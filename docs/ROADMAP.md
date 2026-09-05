@@ -63,6 +63,11 @@ ModExportService 两条导出路径与 DebugApplyService 的复制步骤；导�
 - 引入结构化诊断：代码、严重级别、文件、Path ID、建议操作。
 - WPF、CLI、日志使用同一诊断模型；导出报告可保存为 JSON/文本。
 
+状态（部分完成）：导出报告已可保存为结构化 JSON（逐资源状态 + 诊断，
+经 AtomicOutput 事务写出，P0.3 最后一项）；全库乱码巡检通过（源码/文档/测试
+均为 UTF-8 无 BOM 的规范中文）。`FormatDiagnostic`（代码/级别/消息/路径）已存在，
+WPF/CLI 共用同一诊断模型的工作仍待后续。
+
 ## P1：Unity 资源编辑能力
 
 ### P1.1 通用字段编辑器完善

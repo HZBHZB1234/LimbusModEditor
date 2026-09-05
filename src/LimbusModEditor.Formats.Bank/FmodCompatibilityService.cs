@@ -28,15 +28,48 @@ public sealed class FmodCompatibilityService
         return fresh;
     }
 
+    private const int SniffBytes = 16 * 1024;
+
     private static string BuildFingerprint(string directory)
     {
         var parts = new List<string>();
         if (Directory.Exists(directory))
             foreach (var file in Directory.EnumerateFiles(directory, "*.dll").Order(StringComparer.OrdinalIgnoreCase))
-                parts.Add($"{Path.GetFileName(file)}:{new FileInfo(file).Length}:{File.GetLastWriteTimeUtc(file).Ticks}");
+                parts.Add($"{Path.GetFileName(file)}:{new FileInfo(file).Length}:{File.GetLastWriteTimeUtc(file).Ticks}:{ContentSniff(file)}");
         parts.Sort(StringComparer.Ordinal);
         return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
             System.Text.Encoding.UTF8.GetBytes(string.Join("|", parts))));
+    }
+
+    /// <summary>Hashes the head and tail of the file so a replaced DLL with a
+    /// restored timestamp and identical size cannot reuse a stale cache entry
+    /// (timestamps alone were not tamper-resistant).</summary>
+    private static string ContentSniff(string path)
+    {
+        try
+        {
+            using var stream = File.OpenRead(path);
+            var head = new byte[Math.Min(SniffBytes, stream.Length)];
+            var headRead = stream.ReadAtLeast(head, head.Length, throwOnEndOfStream: false);
+            var tail = Array.Empty<byte>();
+            var remaining = stream.Length - headRead;
+            if (remaining > 0)
+            {
+                var tailLength = (int)Math.Min(SniffBytes, remaining);
+                stream.Seek(-tailLength, SeekOrigin.End);
+                tail = new byte[tailLength];
+                var tailRead = stream.ReadAtLeast(tail, tailLength, throwOnEndOfStream: false);
+                if (tailRead != tailLength) tail = tail[..tailRead];
+            }
+            var combined = new byte[headRead + tail.Length];
+            head.AsSpan(0, headRead).CopyTo(combined);
+            tail.CopyTo(combined, headRead);
+            return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(combined))[..16];
+        }
+        catch (Exception)
+        {
+            return "unreadable";
+        }
     }
 
     private static FmodProbeCache? TryRead(string path)

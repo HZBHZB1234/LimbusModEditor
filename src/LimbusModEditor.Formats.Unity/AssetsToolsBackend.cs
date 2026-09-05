@@ -343,18 +343,21 @@ public sealed class AssetsToolsBackend : IDisposable
                         dep.Identity(), "Missing|object-removed"));
                 continue;
             }
-            var afterMap = afterDeps.ToDictionary(d => d.FieldPath, d => d, StringComparer.Ordinal);
+            // ToLookup, not ToDictionary: field paths can repeat on exotic
+            // templates, and a duplicate key must not abort the whole verify.
+            var afterLookup = afterDeps.ToLookup(d => d.FieldPath, d => d, StringComparer.Ordinal);
             foreach (var dep in deps)
             {
-                if (!afterMap.TryGetValue(dep.FieldPath, out var modified))
+                var candidates = afterLookup[dep.FieldPath].ToList();
+                if (candidates.Count == 0)
                 {
                     changes.Add(new UnityDependencyCheck(fileName, pathId.ToString(culture), dep.FieldPath,
                         dep.Identity(), "Missing|field-removed"));
                     continue;
                 }
-                if (!dep.Identity().Equals(modified.Identity(), StringComparison.Ordinal))
+                if (!candidates.Any(m => m.Identity().Equals(dep.Identity(), StringComparison.Ordinal)))
                     changes.Add(new UnityDependencyCheck(fileName, pathId.ToString(culture), dep.FieldPath,
-                        dep.Identity(), modified.Identity()));
+                        dep.Identity(), candidates[0].Identity()));
             }
         }
         return changes;
@@ -1379,6 +1382,27 @@ public sealed class AssetsToolsBackend : IDisposable
             var externalCount = file.file.Metadata.Externals.Count;
             if (value < 0 || value > externalCount)
                 return $"m_FileID {value} 超出外部引用表范围（0..{externalCount}）。";
+            if (value == 0)
+            {
+                // The pointer becomes same-file: the (possibly edited) sibling
+                // m_PathID must name an object that actually exists here, or
+                // the edit silently dangles.
+                long effectivePathId = 0;
+                var siblingOwner = NavigateField(root, parentPath);
+                if (siblingOwner is not null)
+                {
+                    var sibling = siblingOwner.Children.FirstOrDefault(x => x.FieldName.Equals("m_PathID", StringComparison.OrdinalIgnoreCase) || x.FieldName.Equals("pathID", StringComparison.OrdinalIgnoreCase));
+                    if (sibling is not null) TryReadLong(sibling, out effectivePathId);
+                }
+                var siblingPathIdPath = parentPath + ".m_PathID";
+                foreach (var other in edits)
+                {
+                    if (resolveNodePath(other.Key)?.Equals(siblingPathIdPath, StringComparison.Ordinal) != true) continue;
+                    if (long.TryParse(other.Value, System.Globalization.NumberStyles.Integer, culture, out var overridden)) effectivePathId = overridden;
+                }
+                if (effectivePathId != 0 && file.file.GetAssetInfo(effectivePathId) is null)
+                    return $"将 m_FileID 置 0 后，同文件 Path ID {effectivePathId} 不存在（将产生悬空引用）。";
+            }
             return null;
         }
 

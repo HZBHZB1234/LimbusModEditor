@@ -1,4 +1,5 @@
 using LimbusModEditor.Domain.Assets;
+using LimbusModEditor.Domain.Edits;
 using LimbusModEditor.Domain.Projects;
 using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Editing.Images;
@@ -43,11 +44,16 @@ public sealed class UnityBundleBuildService
                 {
                     foreach (var fieldAsset in container.Where(x => x.UnityPathId.HasValue && x.Metadata.ContainsKey("unityFieldEdits") && !x.Metadata.ContainsKey("replacementPath")))
                     {
-                        if (!fieldAsset.Metadata.TryGetValue("unityFieldEdits", out var fieldJson)) continue;
-                        Dictionary<string, string>? edits;
-                        try { edits = JsonSerializer.Deserialize<Dictionary<string, string>>(fieldJson); }
-                        catch (JsonException) { continue; }
-                        if (edits is null || edits.Count == 0) continue;
+                        var editSet = UnityFieldEditSetCodec.Deserialize(fieldAsset.Metadata.TryGetValue("unityFieldEdits", out var fieldJson) ? fieldJson : null);
+                        if (editSet is null) continue;
+                        var edits = UnityFieldEditSetCodec.ToPathValueMap(editSet);
+                        if (edits.Count == 0) continue;
+                        var problems = backend.ValidateBundleObjectFieldEdits(current, container.Key, fieldAsset.UnityPathId!.Value, edits)
+                            .Where(x => !x.IsOk).ToArray();
+                        if (problems.Length > 0)
+                            throw new InvalidDataException(
+                                $"字段预校验失败 ({fieldAsset.LogicalPath}): " +
+                                string.Join("; ", problems.Select(x => $"{x.Path}: {x.Message}")));
                         var next = NextPath(output, intermediates.Count, intermediates);
                         backend.ReplaceBundleObjectFields(current, container.Key, fieldAsset.UnityPathId!.Value, edits, next);
                         current = next; applied++;
@@ -80,7 +86,7 @@ public sealed class UnityBundleBuildService
                         current = next;
                         applied++;
                     }
-                    foreach (var sprite in container.Where(x => x.UnityTypeId == 115 && x.Metadata.ContainsKey("spriteMetadata")))
+                    foreach (var sprite in container.Where(x => x.UnityTypeId == UnityClassId.Sprite && x.Metadata.ContainsKey("spriteMetadata")))
                     {
                         if (!sprite.Metadata.TryGetValue("spriteMetadata", out var json)) continue;
                         UnitySpriteMetadata? metadata;

@@ -1,5 +1,6 @@
 using AssetsTools.NET.Extra;
 using AssetsTools.NET;
+using System.Text;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Editing.Images;
 
@@ -40,8 +41,9 @@ public sealed class AssetsToolsBackend : IDisposable
             ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFilePath}");
         var info = file.file.GetAssetInfo(pathId)
             ?? throw new KeyNotFoundException($"SerializedFile 中不存在 Path ID: {pathId}");
-        var fields = _manager.GetBaseField(file, info, AssetReadFlags.None);
-        return [BuildFieldNode(fields, fields.FieldName, fields.FieldName)];
+        var template = LoadTemplate(file, info);
+        var fields = GetBaseField(file, info, template);
+        return [BuildFieldNode(fields, template, fields.FieldName, fields.FieldName)];
     }
 
     public IReadOnlyList<UnityFieldNode> ReadBundleObjectFields(string bundlePath, string serializedFileName,
@@ -57,8 +59,83 @@ public sealed class AssetsToolsBackend : IDisposable
             ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFileName}");
         var info = file.file.GetAssetInfo(pathId)
             ?? throw new KeyNotFoundException($"SerializedFile 中不存在 Path ID: {pathId}");
-        var fields = _manager.GetBaseField(file, info, AssetReadFlags.None);
-        return [BuildFieldNode(fields, fields.FieldName, fields.FieldName)];
+        var template = LoadTemplate(file, info);
+        var fields = GetBaseField(file, info, template);
+        return [BuildFieldNode(fields, template, fields.FieldName, fields.FieldName)];
+    }
+
+    /// <summary>Script provenance for a MonoBehaviour object: the serialized
+    /// m_Script PPtr, class data when the MonoScript lives in the same
+    /// SerializedFile, the referenced external file otherwise, and the reason
+    /// the field tree is unavailable.</summary>
+    public UnityScriptInfo ReadScriptInfo(string serializedFilePath, long pathId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var file = _manager.LoadAssetsFile(serializedFilePath, loadDeps: false)
+            ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFilePath}");
+        var info = file.file.GetAssetInfo(pathId)
+            ?? throw new KeyNotFoundException($"SerializedFile 中不存在 Path ID: {pathId}");
+        return ReadScriptInfoCore(file, info);
+    }
+
+    /// <summary>Bundle variant of <see cref="ReadScriptInfo"/>.</summary>
+    public UnityScriptInfo ReadBundleScriptInfo(string bundlePath, string serializedFileName, long pathId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var bundle = _manager.LoadBundleFile(bundlePath, unpackIfPacked: true)
+            ?? throw new InvalidDataException($"无法读取 Unity Bundle: {bundlePath}");
+        _bundles.Add(bundle);
+        var index = bundle.file.GetFileIndex(serializedFileName);
+        if (index < 0 || !bundle.file.IsAssetsFile(index)) throw new KeyNotFoundException($"Bundle 中不存在 SerializedFile: {serializedFileName}");
+        var file = _manager.LoadAssetsFileFromBundle(bundle, serializedFileName, loadDeps: false)
+            ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFileName}");
+        var info = file.file.GetAssetInfo(pathId)
+            ?? throw new KeyNotFoundException($"SerializedFile 中不存在 Path ID: {pathId}");
+        return ReadScriptInfoCore(file, info);
+    }
+
+    /// <summary>Validates field edits against the real serialized types of a
+    /// standalone SerializedFile without writing anything.</summary>
+    public IReadOnlyList<UnityFieldEditDiagnostic> ValidateObjectFieldEdits(string serializedFilePath, long pathId,
+        IReadOnlyDictionary<string, string> edits, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentException.ThrowIfNullOrWhiteSpace(serializedFilePath);
+        ArgumentNullException.ThrowIfNull(edits);
+        if (edits.Count == 0) throw new ArgumentException("至少需要一个字段修改。", nameof(edits));
+        var file = _manager.LoadAssetsFile(serializedFilePath, loadDeps: false)
+            ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFilePath}");
+        var info = file.file.GetAssetInfo(pathId)
+            ?? throw new KeyNotFoundException($"SerializedFile 中不存在 Path ID: {pathId}");
+        var template = LoadTemplate(file, info);
+        var fields = GetBaseField(file, info, template);
+        return ValidateFieldEdits(fields, template, edits);
+    }
+
+    /// <summary>Bundle variant of <see cref="ValidateObjectFieldEdits"/>.</summary>
+    public IReadOnlyList<UnityFieldEditDiagnostic> ValidateBundleObjectFieldEdits(string bundlePath,
+        string serializedFileName, long pathId, IReadOnlyDictionary<string, string> edits,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentException.ThrowIfNullOrWhiteSpace(bundlePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(serializedFileName);
+        ArgumentNullException.ThrowIfNull(edits);
+        if (edits.Count == 0) throw new ArgumentException("至少需要一个字段修改。", nameof(edits));
+        var bundle = _manager.LoadBundleFile(bundlePath, unpackIfPacked: true)
+            ?? throw new InvalidDataException($"无法读取 Unity Bundle: {bundlePath}");
+        _bundles.Add(bundle);
+        var index = bundle.file.GetFileIndex(serializedFileName);
+        if (index < 0 || !bundle.file.IsAssetsFile(index)) throw new KeyNotFoundException($"Bundle 中不存在 SerializedFile: {serializedFileName}");
+        var file = _manager.LoadAssetsFileFromBundle(bundle, serializedFileName, loadDeps: false)
+            ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFileName}");
+        var info = file.file.GetAssetInfo(pathId)
+            ?? throw new KeyNotFoundException($"SerializedFile 中不存在 Path ID: {pathId}");
+        var template = LoadTemplate(file, info);
+        var fields = GetBaseField(file, info, template);
+        return ValidateFieldEdits(fields, template, edits);
     }
 
     public IReadOnlyList<UnityObjectReference> ReadObjectReferences(string serializedFilePath, long pathId,
@@ -179,7 +256,7 @@ public sealed class AssetsToolsBackend : IDisposable
             var file = _manager.LoadAssetsFileFromBundle(bundle, fileName, loadDeps: false);
             if (file is null) continue;
             var info = file.file.GetAssetInfo(pathId);
-            if (info is null || info.GetTypeId(file.file) != 115) continue;
+            if (info is null || info.GetTypeId(file.file) != UnityClassId.Sprite) continue;
             var fields = _manager.GetBaseField(file, info, AssetReadFlags.None);
             return ReadSpriteFields(fileName, pathId, fields);
         }
@@ -196,7 +273,7 @@ public sealed class AssetsToolsBackend : IDisposable
             ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFilePath}");
         var info = file.file.GetAssetInfo(pathId)
             ?? throw new KeyNotFoundException($"SerializedFile 中不存在 Path ID: {pathId}");
-        if (info.GetTypeId(file.file) != 115) throw new InvalidOperationException("目标对象不是 Sprite。");
+        if (info.GetTypeId(file.file) != UnityClassId.Sprite) throw new InvalidOperationException("目标对象不是 Sprite。");
         var fields = _manager.GetBaseField(file, info, AssetReadFlags.None);
         SetSpriteFields(fields, rect, pivot, border, pixelsToUnits);
         info.SetNewData(fields);
@@ -217,7 +294,7 @@ public sealed class AssetsToolsBackend : IDisposable
             ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFileName}");
         var info = instance.file.GetAssetInfo(pathId)
             ?? throw new KeyNotFoundException($"SerializedFile 中不存在 Path ID: {pathId}");
-        if (info.GetTypeId(instance.file) != 115) throw new InvalidOperationException("目标对象不是 Sprite。");
+        if (info.GetTypeId(instance.file) != UnityClassId.Sprite) throw new InvalidOperationException("目标对象不是 Sprite。");
         var fields = _manager.GetBaseField(instance, info, AssetReadFlags.None);
         SetSpriteFields(fields, rect, pivot, border, pixelsToUnits);
         info.SetNewData(fields);
@@ -478,12 +555,15 @@ public sealed class AssetsToolsBackend : IDisposable
     private static void WritePackedBundle(BundleFileInstance bundle, string outputPath)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outputPath))!);
-        var temporary = outputPath + ".tmp";
+        var temporary = outputPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            using var writer = new AssetsFileWriter(temporary);
-            bundle.file.Pack(writer, bundle.file.GetCompressionType(), true, null);
-            File.Move(temporary, outputPath, true);
+            {
+                using var writer = new AssetsFileWriter(temporary);
+                bundle.file.Pack(writer, bundle.file.GetCompressionType(), true, null);
+            }
+            // dispose before moving: the writer holds the temp stream open
+            MoveWithRetry(temporary, outputPath);
         }
         finally
         {
@@ -494,17 +574,57 @@ public sealed class AssetsToolsBackend : IDisposable
     private static void WriteSerializedFile(AssetsFileInstance file, string outputPath)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outputPath))!);
-        var temporary = outputPath + ".tmp";
+        var temporary = outputPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            using var writer = new AssetsFileWriter(temporary);
-            file.file.Write(writer, 0);
-            File.Move(temporary, outputPath, true);
+            {
+                using var writer = new AssetsFileWriter(temporary);
+                file.file.Write(writer, 0);
+            }
+            // dispose before moving: the writer holds the temp stream open
+            MoveWithRetry(temporary, outputPath);
         }
         finally
         {
             if (File.Exists(temporary)) File.Delete(temporary);
         }
+    }
+
+    /// <summary>Moves the freshly written temp file into place, retrying
+    /// briefly: antivirus and search indexers occasionally hold new files
+    /// for a moment right after close.</summary>
+    private static void MoveWithRetry(string source, string destination)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                File.Move(source, destination, true);
+                return;
+            }
+            catch (IOException) when (attempt < 4)
+            {
+                Thread.Sleep(120 * (attempt + 1));
+            }
+            catch (IOException ex)
+            {
+                var sourceState = ProbeFile(source);
+                var targetState = ProbeFile(destination);
+                throw new IOException(
+                    $"移动 {source} → {destination} 失败: {ex.Message}；源状态 {sourceState}；目标状态 {targetState}", ex);
+            }
+        }
+    }
+
+    private static string ProbeFile(string path)
+    {
+        if (!File.Exists(path)) return "不存在";
+        try
+        {
+            using var stream = File.Open(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete);
+            return $"可读写 ({stream.Length} 字节)";
+        }
+        catch (Exception ex) { return $"被锁 ({ex.GetType().Name}: {ex.Message})"; }
     }
 
     public void Dispose()
@@ -514,18 +634,7 @@ public sealed class AssetsToolsBackend : IDisposable
         _bundles.Clear();
     }
 
-    private static AssetType MapType(int typeId) => typeId switch
-    {
-        1 => AssetType.GameObject,
-        28 => AssetType.Texture,
-        83 => AssetType.Audio,
-        114 => AssetType.MonoBehaviour,
-        115 => AssetType.Sprite,
-        128 => AssetType.Font,
-        142 => AssetType.Binary,
-        213 => AssetType.ScriptableObject,
-        _ => AssetType.Unknown
-    };
+    private static AssetType MapType(int typeId) => UnityClassId.Map(typeId);
 
     private static int ReadInt(AssetTypeValueField root, params string[] names)
     {
@@ -661,15 +770,356 @@ public sealed class AssetsToolsBackend : IDisposable
         return null;
     }
 
-    private static UnityFieldNode BuildFieldNode(AssetTypeValueField field, string name, string path)
+    /// <summary>Builds the editor field tree by walking the parsed value tree
+    /// and the serialized type template side by side, so enum, PPtr, array and
+    /// byte-array nodes carry their real type information.</summary>
+    private static UnityFieldNode BuildFieldNode(AssetTypeValueField field, AssetTypeTemplateField? template,
+        string name, string path, bool parentIsArraySize = false)
     {
-        var children = field.Children.Select((child, index) =>
+        var value = field.Value;
+        var valueType = MapValueType(value?.ValueType ?? AssetValueType.None);
+        var typeName = template?.Type ?? field.TypeName ?? value?.ValueType.ToString() ?? string.Empty;
+        var isPPtr = typeName.StartsWith("PPtr<", StringComparison.Ordinal);
+        var isEnum = template is not null && IsEnumTemplate(template);
+        // An enum is serialized as a container with one "value" child; edits
+        // on the enum path must parse as the child's integer type.
+        if (isEnum && template!.Children.Count == 1)
         {
-            var childName = string.IsNullOrWhiteSpace(child.FieldName) ? $"[{index}]" : child.FieldName;
+            valueType = MapValueType(template.Children[0].ValueType);
+            value = field.Children.Count == 1 ? field.Children[0].Value : null;
+        }
+        var isByteArray = value?.ValueType == AssetValueType.ByteArray;
+        var isArray = template?.IsArray == true && !isByteArray;
+
+        long pptrFileId = 0, pptrPathId = 0;
+        string? pptrTarget = null;
+        if (isPPtr)
+        {
+            pptrTarget = ExtractPPtrTarget(typeName);
+            foreach (var child in field.Children)
+            {
+                if (child.FieldName.Equals("m_FileID", StringComparison.OrdinalIgnoreCase) ||
+                    child.FieldName.Equals("fileID", StringComparison.OrdinalIgnoreCase)) TryReadLong(child, out pptrFileId);
+                else if (child.FieldName.Equals("m_PathID", StringComparison.OrdinalIgnoreCase) ||
+                         child.FieldName.Equals("pathID", StringComparison.OrdinalIgnoreCase)) TryReadLong(child, out pptrPathId);
+            }
+        }
+
+        var children = new List<UnityFieldNode>();
+        if (isByteArray)
+        {
+            // byte arrays carry their payload in the node value, not children
+        }
+        else if (template is not null && template.IsArray)
+        {
+            // AssetsTools vector templates carry [size, itemTemplate]; the
+            // parsed value children are the items, all built from the item
+            // template (their own field names are the template's, e.g. "Array").
+            var itemTemplate = GetArrayItemTemplate(template);
+            for (var i = 0; i < field.Children.Count; i++)
+            {
+                var child = field.Children[i];
+                children.Add(BuildFieldNode(child, itemTemplate, $"[{i}]", $"{path}[{i}]"));
+            }
+        }
+        else
+        {
+            for (var i = 0; i < field.Children.Count; i++)
+            {
+                var child = field.Children[i];
+                var childTemplate = template is not null && template.Children.Count > i ? template.Children[i] : null;
+                var childName = string.IsNullOrWhiteSpace(child.FieldName) ? $"[{i}]" : child.FieldName;
+                var childPath = childName.StartsWith("[", StringComparison.Ordinal) ? $"{path}{childName}" : $"{path}.{childName}";
+                var childNode = BuildFieldNode(child, childTemplate, childName, childPath);
+                if (isArray && childName.Equals("size", StringComparison.Ordinal)) childNode = childNode with { Editable = false };
+                children.Add(childNode);
+            }
+        }
+
+        var editable = (UnityFieldNode.IsEditableValueType(valueType) || isEnum) && !parentIsArraySize && !isArray && !isByteArray && !isPPtr;
+        long byteArrayLength = 0;
+        string byteArrayPreview = string.Empty;
+        if (isByteArray)
+        {
+            var bytes = field.AsByteArray;
+            byteArrayLength = bytes?.Length ?? 0;
+            byteArrayPreview = ToHexPreview(bytes);
+        }
+
+        return new UnityFieldNode(
+            path, name, typeName,
+            isEnum && field.Children.Count == 1 ? ReadFieldValue(field.Children[0]) : ReadFieldValue(field),
+            children,
+            valueType,
+            isArray, isArray ? CountArrayItems(field) : 0,
+            isEnum, isEnum ? typeName : string.Empty,
+            isPPtr, pptrFileId, pptrPathId, pptrTarget,
+            byteArrayLength, byteArrayPreview,
+            editable);
+    }
+
+    /// <summary>The item template of an array node. AssetsTools vector
+    /// templates carry [size, itemTemplate]; alternate shapes carry the item
+    /// template as the single child.</summary>
+    private static AssetTypeTemplateField? GetArrayItemTemplate(AssetTypeTemplateField template)
+    {
+        if (template.Children.Count >= 2) return template.Children[1];
+        if (template.Children.Count == 1) return template.Children[0];
+        return null;
+    }
+
+    private static int CountArrayItems(AssetTypeValueField field)
+    {
+        if (field.Value?.ValueType == AssetValueType.ByteArray) return 0;
+        var container = templateArrayContainer(field);
+        return container?.Children.Count ?? 0;
+
+        static AssetTypeValueField? templateArrayContainer(AssetTypeValueField f)
+        {
+            // value-side shape A: items stored directly on the node
+            if (f.Children.Count > 0 && f.Children.All(x => !x.FieldName.Equals("size", StringComparison.OrdinalIgnoreCase)))
+                return f;
+            // value-side shape B: a nested "Array"/"data" vector holds the items
+            var nested = f.Children.FirstOrDefault(x =>
+                x.FieldName.Equals("Array", StringComparison.OrdinalIgnoreCase) ||
+                x.FieldName.Equals("data", StringComparison.OrdinalIgnoreCase));
+            return nested;
+        }
+    }
+
+    private static string ToHexPreview(byte[]? bytes)
+    {
+        if (bytes is null || bytes.Length == 0) return string.Empty;
+        const int previewLength = 16;
+        var count = Math.Min(previewLength, bytes.Length);
+        var builder = new StringBuilder(count * 3);
+        for (var i = 0; i < count; i++)
+        {
+            if (i > 0) builder.Append(' ');
+            builder.Append(bytes[i].ToString("X2"));
+        }
+        if (bytes.Length > count) builder.Append(" …");
+        return builder.ToString();
+    }
+
+    /// <summary>Returns the serialized type template of an object, or null with
+    /// a reason when the file has no usable type tree.</summary>
+    private AssetTypeTemplateField? LoadTemplate(AssetsFileInstance file, AssetFileInfo info, out string? missingReason)
+    {
+        missingReason = null;
+        var metadata = file.file.Metadata;
+        if (!metadata.TypeTreeEnabled)
+        {
+            missingReason = "SerializedFile 未包含类型树（TypeTreeEnabled=false），无法读取字段结构。";
+            return null;
+        }
+        var typeId = info.GetTypeId(file.file);
+        var tree = metadata.TypeTreeTypes.FirstOrDefault(t => t.TypeId == typeId);
+        if (tree is null)
+        {
+            missingReason = $"类型 {typeId} 的类型树被剥离（stripped），需要 class package 才能读取字段结构。";
+            return null;
+        }
+        var template = new AssetTypeTemplateField();
+        template.FromTypeTree(tree);
+        NormalizeTemplateChildren(template);
+        return template;
+    }
+
+    /// <summary>FromTypeTree can leave null Children lists on leaf nodes;
+    /// every walk in this backend dereferences Children.</summary>
+    private static void NormalizeTemplateChildren(AssetTypeTemplateField node)
+    {
+        node.Children ??= [];
+        foreach (var child in node.Children) NormalizeTemplateChildren(child);
+    }
+
+    private AssetTypeTemplateField? LoadTemplate(AssetsFileInstance file, AssetFileInfo info)
+        => LoadTemplate(file, info, out _);
+
+    private AssetTypeValueField GetBaseField(AssetsFileInstance file, AssetFileInfo info, AssetTypeTemplateField? template)
+    {
+        try
+        {
+            return _manager.GetBaseField(file, info, AssetReadFlags.None);
+        }
+        catch (Exception ex) when (template is null)
+        {
+            throw new InvalidDataException($"{ex.Message}");
+        }
+    }
+
+    private UnityScriptInfo ReadScriptInfoCore(AssetsFileInstance file, AssetFileInfo info)
+    {
+        var typeId = info.GetTypeId(file.file);
+        if (typeId != UnityClassId.MonoBehaviour)
+            throw new InvalidOperationException($"目标对象不是 MonoBehaviour（类型 {typeId}），无法读取脚本信息。");
+        var template = LoadTemplate(file, info, out var missingReason);
+        if (template is null) return new UnityScriptInfo(0, 0, null, null, null, null, null, missingReason);
+        AssetTypeValueField fields;
+        try { fields = _manager.GetBaseField(file, info, AssetReadFlags.None); }
+        catch (Exception ex) { return new UnityScriptInfo(0, 0, null, null, null, null, null, $"读取字段树失败: {ex.Message}"); }
+
+        var script = FindField(fields, "m_Script", "script");
+        long fileId = 0, pathId = 0;
+        if (script is not null)
+        {
+            var idField = FindField(script, "m_FileID", "fileID");
+            var pathField = FindField(script, "m_PathID", "pathID");
+            if (idField is not null) TryReadLong(idField, out fileId);
+            if (pathField is not null) TryReadLong(pathField, out pathId);
+        }
+
+        string? className = null, namespaceName = null, assemblyName = null, externalPath = null, externalGuid = null;
+        if (fileId == 0 && pathId != 0)
+        {
+            var scriptInfo = file.file.GetAssetInfo(pathId);
+            if (scriptInfo is null)
+            {
+                missingReason ??= $"m_Script 指向的 Path ID {pathId} 在本文件中不存在（悬空引用）。";
+            }
+            else if (scriptInfo.GetTypeId(file.file) == UnityClassId.MonoScript)
+            {
+                try
+                {
+                    var scriptFields = _manager.GetBaseField(file, scriptInfo, AssetReadFlags.None);
+                    className = FindField(scriptFields, "m_ClassName", "className")?.AsString;
+                    namespaceName = FindField(scriptFields, "m_Namespace", "namespace")?.AsString;
+                    assemblyName = FindField(scriptFields, "m_AssemblyName", "m_Assembly", "assemblyName")?.AsString;
+                }
+                catch (Exception ex) { missingReason ??= $"读取 MonoScript 失败: {ex.Message}"; }
+            }
+            else
+            {
+                missingReason ??= $"m_Script 指向 Path ID {pathId} 的类型不是 MonoScript。";
+            }
+        }
+        else if (fileId > 0)
+        {
+            var externals = file.file.Metadata.Externals;
+            var externalIndex = (int)fileId - 1;
+            if (externalIndex < 0 || externalIndex >= externals.Count)
+            {
+                missingReason ??= $"m_FileID {fileId} 超出外部引用表范围。";
+            }
+            else
+            {
+                externalPath = externals[externalIndex].PathName;
+                externalGuid = externals[externalIndex].Guid.ToString();
+            }
+        }
+
+        return new UnityScriptInfo(fileId, pathId, className, namespaceName, assemblyName, externalPath, externalGuid, missingReason);
+    }
+
+    private static IReadOnlyList<UnityFieldEditDiagnostic> ValidateFieldEdits(AssetTypeValueField root,
+        AssetTypeTemplateField? template, IReadOnlyDictionary<string, string> edits)
+    {
+        var nodes = new Dictionary<string, (string ValueType, string TypeName, bool Editable)>(StringComparer.Ordinal);
+        IndexNodes(root, template, root.FieldName, nodes, templateIsArray: false);
+        var results = new List<UnityFieldEditDiagnostic>();
+        foreach (var edit in edits)
+        {
+            if (!nodes.TryGetValue(edit.Key, out var node)
+                && !nodes.TryGetValue("Base." + edit.Key, out node))
+            {
+                var trimmed = edit.Key.Contains('.') ? edit.Key[(edit.Key.IndexOf('.') + 1)..] : null;
+                if (trimmed is null || !nodes.TryGetValue(trimmed, out node))
+                {
+                    results.Add(new UnityFieldEditDiagnostic(edit.Key, UnityFieldEditStatus.UnknownPath, string.Empty, "未找到字段路径。"));
+                    continue;
+                }
+            }
+            if (!node.Editable)
+            {
+                results.Add(new UnityFieldEditDiagnostic(edit.Key, UnityFieldEditStatus.NotEditable, node.TypeName, "该字段不是可编辑的基础字段。"));
+                continue;
+            }
+            if (!UnityFieldValueParser.TryValidate(node.ValueType, edit.Value, out var error))
+            {
+                results.Add(new UnityFieldEditDiagnostic(edit.Key, UnityFieldEditStatus.ParseError, node.TypeName, error ?? "值无效。"));
+                continue;
+            }
+            results.Add(new UnityFieldEditDiagnostic(edit.Key, UnityFieldEditStatus.Ok, node.TypeName, string.Empty));
+        }
+        return results;
+    }
+
+    private static void IndexNodes(AssetTypeValueField field, AssetTypeTemplateField? template, string path,
+        IDictionary<string, (string, string, bool)> nodes, bool templateIsArray)
+    {
+        var value = field.Value;
+        var valueType = MapValueType(value?.ValueType ?? AssetValueType.None);
+        var typeName = template?.Type ?? field.TypeName ?? value?.ValueType.ToString() ?? string.Empty;
+        var isEnum = template is not null && IsEnumTemplate(template);
+        // An enum is serialized as a container with one "value" child; edits
+        // on the enum path must parse as the child's integer type.
+        if (isEnum && template!.Children.Count == 1) valueType = MapValueType(template.Children[0].ValueType);
+        var isPPtr = typeName.StartsWith("PPtr<", StringComparison.Ordinal);
+        var isByteArray = value?.ValueType == AssetValueType.ByteArray;
+        var isArray = template?.IsArray == true && !isByteArray;
+        var editable = (UnityFieldNode.IsEditableValueType(valueType) || isEnum) && !templateIsArray && !isArray && !isByteArray && !isPPtr;
+        nodes[path] = (valueType, typeName, editable);
+        if (isByteArray) return;
+        if (template is not null && template.IsArray)
+        {
+            var itemTemplate = GetArrayItemTemplate(template);
+            for (var i = 0; i < field.Children.Count; i++)
+                IndexNodes(field.Children[i], itemTemplate, $"{path}[{i}]", nodes, templateIsArray: false);
+            return;
+        }
+        for (var i = 0; i < field.Children.Count; i++)
+        {
+            var child = field.Children[i];
+            var childTemplate = template is not null && template.Children.Count > i ? template.Children[i] : null;
+            var childName = string.IsNullOrWhiteSpace(child.FieldName) ? $"[{i}]" : child.FieldName;
             var childPath = childName.StartsWith("[", StringComparison.Ordinal) ? $"{path}{childName}" : $"{path}.{childName}";
-            return BuildFieldNode(child, childName, childPath);
-        }).ToArray();
-        return new UnityFieldNode(path, name, field.TypeName ?? field.Value.ValueType.ToString(), ReadFieldValue(field), children);
+            var childIsSize = isArray && childName.Equals("size", StringComparison.Ordinal);
+            IndexNodes(child, childTemplate, childPath, nodes, childIsSize);
+        }
+    }
+
+    private static string MapValueType(AssetValueType valueType) => valueType switch
+    {
+        AssetValueType.Bool => "bool",
+        AssetValueType.Int8 => "int8",
+        AssetValueType.UInt8 => "uint8",
+        AssetValueType.Int16 => "int16",
+        AssetValueType.UInt16 => "uint16",
+        AssetValueType.Int32 => "int32",
+        AssetValueType.UInt32 => "uint32",
+        AssetValueType.Int64 => "int64",
+        AssetValueType.UInt64 => "uint64",
+        AssetValueType.Float => "float",
+        AssetValueType.Double => "double",
+        AssetValueType.String => "string",
+        AssetValueType.ByteArray => "byteArray",
+        AssetValueType.Array => "array",
+        _ => "unknown"
+    };
+
+    private static bool IsEnumTemplate(AssetTypeTemplateField template)
+    {
+        if (template.Children.Count != 1) return false;
+        var child = template.Children[0];
+        if (!string.Equals(child.Name, "value", StringComparison.Ordinal)) return false;
+        return child.ValueType is AssetValueType.Int8 or AssetValueType.UInt8 or AssetValueType.Int16
+            or AssetValueType.UInt16 or AssetValueType.Int32 or AssetValueType.UInt32
+            && !IsPrimitiveTypeName(template.Type);
+    }
+
+    private static bool IsPrimitiveTypeName(string? typeName) => typeName is
+        "int" or "unsigned int" or "SInt8" or "UInt8" or "short" or "unsigned short" or
+        "SInt16" or "SInt64" or "UInt64" or "long long" or "unsigned long long" or
+        "float" or "double" or "bool" or "string" or "TypelessData" or "Type[]" or "vector";
+
+    private static string ExtractPPtrTarget(string typeName)
+    {
+        var start = typeName.IndexOf('<');
+        var end = typeName.LastIndexOf('>');
+        if (start < 0 || end <= start) return typeName;
+        var target = typeName[(start + 1)..end];
+        return target.StartsWith('$') ? target[1..] : target;
     }
 
     private static void CollectReferences(AssetTypeValueField field, string path, ICollection<UnityObjectReference> result)
@@ -678,11 +1128,18 @@ public sealed class AssetsToolsBackend : IDisposable
         var pathId = field.Children.FirstOrDefault(x => x.FieldName.Equals("m_PathID", StringComparison.OrdinalIgnoreCase) || x.FieldName.Equals("pathID", StringComparison.OrdinalIgnoreCase));
         if (fileId is not null && pathId is not null && TryReadLong(fileId, out var fileValue) && TryReadLong(pathId, out var pathValue) && pathValue != 0)
             result.Add(new UnityObjectReference(path, fileValue, pathValue, field.TypeName));
+        var isArray = field.TemplateField?.IsArray == true || field.Value?.ValueType == AssetValueType.Array;
         for (var i = 0; i < field.Children.Count; i++)
         {
             var child = field.Children[i];
-            var childName = string.IsNullOrWhiteSpace(child.FieldName) ? $"[{i}]" : child.FieldName;
-            var childPath = childName.StartsWith("[", StringComparison.Ordinal) ? $"{path}{childName}" : $"{path}.{childName}";
+            string childName;
+            string childPath;
+            if (isArray) { childName = $"[{i}]"; childPath = $"{path}[{i}]"; }
+            else
+            {
+                childName = string.IsNullOrWhiteSpace(child.FieldName) ? $"[{i}]" : child.FieldName;
+                childPath = childName.StartsWith("[", StringComparison.Ordinal) ? $"{path}{childName}" : $"{path}.{childName}";
+            }
             CollectReferences(child, childPath, result);
         }
     }
@@ -711,19 +1168,44 @@ public sealed class AssetsToolsBackend : IDisposable
 
     private static void ApplyFieldEdits(AssetTypeValueField field, string path, IReadOnlyDictionary<string, string> edits, ISet<string> matched)
     {
+        if (field.Value?.ValueType == AssetValueType.ByteArray) return;
         string? matchedKey = null;
         if (edits.TryGetValue(path, out var value)) matchedKey = path;
-        else if (field.FieldName.Length > 0 && path.IndexOf('.') >= 0 && edits.TryGetValue(path[(path.IndexOf('.') + 1)..], out value)) matchedKey = path[(path.IndexOf('.') + 1)..];
+        else if (path.StartsWith("Base.", StringComparison.Ordinal)
+            && edits.TryGetValue(path[5..], out value)) matchedKey = path[5..];
         if (matchedKey is not null)
         {
-            SetPrimitiveField(field, value!, path);
+            // Enums serialize as a container with a single "value" child;
+            // an edit targeting the enum path delegates to that child. A
+            // container's Value is null (or None), never a primitive.
+            var isContainer = field.Value is null || field.Value.ValueType == AssetValueType.None;
+            var target = isContainer
+                && field.Children.Count == 1
+                && field.Children[0].FieldName.Equals("value", StringComparison.OrdinalIgnoreCase)
+                ? field.Children[0]
+                : field;
+            SetPrimitiveField(target, value!, path);
             matched.Add(matchedKey);
         }
+        var template = field.TemplateField;
+        var isArray = template?.IsArray == true || field.Value?.ValueType == AssetValueType.Array;
         for (var i = 0; i < field.Children.Count; i++)
         {
             var child = field.Children[i];
-            var childName = string.IsNullOrWhiteSpace(child.FieldName) ? $"[{i}]" : child.FieldName;
-            var childPath = childName.StartsWith("[", StringComparison.Ordinal) ? $"{path}{childName}" : $"{path}.{childName}";
+            string childName;
+            string childPath;
+            if (isArray)
+            {
+                // Array items are unnamed index entries; their serialized field
+                // names (e.g. "Array") must not leak into edit paths.
+                childName = $"[{i}]";
+                childPath = $"{path}[{i}]";
+            }
+            else
+            {
+                childName = string.IsNullOrWhiteSpace(child.FieldName) ? $"[{i}]" : child.FieldName;
+                childPath = childName.StartsWith("[", StringComparison.Ordinal) ? $"{path}{childName}" : $"{path}.{childName}";
+            }
             ApplyFieldEdits(child, childPath, edits, matched);
         }
     }
@@ -737,9 +1219,11 @@ public sealed class AssetsToolsBackend : IDisposable
     private static void SetPrimitiveField(AssetTypeValueField field, string value, string path)
     {
         var culture = System.Globalization.CultureInfo.InvariantCulture;
+        var valueType = field.Value?.ValueType
+            ?? throw new InvalidDataException($"字段 {path} 没有可写的基本值。");
         try
         {
-            switch (field.Value.ValueType)
+            switch (valueType)
             {
                 case AssetValueType.Bool: field.AsBool = bool.Parse(value); break;
                 case AssetValueType.Int8: field.AsSByte = sbyte.Parse(value, culture); break;

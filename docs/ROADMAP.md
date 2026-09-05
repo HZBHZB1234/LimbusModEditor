@@ -68,6 +68,10 @@ Installation/Uninstallation 和 Carra/Carra2 样本。
 - 对 MonoBehaviour/ScriptableObject 显示脚本 GUID、类名、TypeTree 缺失原因。
 - 将字段编辑记录从单一 JSON 字典升级为带类型、原值哈希、时间和作者的版本化模型。
 
+状态（本轮）：核心能力已落地并有真实 SerializedFile 样本的回归测试
+（`UnityFieldTreeTests`：字段树元数据、脚本信息、校验、应用回写全链路）；
+编辑记录为 SchemaVersion 2 版本化模型，旧 JSON 字典自动迁移。
+
 ### P1.2 PPtr 引用和依赖检查
 
 - 解析 `m_FileID`/`m_PathID`，显示目标对象和跨 SerializedFile 依赖。

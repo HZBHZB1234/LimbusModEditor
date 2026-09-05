@@ -490,13 +490,22 @@ public partial class MainWindow : Window
         try
         {
             var service = new LimbusModEditor.Formats.Unity.UnityAssetService();
-            var fields = asset.Metadata.ContainsKey("unityBundle") && !string.IsNullOrWhiteSpace(asset.ContainerPath)
+            var isBundle = asset.Metadata.ContainsKey("unityBundle") && !string.IsNullOrWhiteSpace(asset.ContainerPath);
+            var fields = isBundle
                 ? service.ReadBundleObjectFields(asset.SourcePath, asset.ContainerPath!, asset.UnityPathId.Value)
                 : service.ReadObjectFields(asset.SourcePath, asset.UnityPathId.Value);
-            var dialog = new UnityFieldEditorWindow(fields, _unityFieldEdits.ReadStored(asset)) { Owner = this };
+            LimbusModEditor.Formats.Unity.UnityScriptInfo? scriptInfo = null;
+            try
+            {
+                scriptInfo = isBundle
+                    ? service.ReadBundleObjectScriptInfo(asset.SourcePath, asset.ContainerPath!, asset.UnityPathId.Value)
+                    : service.ReadObjectScriptInfo(asset.SourcePath, asset.UnityPathId.Value);
+            }
+            catch (Exception) { /* non-MonoBehaviour objects have no script info */ }
+            var dialog = new UnityFieldEditorWindow(fields, _unityFieldEdits.ReadStored(asset), scriptInfo) { Owner = this };
             if (dialog.ShowDialog() != true || dialog.Result is null) return;
             if (dialog.Result.Count == 0) return;
-            _unityFieldEdits.Set(_project, asset, dialog.Result);
+            _unityFieldEdits.Set(_project, asset, fields, dialog.Result);
             await _projects.SaveAsync(_project, _projectFile);
             RefreshProjectState("Unity 字段修改已记录");
             AssetList.SelectedItem = asset;

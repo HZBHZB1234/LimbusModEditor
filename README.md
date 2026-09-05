@@ -15,9 +15,11 @@ not as a launcher replacement.
 3. Search the merged asset index, inspect Unity object metadata, preview and
    split/repack supported images, inspect/edit Sprite rect/pivot/border metadata,
    import standalone Unity SerializedFiles (`.assets`) as editable object trees,
+   inspect/edit Unity serialized fields (validated primitives, enum values,
+   PPtr pointers, vector arrays and byte-array info, with per-field
+   original/new/diff view),
    export indexed Bank audio to WAV when user-provided FMOD DLLs are configured,
-   inspect/edit Unity serialized fields (primitive values), edit text/JSON resources, and record
-   replacements in `edits/assets`.
+   edit text/JSON resources, and record replacements in `edits/assets`.
 4. Export using the source format or choose the Carra/Carra2/Rebank/Lunartique
    output supported by the current handler. Lunartique Installation pairs can
    be converted to object-level Carra/Carra2 output by comparing Unity object

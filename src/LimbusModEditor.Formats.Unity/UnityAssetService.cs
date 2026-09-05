@@ -3,9 +3,65 @@ using LimbusModEditor.Editing.Images;
 
 namespace LimbusModEditor.Formats.Unity;
 
-public sealed record UnityFieldNode(string Path, string Name, string Type, string? Value,
-    IReadOnlyList<UnityFieldNode> Children);
+/// <summary>
+/// One node of a Unity serialized-object field tree. Editable metadata mirrors
+/// the underlying serialized type so the editor can validate before writing:
+/// <see cref="ValueType"/> uses normalized names (bool, int8..uint64, float,
+/// double, string, byteArray, array, pptr, unknown); enum nodes carry the
+/// serialized enum type name; PPtr nodes carry their target file/path IDs.
+/// </summary>
+public sealed record UnityFieldNode(
+    string Path,
+    string Name,
+    string Type,
+    string? Value,
+    IReadOnlyList<UnityFieldNode> Children,
+    string ValueType = "",
+    bool IsArray = false,
+    int ArraySize = 0,
+    bool IsEnum = false,
+    string EnumTypeName = "",
+    bool IsPPtr = false,
+    long PPtrFileId = 0,
+    long PPtrPathId = 0,
+    string? PPtrTargetType = null,
+    long ByteArrayLength = 0,
+    string ByteArrayPreviewHex = "",
+    bool Editable = false)
+{
+    /// <summary>Normalized value type for the primitive kinds that can be
+    /// edited as text; null for structure nodes.</summary>
+    public static bool IsEditableValueType(string valueType) => valueType switch
+    {
+        "bool" or "int8" or "uint8" or "int16" or "uint16" or "int32" or
+        "uint32" or "int64" or "uint64" or "float" or "double" or "string" => true,
+        _ => false
+    };
+}
 public sealed record UnityObjectReference(string FieldPath, long FileId, long PathId, string? TargetType);
+
+public enum UnityFieldEditStatus { Ok, UnknownPath, NotEditable, ParseError }
+
+/// <summary>Result of validating one field edit against the real serialized
+/// type before it is stored or written.</summary>
+public sealed record UnityFieldEditDiagnostic(string Path, UnityFieldEditStatus Status, string FieldType, string Message)
+{
+    public bool IsOk => Status == UnityFieldEditStatus.Ok;
+}
+
+/// <summary>Script provenance of a MonoBehaviour/ScriptableObject object:
+/// the serialized m_Script PPtr, the resolved MonoScript class data when the
+/// script lives in the same SerializedFile, the referenced external file when
+/// it does not, and the reason the field tree could not be read.</summary>
+public sealed record UnityScriptInfo(
+    long ScriptFileId,
+    long ScriptPathId,
+    string? ClassName,
+    string? Namespace,
+    string? AssemblyName,
+    string? ExternalPath,
+    string? ExternalGuid,
+    string? TypeTreeMissingReason);
 
 /// <summary>
 /// Converts AssetsTools.NET descriptors into the editor's neutral asset model.
@@ -26,6 +82,20 @@ public sealed class UnityAssetService
     {
         using var backend = new AssetsToolsBackend();
         return backend.ReadBundleObjectFields(bundlePath, serializedFileName, pathId, cancellationToken);
+    }
+
+    public UnityScriptInfo? ReadObjectScriptInfo(string serializedFilePath, long pathId,
+        CancellationToken cancellationToken = default)
+    {
+        using var backend = new AssetsToolsBackend();
+        return backend.ReadScriptInfo(serializedFilePath, pathId, cancellationToken);
+    }
+
+    public UnityScriptInfo? ReadBundleObjectScriptInfo(string bundlePath, string serializedFileName,
+        long pathId, CancellationToken cancellationToken = default)
+    {
+        using var backend = new AssetsToolsBackend();
+        return backend.ReadBundleScriptInfo(bundlePath, serializedFileName, pathId, cancellationToken);
     }
 
     public IReadOnlyList<UnityObjectReference> ReadObjectReferences(string serializedFilePath, long pathId,
@@ -52,18 +122,7 @@ public sealed class UnityAssetService
             .Select((obj, index) =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var type = obj.TypeId switch
-                {
-                    28 => AssetType.Texture,
-                    83 => AssetType.Audio,
-                    114 => AssetType.MonoBehaviour,
-                    115 => AssetType.Sprite,
-                    128 => AssetType.Font,
-                    142 => AssetType.Binary,
-                    213 => AssetType.ScriptableObject,
-                    1 => AssetType.GameObject,
-                    _ => AssetType.Unknown
-                };
+                var type = UnityClassId.Map(obj.TypeId);
                 return new AssetRecord
                 {
                     LogicalPath = $"{fileName}/{obj.PathId}.{obj.TypeId}",

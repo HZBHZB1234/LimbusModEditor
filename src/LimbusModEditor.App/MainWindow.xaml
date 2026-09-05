@@ -103,6 +103,7 @@
                     <Button x:Name="UnityFieldsButton" Content="Unity 字段编辑" Click="EditUnityFields_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"/>
                     <Button x:Name="ReferencersButton" Content="查找谁引用了此对象" Click="FindReferencers_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"/>
                     <Button x:Name="DecodeAudioButton" Content="导出当前音频 WAV" Click="DecodeAudio_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"/>
+                    <Button x:Name="FsbInspectButton" Content="查看 FSB 结构" Click="InspectFsb_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"/>
                     <Button Content="构建调试覆盖层" Click="BuildOverlay_Click" Margin="0,8,0,0" Padding="8,6"/>
                     <Button Content="应用并启动调试" Click="DebugApply_Click" Margin="0,18,0,0" Padding="8,6"/>
                 </StackPanel>

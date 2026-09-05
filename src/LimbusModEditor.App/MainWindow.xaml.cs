@@ -360,6 +360,9 @@ public partial class MainWindow : Window
             asset.LogicalPath.StartsWith("fsb/", StringComparison.OrdinalIgnoreCase) &&
             !string.IsNullOrWhiteSpace(_project?.FmodLibraryDirectory) &&
             Directory.Exists(_project.FmodLibraryDirectory) && _projectFile is not null;
+        FsbInspectButton.IsEnabled = asset?.Type == AssetType.Audio &&
+            asset.LogicalPath.StartsWith("fsb/", StringComparison.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(asset.SourcePath) && File.Exists(asset.SourcePath) && _projectFile is not null;
         var isImage = asset?.Type is AssetType.Texture or AssetType.Sprite;
         AtlasPanel.Visibility = isImage ? Visibility.Visible : Visibility.Collapsed;
         SplitAtlasButton.IsEnabled = isImage && _projectFile is not null;
@@ -529,6 +532,20 @@ public partial class MainWindow : Window
             AssetList.SelectedItem = asset;
         }
         catch (Exception ex) { ShowError("Unity 字段读取或保存失败", ex); }
+    }
+
+    /// <summary>P2.1: read-only FSB5 structural inspection for the selected
+    /// Bank audio entry; unknown/encrypted payloads are explained in-window.</summary>
+    private async void InspectFsb_Click(object sender, RoutedEventArgs e)
+    {
+        if (_project is null || AssetList.SelectedItem is not AssetRecord asset ||
+            string.IsNullOrWhiteSpace(asset.SourcePath) || !File.Exists(asset.SourcePath)) return;
+        try
+        {
+            var inspection = await new BankAudioService().InspectFsbAsync(asset);
+            new BankInspectorWindow(asset, inspection) { Owner = this }.ShowDialog();
+        }
+        catch (Exception ex) { ShowError("FSB 结构检查失败", ex); }
     }
 
     private void Help_Click(object sender, RoutedEventArgs e)

@@ -1,0 +1,16 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework Condition="'$(TargetFrameworkIdentifier)' != '.NETCoreApp'">net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+    <!-- Library projects normally omit transitive NuGet assemblies from their
+         own bin folder.  The editor ships as a self-contained workbench, so
+         keep codec/runtime assets beside every executable during development
+         and publish. -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <RuntimeIdentifier Condition="'$(OS)' == 'Windows_NT'">win-x64</RuntimeIdentifier>
+  </PropertyGroup>
+</Project>

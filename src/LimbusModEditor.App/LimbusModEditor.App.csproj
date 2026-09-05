@@ -1,0 +1,19 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\LimbusModEditor.Application\LimbusModEditor.Application.csproj" />
+    <ProjectReference Include="..\LimbusModEditor.Infrastructure\LimbusModEditor.Infrastructure.csproj" />
+    <ProjectReference Include="..\LimbusModEditor.Domain\LimbusModEditor.Domain.csproj" />
+    <ProjectReference Include="..\LimbusModEditor.Editing\LimbusModEditor.Editing.csproj" />
+    <ProjectReference Include="..\LimbusModEditor.Formats.Unity\LimbusModEditor.Formats.Unity.csproj" />
+  </ItemGroup>
+
+</Project>

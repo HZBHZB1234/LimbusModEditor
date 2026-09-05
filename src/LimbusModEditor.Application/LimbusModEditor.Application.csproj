@@ -1,0 +1,25 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.11" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\LimbusModEditor.Domain\LimbusModEditor.Domain.csproj" />
+    <ProjectReference Include="..\LimbusModEditor.Formats.Abstractions\LimbusModEditor.Formats.Abstractions.csproj" />
+    <ProjectReference Include="..\LimbusModEditor.Formats.Carra\LimbusModEditor.Formats.Carra.csproj" />
+    <ProjectReference Include="..\LimbusModEditor.Formats.Lunartique\LimbusModEditor.Formats.Lunartique.csproj" />
+    <ProjectReference Include="..\LimbusModEditor.Formats.Bank\LimbusModEditor.Formats.Bank.csproj" />
+    <ProjectReference Include="..\LimbusModEditor.Formats.Rebank\LimbusModEditor.Formats.Rebank.csproj" />
+    <ProjectReference Include="..\LimbusModEditor.Formats.Unity\LimbusModEditor.Formats.Unity.csproj" />
+    <ProjectReference Include="..\LimbusModEditor.Editing\LimbusModEditor.Editing.csproj" />
+  </ItemGroup>
+
+</Project>
+

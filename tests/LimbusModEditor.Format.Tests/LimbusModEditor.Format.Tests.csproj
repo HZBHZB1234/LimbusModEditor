@@ -1,0 +1,32 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="SharpCompress" Version="0.38.0" />
+    <PackageReference Include="AssetsTools.NET" Version="3.0.5" />
+    <ProjectReference Include="..\..\src\LimbusModEditor.Formats.Abstractions\LimbusModEditor.Formats.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\LimbusModEditor.Formats.Carra\LimbusModEditor.Formats.Carra.csproj" />
+    <ProjectReference Include="..\..\src\LimbusModEditor.Formats.Lunartique\LimbusModEditor.Formats.Lunartique.csproj" />
+    <ProjectReference Include="..\..\src\LimbusModEditor.Formats.Bank\LimbusModEditor.Formats.Bank.csproj" />
+    <ProjectReference Include="..\..\src\LimbusModEditor.Formats.Rebank\LimbusModEditor.Formats.Rebank.csproj" />
+    <ProjectReference Include="..\..\src\LimbusModEditor.Formats.Unity\LimbusModEditor.Formats.Unity.csproj" />
+  </ItemGroup>
+
+</Project>

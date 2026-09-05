@@ -32,7 +32,7 @@
   `checked` 整型转换，异常统一折叠为 `Error` 字段；版本资源经 OS 文件版本 API
   读取。无未受控循环，无进程加载风险。
 - **FmodCompatibilityService**：缓存读写全部 try/catch（缓存是尽力而为的加速），
-  指纹只依赖 DLL 大小/时间戳，不读取内容，不执行任何 DLL 代码。
+  指纹由 DLL 大小/时间戳加头尾内容哈希组成，不执行任何 DLL 代码。
 - **AtomicOutput**：临时文件唯一命名 + 同目录原子移动；成功/失败/取消三条路径都
   清理临时文件；共享冲突（游戏占用目标）折叠为含目标路径与处置建议的中文错误；
   失败时旧目标保持不变（测试覆盖）。
@@ -45,10 +45,29 @@
 
 ### 2.3 独立复审（第二意见）
 
-另派了一个独立复审代理对最近 12 个提交做交叉审查；该代理多次未能在限时内交付
-结论，最终被中断，其未完成的结果不作为本文档依据。本文 §2.1/§2.2 的走查与
-全部 130 个回归测试（含每个新模块的针对性测试）构成本次自审的最终记录；
-后续如需第二意见，可按 §1 的方法清单重跑。
+另派了一个独立复审代理对最近 12 个提交做交叉审查。该代理一度未能在限时内交付，
+被中断后以 `send_message` 方式补交了 14 项按严重度排序的发现；本节记录该清单
+与逐项处置（三项 HIGH 已确认属实并修复，全部修复以对应提交为准）：
+
+| # | 严重度 | 发现 | 处置 |
+| --- | --- | --- | --- |
+| 1 | HIGH | FSB5 解析器凭空发明了头部布局（把 0x10 处 u64 当名称偏移、0x20 起按自定义条目解析），测试把错误模型固化 | **属实**。按 vgmstream `src/meta/fsb5.c` + python-fsb5 双源重写：基头 0x3C/0x40、0x18 为整库编码、packed-u64 条目 + 元数据块、u32 偏移名称表、相邻偏移推导数据大小；未知版本/无效采样率显式报错。测试改为按真实布局构造（`8f14e17`） |
+| 2 | HIGH | ARGB32 字节序写成 B,G,R,A（实为 BGRA32 的布局），解码/替换会打乱 R/B 与 alpha | **属实**。UnityPy CONV_TABLE 以 Pillow rawmode `ARGB` 解码 → 字节序 A,R,G,B。已修正读写与目录注记（`8f14e17`） |
+| 3 | MEDIUM | R8 写入的是 alpha 而非红通道 | **属实**。已改为 `pixel.R` 并补往返测试（`8f14e17`） |
+| 4 | MEDIUM | EditUnityFields/FindReferencers 在 UI 线程同步扫描整个文件/Bundle，大文件冻结窗口 | **属实**。改 `Task.Run` + 按钮禁用 + 状态提示（`182f3a2`） |
+| 5 | MEDIUM | FindBundleReferencers 计算 fileName 却未随结果返回，Bundle 内 Path ID 重名时用户无法区分 | **属实**。`UnityReferencer` 增加 `OriginatingFile`，UI 列表显示 `[文件] Path …`（`182f3a2`） |
+| 6 | MEDIUM | 构建验证失败时回归产物与 `.stepN.tmp` 残留；输出目录=源目录时在位覆盖且自比较验证失效 | **属实**。改为全程 `.stepN.tmp` 中间文件 + `.lme-build.tmp` 暂存 → 验证通过才落位，finally 清理；输出=源直接拒绝（`182f3a2`） |
+| 7 | LOW | 仅把 m_FileID 置 0 的编辑不检查遗留 m_PathID 是否存在，可静默产生悬空引用 | **属实**。m_FileID→0 时检查（可能被同批编辑覆盖的）同级 m_PathID 是否在本文件对象表中（`f5d0abf` + 测试 `ddcad1c`） |
+| 8 | LOW | DiffDependencies 用 ToDictionary(FieldPath)，模板异常导致重复路径时整个验证崩掉 | **属实**。改 ToLookup，重复路径按组比较（`f5d0abf`） |
+| 9 | LOW | FMOD 探测缓存指纹只看大小/时间戳，时间戳还原的替换 DLL 会复用过期结论 | **属实**。指纹加入头尾各 16 KiB 内容哈希（`f5d0abf`） |
+| 10 | LOW | BankAudioService 整库读入内存只为取一段 FSB | 确认为性能瑕疵；结构检查场景体量有限，记录待优化（分段流式读取） |
+| 11 | LOW | ValidatePointerTarget 在 m_FileID→0 时跳过悬空检查 | 同 #7，已修复 |
+| 12 | LOW | 单元测试项目引用 Application 层（分层瑕疵） | 确认；测试需要 `AtomicOutput`/`BatchReplacement` 等服务行为，记录为已知取舍 |
+| 13 | LOW | AssetSearch 的 MaxSize<0 会静默关闭上限、HasReplacement 不校验文件存在 | 确认为交互瑕疵；筛选 UI 已限定输入范围，后续在筛选面板收紧 |
+| 14 | LOW | FSB5 名称越界等场景诊断信息可更精确 | 已在重写中处理（越界偏移逐样本报告，保留空名） |
+
+复审后全文基线重新验证：build 0 错误、131 测试全绿、publish 通过；§2.2 的走查
+结论与全部针对性测试构成本次自审的最终记录。
 
 ## 3. 项目优点分析
 
@@ -91,6 +110,6 @@
 
 ```text
 dotnet build LimbusModEditor.slnx --no-restore   ✓ 0 错误
-dotnet test LimbusModEditor.slnx --no-restore    ✓ 123 通过（44 Format + 79 Domain）
+dotnet test LimbusModEditor.slnx --no-restore    ✓ 131 通过（45 Format + 86 Domain）
 dotnet publish ... -o artifacts/publish-win-x64  ✓ LimbusModEditor.App.exe
 ```

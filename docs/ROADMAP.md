@@ -107,12 +107,14 @@ WPF/CLI 共用同一诊断模型的工作仍待后续。
 - 支持 mipmap 层选择、保留/重建 mipmap、纹理尺寸和可读性检查。
 
 状态（部分完成）：全部无损/半压缩格式已实现并有测试（`ExtendedTextureFormatTests`，
-枚举值经权威工具链核对：ARGB32 为 B,G,R,A 字节序、RGBA4444=13、RG16 为 2 字节双 8 位
-通道）；`TextureFormatCatalog` 标注有损/无损与字节序说明并在预览行展示
+枚举值经权威工具链核对：ARGB32 为 A,R,G,B 字节序（UnityPy 以 Pillow rawmode
+`ARGB` 解码；BGRA32 才是 B,G,R,A）、RGBA4444=13、RG16 为 2 字节双 8 位通道）；
+`TextureFormatCatalog` 标注有损/无损与字节序说明并在预览行展示
 （`ReadTextureSummary`）；`UnityTextureMipmaps` 提供逐层布局、mip 数推断与
 `Slice`（含 DXT 块对齐）。DXT 编解码维持托管实现（有损已标注）。ETC/ASTC 需要可靠
 可再分发库，当前不提供预览也不声称支持（符合"不伪造"约束）；mipmap 重建式替换与
-可读性检查待后续。
+可读性检查待后续。独立复审曾发现 ARGB32 字节序与 R8 写通道两处错误，已修复并
+以修正后的测试固化。
 
 ### P1.4 Sprite、SpriteAtlas 和网格
 
@@ -135,9 +137,12 @@ WPF/CLI 共用同一诊断模型的工作仍待后续。
 - 任何加密/未知 FSB 使用清晰错误，不尝试猜测或破坏性重写。
 
 状态（部分完成）：SNDH 偏移/大小索引与 FSB 提取/重组此前已落地并有测试；本轮新增
-FSB5 只读结构探测（`Fsb5Parser`：版本、样本条目（数据大小/采样率/声道标记/编码）、
-名称表、数据起始偏移、诊断列表）与「查看 FSB 结构」窗口（`BankInspectorWindow`）。
-加密/未知负载给出明确原因，不做猜测或改写。事件/总线级 FEV 索引展示与 WAV→FSB
+FSB5 只读结构探测（`Fsb5Parser`：按 vgmstream/python-fsb5 双源核对的布局——基头
+0x3C/0x40、整库编码字段@0x18、packed-u64 样本条目（采样率索引/声道映射/数据偏移/
+样本数）+ 元数据块（CHANNELS/FREQUENCY/LOOP 等）、u32 偏移名称表、相邻偏移推导
+数据大小、长度一致性诊断）与「查看 FSB 结构」窗口（`BankInspectorWindow`）。
+加密/未知负载给出明确原因，不做猜测或改写；独立复审曾发现初版解析器布局错误，
+已按权威布局重写并以合成样本测试固化。事件/总线级 FEV 索引展示与 WAV→FSB
 替换选项（P2.2）仍待后续轮次。
 
 ### P2.2 FMOD DLL 管理

@@ -5,16 +5,33 @@ using LimbusModEditor.Domain.Projects;
 namespace LimbusModEditor.Domain.Tests;
 
 /// <summary>P3.3: the asset search query covers text, type, edit state,
-/// container, Unity Path/Type ID, size range and replacement presence.</summary>
-public class AssetSearchServiceTests
+/// container, Unity Path/Type ID, size range and replacement presence.
+/// Replacement presence requires the registered file to still exist.</summary>
+public class AssetSearchServiceTests : IDisposable
 {
-    private static ModProject Project()
+    private readonly string _root = Path.Combine(Path.GetTempPath(), "lme-search-" + Guid.NewGuid().ToString("N"));
+
+    public AssetSearchServiceTests()
+    {
+        Directory.CreateDirectory(_root);
+        File.WriteAllText(Path.Combine(_root, "repl.png"), "png");
+        File.WriteAllText(Path.Combine(_root, "stats.json"), "{}");
+        // "gone.json" is deliberately never created: the record referencing it
+        // must not count as replaced.
+    }
+
+    public void Dispose()
+    {
+        try { Directory.Delete(_root, true); } catch (IOException) { }
+    }
+
+    private ModProject Project()
     {
         var project = new ModProject();
         project.Assets.Add(new AssetRecord { LogicalPath = "images/ui/logo.png", Type = AssetType.Texture, Size = 4096, UnityPathId = 100, UnityTypeId = 28, ContainerPath = "bundleA" });
-        project.Assets.Add(new AssetRecord { LogicalPath = "images/ui/icon.png", Type = AssetType.Sprite, Size = 512, UnityPathId = 101, UnityTypeId = 213, ContainerPath = "bundleA", Metadata = { ["replacementPath"] = @"C:\repl.png" } });
+        project.Assets.Add(new AssetRecord { LogicalPath = "images/ui/icon.png", Type = AssetType.Sprite, Size = 512, UnityPathId = 101, UnityTypeId = 213, ContainerPath = "bundleA", Metadata = { ["replacementPath"] = Path.Combine(_root, "repl.png") } });
         project.Assets.Add(new AssetRecord { LogicalPath = "audio/bgm1", Type = AssetType.Audio, Size = 1_000_000, UnityPathId = 200, UnityTypeId = 129, ContainerPath = "bundleB", EditState = AssetEditState.Modified });
-        project.Assets.Add(new AssetRecord { LogicalPath = "data/stats.json", Type = AssetType.Json, Size = 256, ContainerPath = "bundleB", EditState = AssetEditState.Added, Metadata = { ["replacementPath"] = @"C:\stats.json" } });
+        project.Assets.Add(new AssetRecord { LogicalPath = "data/stats.json", Type = AssetType.Json, Size = 256, ContainerPath = "bundleB", EditState = AssetEditState.Added, Metadata = { ["replacementPath"] = Path.Combine(_root, "stats.json") } });
         return project;
     }
 
@@ -47,11 +64,21 @@ public class AssetSearchServiceTests
     }
 
     [Fact]
-    public void Replacement_presence_filter()
+    public void Replacement_presence_filter_requires_existing_file()
+    {
+        var project = Project();
+        project.Assets.Add(new AssetRecord { LogicalPath = "data/gone.json", Type = AssetType.Json, Size = 128, Metadata = { ["replacementPath"] = Path.Combine(_root, "gone.json") } });
+        var service = new AssetSearchService();
+        Assert.Equal(2, service.Search(project, new AssetSearchQuery(HasReplacement: true)).Count);
+        Assert.Equal(3, service.Search(project, new AssetSearchQuery(HasReplacement: false)).Count);
+    }
+
+    [Fact]
+    public void Negative_size_bounds_are_rejected_loudly()
     {
         var service = new AssetSearchService();
-        Assert.Equal(2, service.Search(Project(), new AssetSearchQuery(HasReplacement: true)).Count);
-        Assert.Equal(2, service.Search(Project(), new AssetSearchQuery(HasReplacement: false)).Count);
+        Assert.Throws<ArgumentException>(() => service.Search(Project(), new AssetSearchQuery(MaxSize: -1)));
+        Assert.Throws<ArgumentException>(() => service.Search(Project(), new AssetSearchQuery(MinSize: -1)));
     }
 
     [Fact]

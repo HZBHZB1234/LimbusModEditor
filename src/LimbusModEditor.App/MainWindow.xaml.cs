@@ -134,39 +134,26 @@ public partial class MainWindow : Window
     private async void Export_Click(object sender, RoutedEventArgs e)
     {
         if (_project is null) { StatusText.Text = "请先创建或打开项目"; return; }
-        var sourceDialog = new Microsoft.Win32.OpenFileDialog
+        string? selectedSource = null;
+        if (!_project.Sources.Any())
         {
-            Filter = "支持的源模组 (*.carra;*.carra2;*.rebank;*.bank;*.zip)|*.carra;*.carra2;*.rebank;*.bank;*.zip|所有文件 (*.*)|*.*",
-            Title = "选择源模组（留空将使用项目最近导入的源）"
-        };
-        var selectedSource = sourceDialog.ShowDialog() == true ? sourceDialog.FileName : null;
-        if (string.IsNullOrWhiteSpace(selectedSource) && !_project.Sources.Any())
-        {
-            StatusText.Text = "项目中还没有源模组，请先导入资源包";
-            return;
+            var sourceDialog = new Microsoft.Win32.OpenFileDialog
+            {
+                Filter = "支持的源模组 (*.carra;*.carra2;*.rebank;*.bank;*.zip)|*.carra;*.carra2;*.rebank;*.bank;*.zip|所有文件 (*.*)|*.*",
+                Title = "选择源模组（项目还没有源时必选）"
+            };
+            if (sourceDialog.ShowDialog() != true) return;
+            selectedSource = sourceDialog.FileName;
         }
-        var outputDialog = new Microsoft.Win32.SaveFileDialog
-        {
-            Filter = "Carra 模组 (*.carra)|*.carra|Carra2 模组 (*.carra2)|*.carra2|Rebank 包 (*.rebank)|*.rebank|Bank (*.bank)|*.bank|Lunartique ZIP (*.zip)|*.zip",
-            FileName = Path.GetFileNameWithoutExtension(selectedSource ?? _project.Sources.Last().Path) + ".carra2",
-            Title = "选择模组输出位置"
-        };
-        if (outputDialog.ShowDialog() != true) return;
+        var wizard = new ExportWizardWindow(_project, selectedSource) { Owner = this };
+        if (wizard.ShowDialog() != true || wizard.Result is not { } choice) return;
         try
         {
-            var targetFormat = outputDialog.FilterIndex switch
-            {
-                1 => LimbusModEditor.Domain.Formats.ModFormatKind.Carra,
-                2 => LimbusModEditor.Domain.Formats.ModFormatKind.Carra2,
-                3 => LimbusModEditor.Domain.Formats.ModFormatKind.Rebank,
-                4 => LimbusModEditor.Domain.Formats.ModFormatKind.Bank,
-                5 => LimbusModEditor.Domain.Formats.ModFormatKind.Lunartique,
-                _ => (LimbusModEditor.Domain.Formats.ModFormatKind?)null
-            };
-            using NativeFmodAudioCodec? nativeCodec = targetFormat == LimbusModEditor.Domain.Formats.ModFormatKind.Bank && !string.IsNullOrWhiteSpace(_project.FmodLibraryDirectory) && Directory.Exists(_project.FmodLibraryDirectory)
+            using NativeFmodAudioCodec? nativeCodec = choice.Target == LimbusModEditor.Domain.Formats.ModFormatKind.Bank && !string.IsNullOrWhiteSpace(_project.FmodLibraryDirectory) && Directory.Exists(_project.FmodLibraryDirectory)
                 ? new NativeFmodAudioCodec(_project.FmodLibraryDirectory) : null;
-            var result = await _exporter.ExportWithEditsAsync(selectedSource, _project, outputDialog.FileName, targetFormat, nativeCodec);
-            StatusText.Text = $"导出完成：应用 {result.AppliedReplacements} 个替换";
+            var result = await _exporter.ExportWithEditsAsync(selectedSource, _project, choice.OutputPath, choice.Target, nativeCodec);
+            StatusText.Text = $"导出完成：应用 {result.AppliedReplacements} 个替换 → {result.OutputPath}";
+            new ExportReportWindow(result) { Owner = this }.ShowDialog();
         }
         catch (Exception ex) { ShowError("导出模组失败", ex); }
     }

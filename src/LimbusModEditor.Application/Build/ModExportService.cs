@@ -11,7 +11,16 @@ using LimbusModEditor.Formats.Bank;
 
 namespace LimbusModEditor.Application.Build;
 
-public sealed record ModExportResult(ModFormatKind Format, string OutputPath, int AppliedReplacements, IReadOnlyList<string> Diagnostics);
+public sealed record ModExportResult(
+    ModFormatKind Format,
+    string OutputPath,
+    int AppliedReplacements,
+    IReadOnlyList<string> Diagnostics,
+    IReadOnlyList<ExportAssetStatus> AssetStatuses)
+{
+    public ModExportResult(ModFormatKind format, string outputPath, int appliedReplacements, IReadOnlyList<string> diagnostics)
+        : this(format, outputPath, appliedReplacements, diagnostics, []) { }
+}
 
 /// <summary>Builds a portable package from project sources and replacements.</summary>
 public sealed class ModExportService(FormatRegistry registry)
@@ -58,12 +67,14 @@ public sealed class ModExportService(FormatRegistry registry)
             package = await handler.ImportAsync(input, new(Path.GetDirectoryName(sourceFullPath), true, cancellationToken));
             if (isLunartiqueToCarra)
             {
-                var replacementCount = await ApplyReplacementsAsync(package, project, codec as IFmodAudioCodec, cancellationToken);
+                var (replacementCount, statuses) = await ApplyReplacementsAsync(package, project, codec as IFmodAudioCodec, cancellationToken);
                 var sourcePackage = (LunartiquePackage)package.Payload!;
                 var converted = await new LunartiqueCarraConversionService().ConvertAsync(sourcePackage, cancellationToken);
                 if (converted.Package.Entries.Count == 0)
                     throw new InvalidDataException("Lunartique 中没有可转换的 Carra 对象；请确认 Installation 资源是有效的 Unity SerializedFile。");
                 converted.Package.UnknownFiles.AddRange(sourcePackage.PreservedFiles);
+                foreach (var preserved in sourcePackage.PreservedFiles)
+                    statuses.Add(new ExportAssetStatus(preserved.Path, ExportAssetStatus.Preserved, "无法转换为对象级 Carra 的未知文件，按原样保留。"));
                 package = new ModPackage { SourceFormat = format, Payload = converted.Package };
                 handler = FindHandler(format);
                 var report = await handler.ValidateAsync(package, cancellationToken);
@@ -78,10 +89,10 @@ public sealed class ModExportService(FormatRegistry registry)
                 }
                 finally { if (File.Exists(convertedTemp)) File.Delete(convertedTemp); }
                 var diagnostics = converted.Diagnostics.Select(x => $"{x.RelativePath}: {x.Message}").ToArray();
-                return new(format, convertedOutput, replacementCount + converted.AddedObjects + converted.ModifiedObjects, diagnostics);
+                return new(format, convertedOutput, replacementCount + converted.AddedObjects + converted.ModifiedObjects, diagnostics, statuses);
             }
         }
-        var applied = await ApplyReplacementsAsync(package, project, codec as IFmodAudioCodec, cancellationToken);
+        var (applied, assetStatuses) = await ApplyReplacementsAsync(package, project, codec as IFmodAudioCodec, cancellationToken);
         var validation = await handler.ValidateAsync(package, cancellationToken);
         if (validation.Diagnostics.Any(x => x.Severity == DiagnosticSeverity.Error)) throw new InvalidDataException(string.Join("; ", validation.Diagnostics.Select(x => x.Message)));
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outputPath))!);
@@ -99,7 +110,7 @@ public sealed class ModExportService(FormatRegistry registry)
         {
             if (File.Exists(temporaryOutput)) File.Delete(temporaryOutput);
         }
-        return new(format, outputFullPath, applied, validation.Diagnostics.Select(x => x.Message).ToArray());
+        return new(format, outputFullPath, applied, validation.Diagnostics.Select(x => x.Message).ToArray(), assetStatuses);
     }
 
     private IModFormatHandler FindHandler(ModFormatKind format)
@@ -161,9 +172,11 @@ public sealed class ModExportService(FormatRegistry registry)
         return new ModPackage { SourceFormat = ModFormatKind.Lunartique, Payload = package };
     }
 
-    private static async Task<int> ApplyReplacementsAsync(ModPackage package, ModProject project, IFmodAudioCodec? audioCodec, CancellationToken cancellationToken)
+    private static async Task<(int Applied, List<ExportAssetStatus> Statuses)> ApplyReplacementsAsync(
+        ModPackage package, ModProject project, IFmodAudioCodec? audioCodec, CancellationToken cancellationToken)
     {
         var count = 0;
+        var statuses = new List<ExportAssetStatus>();
         foreach (var asset in project.Assets)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -171,18 +184,40 @@ public sealed class ModExportService(FormatRegistry registry)
             var data = File.ReadAllBytes(path);
             switch (package.Payload)
             {
-                case CarraPackage carra when carra.Find(asset.LogicalPath) is { } entry: entry.ReplaceData(data); count++; break;
+                case CarraPackage carra when carra.Find(asset.LogicalPath) is { } entry:
+                    entry.ReplaceData(data); count++;
+                    statuses.Add(new ExportAssetStatus(asset.LogicalPath, ExportAssetStatus.Applied, null));
+                    break;
+                case CarraPackage:
+                    statuses.Add(new ExportAssetStatus(asset.LogicalPath, ExportAssetStatus.Skipped, "包内没有匹配的 Carra 对象。"));
+                    break;
                 case LunartiquePackage lunartique:
                     var resource = lunartique.Resources.FirstOrDefault(x => string.Equals(x.RelativePath, asset.LogicalPath, StringComparison.OrdinalIgnoreCase));
-                    if (resource is not null) { lunartique.Resources[lunartique.Resources.IndexOf(resource)] = resource with { Installation = data }; count++; }
+                    if (resource is not null)
+                    {
+                        lunartique.Resources[lunartique.Resources.IndexOf(resource)] = resource with { Installation = data };
+                        count++;
+                        statuses.Add(new ExportAssetStatus(asset.LogicalPath, ExportAssetStatus.Applied, null));
+                    }
+                    else statuses.Add(new ExportAssetStatus(asset.LogicalPath, ExportAssetStatus.Skipped, "包内没有匹配的 Lunartique 资源。"));
                     break;
                 case RebankPackage rebank:
                     var file = rebank.Files.FirstOrDefault(x => string.Equals($"{x.Index}/{x.Name}", asset.LogicalPath, StringComparison.OrdinalIgnoreCase));
-                    if (file is not null) { rebank.Files[rebank.Files.IndexOf(file)] = file with { Data = data }; count++; }
+                    if (file is not null)
+                    {
+                        rebank.Files[rebank.Files.IndexOf(file)] = file with { Data = data };
+                        count++;
+                        statuses.Add(new ExportAssetStatus(asset.LogicalPath, ExportAssetStatus.Applied, null));
+                    }
+                    else statuses.Add(new ExportAssetStatus(asset.LogicalPath, ExportAssetStatus.Skipped, "包内没有匹配的 Rebank 文件。"));
                     break;
                 case LimbusModEditor.Formats.Bank.BankPackage bank:
                     var bankIndex = ParseFsbIndex(asset.LogicalPath);
-                    if (bankIndex < 0 || bankIndex >= bank.FsbData.Count) continue;
+                    if (bankIndex < 0 || bankIndex >= bank.FsbData.Count)
+                    {
+                        statuses.Add(new ExportAssetStatus(asset.LogicalPath, ExportAssetStatus.Skipped, "FSB 索引超出 Bank 范围。"));
+                        continue;
+                    }
                     if (data.Length >= 12 && data.AsSpan(0, 4).SequenceEqual("RIFF"u8) && data.AsSpan(8, 4).SequenceEqual("WAVE"u8))
                     {
                         if (audioCodec is null || !audioCodec.IsAvailable)
@@ -194,10 +229,14 @@ public sealed class ModExportService(FormatRegistry registry)
                     bank.FsbData[bankIndex] = data;
                     bank.HasModifications = true;
                     count++;
+                    statuses.Add(new ExportAssetStatus(asset.LogicalPath, ExportAssetStatus.Applied, null));
+                    break;
+                default:
+                    statuses.Add(new ExportAssetStatus(asset.LogicalPath, ExportAssetStatus.Skipped, "当前包格式不支持该替换。"));
                     break;
             }
         }
-        return count;
+        return (count, statuses);
     }
 
     private static string? ResolveSourcePath(string? requested, ModProject project, ModFormatKind? targetFormat)

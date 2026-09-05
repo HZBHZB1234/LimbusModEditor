@@ -137,6 +137,12 @@ FSB5 只读结构探测（`Fsb5Parser`：版本、样本条目（数据大小/�
 - 提供 WAV→FSB 选项：格式、采样率、声道、循环元数据，并显示有损编码警告。
 - 不分发 FMOD/FSBank 专有 DLL，不逆向或伪造编码器。
 
+状态（部分完成）：`FmodDllInspector` 从原始字节解析 PE 头与导出表（不 LoadLibrary、
+不执行），报告位数/版本资源/导出符号快照与缺失的解码、FSBank 编码符号；
+`FmodCompatibilityService` 以 DLL 大小+时间戳指纹缓存探测结果（logs/fmod-probe.json）；
+「检测 FMOD DLL」按钮展示就绪状态与 32 位告警。加载仍遵循"用户明确选择目录后才绑定"
+的既有原则。WAV→FSB 选项面板待后续。
+
 ### P2.3 Bank 调试和回滚
 
 - 将 Bank 构建输出接入 overlay 和游戏启动事务。

@@ -381,8 +381,15 @@ public partial class MainWindow : Window
         {
             try
             {
-                var png = new LimbusModEditor.Formats.Unity.UnityAssetService().ReadTexturePng(asset.SourcePath, asset.UnityPathId.Value);
-                if (png is not null) { SetPreviewBitmap(png); PreviewInfoText.Text = "Unity Texture2D PNG preview"; return; }
+                var unityService = new LimbusModEditor.Formats.Unity.UnityAssetService();
+                var png = unityService.ReadTexturePng(asset.SourcePath, asset.UnityPathId.Value);
+                if (png is not null)
+                {
+                    SetPreviewBitmap(png);
+                    try { PreviewInfoText.Text = unityService.ReadTextureSummary(asset.SourcePath, asset.UnityPathId.Value)?.Describe() ?? "Unity Texture2D PNG preview"; }
+                    catch (Exception) { PreviewInfoText.Text = "Unity Texture2D PNG preview"; }
+                    return;
+                }
             }
             catch (Exception ex) { PreviewInfoText.Text = $"Unity texture preview failed: {ex.Message}"; return; }
         }

@@ -40,6 +40,24 @@ public sealed record UnityFieldNode(
 }
 public sealed record UnityObjectReference(string FieldPath, long FileId, long PathId, string? TargetType);
 
+/// <summary>Texture2D structural summary for previews (P1.3).</summary>
+public sealed record UnityTextureSummary(
+    int Width,
+    int Height,
+    int TextureFormat,
+    string? FormatName,
+    int MipCount,
+    string? CapabilityNotes)
+{
+    public string Describe()
+    {
+        var name = FormatName ?? $"格式 {TextureFormat}（暂不支持预览/替换）";
+        var text = $"{Width} × {Height} · {name} · mipmap {MipCount} 层";
+        if (!string.IsNullOrWhiteSpace(CapabilityNotes)) text += $" ｜ {CapabilityNotes}";
+        return text;
+    }
+}
+
 public enum UnityFieldEditStatus { Ok, UnknownPath, NotEditable, ParseError, InvalidTarget }
 
 /// <summary>How a PPtr dependency resolves against a SerializedFile's own
@@ -251,6 +269,28 @@ public sealed class UnityAssetService
         if (texture is null || !Enum.IsDefined(typeof(UnityTexturePixelFormat), texture.TextureFormat)) return null;
         return new UnityTextureCodec().ToPng(new UnityTextureInfo(texture.Width, texture.Height,
             (UnityTexturePixelFormat)texture.TextureFormat, texture.PixelData));
+    }
+
+    /// <summary>Structural summary of a Texture2D: dimensions, format name,
+    /// estimated mipmap level count and capability notes (P1.3).</summary>
+    public UnityTextureSummary? ReadTextureSummary(string bundlePath, long pathId,
+        CancellationToken cancellationToken = default)
+    {
+        using var backend = new AssetsToolsBackend();
+        var texture = backend.ReadTexture(bundlePath, pathId, cancellationToken);
+        if (texture is null) return null;
+        UnityTexturePixelFormat? format = Enum.IsDefined(typeof(UnityTexturePixelFormat), texture.TextureFormat)
+            ? (UnityTexturePixelFormat)texture.TextureFormat
+            : null;
+        var mipCount = 1;
+        string? capability = null;
+        if (format is { } known)
+        {
+            mipCount = UnityTextureMipmaps.EstimateMipCount(texture.Width, texture.Height, known, texture.PixelData.Length);
+            capability = TextureFormatCatalog.Describe(known).Notes;
+        }
+        return new UnityTextureSummary(texture.Width, texture.Height, texture.TextureFormat,
+            format?.ToString(), mipCount, capability);
     }
 
     public UnitySpriteObject? ReadSprite(string bundlePath, long pathId,

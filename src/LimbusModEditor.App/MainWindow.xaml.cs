@@ -158,6 +158,27 @@ public partial class MainWindow : Window
         catch (Exception ex) { ShowError("导出模组失败", ex); }
     }
 
+    /// <summary>自动获取资源地址：scan known Steam libraries for the Limbus
+    /// Company install and fill the game directory automatically.</summary>
+    private async void AutoLocateGame_Click(object sender, RoutedEventArgs e)
+    {
+        if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }
+        try
+        {
+            var lookup = LimbusModEditor.Application.Debugging.GameDirectoryLocator.Scan(
+                LimbusModEditor.Application.Debugging.GameDirectoryLocator.DefaultCandidateRoots());
+            if (!lookup.Found)
+            {
+                MessageBox.Show(this, "未能在已知的 Steam 库中找到 LimbusCompany.exe。\n请手动选择游戏目录。", "自动定位失败", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+            _project.GameDirectory = lookup.GameDirectory;
+            await _projects.SaveAsync(_project, _projectFile);
+            StatusText.Text = $"已自动定位游戏目录：{lookup.GameDirectory}（{lookup.Method}）";
+        }
+        catch (Exception ex) { ShowError("自动定位游戏目录失败", ex); }
+    }
+
     private async void SetGameDirectory_Click(object sender, RoutedEventArgs e)
     {
         if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }

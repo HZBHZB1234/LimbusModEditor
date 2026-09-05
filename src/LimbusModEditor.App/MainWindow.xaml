@@ -35,6 +35,7 @@
                     <TextBlock Text="当前项目" Foreground="#7F93A4"/>
                     <TextBlock x:Name="ProjectNameText" Text="未打开项目" TextWrapping="Wrap" Margin="0,6"/>
                     <Button Content="设置游戏目录" Click="SetGameDirectory_Click" Margin="0,8,0,0" Padding="8,6"/>
+                    <Button Content="自动定位游戏目录" Click="AutoLocateGame_Click" Margin="0,8,0,0" Padding="8,6"/>
                     <Button Content="设置 Unity 缓存目录" Click="SetUnityCacheDirectory_Click" Margin="0,8,0,0" Padding="8,6"/>
                     <Button Content="设置模组目录" Click="SetModDirectory_Click" Margin="0,8,0,0" Padding="8,6"/>
                     <Button Content="设置 FMOD DLL 目录" Click="SetFmodDirectory_Click" Margin="0,8,0,0" Padding="8,6"/>

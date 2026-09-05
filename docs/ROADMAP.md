@@ -52,6 +52,11 @@ Installation/Uninstallation 和 Carra/Carra2 样本。
 - 所有临时文件在成功、失败、取消三种路径都能清理或留下可恢复日志。
 - 增加并发构建/取消构建测试。
 
+状态（部分完成）：新增 `AtomicOutput` 事务写出助手（唯一临时文件 + 原子移动 +
+三种路径清理 + 过期临时清扫 + 目标被占用时的可操作中文错误），已接入
+ModExportService 两条导出路径与 DebugApplyService 的复制步骤；导出/应用失败时
+原目标保持不变。Bundle/SerializedFile 构建内部写回与并发取消测试仍待后续。
+
 ### P0.3 编码和诊断统一化
 
 - 清理现有源文件中的乱码中文字符串，统一 UTF-8 和资源文本编码策略。

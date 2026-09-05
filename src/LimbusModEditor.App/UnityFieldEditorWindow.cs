@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Media;
 using LimbusModEditor.Application.Assets;
+using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Domain.Edits;
 using LimbusModEditor.Formats.Unity;
 
@@ -62,14 +63,22 @@ public sealed class UnityFieldEditorWindow : Window
     private readonly ICollectionView _view;
     private readonly DataGrid _grid;
     private readonly TextBlock _errorText;
+    private readonly TextBlock _dependencyText;
+    private readonly ComboBox _objectPicker = new() { Width = 260, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) };
+    private readonly IReadOnlyList<UnityDependency>? _dependencies;
+    private readonly IReadOnlyList<AssetRecord>? _inFileObjects;
     private bool _showAll;
 
     /// <summary>The selected, modified and valid drafts; null when cancelled.</summary>
     public IReadOnlyList<UnityFieldEditDraft>? Result { get; private set; }
 
     public UnityFieldEditorWindow(IReadOnlyList<UnityFieldNode> roots, UnityFieldEditSet? initial,
-        UnityScriptInfo? scriptInfo = null)
+        UnityScriptInfo? scriptInfo = null,
+        IReadOnlyList<UnityDependency>? dependencies = null,
+        IReadOnlyList<AssetRecord>? inFileObjects = null)
     {
+        _dependencies = dependencies;
+        _inFileObjects = inFileObjects;
         Title = "Unity SerializedObject 字段编辑";
         Width = 1060; Height = 680; MinWidth = 760; MinHeight = 480;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
@@ -138,6 +147,7 @@ public sealed class UnityFieldEditorWindow : Window
             new SolidColorBrush(Color.FromRgb(255, 232, 232))));
         rowStyle.Triggers.Add(errorTrigger);
         _grid.RowStyle = rowStyle;
+        _grid.SelectionChanged += (_, _) => UpdateDependencyText();
 
         var selectedFactory = new FrameworkElementFactory(typeof(CheckBox));
         selectedFactory.SetValue(HorizontalAlignmentProperty, HorizontalAlignment.Center);
@@ -181,10 +191,33 @@ public sealed class UnityFieldEditorWindow : Window
         DockPanel.SetDock(_errorText, Dock.Bottom);
         panel.Children.Add(_errorText);
 
+        _dependencyText = new TextBlock
+        {
+            Foreground = Brushes.RoyalBlue,
+            Margin = new Thickness(0, 8, 0, 0),
+            TextWrapping = TextWrapping.Wrap,
+            Visibility = string.IsNullOrEmpty(DependencySummary()) ? Visibility.Collapsed : Visibility.Visible,
+            Text = DependencySummary()
+        };
+        DockPanel.SetDock(_dependencyText, Dock.Bottom);
+        panel.Children.Add(_dependencyText);
+
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0) };
         var showAll = new CheckBox { Content = "显示全部字段", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 12, 0) };
         showAll.Click += (_, _) => { _showAll = showAll.IsChecked == true; _view.Refresh(); };
         buttons.Children.Add(showAll);
+        if (_inFileObjects is { Count: > 0 })
+        {
+            buttons.Children.Add(new TextBlock
+            {
+                Text = "同文件对象:",
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 4, 0),
+                Foreground = Brushes.Gray
+            });
+            buttons.Children.Add(_objectPicker);
+            buttons.Children.Add(MakeButton("自动填充所选 PPtr", FillPointer_Click, width: 130));
+        }
         buttons.Children.Add(MakeButton("全选已修改", SelectModified_Click));
         buttons.Children.Add(MakeButton("恢复选中为原值", RevertSelected_Click));
         var cancel = MakeButton("取消", (_, _) => DialogResult = false, width: 90);
@@ -203,8 +236,12 @@ public sealed class UnityFieldEditorWindow : Window
 
     private void AddRows(UnityFieldNode node, UnityFieldEditSet? initial)
     {
+        var resolved = node.IsPPtr && _dependencies is not null
+            ? _dependencies.FirstOrDefault(d => string.Equals(d.FieldPath, node.Path, StringComparison.Ordinal))
+            : null;
         var displayValue = node.IsPPtr
             ? $"→ {node.PPtrTargetType ?? "对象"}（file {node.PPtrFileId}, path {node.PPtrPathId}）"
+              + (resolved is null ? string.Empty : $"　✓ {resolved.Describe()}")
             : node.ValueType switch
             {
                 "byteArray" => $"<{node.ByteArrayLength} 字节> {node.ByteArrayPreviewHex}".TrimEnd(),
@@ -246,6 +283,118 @@ public sealed class UnityFieldEditorWindow : Window
         _grid.CommitEdit(DataGridEditingUnit.Row, true);
         foreach (var row in _rows.Where(x => x.Editable && x.Modified)) row.Selected = true;
     }
+
+    /// <summary>Top summary of every pointer in this object with its resolution.</summary>
+    private string DependencySummary()
+    {
+        if (_dependencies is not { Count: > 0 }) return string.Empty;
+        var lines = _dependencies.Select(d => $"{d.FieldPath}: {d.Describe()}");
+        return "指针依赖：" + string.Join("；", lines);
+    }
+
+    private void UpdateDependencyText()
+    {
+        if (_dependencies is not { Count: > 0 }) return;
+        var text = DependencySummary();
+        if (_grid.SelectedItem is Row row)
+        {
+            var dep = _dependencies.FirstOrDefault(d => string.Equals(d.FieldPath, row.Path, StringComparison.Ordinal))
+                ?? FindParentDependency(row.Path);
+            if (dep is not null)
+            {
+                text = $"{row.Path}: {dep.Describe()}（File {dep.FileId}, Path {dep.PathId}）";
+                if (!string.IsNullOrEmpty(dep.ExternalGuid)) text += $"  GUID {dep.ExternalGuid}";
+                PopulatePickerForParent(dep.TargetType);
+            }
+        }
+        _dependencyText.Text = text;
+    }
+
+    private UnityDependency? FindParentDependency(string path)
+    {
+        var lastDot = path.LastIndexOf('.');
+        if (lastDot < 0) return null;
+        var parentPath = path[..lastDot];
+        return _dependencies!.FirstOrDefault(d => string.Equals(d.FieldPath, parentPath, StringComparison.Ordinal));
+    }
+
+    /// <summary>Fills the object picker with same-file objects that match the
+    /// selected PPtr's declared target type (falls back to all objects).</summary>
+    private void PopulatePickerForParent(string? targetType)
+    {
+        if (_inFileObjects is not { Count: > 0 }) return;
+        var wanted = ParsePointerType(targetType);
+        var candidates = _inFileObjects
+            .Where(x => x.UnityPathId.HasValue)
+            .Where(x => wanted is null || x.Type == wanted)
+            .OrderBy(x => x.UnityPathId!.Value)
+            .Select(x => new PickerItem($"{x.Type}（{x.UnityTypeId}） Path {x.UnityPathId}", x.UnityPathId!.Value))
+            .ToList();
+        _objectPicker.ItemsSource = candidates;
+        _objectPicker.DisplayMemberPath = nameof(PickerItem.Label);
+        _objectPicker.SelectedIndex = candidates.Count > 0 ? 0 : -1;
+    }
+
+    private static AssetType? ParsePointerType(string? targetType)
+    {
+        if (string.IsNullOrWhiteSpace(targetType)) return null;
+        var open = targetType.IndexOf('<');
+        var close = targetType.LastIndexOf('>');
+        if (open < 0 || close <= open) return null;
+        var name = targetType[(open + 1)..close].TrimStart('$');
+        return Enum.TryParse(name, out AssetType mapped) ? mapped : null;
+    }
+
+    private sealed record PickerItem(string Label, long PathId);
+
+    private void FillPointer_Click(object sender, RoutedEventArgs e)
+    {
+        _grid.CommitEdit(DataGridEditingUnit.Cell, true);
+        _grid.CommitEdit(DataGridEditingUnit.Row, true);
+        var row = _grid.SelectedItem as Row;
+        if (row is null)
+        {
+            ShowDependencyHint("先在表格中选中某个 PPtr 的 m_PathID 或 m_FileID 行。");
+            return;
+        }
+        var lastDot = row.Path.LastIndexOf('.');
+        var segment = lastDot < 0 ? row.Path : row.Path[(lastDot + 1)..];
+        var parentPath = lastDot < 0 ? string.Empty : row.Path[..lastDot];
+        var isPointerId = segment.Equals("m_PathID", StringComparison.Ordinal) || segment.Equals("pathID", StringComparison.Ordinal)
+            || segment.Equals("m_FileID", StringComparison.Ordinal) || segment.Equals("fileID", StringComparison.Ordinal);
+        if (!isPointerId)
+        {
+            ShowDependencyHint("所选行不是 PPtr 指针字段（m_FileID / m_PathID）。");
+            return;
+        }
+        var pathIdRow = FindIdRow(parentPath, "m_PathID", "pathID");
+        var fileIdRow = FindIdRow(parentPath, "m_FileID", "fileID");
+        if (pathIdRow is null)
+        {
+            ShowDependencyHint("找不到同组 PPtr 的 m_PathID 行。");
+            return;
+        }
+        var chosen = _objectPicker.SelectedItem as PickerItem;
+        if (chosen is null)
+        {
+            ShowDependencyHint("请先在下拉框中选择要指向的同文件对象。");
+            return;
+        }
+        pathIdRow.Value = chosen.PathId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (fileIdRow is not null && fileIdRow.Value != "0") fileIdRow.Value = "0";
+        pathIdRow.Selected = true;
+        if (fileIdRow is not null) fileIdRow.Selected = true;
+        ShowDependencyHint($"已将 {parentPath} 指向 Path {chosen.PathId}（{chosen.Label}），勾选后保存生效。");
+    }
+
+    private Row? FindIdRow(string parentPath, string primary, string fallback)
+    {
+        var row = _rows.FirstOrDefault(r => string.Equals(r.Path, parentPath + "." + primary, StringComparison.Ordinal));
+        row ??= _rows.FirstOrDefault(r => string.Equals(r.Path, parentPath + "." + fallback, StringComparison.Ordinal));
+        return row;
+    }
+
+    private void ShowDependencyHint(string message) => _dependencyText.Text = message;
 
     private void RevertSelected_Click(object sender, RoutedEventArgs e)
     {

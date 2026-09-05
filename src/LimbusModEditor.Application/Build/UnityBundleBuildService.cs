@@ -105,7 +105,15 @@ public sealed class UnityBundleBuildService
             {
                 if (!string.Equals(current, output, StringComparison.OrdinalIgnoreCase)) File.Move(current, output, true);
                 using (var validator = new AssetsToolsBackend())
+                {
                     _ = validator.InspectBundle(output);
+                    var verify = validator.VerifyBundleReferences(source, output);
+                    if (!verify.Ok)
+                        throw new InvalidDataException(
+                            $"重打包后引用完整性检查失败 ({Path.GetFileName(source)}): " +
+                            string.Join("; ", verify.Changes.Where(c => c.IsRegression)
+                                .Select(c => $"{c.SerializedFile} Path {c.SourcePathId} {c.FieldPath}: {c.Before} → {c.After}")));
+                }
                 results.Add(new(source, output, applied));
             }
             foreach (var temporary in intermediates.Where(x => !string.Equals(x, output, StringComparison.OrdinalIgnoreCase)))

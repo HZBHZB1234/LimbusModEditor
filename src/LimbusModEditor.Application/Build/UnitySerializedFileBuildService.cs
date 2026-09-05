@@ -87,7 +87,15 @@ public sealed class UnitySerializedFileBuildService
             {
                 if (!string.Equals(current, output, StringComparison.OrdinalIgnoreCase)) File.Move(current, output, true);
                 using (var validator = new AssetsToolsBackend())
+                {
                     _ = validator.ReadSerializedObjects(output);
+                    var verify = validator.VerifySerializedReferences(source, output);
+                    if (!verify.Ok)
+                        throw new InvalidDataException(
+                            $"重写后引用完整性检查失败 ({Path.GetFileName(source)}): " +
+                            string.Join("; ", verify.Changes.Where(c => c.IsRegression)
+                                .Select(c => $"Path {c.SourcePathId} {c.FieldPath}: {c.Before} → {c.After}")));
+                }
                 results.Add(new(source, output, applied));
             }
             foreach (var temporary in intermediates)

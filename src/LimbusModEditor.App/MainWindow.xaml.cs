@@ -355,6 +355,7 @@ public partial class MainWindow : Window
         UnityFieldsButton.IsEnabled = asset?.UnityPathId.HasValue == true &&
             (asset.Metadata.ContainsKey("unityBundle") || asset.Metadata.ContainsKey("unitySerializedFile")) &&
             !string.IsNullOrWhiteSpace(asset.SourcePath) && File.Exists(asset.SourcePath) && _projectFile is not null;
+        ReferencersButton.IsEnabled = UnityFieldsButton.IsEnabled;
         DecodeAudioButton.IsEnabled = asset?.Type == AssetType.Audio &&
             asset.LogicalPath.StartsWith("fsb/", StringComparison.OrdinalIgnoreCase) &&
             !string.IsNullOrWhiteSpace(_project?.FmodLibraryDirectory) &&
@@ -502,7 +503,24 @@ public partial class MainWindow : Window
                     : service.ReadObjectScriptInfo(asset.SourcePath, asset.UnityPathId.Value);
             }
             catch (Exception) { /* non-MonoBehaviour objects have no script info */ }
-            var dialog = new UnityFieldEditorWindow(fields, _unityFieldEdits.ReadStored(asset), scriptInfo) { Owner = this };
+            IReadOnlyList<LimbusModEditor.Formats.Unity.UnityDependency>? dependencies = null;
+            try
+            {
+                dependencies = isBundle
+                    ? service.ReadBundleObjectDependencies(asset.SourcePath, asset.ContainerPath!, asset.UnityPathId.Value)
+                    : service.ReadObjectDependencies(asset.SourcePath, asset.UnityPathId.Value);
+            }
+            catch (Exception) { /* dependency view is best-effort */ }
+            IReadOnlyList<AssetRecord>? inFileObjects = null;
+            try
+            {
+                var scanned = isBundle ? service.ScanBundle(asset.SourcePath) : service.ScanSerializedFile(asset.SourcePath);
+                inFileObjects = scanned
+                    .Where(x => x.UnityPathId.HasValue && (!isBundle || string.Equals(x.ContainerPath, asset.ContainerPath, StringComparison.OrdinalIgnoreCase)))
+                    .ToArray();
+            }
+            catch (Exception) { /* object picker is best-effort */ }
+            var dialog = new UnityFieldEditorWindow(fields, _unityFieldEdits.ReadStored(asset), scriptInfo, dependencies, inFileObjects) { Owner = this };
             if (dialog.ShowDialog() != true || dialog.Result is null) return;
             if (dialog.Result.Count == 0) return;
             _unityFieldEdits.Set(_project, asset, fields, dialog.Result);
@@ -511,6 +529,39 @@ public partial class MainWindow : Window
             AssetList.SelectedItem = asset;
         }
         catch (Exception ex) { ShowError("Unity 字段读取或保存失败", ex); }
+    }
+
+    /// <summary>Answers "who points at this object" for the selected Unity
+    /// object: same-file referencers plus, for bundles, cross-file referencers
+    /// from every other SerializedFile inside the same bundle.</summary>
+    private void FindReferencers_Click(object sender, RoutedEventArgs e)
+    {
+        if (_project is null || AssetList.SelectedItem is not AssetRecord asset ||
+            !asset.UnityPathId.HasValue || string.IsNullOrWhiteSpace(asset.SourcePath) || !File.Exists(asset.SourcePath)) return;
+        try
+        {
+            var service = new LimbusModEditor.Formats.Unity.UnityAssetService();
+            var isBundle = asset.Metadata.ContainsKey("unityBundle") && !string.IsNullOrWhiteSpace(asset.ContainerPath);
+            var referencers = isBundle
+                ? service.FindBundleReferencers(asset.SourcePath, asset.ContainerPath!, asset.UnityPathId.Value)
+                : service.FindReferencers(asset.SourcePath, asset.UnityPathId.Value);
+            if (referencers.Count == 0)
+            {
+                MessageBox.Show(this,
+                    $"没有发现任何对象引用 Path {asset.UnityPathId.Value}（{asset.Type}）。\n修改或替换它不会破坏其他对象。",
+                    "引用者检查", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+            var lines = referencers
+                .OrderBy(r => r.SourcePathId)
+                .Select(r => $"Path {r.SourcePathId}（{r.SourceTypeName ?? "未知类型"}）字段 {r.FieldPath}");
+            MessageBox.Show(this,
+                $"有 {referencers.Count} 个指针引用 Path {asset.UnityPathId.Value}（{asset.Type}）：\n\n" +
+                string.Join(Environment.NewLine, lines) +
+                "\n\n修改此对象前请确认这些指针仍然有效；把指针改成空引用是允许的，改成不存在的 Path ID 会在保存时被拒绝。",
+                "引用者检查", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        catch (Exception ex) { ShowError("引用者检查失败", ex); }
     }
 
     private async void DecodeAudio_Click(object sender, RoutedEventArgs e)

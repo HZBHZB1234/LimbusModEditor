@@ -54,6 +54,29 @@ public sealed class HelpWindow : Window
             "• Bank 音频需要你提供合法的 fmod64.dll / fsbank64.dll 才能解码导出 WAV；\n" +
             "  本工具不附带、不伪造任何 FMOD 二进制文件。"));
 
+        panel.Children.Add(MakeTitle("FMOD DLL 检测"));
+        panel.Children.Add(MakeBody(
+            "• 配置 FMOD DLL 目录后，点击「检测 FMOD DLL」查看每个 DLL 的：\n" +
+            "  位数（x64/x86）、文件版本、导出符号数量，以及解码/FSB 编码接口是否齐全；\n" +
+            "• 检测只读取文件头与导出表，不会加载或执行任何 DLL 代码；\n" +
+            "• 结果按 DLL 大小/时间戳缓存，目录变化后自动重新检测；\n" +
+            "• 32 位（x86）DLL 无法被本 64 位编辑器加载，报告中会给出红色警告。"));
+
+        panel.Children.Add(MakeTitle("导出向导与导出报告"));
+        panel.Children.Add(MakeBody(
+            "• 「导出模组」会先识别源格式，然后显示源→目标兼容性矩阵：\n" +
+            "  可用目标带 ✓ 说明；不可用目标置灰并解释原因；\n" +
+            "• 窗口同时显示项目概况（资源数/替换数/字段编辑数/Sprite 元数据数）；\n" +
+            "• 选择目标格式后输出路径自动切换扩展名；\n" +
+            "• 导出完成后弹出逐资源报告：已应用 / 已跳过 / 保留未知 + 诊断，\n" +
+            "  「已跳过」说明该替换没有写入包（常见原因是替换路径与包内对象不匹配）。"));
+
+        panel.Children.Add(MakeTitle("资源筛选"));
+        panel.Children.Add(MakeBody(
+            "• 资源列表上方筛选行支持：文本搜索、类型、编辑状态、Path ID、Type ID、\n" +
+            "  大小区间（KB）与「仅已替换」开关；\n" +
+            "• 「清除筛选」一键还原；筛选生效时右上角计数显示 “筛选后 / 总数”。"));
+
         panel.Children.Add(MakeTitle("安全边界"));
         panel.Children.Add(MakeBody(
             "• 原始资源永远保留在 sources/ 中，所有修改先记录、构建时才应用；\n" +

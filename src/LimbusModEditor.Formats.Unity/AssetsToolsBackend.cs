@@ -111,7 +111,7 @@ public sealed class AssetsToolsBackend : IDisposable
             ?? throw new KeyNotFoundException($"SerializedFile 中不存在 Path ID: {pathId}");
         var template = LoadTemplate(file, info);
         var fields = GetBaseField(file, info, template);
-        return ValidateFieldEdits(fields, template, edits);
+        return ValidateFieldEdits(file, fields, template, edits);
     }
 
     /// <summary>Bundle variant of <see cref="ValidateObjectFieldEdits"/>.</summary>
@@ -124,18 +124,12 @@ public sealed class AssetsToolsBackend : IDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(serializedFileName);
         ArgumentNullException.ThrowIfNull(edits);
         if (edits.Count == 0) throw new ArgumentException("至少需要一个字段修改。", nameof(edits));
-        var bundle = _manager.LoadBundleFile(bundlePath, unpackIfPacked: true)
-            ?? throw new InvalidDataException($"无法读取 Unity Bundle: {bundlePath}");
-        _bundles.Add(bundle);
-        var index = bundle.file.GetFileIndex(serializedFileName);
-        if (index < 0 || !bundle.file.IsAssetsFile(index)) throw new KeyNotFoundException($"Bundle 中不存在 SerializedFile: {serializedFileName}");
-        var file = _manager.LoadAssetsFileFromBundle(bundle, serializedFileName, loadDeps: false)
-            ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFileName}");
+        var file = LoadBundleAssetsFile(bundlePath, serializedFileName);
         var info = file.file.GetAssetInfo(pathId)
             ?? throw new KeyNotFoundException($"SerializedFile 中不存在 Path ID: {pathId}");
         var template = LoadTemplate(file, info);
         var fields = GetBaseField(file, info, template);
-        return ValidateFieldEdits(fields, template, edits);
+        return ValidateFieldEdits(file, fields, template, edits);
     }
 
     public IReadOnlyList<UnityObjectReference> ReadObjectReferences(string serializedFilePath, long pathId,
@@ -169,6 +163,290 @@ public sealed class AssetsToolsBackend : IDisposable
         var result = new List<UnityObjectReference>();
         CollectReferences(fields, fields.FieldName, result);
         return result;
+    }
+
+    /// <summary>Resolves every PPtr field of one object against the file's own
+    /// object table and external list (P1.2 dependency view).</summary>
+    public IReadOnlyList<UnityDependency> ReadObjectDependencies(string serializedFilePath, long pathId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var file = _manager.LoadAssetsFile(serializedFilePath, loadDeps: false)
+            ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFilePath}");
+        var info = file.file.GetAssetInfo(pathId)
+            ?? throw new KeyNotFoundException($"SerializedFile 中不存在 Path ID: {pathId}");
+        var fields = _manager.GetBaseField(file, info, AssetReadFlags.None);
+        var result = new List<UnityDependency>();
+        CollectDependencyInfos(fields, fields.FieldName, file, result);
+        return result;
+    }
+
+    /// <summary>Bundle variant of <see cref="ReadObjectDependencies"/>.</summary>
+    public IReadOnlyList<UnityDependency> ReadBundleObjectDependencies(string bundlePath, string serializedFileName,
+        long pathId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var file = LoadBundleAssetsFile(bundlePath, serializedFileName);
+        var info = file.file.GetAssetInfo(pathId)
+            ?? throw new KeyNotFoundException($"SerializedFile 中不存在 Path ID: {pathId}");
+        var fields = _manager.GetBaseField(file, info, AssetReadFlags.None);
+        var result = new List<UnityDependency>();
+        CollectDependencyInfos(fields, fields.FieldName, file, result);
+        return result;
+    }
+
+    /// <summary>Finds every same-file object that points at the target path ID,
+    /// with the field that carries the pointer (P1.2 referencer check).</summary>
+    public IReadOnlyList<UnityReferencer> FindReferencers(string serializedFilePath, long targetPathId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var file = _manager.LoadAssetsFile(serializedFilePath, loadDeps: false)
+            ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFilePath}");
+        return FindReferencersCore(file, targetPathId, fileName: null, crossFileTargetPathId: 0, cancellationToken);
+    }
+
+    /// <summary>Finds every object in the bundle (including other SerializedFiles
+    /// inside it) that points at the target object, matching in-file references
+    /// and cross-file references that resolve to the target file by name.</summary>
+    public IReadOnlyList<UnityReferencer> FindBundleReferencers(string bundlePath, string serializedFileName,
+        long targetPathId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var bundle = _manager.LoadBundleFile(bundlePath, unpackIfPacked: true)
+            ?? throw new InvalidDataException($"无法读取 Unity Bundle: {bundlePath}");
+        _bundles.Add(bundle);
+        var result = new List<UnityReferencer>();
+        foreach (var fileName in bundle.file.GetAllFileNames())
+        {
+            if (!bundle.file.IsAssetsFile(bundle.file.GetFileIndex(fileName))) continue;
+            var file = _manager.LoadAssetsFileFromBundle(bundle, fileName, loadDeps: false);
+            if (file is null) continue;
+            var isTargetFile = fileName.Equals(serializedFileName, StringComparison.OrdinalIgnoreCase);
+            result.AddRange(FindReferencersCore(file,
+                sameFileTargetPathId: targetPathId,
+                fileName: fileName,
+                crossFileTargetPathId: targetPathId,
+                cancellationToken,
+                crossFileTargetName: isTargetFile ? null : serializedFileName));
+        }
+        return result;
+    }
+
+    private IReadOnlyList<UnityReferencer> FindReferencersCore(AssetsFileInstance file, long sameFileTargetPathId,
+        string? fileName, long crossFileTargetPathId, CancellationToken cancellationToken, string? crossFileTargetName = null)
+    {
+        var result = new List<UnityReferencer>();
+        foreach (var info in file.file.AssetInfos)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            AssetTypeValueField fields;
+            try { fields = _manager.GetBaseField(file, info, AssetReadFlags.None); }
+            catch (Exception) { continue; }
+            var sourceType = MapType(info.GetTypeId(file.file)).ToString();
+            CollectReferencerNodes(fields, fields.FieldName, file, info.PathId, sourceType,
+                sameFileTargetPathId, crossFileTargetPathId, crossFileTargetName, result);
+        }
+        return result;
+    }
+
+    /// <summary>Verifies that rewriting a standalone SerializedFile kept every
+    /// previously resolvable dependency resolvable (P1.2 repack check). Both
+    /// snapshots are read from disk through a separate backend so in-place
+    /// edits on this backend's cached instances cannot pollute the comparison.</summary>
+    public UnityReferenceVerifyReport VerifySerializedReferences(string originalPath, string modifiedPath,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        using var reader = new AssetsToolsBackend();
+        var before = reader.CollectAllObjectDependencies(originalPath, cancellationToken);
+        var after = reader.CollectAllObjectDependencies(modifiedPath, cancellationToken);
+        var changes = DiffDependencies(Path.GetFileName(originalPath), before, after);
+        return new UnityReferenceVerifyReport(changes.All(c => !c.IsRegression), changes);
+    }
+
+    /// <summary>Verifies that repacking a bundle kept every previously
+    /// resolvable dependency resolvable, across all contained SerializedFiles.</summary>
+    public UnityReferenceVerifyReport VerifyBundleReferences(string originalBundle, string modifiedBundle,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        using var reader = new AssetsToolsBackend();
+        var before = reader.CollectAllBundleObjectDependencies(originalBundle, cancellationToken);
+        var after = reader.CollectAllBundleObjectDependencies(modifiedBundle, cancellationToken);
+        var changes = new List<UnityDependencyCheck>();
+        foreach (var (fileName, beforeObjects) in before)
+        {
+            if (!after.TryGetValue(fileName, out var afterObjects))
+            {
+                foreach (var (pathId, deps) in beforeObjects)
+                    foreach (var dep in deps)
+                        changes.Add(new UnityDependencyCheck(fileName, pathId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                            dep.FieldPath, dep.Identity(), "Missing|file-removed"));
+                continue;
+            }
+            changes.AddRange(DiffDependencies(fileName, beforeObjects, afterObjects));
+        }
+        return new UnityReferenceVerifyReport(changes.All(c => !c.IsRegression), changes);
+    }
+
+    private Dictionary<long, List<UnityDependency>> CollectAllObjectDependencies(string path, CancellationToken cancellationToken)
+    {
+        var file = _manager.LoadAssetsFile(path, loadDeps: false)
+            ?? throw new InvalidDataException($"无法读取 SerializedFile: {path}");
+        return CollectAllObjectDependenciesCore(file, cancellationToken);
+    }
+
+    private Dictionary<string, Dictionary<long, List<UnityDependency>>> CollectAllBundleObjectDependencies(string bundlePath, CancellationToken cancellationToken)
+    {
+        var bundle = _manager.LoadBundleFile(bundlePath, unpackIfPacked: true)
+            ?? throw new InvalidDataException($"无法读取 Unity Bundle: {bundlePath}");
+        _bundles.Add(bundle);
+        var result = new Dictionary<string, Dictionary<long, List<UnityDependency>>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var fileName in bundle.file.GetAllFileNames())
+        {
+            if (!bundle.file.IsAssetsFile(bundle.file.GetFileIndex(fileName))) continue;
+            var file = _manager.LoadAssetsFileFromBundle(bundle, fileName, loadDeps: false);
+            if (file is null) continue;
+            result[fileName] = CollectAllObjectDependenciesCore(file, cancellationToken);
+        }
+        return result;
+    }
+
+    private Dictionary<long, List<UnityDependency>> CollectAllObjectDependenciesCore(AssetsFileInstance file, CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<long, List<UnityDependency>>();
+        foreach (var info in file.file.AssetInfos)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            AssetTypeValueField fields;
+            try { fields = _manager.GetBaseField(file, info, AssetReadFlags.None); }
+            catch (Exception) { continue; }
+            var deps = new List<UnityDependency>();
+            CollectDependencyInfos(fields, fields.FieldName, file, deps);
+            result[info.PathId] = deps;
+        }
+        return result;
+    }
+
+    private static List<UnityDependencyCheck> DiffDependencies(string fileName,
+        Dictionary<long, List<UnityDependency>> before, Dictionary<long, List<UnityDependency>> after)
+    {
+        var changes = new List<UnityDependencyCheck>();
+        var culture = System.Globalization.CultureInfo.InvariantCulture;
+        foreach (var (pathId, deps) in before)
+        {
+            if (!after.TryGetValue(pathId, out var afterDeps))
+            {
+                foreach (var dep in deps)
+                    changes.Add(new UnityDependencyCheck(fileName, pathId.ToString(culture), dep.FieldPath,
+                        dep.Identity(), "Missing|object-removed"));
+                continue;
+            }
+            var afterMap = afterDeps.ToDictionary(d => d.FieldPath, d => d, StringComparer.Ordinal);
+            foreach (var dep in deps)
+            {
+                if (!afterMap.TryGetValue(dep.FieldPath, out var modified))
+                {
+                    changes.Add(new UnityDependencyCheck(fileName, pathId.ToString(culture), dep.FieldPath,
+                        dep.Identity(), "Missing|field-removed"));
+                    continue;
+                }
+                if (!dep.Identity().Equals(modified.Identity(), StringComparison.Ordinal))
+                    changes.Add(new UnityDependencyCheck(fileName, pathId.ToString(culture), dep.FieldPath,
+                        dep.Identity(), modified.Identity()));
+            }
+        }
+        return changes;
+    }
+
+    private void CollectDependencyInfos(AssetTypeValueField field, string path, AssetsFileInstance file, List<UnityDependency> result)
+    {
+        var fileIdField = field.Children.FirstOrDefault(x => x.FieldName.Equals("m_FileID", StringComparison.OrdinalIgnoreCase) || x.FieldName.Equals("fileID", StringComparison.OrdinalIgnoreCase));
+        var pathIdField = field.Children.FirstOrDefault(x => x.FieldName.Equals("m_PathID", StringComparison.OrdinalIgnoreCase) || x.FieldName.Equals("pathID", StringComparison.OrdinalIgnoreCase));
+        if (fileIdField is not null && pathIdField is not null
+            && TryReadLong(fileIdField, out var fileIdValue) && TryReadLong(pathIdField, out var pathIdValue))
+            result.Add(ResolveDependency(file, path, fileIdValue, pathIdValue, field.TypeName));
+        var isArray = field.TemplateField?.IsArray == true || field.Value?.ValueType == AssetValueType.Array;
+        for (var i = 0; i < field.Children.Count; i++)
+        {
+            var child = field.Children[i];
+            string childName;
+            string childPath;
+            if (isArray) { childName = $"[{i}]"; childPath = $"{path}[{i}]"; }
+            else
+            {
+                childName = string.IsNullOrWhiteSpace(child.FieldName) ? $"[{i}]" : child.FieldName;
+                childPath = childName.StartsWith("[", StringComparison.Ordinal) ? $"{path}{childName}" : $"{path}.{childName}";
+            }
+            CollectDependencyInfos(child, childPath, file, result);
+        }
+    }
+
+    private void CollectReferencerNodes(AssetTypeValueField field, string path, AssetsFileInstance file,
+        long sourcePathId, string sourceType, long sameFileTargetPathId, long crossFileTargetPathId,
+        string? crossFileTargetName, List<UnityReferencer> result)
+    {
+        var fileIdField = field.Children.FirstOrDefault(x => x.FieldName.Equals("m_FileID", StringComparison.OrdinalIgnoreCase) || x.FieldName.Equals("fileID", StringComparison.OrdinalIgnoreCase));
+        var pathIdField = field.Children.FirstOrDefault(x => x.FieldName.Equals("m_PathID", StringComparison.OrdinalIgnoreCase) || x.FieldName.Equals("pathID", StringComparison.OrdinalIgnoreCase));
+        if (fileIdField is not null && pathIdField is not null
+            && TryReadLong(fileIdField, out var fileIdValue) && TryReadLong(pathIdField, out var pathIdValue))
+        {
+            var isSameFileRef = fileIdValue == 0 && pathIdValue == sameFileTargetPathId;
+            var isCrossFileRef = crossFileTargetName is not null && fileIdValue > 0 && pathIdValue == crossFileTargetPathId
+                && ExternalMatchesFileName(file, fileIdValue, crossFileTargetName);
+            if (isSameFileRef || isCrossFileRef)
+                result.Add(new UnityReferencer(sourcePathId, sourceType, path, fileIdValue));
+        }
+        var isArray = field.TemplateField?.IsArray == true || field.Value?.ValueType == AssetValueType.Array;
+        for (var i = 0; i < field.Children.Count; i++)
+        {
+            var child = field.Children[i];
+            string childName;
+            string childPath;
+            if (isArray) { childName = $"[{i}]"; childPath = $"{path}[{i}]"; }
+            else
+            {
+                childName = string.IsNullOrWhiteSpace(child.FieldName) ? $"[{i}]" : child.FieldName;
+                childPath = childName.StartsWith("[", StringComparison.Ordinal) ? $"{path}{childName}" : $"{path}.{childName}";
+            }
+            CollectReferencerNodes(child, childPath, file, sourcePathId, sourceType,
+                sameFileTargetPathId, crossFileTargetPathId, crossFileTargetName, result);
+        }
+    }
+
+    private static bool ExternalMatchesFileName(AssetsFileInstance file, long fileId, string fileName)
+    {
+        var externals = file.file.Metadata.Externals;
+        var index = (int)fileId - 1;
+        if (index < 0 || index >= externals.Count) return false;
+        var externalPath = externals[index].PathName ?? string.Empty;
+        if (externalPath.Equals(fileName, StringComparison.OrdinalIgnoreCase)) return true;
+        // bundle-internal references are often written as "archive:/CAB-xxx/CAB-xxx"
+        return externalPath.EndsWith("/" + fileName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static UnityDependency ResolveDependency(AssetsFileInstance file, string fieldPath,
+        long fileId, long pathId, string? targetType)
+    {
+        if (fileId == 0 && pathId == 0)
+            return new UnityDependency(fieldPath, 0, 0, targetType, UnityDependencyResolution.NullReference);
+        if (fileId == 0)
+        {
+            var info = file.file.GetAssetInfo(pathId);
+            if (info is null)
+                return new UnityDependency(fieldPath, 0, pathId, targetType, UnityDependencyResolution.Missing);
+            var typeId = info.GetTypeId(file.file);
+            return new UnityDependency(fieldPath, 0, pathId, targetType, UnityDependencyResolution.SameFile,
+                TargetTypeId: typeId, TargetTypeName: MapType(typeId).ToString());
+        }
+        var externals = file.file.Metadata.Externals;
+        var externalIndex = (int)fileId - 1;
+        if (externalIndex < 0 || externalIndex >= externals.Count)
+            return new UnityDependency(fieldPath, fileId, pathId, targetType, UnityDependencyResolution.Missing);
+        return new UnityDependency(fieldPath, fileId, pathId, targetType, UnityDependencyResolution.ExternalFile,
+            ExternalPath: externals[externalIndex].PathName,
+            ExternalGuid: externals[externalIndex].Guid.ToString());
     }
 
     public IReadOnlyList<UnityAssetDescriptor> InspectBundle(string path)
@@ -934,6 +1212,19 @@ public sealed class AssetsToolsBackend : IDisposable
         foreach (var child in node.Children) NormalizeTemplateChildren(child);
     }
 
+    /// <summary>Loads one SerializedFile out of a bundle, registering the
+    /// bundle for later unload.</summary>
+    private AssetsFileInstance LoadBundleAssetsFile(string bundlePath, string serializedFileName)
+    {
+        var bundle = _manager.LoadBundleFile(bundlePath, unpackIfPacked: true)
+            ?? throw new InvalidDataException($"无法读取 Unity Bundle: {bundlePath}");
+        _bundles.Add(bundle);
+        var index = bundle.file.GetFileIndex(serializedFileName);
+        if (index < 0 || !bundle.file.IsAssetsFile(index)) throw new KeyNotFoundException($"Bundle 中不存在 SerializedFile: {serializedFileName}");
+        return _manager.LoadAssetsFileFromBundle(bundle, serializedFileName, loadDeps: false)
+            ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFileName}");
+    }
+
     private AssetTypeTemplateField? LoadTemplate(AssetsFileInstance file, AssetFileInfo info)
         => LoadTemplate(file, info, out _);
 
@@ -1012,12 +1303,19 @@ public sealed class AssetsToolsBackend : IDisposable
         return new UnityScriptInfo(fileId, pathId, className, namespaceName, assemblyName, externalPath, externalGuid, missingReason);
     }
 
-    private static IReadOnlyList<UnityFieldEditDiagnostic> ValidateFieldEdits(AssetTypeValueField root,
+    private IReadOnlyList<UnityFieldEditDiagnostic> ValidateFieldEdits(AssetsFileInstance? file, AssetTypeValueField root,
         AssetTypeTemplateField? template, IReadOnlyDictionary<string, string> edits)
     {
         var nodes = new Dictionary<string, (string ValueType, string TypeName, bool Editable)>(StringComparer.Ordinal);
         IndexNodes(root, template, root.FieldName, nodes, templateIsArray: false);
         var results = new List<UnityFieldEditDiagnostic>();
+        string? ResolveNodePath(string key)
+        {
+            if (nodes.ContainsKey(key)) return key;
+            if (nodes.ContainsKey("Base." + key)) return "Base." + key;
+            var trimmed = key.Contains('.') ? key[(key.IndexOf('.') + 1)..] : null;
+            return trimmed is not null && nodes.ContainsKey(trimmed) ? trimmed : null;
+        }
         foreach (var edit in edits)
         {
             if (!nodes.TryGetValue(edit.Key, out var node)
@@ -1040,9 +1338,100 @@ public sealed class AssetsToolsBackend : IDisposable
                 results.Add(new UnityFieldEditDiagnostic(edit.Key, UnityFieldEditStatus.ParseError, node.TypeName, error ?? "值无效。"));
                 continue;
             }
+            if (file is not null)
+            {
+                var targetProblem = ValidatePointerTarget(ResolveNodePath, nodes, root, file, edit, edits);
+                if (targetProblem is not null)
+                {
+                    results.Add(new UnityFieldEditDiagnostic(edit.Key, UnityFieldEditStatus.InvalidTarget, node.TypeName, targetProblem));
+                    continue;
+                }
+            }
             results.Add(new UnityFieldEditDiagnostic(edit.Key, UnityFieldEditStatus.Ok, node.TypeName, string.Empty));
         }
         return results;
+    }
+
+    /// <summary>Semantic check for edits on the two halves of a PPtr: m_FileID
+    /// must stay within the external table, and a m_PathID that points inside
+    /// the same file (FileID 0) must name an object that actually exists.</summary>
+    private static string? ValidatePointerTarget(Func<string, string?> resolveNodePath,
+        Dictionary<string, (string ValueType, string TypeName, bool Editable)> nodes,
+        AssetTypeValueField root, AssetsFileInstance file,
+        KeyValuePair<string, string> edit, IReadOnlyDictionary<string, string> edits)
+    {
+        var nodePath = resolveNodePath(edit.Key);
+        if (nodePath is null) return null;
+        var lastDot = nodePath.LastIndexOf('.');
+        if (lastDot < 0) return null;
+        var parentPath = nodePath[..lastDot];
+        var segmentName = nodePath[(lastDot + 1)..];
+        var isFileId = segmentName.Equals("m_FileID", StringComparison.OrdinalIgnoreCase) || segmentName.Equals("fileID", StringComparison.OrdinalIgnoreCase);
+        var isPathId = segmentName.Equals("m_PathID", StringComparison.OrdinalIgnoreCase) || segmentName.Equals("pathID", StringComparison.OrdinalIgnoreCase);
+        if (!isFileId && !isPathId) return null;
+        if (!nodes.TryGetValue(parentPath, out var parentNode) || !parentNode.TypeName.StartsWith("PPtr<", StringComparison.Ordinal)) return null;
+
+        var culture = System.Globalization.CultureInfo.InvariantCulture;
+        if (!long.TryParse(edit.Value, System.Globalization.NumberStyles.Integer, culture, out var value)) return null;
+
+        if (isFileId)
+        {
+            var externalCount = file.file.Metadata.Externals.Count;
+            if (value < 0 || value > externalCount)
+                return $"m_FileID {value} 超出外部引用表范围（0..{externalCount}）。";
+            return null;
+        }
+
+        // m_PathID: resolve the effective file ID (sibling current value or an
+        // edit in the same set that overrides it).
+        long effectiveFileId = 0;
+        var parentField = NavigateField(root, parentPath);
+        if (parentField is not null)
+        {
+            var sibling = parentField.Children.FirstOrDefault(x => x.FieldName.Equals("m_FileID", StringComparison.OrdinalIgnoreCase) || x.FieldName.Equals("fileID", StringComparison.OrdinalIgnoreCase));
+            if (sibling is not null) TryReadLong(sibling, out effectiveFileId);
+        }
+        var siblingPath = parentPath + ".m_FileID";
+        foreach (var other in edits)
+        {
+            if (resolveNodePath(other.Key)?.Equals(siblingPath, StringComparison.Ordinal) != true) continue;
+            if (long.TryParse(other.Value, System.Globalization.NumberStyles.Integer, culture, out var overridden)) effectiveFileId = overridden;
+        }
+
+        if (effectiveFileId != 0) return null;
+        if (value == 0) return null; // deliberately clearing the pointer is legal
+        return file.file.GetAssetInfo(value) is null
+            ? $"同文件指针指向的 Path ID {value} 不存在（将产生悬空引用）。"
+            : null;
+    }
+
+    /// <summary>Walks a value tree by a dot/bracket path such as
+    /// "Base.m_Tags[0].data"; returns null when a segment is missing.</summary>
+    private static AssetTypeValueField? NavigateField(AssetTypeValueField root, string path)
+    {
+        var current = root;
+        foreach (var rawSegment in path.Split('.'))
+        {
+            if (rawSegment.Length == 0) continue;
+            var bracketStart = rawSegment.IndexOf('[');
+            var name = bracketStart < 0 ? rawSegment : rawSegment[..bracketStart];
+            if (bracketStart < 0)
+            {
+                if (current.FieldName.Equals(name, StringComparison.Ordinal)) continue;
+                var child = current.Children.FirstOrDefault(x => x.FieldName.Equals(name, StringComparison.Ordinal));
+                if (child is null) return null;
+                current = child;
+            }
+            else
+            {
+                if (!current.FieldName.Equals(name, StringComparison.Ordinal)) return null;
+                var bracketEnd = rawSegment.IndexOf(']');
+                if (bracketStart + 1 >= bracketEnd || !int.TryParse(rawSegment[(bracketStart + 1)..bracketEnd], out var index)) return null;
+                if (index < 0 || index >= current.Children.Count) return null;
+                current = current.Children[index];
+            }
+        }
+        return current;
     }
 
     private static void IndexNodes(AssetTypeValueField field, AssetTypeTemplateField? template, string path,

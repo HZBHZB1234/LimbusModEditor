@@ -40,7 +40,65 @@ public sealed record UnityFieldNode(
 }
 public sealed record UnityObjectReference(string FieldPath, long FileId, long PathId, string? TargetType);
 
-public enum UnityFieldEditStatus { Ok, UnknownPath, NotEditable, ParseError }
+public enum UnityFieldEditStatus { Ok, UnknownPath, NotEditable, ParseError, InvalidTarget }
+
+/// <summary>How a PPtr dependency resolves against a SerializedFile's own
+/// object table and external reference list.</summary>
+public enum UnityDependencyResolution
+{
+    /// <summary>FileID=0 and PathID=0: a deliberately empty pointer.</summary>
+    NullReference,
+    /// <summary>The pointer resolves to an object inside the same SerializedFile.</summary>
+    SameFile,
+    /// <summary>The pointer references another file through the external table.</summary>
+    ExternalFile,
+    /// <summary>Dangling path ID, out-of-range file ID, or otherwise unresolvable.</summary>
+    Missing
+}
+
+/// <summary>One resolved (or unresolvable) PPtr dependency of a serialized
+/// object, with the in-file target or the external file it points at.</summary>
+public sealed record UnityDependency(
+    string FieldPath,
+    long FileId,
+    long PathId,
+    string? TargetType,
+    UnityDependencyResolution Resolution,
+    string? ExternalPath = null,
+    string? ExternalGuid = null,
+    long? TargetTypeId = null,
+    string? TargetTypeName = null)
+{
+    /// <summary>Compact human-readable resolution used in UI and reports.</summary>
+    public string Describe() => Resolution switch
+    {
+        UnityDependencyResolution.NullReference => "空引用",
+        UnityDependencyResolution.SameFile => $"同文件 Path {PathId}（{TargetTypeName ?? TargetType ?? "未知类型"}）",
+        UnityDependencyResolution.ExternalFile => $"外部文件 {ExternalPath ?? "未知"} Path {PathId}",
+        _ => FileId == 0 && PathId == 0 ? "空引用" : $"无法解析（File {FileId}, Path {PathId}）"
+    };
+
+    /// <summary>Stable identity used to compare dependencies across rewrites.
+    /// The resolution comes first so regression checks can match by prefix.</summary>
+    public string Identity() => $"{Resolution}|{FileId}|{PathId}|{ExternalPath ?? string.Empty}";
+}
+
+/// <summary>An object that points at a target object through one of its PPtr fields.</summary>
+public sealed record UnityReferencer(long SourcePathId, string? SourceTypeName, string FieldPath, long FileId);
+
+/// <summary>Before/after comparison of one dependency across a rewrite.</summary>
+public sealed record UnityDependencyCheck(string SerializedFile, string SourcePathId, string FieldPath, string Before, string After)
+{
+    public bool IsRegression => Before.StartsWith("SameFile", StringComparison.Ordinal) && After.StartsWith("Missing", StringComparison.Ordinal)
+        || Before.StartsWith("ExternalFile", StringComparison.Ordinal) && After.StartsWith("Missing", StringComparison.Ordinal);
+}
+
+/// <summary>Result of verifying that a rewrite kept every previously resolvable
+/// dependency resolvable (same-file and external references alike).</summary>
+public sealed record UnityReferenceVerifyReport(bool Ok, IReadOnlyList<UnityDependencyCheck> Changes)
+{
+    public static UnityReferenceVerifyReport Empty() => new(true, []);
+}
 
 /// <summary>Result of validating one field edit against the real serialized
 /// type before it is stored or written.</summary>
@@ -110,6 +168,48 @@ public sealed class UnityAssetService
     {
         using var backend = new AssetsToolsBackend();
         return backend.ReadBundleObjectReferences(bundlePath, serializedFileName, pathId, cancellationToken);
+    }
+
+    public IReadOnlyList<UnityDependency> ReadObjectDependencies(string serializedFilePath, long pathId,
+        CancellationToken cancellationToken = default)
+    {
+        using var backend = new AssetsToolsBackend();
+        return backend.ReadObjectDependencies(serializedFilePath, pathId, cancellationToken);
+    }
+
+    public IReadOnlyList<UnityDependency> ReadBundleObjectDependencies(string bundlePath, string serializedFileName,
+        long pathId, CancellationToken cancellationToken = default)
+    {
+        using var backend = new AssetsToolsBackend();
+        return backend.ReadBundleObjectDependencies(bundlePath, serializedFileName, pathId, cancellationToken);
+    }
+
+    public IReadOnlyList<UnityReferencer> FindReferencers(string serializedFilePath, long targetPathId,
+        CancellationToken cancellationToken = default)
+    {
+        using var backend = new AssetsToolsBackend();
+        return backend.FindReferencers(serializedFilePath, targetPathId, cancellationToken);
+    }
+
+    public IReadOnlyList<UnityReferencer> FindBundleReferencers(string bundlePath, string serializedFileName,
+        long targetPathId, CancellationToken cancellationToken = default)
+    {
+        using var backend = new AssetsToolsBackend();
+        return backend.FindBundleReferencers(bundlePath, serializedFileName, targetPathId, cancellationToken);
+    }
+
+    public UnityReferenceVerifyReport VerifySerializedReferences(string originalPath, string modifiedPath,
+        CancellationToken cancellationToken = default)
+    {
+        using var backend = new AssetsToolsBackend();
+        return backend.VerifySerializedReferences(originalPath, modifiedPath, cancellationToken);
+    }
+
+    public UnityReferenceVerifyReport VerifyBundleReferences(string originalBundle, string modifiedBundle,
+        CancellationToken cancellationToken = default)
+    {
+        using var backend = new AssetsToolsBackend();
+        return backend.VerifyBundleReferences(originalBundle, modifiedBundle, cancellationToken);
     }
 
     public IReadOnlyList<AssetRecord> ScanSerializedFile(string serializedFilePath,

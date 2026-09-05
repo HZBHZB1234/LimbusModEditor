@@ -54,6 +54,10 @@ internal static class UnityTestAssetBuilder
         new("float", "m_Health", 1),
         new("AttackType", "m_AttackType", 1),
         new("int", "value", 2),
+        // Cross-file PPtr: exercises the external reference table (FileID 1).
+        new("PPtr<$Sprite>", "m_Target", 1),
+        new("int", "m_FileID", 2),
+        new("SInt64", "m_PathID", 2),
         // Vector arrays: exactly two children under the flagged node — the
         // int size and the unflagged item template ("Type[]" maps to None).
         new("vector", "m_Tags", 1, IsArray: true, Aligned: true),
@@ -67,6 +71,10 @@ internal static class UnityTestAssetBuilder
         new("unsigned char", "Array", 2)
     ];
 
+    /// <summary>Sample layout: a MonoBehaviour (path 1) pointing at the
+    /// MonoScript (path 2) and an external Sprite (file 1, path 100), plus a
+    /// second MonoBehaviour (path 3) that also references the script and the
+    /// first behaviour — enough shapes to test dependencies and referencers.</summary>
     public static string BuildMonoBehaviourFile(string directory, string fileName = "testmono.assets")
     {
         Directory.CreateDirectory(directory);
@@ -90,14 +98,32 @@ internal static class UnityTestAssetBuilder
         };
         file.Metadata.TypeTreeTypes.Add(BuildTypeTreeType(115, MonoScriptTree));
         file.Metadata.TypeTreeTypes.Add(BuildTypeTreeType(114, MonoBehaviourTree));
+        file.Metadata.Externals.Add(new AssetsFileExternal
+        {
+            PathName = "resources.assets",
+            OriginalPathName = string.Empty,
+            VirtualAssetPathName = string.Empty,
+            // d41d8cd9-8f00-b204-e980-0998ecf8427e as four little-endian words
+            Guid = new GUID128 { data0 = 0xD98C1DD4, data1 = 0x04B2008F, data2 = 0xE9800998, data3 = 0x7E42F8EC }
+        });
 
         var scriptInfo = AssetFileInfo.Create(file, 2, 115, 0);
         scriptInfo.Replacer = new ContentReplacerFromBuffer(SerializeMonoScript());
         file.Metadata.AddAssetInfo(scriptInfo);
 
         var behaviourInfo = AssetFileInfo.Create(file, 1, 114, 0);
-        behaviourInfo.Replacer = new ContentReplacerFromBuffer(SerializeMonoBehaviour());
+        behaviourInfo.Replacer = new ContentReplacerFromBuffer(SerializeMonoBehaviour(
+            name: "TestBehaviour", health: 12.5f, attackType: 3, tags: [5, 6, 7],
+            data: [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x42],
+            scriptPathId: 2, targetFileId: 1, targetPathId: 100));
         file.Metadata.AddAssetInfo(behaviourInfo);
+
+        var secondInfo = AssetFileInfo.Create(file, 3, 114, 0);
+        secondInfo.Replacer = new ContentReplacerFromBuffer(SerializeMonoBehaviour(
+            name: "SecondBehaviour", health: 3.25f, attackType: 1, tags: [1, 2],
+            data: [0x11, 0x22],
+            scriptPathId: 2, targetFileId: 0, targetPathId: 1));
+        file.Metadata.AddAssetInfo(secondInfo);
 
         using var writer = new AssetsFileWriter(path);
         file.Write(writer, 0);
@@ -115,33 +141,35 @@ internal static class UnityTestAssetBuilder
         return stream.ToArray();
     }
 
-    private static byte[] SerializeMonoBehaviour()
+    private static byte[] SerializeMonoBehaviour(string name, float health, int attackType, int[] tags,
+        byte[] data, long scriptPathId, int targetFileId, long targetPathId)
     {
         using var stream = new MemoryStream();
         using var writer = new AssetsFileWriter(stream);
-        // m_GameObject PPtr (file 0, path 0)
+        // m_GameObject PPtr (file 0, path 0 — deliberately null)
         writer.Write(0);
         writer.Write(0L);
         // m_Enabled
         writer.Write((byte)1);
-        // m_Script PPtr (file 0, path 2 → the MonoScript in this file)
+        // m_Script PPtr (file 0 → the MonoScript in this file)
         writer.Write(0);
-        writer.Write(2L);
+        writer.Write(scriptPathId);
         // m_Name
-        WriteString(writer, "TestBehaviour");
+        WriteString(writer, name);
         // m_Health
-        writer.Write(12.5f);
+        writer.Write(health);
         // m_AttackType (enum carried by its "value" child)
-        writer.Write(3);
-        // m_Tags vector<int> (size 3, aligned)
-        writer.Write(3);
-        writer.Write(5);
-        writer.Write(6);
-        writer.Write(7);
+        writer.Write(attackType);
+        // m_Target PPtr (cross-file when targetFileId > 0)
+        writer.Write(targetFileId);
+        writer.Write(targetPathId);
+        // m_Tags vector<int> (aligned)
+        writer.Write(tags.Length);
+        foreach (var tag in tags) writer.Write(tag);
         writer.Align();
-        // m_Data TypelessData (size 6, aligned)
-        writer.Write(6);
-        writer.Write(new byte[] { 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x42 });
+        // m_Data TypelessData (aligned)
+        writer.Write(data.Length);
+        writer.Write(data);
         writer.Align();
         return stream.ToArray();
     }

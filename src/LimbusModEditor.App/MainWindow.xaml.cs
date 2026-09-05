@@ -158,6 +158,15 @@ public partial class MainWindow : Window
         catch (Exception ex) { ShowError("导出模组失败", ex); }
     }
 
+    /// <summary>P3.4: hex dump of the selected asset's payload for
+    /// identifying unknown data before replacing it.</summary>
+    private void HexPreview_Click(object sender, RoutedEventArgs e)
+    {
+        if (AssetList.SelectedItem is not AssetRecord asset) return;
+        try { new HexPreviewWindow(asset) { Owner = this }.ShowDialog(); }
+        catch (Exception ex) { ShowError("十六进制预览失败", ex); }
+    }
+
     /// <summary>自动获取资源地址（续）：list verified Unity-cache candidates
     /// (directories that actually contain .bundle files) and let the user pick.</summary>
     private async void SuggestUnityCache_Click(object sender, RoutedEventArgs e)
@@ -429,6 +438,7 @@ public partial class MainWindow : Window
         SelectedContainerText.Text = asset?.ContainerPath ?? "—";
         SelectedStateText.Text = asset?.EditState.ToString() ?? string.Empty;
         ReplaceAssetButton.IsEnabled = asset is not null && _projectFile is not null;
+        HexPreviewButton.IsEnabled = asset is not null;
         SpriteMetadataButton.IsEnabled = asset?.Type == AssetType.Sprite &&
             asset.UnityPathId.HasValue && !string.IsNullOrWhiteSpace(asset.SourcePath) &&
             File.Exists(asset.SourcePath) && _projectFile is not null;

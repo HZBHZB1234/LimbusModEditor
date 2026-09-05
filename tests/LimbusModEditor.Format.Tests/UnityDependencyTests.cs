@@ -118,6 +118,22 @@ public class UnityDependencyTests : IDisposable
     }
 
     [Fact]
+    public void FileId_to_zero_edit_checks_sibling_path_id()
+    {
+        using var backend = new AssetsToolsBackend();
+        // object 1's m_Target is external (file 1, path 100); flipping only the
+        // file id to 0 would leave path 100 dangling inside this file - the
+        // validation must surface it even though m_PathID itself is not edited
+        var results = backend.ValidateObjectFieldEdits(FilePath, 1, new Dictionary<string, string>
+        {
+            ["m_Target.m_FileID"] = "0"
+        });
+        var diagnostic = Assert.Single(results);
+        Assert.Equal(UnityFieldEditStatus.InvalidTarget, diagnostic.Status);
+        Assert.Contains("悬空引用", diagnostic.Message);
+    }
+
+    [Fact]
     public void Verify_detects_no_regressions_for_value_edits()
     {
         using var backend = new AssetsToolsBackend();

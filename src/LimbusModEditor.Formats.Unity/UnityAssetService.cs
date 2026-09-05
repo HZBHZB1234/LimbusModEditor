@@ -102,7 +102,10 @@ public sealed record UnityDependency(
 }
 
 /// <summary>An object that points at a target object through one of its PPtr fields.</summary>
-public sealed record UnityReferencer(long SourcePathId, string? SourceTypeName, string FieldPath, long FileId);
+/// <summary>One pointer that targets another object. For bundle scans,
+/// <paramref name="OriginatingFile"/> names the SerializedFile the pointer
+/// lives in, since Path IDs repeat across files inside one bundle.</summary>
+public sealed record UnityReferencer(long SourcePathId, string? SourceTypeName, string FieldPath, long FileId, string? OriginatingFile = null);
 
 /// <summary>Before/after comparison of one dependency across a rewrite.</summary>
 public sealed record UnityDependencyCheck(string SerializedFile, string SourcePathId, string FieldPath, string Before, string After)

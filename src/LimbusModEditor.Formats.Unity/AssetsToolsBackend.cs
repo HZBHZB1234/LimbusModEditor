@@ -245,7 +245,7 @@ public sealed class AssetsToolsBackend : IDisposable
             catch (Exception) { continue; }
             var sourceType = MapType(info.GetTypeId(file.file)).ToString();
             CollectReferencerNodes(fields, fields.FieldName, file, info.PathId, sourceType,
-                sameFileTargetPathId, crossFileTargetPathId, crossFileTargetName, result);
+                sameFileTargetPathId, crossFileTargetPathId, crossFileTargetName, fileName, result);
         }
         return result;
     }
@@ -385,7 +385,7 @@ public sealed class AssetsToolsBackend : IDisposable
 
     private void CollectReferencerNodes(AssetTypeValueField field, string path, AssetsFileInstance file,
         long sourcePathId, string sourceType, long sameFileTargetPathId, long crossFileTargetPathId,
-        string? crossFileTargetName, List<UnityReferencer> result)
+        string? crossFileTargetName, string? originatingFile, List<UnityReferencer> result)
     {
         var fileIdField = field.Children.FirstOrDefault(x => x.FieldName.Equals("m_FileID", StringComparison.OrdinalIgnoreCase) || x.FieldName.Equals("fileID", StringComparison.OrdinalIgnoreCase));
         var pathIdField = field.Children.FirstOrDefault(x => x.FieldName.Equals("m_PathID", StringComparison.OrdinalIgnoreCase) || x.FieldName.Equals("pathID", StringComparison.OrdinalIgnoreCase));
@@ -396,7 +396,7 @@ public sealed class AssetsToolsBackend : IDisposable
             var isCrossFileRef = crossFileTargetName is not null && fileIdValue > 0 && pathIdValue == crossFileTargetPathId
                 && ExternalMatchesFileName(file, fileIdValue, crossFileTargetName);
             if (isSameFileRef || isCrossFileRef)
-                result.Add(new UnityReferencer(sourcePathId, sourceType, path, fileIdValue));
+                result.Add(new UnityReferencer(sourcePathId, sourceType, path, fileIdValue, originatingFile));
         }
         var isArray = field.TemplateField?.IsArray == true || field.Value?.ValueType == AssetValueType.Array;
         for (var i = 0; i < field.Children.Count; i++)
@@ -411,7 +411,7 @@ public sealed class AssetsToolsBackend : IDisposable
                 childPath = childName.StartsWith("[", StringComparison.Ordinal) ? $"{path}{childName}" : $"{path}.{childName}";
             }
             CollectReferencerNodes(child, childPath, file, sourcePathId, sourceType,
-                sameFileTargetPathId, crossFileTargetPathId, crossFileTargetName, result);
+                sameFileTargetPathId, crossFileTargetPathId, crossFileTargetName, originatingFile, result);
         }
     }
 

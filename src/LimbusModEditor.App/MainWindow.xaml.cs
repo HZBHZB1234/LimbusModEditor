@@ -615,39 +615,52 @@ public partial class MainWindow : Window
     {
         if (_project is null || _projectFile is null || AssetList.SelectedItem is not AssetRecord asset ||
             !asset.UnityPathId.HasValue || string.IsNullOrWhiteSpace(asset.SourcePath) || !File.Exists(asset.SourcePath)) return;
+        UnityFieldsButton.IsEnabled = false;
+        StatusText.Text = "正在读取对象字段…";
         try
         {
+            // Field tree, script info, dependencies and the in-file object scan
+            // all walk the whole serialized file / bundle; run them off the UI
+            // thread so large bundles do not freeze the window.
             var service = new LimbusModEditor.Formats.Unity.UnityAssetService();
             var isBundle = asset.Metadata.ContainsKey("unityBundle") && !string.IsNullOrWhiteSpace(asset.ContainerPath);
-            var fields = isBundle
-                ? service.ReadBundleObjectFields(asset.SourcePath, asset.ContainerPath!, asset.UnityPathId.Value)
-                : service.ReadObjectFields(asset.SourcePath, asset.UnityPathId.Value);
-            LimbusModEditor.Formats.Unity.UnityScriptInfo? scriptInfo = null;
-            try
+            var source = asset.SourcePath;
+            var container = asset.ContainerPath;
+            var pathId = asset.UnityPathId.Value;
+            var stored = _unityFieldEdits.ReadStored(asset);
+            var (fields, scriptInfo, dependencies, inFileObjects) = await Task.Run(() =>
             {
-                scriptInfo = isBundle
-                    ? service.ReadBundleObjectScriptInfo(asset.SourcePath, asset.ContainerPath!, asset.UnityPathId.Value)
-                    : service.ReadObjectScriptInfo(asset.SourcePath, asset.UnityPathId.Value);
-            }
-            catch (Exception) { /* non-MonoBehaviour objects have no script info */ }
-            IReadOnlyList<LimbusModEditor.Formats.Unity.UnityDependency>? dependencies = null;
-            try
-            {
-                dependencies = isBundle
-                    ? service.ReadBundleObjectDependencies(asset.SourcePath, asset.ContainerPath!, asset.UnityPathId.Value)
-                    : service.ReadObjectDependencies(asset.SourcePath, asset.UnityPathId.Value);
-            }
-            catch (Exception) { /* dependency view is best-effort */ }
-            IReadOnlyList<AssetRecord>? inFileObjects = null;
-            try
-            {
-                var scanned = isBundle ? service.ScanBundle(asset.SourcePath) : service.ScanSerializedFile(asset.SourcePath);
-                inFileObjects = scanned
-                    .Where(x => x.UnityPathId.HasValue && (!isBundle || string.Equals(x.ContainerPath, asset.ContainerPath, StringComparison.OrdinalIgnoreCase)))
-                    .ToArray();
-            }
-            catch (Exception) { /* object picker is best-effort */ }
-            var dialog = new UnityFieldEditorWindow(fields, _unityFieldEdits.ReadStored(asset), scriptInfo, dependencies, inFileObjects) { Owner = this };
+                var root = isBundle
+                    ? service.ReadBundleObjectFields(source, container!, pathId)
+                    : service.ReadObjectFields(source, pathId);
+                LimbusModEditor.Formats.Unity.UnityScriptInfo? script = null;
+                try
+                {
+                    script = isBundle
+                        ? service.ReadBundleObjectScriptInfo(source, container!, pathId)
+                        : service.ReadObjectScriptInfo(source, pathId);
+                }
+                catch (Exception) { /* non-MonoBehaviour objects have no script info */ }
+                IReadOnlyList<LimbusModEditor.Formats.Unity.UnityDependency>? deps = null;
+                try
+                {
+                    deps = isBundle
+                        ? service.ReadBundleObjectDependencies(source, container!, pathId)
+                        : service.ReadObjectDependencies(source, pathId);
+                }
+                catch (Exception) { /* dependency view is best-effort */ }
+                IReadOnlyList<AssetRecord>? objects = null;
+                try
+                {
+                    var scanned = isBundle ? service.ScanBundle(source) : service.ScanSerializedFile(source);
+                    objects = scanned
+                        .Where(x => x.UnityPathId.HasValue && (!isBundle || string.Equals(x.ContainerPath, container, StringComparison.OrdinalIgnoreCase)))
+                        .ToArray();
+                }
+                catch (Exception) { /* object picker is best-effort */ }
+                return (root, script, deps, objects);
+            });
+            var dialog = new UnityFieldEditorWindow(fields, stored, scriptInfo, dependencies, inFileObjects) { Owner = this };
             if (dialog.ShowDialog() != true || dialog.Result is null) return;
             if (dialog.Result.Count == 0) return;
             _unityFieldEdits.Set(_project, asset, fields, dialog.Result);
@@ -656,6 +669,12 @@ public partial class MainWindow : Window
             AssetList.SelectedItem = asset;
         }
         catch (Exception ex) { ShowError("Unity 字段读取或保存失败", ex); }
+        finally
+        {
+            UnityFieldsButton.IsEnabled = true;
+            ReferencersButton.IsEnabled = UnityFieldsButton.IsEnabled;
+            StatusText.Text = "就绪";
+        }
     }
 
     /// <summary>P2.1: read-only FSB5 structural inspection for the selected
@@ -677,35 +696,47 @@ public partial class MainWindow : Window
 
     /// <summary>Answers "who points at this object" for the selected Unity
     /// object: same-file referencers plus, for bundles, cross-file referencers
-    /// from every other SerializedFile inside the same bundle.</summary>
-    private void FindReferencers_Click(object sender, RoutedEventArgs e)
+    /// from every other SerializedFile inside the same bundle. The scan runs
+    /// off the UI thread because it walks every object in the file/bundle.</summary>
+    private async void FindReferencers_Click(object sender, RoutedEventArgs e)
     {
         if (_project is null || AssetList.SelectedItem is not AssetRecord asset ||
             !asset.UnityPathId.HasValue || string.IsNullOrWhiteSpace(asset.SourcePath) || !File.Exists(asset.SourcePath)) return;
+        ReferencersButton.IsEnabled = false;
+        StatusText.Text = "正在扫描引用者…";
         try
         {
             var service = new LimbusModEditor.Formats.Unity.UnityAssetService();
             var isBundle = asset.Metadata.ContainsKey("unityBundle") && !string.IsNullOrWhiteSpace(asset.ContainerPath);
-            var referencers = isBundle
-                ? service.FindBundleReferencers(asset.SourcePath, asset.ContainerPath!, asset.UnityPathId.Value)
-                : service.FindReferencers(asset.SourcePath, asset.UnityPathId.Value);
+            var pathId = asset.UnityPathId.Value;
+            var source = asset.SourcePath;
+            var container = asset.ContainerPath;
+            var referencers = await Task.Run(() => isBundle
+                ? service.FindBundleReferencers(source, container!, pathId)
+                : service.FindReferencers(source, pathId));
             if (referencers.Count == 0)
             {
                 MessageBox.Show(this,
-                    $"没有发现任何对象引用 Path {asset.UnityPathId.Value}（{asset.Type}）。\n修改或替换它不会破坏其他对象。",
+                    $"没有发现任何对象引用 Path {pathId}（{asset.Type}）。\n修改或替换它不会破坏其他对象。",
                     "引用者检查", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
             var lines = referencers
                 .OrderBy(r => r.SourcePathId)
-                .Select(r => $"Path {r.SourcePathId}（{r.SourceTypeName ?? "未知类型"}）字段 {r.FieldPath}");
+                .Select(r => (r.OriginatingFile is { } file ? $"[{file}] " : string.Empty) +
+                             $"Path {r.SourcePathId}（{r.SourceTypeName ?? "未知类型"}）字段 {r.FieldPath}");
             MessageBox.Show(this,
-                $"有 {referencers.Count} 个指针引用 Path {asset.UnityPathId.Value}（{asset.Type}）：\n\n" +
+                $"有 {referencers.Count} 个指针引用 Path {pathId}（{asset.Type}）：\n\n" +
                 string.Join(Environment.NewLine, lines) +
                 "\n\n修改此对象前请确认这些指针仍然有效；把指针改成空引用是允许的，改成不存在的 Path ID 会在保存时被拒绝。",
                 "引用者检查", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
         catch (Exception ex) { ShowError("引用者检查失败", ex); }
+        finally
+        {
+            ReferencersButton.IsEnabled = UnityFieldsButton.IsEnabled;
+            StatusText.Text = "就绪";
+        }
     }
 
     private async void DecodeAudio_Click(object sender, RoutedEventArgs e)

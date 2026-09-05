@@ -1,3 +1,5 @@
+using System.IO;
+using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -6,11 +8,15 @@ using LimbusModEditor.Application.Build;
 namespace LimbusModEditor.App;
 
 /// <summary>P3.2 export report: per-asset outcome (applied / skipped /
-/// preserved) plus package diagnostics after a completed export.</summary>
+/// preserved) plus package diagnostics after a completed export. The report
+/// can be saved as JSON for feedback and post-mortem (P0.3).</summary>
 public sealed class ExportReportWindow : Window
 {
+    private readonly ModExportResult _result;
+
     public ExportReportWindow(ModExportResult result)
     {
+        _result = result;
         Title = $"导出报告 — {result.Format}";
         Width = 720;
         Height = 520;
@@ -19,14 +25,19 @@ public sealed class ExportReportWindow : Window
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
 
         var panel = new DockPanel { Margin = new Thickness(12) };
-        var header = new TextBlock
+        var headerRow = new DockPanel { Margin = new Thickness(0, 0, 0, 10) };
+        var save = new Button { Content = "保存为 JSON…", Padding = new Thickness(10, 4, 10, 4), VerticalAlignment = VerticalAlignment.Top };
+        save.Click += async (_, _) => await SaveAsJsonAsync();
+        DockPanel.SetDock(save, Dock.Right);
+        headerRow.Children.Add(save);
+        headerRow.Children.Add(new TextBlock
         {
             TextWrapping = TextWrapping.Wrap,
-            Margin = new Thickness(0, 0, 0, 10),
+            VerticalAlignment = VerticalAlignment.Center,
             Text = $"输出：{result.OutputPath}\n应用替换 {result.AppliedReplacements} 个；逐资源状态 {result.AssetStatuses.Count} 条；诊断 {result.Diagnostics.Count} 条。"
-        };
-        DockPanel.SetDock(header, Dock.Top);
-        panel.Children.Add(header);
+        });
+        DockPanel.SetDock(headerRow, Dock.Top);
+        panel.Children.Add(headerRow);
 
         var list = new StackPanel();
         foreach (var status in result.AssetStatuses)
@@ -58,5 +69,34 @@ public sealed class ExportReportWindow : Window
 
         panel.Children.Add(new ScrollViewer { Content = list, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
         Content = panel;
+    }
+
+    /// <summary>P0.3: writes the structured report via the atomic-output
+    /// helper so a partial JSON never lands on disk.</summary>
+    private async Task SaveAsJsonAsync()
+    {
+        var dialog = new Microsoft.Win32.SaveFileDialog
+        {
+            Filter = "JSON 报告 (*.json)|*.json|文本报告 (*.txt)|*.txt",
+            FileName = $"export-report-{DateTime.Now:yyyyMMdd-HHmmss}.json"
+        };
+        if (dialog.ShowDialog() != true) return;
+        try
+        {
+            var json = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                format = _result.Format.ToString(),
+                outputPath = _result.OutputPath,
+                appliedReplacements = _result.AppliedReplacements,
+                diagnostics = _result.Diagnostics,
+                assets = _result.AssetStatuses.Select(x => new { path = x.LogicalPath, status = x.Status, note = x.Note })
+            }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
+            await LimbusModEditor.Application.Build.AtomicOutput.WriteAsync(dialog.FileName, Encoding.UTF8.GetBytes(json));
+            MessageBox.Show(this, $"报告已保存：{dialog.FileName}", "导出报告", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"保存报告失败：{ex.Message}", "导出报告", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
     }
 }

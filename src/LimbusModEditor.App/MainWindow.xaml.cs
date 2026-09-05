@@ -204,6 +204,26 @@ public partial class MainWindow : Window
         await SetProjectDirectoryAsync(value => _project!.FmodLibraryDirectory = value, "选择 FMOD/FSBANK DLL 目录");
     }
 
+    /// <summary>P2.2: probes the configured FMOD DLL directory (cached by file
+    /// fingerprint) and shows the compatibility report without loading DLLs.</summary>
+    private void ProbeFmod_Click(object sender, RoutedEventArgs e)
+    {
+        if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }
+        var directory = _project.FmodLibraryDirectory;
+        if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory))
+        {
+            MessageBox.Show(this, "请先在右侧设置 FMOD DLL 目录（含 fmod64.dll / fsbank64.dll）。", "尚未配置", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        try
+        {
+            var cacheFile = Path.Combine(Path.GetDirectoryName(_projectFile)!, "logs", "fmod-probe.json");
+            var cache = new LimbusModEditor.Formats.Bank.FmodCompatibilityService().Probe(directory, cacheFile);
+            new FmodReportWindow(directory, cache) { Owner = this }.ShowDialog();
+        }
+        catch (Exception ex) { ShowError("FMOD DLL 检测失败", ex); }
+    }
+
     private async Task SetProjectDirectoryAsync(Action<string> assign, string title)
     {
         if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }

@@ -9,6 +9,11 @@ public enum AssetType
     Text,
     Json,
     MonoBehaviour,
+    /// <summary>Unity class ID 115. Scriptable objects serialize as
+    /// MonoBehaviour (114); there is no dedicated ScriptableObject class.</summary>
+    MonoScript,
+    /// <summary>Legacy marker kept for old saved projects. Unity serializes
+    /// ScriptableObjects as MonoBehaviour (class ID 114).</summary>
     ScriptableObject,
     Mesh,
     Animation,

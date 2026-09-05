@@ -62,9 +62,9 @@ public sealed class CarraFormatHandler : IModFormatHandler
         28 => AssetType.Texture,
         83 => AssetType.Audio,
         114 => AssetType.MonoBehaviour,
-        115 => AssetType.Sprite,
+        115 => AssetType.MonoScript,
         128 => AssetType.Font,
-        213 => AssetType.ScriptableObject,
+        213 => AssetType.Sprite,
         _ => AssetType.Binary
     };
 }

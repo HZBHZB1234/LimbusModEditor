@@ -63,7 +63,7 @@
 | 10 | LOW | BankAudioService 整库读入内存只为取一段 FSB | 确认为性能瑕疵；结构检查场景体量有限，记录待优化（分段流式读取） |
 | 11 | LOW | ValidatePointerTarget 在 m_FileID→0 时跳过悬空检查 | 同 #7，已修复 |
 | 12 | LOW | 单元测试项目引用 Application 层（分层瑕疵） | 确认；测试需要 `AtomicOutput`/`BatchReplacement` 等服务行为，记录为已知取舍 |
-| 13 | LOW | AssetSearch 的 MaxSize<0 会静默关闭上限、HasReplacement 不校验文件存在 | 确认为交互瑕疵；筛选 UI 已限定输入范围，后续在筛选面板收紧 |
+| 13 | LOW | AssetSearch 的 MaxSize<0 会静默关闭上限、HasReplacement 不校验文件存在 | **已修复**（`63a1ddf`）：负值边界显式报错；「仅已替换」现在要求登记的替换文件仍存在 |
 | 14 | LOW | FSB5 名称越界等场景诊断信息可更精确 | 已在重写中处理（越界偏移逐样本报告，保留空名） |
 
 复审后全文基线重新验证：build 0 错误、131 测试全绿、publish 通过；§2.2 的走查
@@ -110,6 +110,6 @@
 
 ```text
 dotnet build LimbusModEditor.slnx --no-restore   ✓ 0 错误
-dotnet test LimbusModEditor.slnx --no-restore    ✓ 132 通过（45 Format + 87 Domain）
+dotnet test LimbusModEditor.slnx --no-restore    ✓ 138 通过（50 Format + 88 Domain）
 dotnet publish ... -o artifacts/publish-win-x64  ✓ LimbusModEditor.App.exe
 ```

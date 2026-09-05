@@ -531,6 +531,9 @@ public partial class MainWindow : Window
         catch (Exception ex) { ShowError("Unity 字段读取或保存失败", ex); }
     }
 
+    private void Help_Click(object sender, RoutedEventArgs e)
+        => new HelpWindow { Owner = this }.ShowDialog();
+
     /// <summary>Answers "who points at this object" for the selected Unity
     /// object: same-file referencers plus, for bundles, cross-file referencers
     /// from every other SerializedFile inside the same bundle.</summary>

@@ -198,6 +198,27 @@ public sealed class UnityAssetService
         return backend.ReadObjectDependencies(serializedFilePath, pathId, cancellationToken);
     }
 
+    /// <summary>P1.5 read-only summary for Mesh / AnimationClip / Font objects;
+    /// null when the object's type is not one of the summarized classes.</summary>
+    public UnityObjectSummary? ReadObjectSummary(string serializedFilePath, long pathId,
+        CancellationToken cancellationToken = default)
+    {
+        var root = ReadObjectFields(serializedFilePath, pathId, cancellationToken).FirstOrDefault()
+            ?? throw new InvalidDataException($"无法读取 SerializedFile 字段树: {serializedFilePath} Path {pathId}");
+        var dependencies = ReadObjectDependencies(serializedFilePath, pathId, cancellationToken);
+        return UnityObjectSummaryBuilder.TryBuild(pathId, root, dependencies);
+    }
+
+    /// <summary>Bundle variant of <see cref="ReadObjectSummary"/>.</summary>
+    public UnityObjectSummary? ReadBundleObjectSummary(string bundlePath, string serializedFileName,
+        long pathId, CancellationToken cancellationToken = default)
+    {
+        var root = ReadBundleObjectFields(bundlePath, serializedFileName, pathId, cancellationToken).FirstOrDefault()
+            ?? throw new InvalidDataException($"无法读取 Bundle 字段树: {bundlePath} / {serializedFileName} Path {pathId}");
+        var dependencies = ReadBundleObjectDependencies(bundlePath, serializedFileName, pathId, cancellationToken);
+        return UnityObjectSummaryBuilder.TryBuild(pathId, root, dependencies);
+    }
+
     public IReadOnlyList<UnityDependency> ReadBundleObjectDependencies(string bundlePath, string serializedFileName,
         long pathId, CancellationToken cancellationToken = default)
     {

@@ -128,6 +128,16 @@ WPF/CLI 共用同一诊断模型的工作仍待后续。
 - 先实现安全只读摘要和导出（顶点数、材质、骨骼、曲线、字体信息）。
 - 再按真实样本确定可写字段；每种资源单独设计版本化替换器。
 
+状态（第一步完成）：只读摘要已落地（`UnityObjectSummaryBuilder` +
+`UnityAssetService.ReadObjectSummary`/`ReadBundleObjectSummary`，合成样本测试
+`UnityObjectSummaryTests`）：Mesh 报告子网格数/顶点数/顶点与索引数据大小，
+AnimationClip 报告采样率与动画类型（Legacy/Generic/Humanoid 为 Unity 公开常量），
+Font 报告字号/字符表条目数/内嵌数据大小/默认材质依赖解析；UI 入口
+「查看对象摘要」带复制与 JSON 导出（AtomicOutput）。数值一律来自文件自身类型树，
+缺失字段明确标注「未包含」而不是补默认值；MeshRenderer 材质引用、骨骼/曲线细节、
+以及各类型可写字段需真实样本（P1.5 第二步）后再扩展。Mesh(43)/AnimationClip(74)
+类 ID 映射已并入 `UnityClassId`。
+
 ## P2：音频和 Bank/FMOD 工作流
 
 ### P2.1 Bank 结构化编辑

@@ -86,10 +86,20 @@
 
 ## 4. 图片与图集
 
-- 支持 Texture2D PNG 预览与替换（RGB24、RGBA32/BGRA32、DXT1/DXT5，DXT 为有损编码）。
+- 支持 Texture2D PNG 预览与替换（RGB24、RGBA32/ARGB32/BGRA32、DXT1/DXT5，DXT 为有损编码）。
 - Sprite 支持 rect/pivot/border 元数据查看与编辑。
 - 图集：**拆分图集** 从 SpriteAtlas 输出子图，**恢复图集** 按记录重新打包。
 - ETC/ASTC 压缩格式解码与图集网格重写属于后续里程碑（P1.3/P1.4）。
+
+## 4.1 对象摘要（P1.5，Mesh / 动画 / 字体）
+
+选中 Mesh、AnimationClip 或 Font 类型的资源后，点 **「查看对象摘要」**：
+
+- Mesh：子网格数、顶点数、顶点数据大小、索引缓冲大小；
+- AnimationClip：旧版模式、采样率、动画类型（Legacy/Generic/Humanoid）；
+- Font：字号、字符表条目数、内嵌字体数据大小、默认材质指向（同文件/外部文件）；
+- 所有数值只来自该文件自己的类型树；某版本缺字段时在「未包含」清单中明确标注，
+  绝不用默认值补齐；窗口内可复制文本或导出 JSON（`logs/` 外任意位置）。
 
 ## 5. 音频（Bank / FMOD）
 
@@ -99,8 +109,8 @@
 - 完整 FSB5 原样替换不需要 DLL。
 - **「检测 FMOD DLL」**（P2.2）：无需加载 DLL 即可查看目录中 fmod64.dll /
   fsbank64.dll 的位数（x64/x86）、文件版本、导出符号快照，以及解码与 FSB 编码
-  接口是否齐全；结果按 DLL 大小/时间戳缓存（`logs/fmod-probe.json`），目录变化后
-  自动重新检测。32 位 DLL 会给出明确警告（本编辑器为 64 位进程）。
+  接口是否齐全；结果按 DLL 大小/时间戳/内容指纹缓存（`logs/fmod-probe.json`），
+  目录变化后自动重新检测。32 位 DLL 会给出明确警告（本编辑器为 64 位进程）。
 
 ## 6. 构建与调试
 

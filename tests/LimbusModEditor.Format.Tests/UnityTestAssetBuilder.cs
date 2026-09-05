@@ -130,6 +130,147 @@ internal static class UnityTestAssetBuilder
         return path;
     }
 
+    private static readonly N[] MeshTree =
+    [
+        new("Mesh", "Base", 0),
+        new("string", "m_Name", 1),
+        new("Type[]", "Array", 2),
+        new("char", "data", 3),
+        new("vector", "m_SubMeshes", 1, IsArray: true, Aligned: true),
+        new("int", "size", 2),
+        new("Type[]", "Array", 2),
+        new("int", "data", 3),
+        new("VertexData", "m_VertexData", 1),
+        new("unsigned int", "m_VertexCount", 2),
+        new("TypelessData", "m_DataSize", 2, IsArray: true, Aligned: true),
+        new("int", "size", 3),
+        new("unsigned char", "Array", 3),
+        new("TypelessData", "m_IndexBuffer", 1, IsArray: true, Aligned: true),
+        new("int", "size", 2),
+        new("unsigned char", "Array", 2)
+    ];
+
+    private static readonly N[] AnimationClipTree =
+    [
+        new("AnimationClip", "Base", 0),
+        new("string", "m_Name", 1),
+        new("Type[]", "Array", 2),
+        new("char", "data", 3),
+        new("bool", "m_Legacy", 1),
+        new("float", "m_SampleRate", 1),
+        new("int", "m_AnimationType", 1)
+    ];
+
+    private static readonly N[] FontTree =
+    [
+        new("Font", "Base", 0),
+        new("string", "m_Name", 1),
+        new("Type[]", "Array", 2),
+        new("char", "data", 3),
+        new("int", "m_FontSize", 1),
+        new("vector", "m_CharacterData", 1, IsArray: true, Aligned: true),
+        new("int", "size", 2),
+        new("Type[]", "Array", 2),
+        new("int", "data", 3),
+        new("TypelessData", "m_FontData", 1, IsArray: true, Aligned: true),
+        new("int", "size", 2),
+        new("unsigned char", "Array", 2),
+        new("PPtr<$Material>", "m_DefaultMaterial", 1),
+        new("int", "m_FileID", 2),
+        new("SInt64", "m_PathID", 2)
+    ];
+
+    /// <summary>Summary sample: Mesh (path 10), AnimationClip (path 11) and
+    /// Font (path 12, its default material points at the same-file Mesh) for
+    /// the P1.5 read-only summary tests.</summary>
+    public static string BuildSummaryFile(string directory, string fileName = "testsummary.assets")
+    {
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, fileName);
+
+        var file = new AssetsFile
+        {
+            Header = new AssetsFileHeader { Version = 21, Endianness = false },
+            Metadata = new AssetsFileMetadata
+            {
+                UnityVersion = UnityVersion,
+                TargetPlatform = WindowsStandalonePlatform,
+                TypeTreeEnabled = true,
+                TypeTreeTypes = [],
+                AssetInfos = [],
+                ScriptTypes = [],
+                Externals = [],
+                RefTypes = [],
+                UserInformation = string.Empty
+            }
+        };
+        file.Metadata.TypeTreeTypes.Add(BuildTypeTreeType(43, MeshTree));
+        file.Metadata.TypeTreeTypes.Add(BuildTypeTreeType(74, AnimationClipTree));
+        file.Metadata.TypeTreeTypes.Add(BuildTypeTreeType(128, FontTree));
+
+        var meshInfo = AssetFileInfo.Create(file, 10, 43, 0);
+        meshInfo.Replacer = new ContentReplacerFromBuffer(SerializeMesh("TestMesh", subMeshes: 2, vertexCount: 8, vertexDataBytes: 24, indexBufferBytes: 6));
+        file.Metadata.AddAssetInfo(meshInfo);
+
+        var clipInfo = AssetFileInfo.Create(file, 11, 74, 0);
+        clipInfo.Replacer = new ContentReplacerFromBuffer(SerializeAnimationClip("TestClip", legacy: false, sampleRate: 60f, animationType: 2));
+        file.Metadata.AddAssetInfo(clipInfo);
+
+        var fontInfo = AssetFileInfo.Create(file, 12, 128, 0);
+        fontInfo.Replacer = new ContentReplacerFromBuffer(SerializeFont("TestFont", fontSize: 16, characterCount: 3, fontDataBytes: 64, defaultMaterialPathId: 10));
+        file.Metadata.AddAssetInfo(fontInfo);
+
+        using var writer = new AssetsFileWriter(path);
+        file.Write(writer, 0);
+        return path;
+    }
+
+    private static byte[] SerializeMesh(string name, int subMeshes, uint vertexCount, int vertexDataBytes, int indexBufferBytes)
+    {
+        using var stream = new MemoryStream();
+        using var writer = new AssetsFileWriter(stream);
+        WriteString(writer, name);
+        writer.Write(subMeshes);
+        for (var i = 0; i < subMeshes; i++) writer.Write((int)(100 + i));
+        writer.Align();
+        writer.Write(vertexCount);
+        writer.Write(vertexDataBytes);
+        writer.Write(new byte[vertexDataBytes]);
+        writer.Align();
+        writer.Write(indexBufferBytes);
+        writer.Write(new byte[indexBufferBytes]);
+        writer.Align();
+        return stream.ToArray();
+    }
+
+    private static byte[] SerializeAnimationClip(string name, bool legacy, float sampleRate, int animationType)
+    {
+        using var stream = new MemoryStream();
+        using var writer = new AssetsFileWriter(stream);
+        WriteString(writer, name);
+        writer.Write((byte)(legacy ? 1 : 0));
+        writer.Write(sampleRate);
+        writer.Write(animationType);
+        return stream.ToArray();
+    }
+
+    private static byte[] SerializeFont(string name, int fontSize, int characterCount, int fontDataBytes, long defaultMaterialPathId)
+    {
+        using var stream = new MemoryStream();
+        using var writer = new AssetsFileWriter(stream);
+        WriteString(writer, name);
+        writer.Write(fontSize);
+        writer.Write(characterCount);
+        for (var i = 0; i < characterCount; i++) writer.Write(65 + i);
+        writer.Align();
+        writer.Write(fontDataBytes);
+        writer.Write(new byte[fontDataBytes]);
+        writer.Align();
+        writer.Write(0); // m_FileID: same file
+        writer.Write(defaultMaterialPathId);
+        return stream.ToArray();
+    }
+
     private static byte[] SerializeMonoScript()
     {
         using var stream = new MemoryStream();

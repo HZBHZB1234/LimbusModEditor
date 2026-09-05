@@ -12,6 +12,8 @@ public static class UnityClassId
 {
     public const int GameObject = 1;
     public const int Texture2D = 28;
+    public const int Mesh = 43;
+    public const int AnimationClip = 74;
     public const int AudioClip = 83;
     public const int MonoBehaviour = 114;
     public const int MonoScript = 115;
@@ -29,6 +31,8 @@ public static class UnityClassId
     {
         GameObject => AssetType.GameObject,
         Texture2D => AssetType.Texture,
+        Mesh => AssetType.Mesh,
+        AnimationClip => AssetType.Animation,
         AudioClip => AssetType.Audio,
         MonoBehaviour => AssetType.MonoBehaviour,
         MonoScript => AssetType.MonoScript,

@@ -464,6 +464,15 @@ public partial class MainWindow : Window
         SelectedPathIdText.Text = asset?.UnityPathId?.ToString() ?? "—";
         SelectedContainerText.Text = asset?.ContainerPath ?? "—";
         SelectedStateText.Text = asset?.EditState.ToString() ?? string.Empty;
+        RefreshSelectionButtons(asset);
+        UpdatePreview(asset);
+    }
+
+    /// <summary>Recomputes every per-selection action button from the current
+    /// project/selection state; also used after long operations to restore
+    /// buttons disabled during the operation.</summary>
+    private void RefreshSelectionButtons(AssetRecord? asset)
+    {
         ReplaceAssetButton.IsEnabled = asset is not null && _projectFile is not null;
         HexPreviewButton.IsEnabled = asset is not null;
         SpriteMetadataButton.IsEnabled = asset?.Type == AssetType.Sprite &&
@@ -473,6 +482,10 @@ public partial class MainWindow : Window
             (asset.Metadata.ContainsKey("unityBundle") || asset.Metadata.ContainsKey("unitySerializedFile")) &&
             !string.IsNullOrWhiteSpace(asset.SourcePath) && File.Exists(asset.SourcePath) && _projectFile is not null;
         ReferencersButton.IsEnabled = UnityFieldsButton.IsEnabled;
+        ObjectSummaryButton.IsEnabled = asset?.UnityPathId.HasValue == true &&
+            asset.Type is AssetType.Mesh or AssetType.Animation or AssetType.Font &&
+            (asset.Metadata.ContainsKey("unityBundle") || asset.Metadata.ContainsKey("unitySerializedFile")) &&
+            !string.IsNullOrWhiteSpace(asset.SourcePath) && File.Exists(asset.SourcePath) && _projectFile is not null;
         DecodeAudioButton.IsEnabled = asset?.Type == AssetType.Audio &&
             asset.LogicalPath.StartsWith("fsb/", StringComparison.OrdinalIgnoreCase) &&
             !string.IsNullOrWhiteSpace(_project?.FmodLibraryDirectory) &&
@@ -484,7 +497,6 @@ public partial class MainWindow : Window
         AtlasPanel.Visibility = isImage ? Visibility.Visible : Visibility.Collapsed;
         SplitAtlasButton.IsEnabled = isImage && _projectFile is not null;
         RepackAtlasButton.IsEnabled = isImage && asset?.Metadata.ContainsKey("atlasLayoutPath") == true && _projectFile is not null;
-        UpdatePreview(asset);
     }
 
     private void UpdatePreview(AssetRecord? asset)
@@ -671,8 +683,7 @@ public partial class MainWindow : Window
         catch (Exception ex) { ShowError("Unity 字段读取或保存失败", ex); }
         finally
         {
-            UnityFieldsButton.IsEnabled = true;
-            ReferencersButton.IsEnabled = UnityFieldsButton.IsEnabled;
+            RefreshSelectionButtons(AssetList.SelectedItem as AssetRecord);
             StatusText.Text = "就绪";
         }
     }
@@ -734,7 +745,43 @@ public partial class MainWindow : Window
         catch (Exception ex) { ShowError("引用者检查失败", ex); }
         finally
         {
-            ReferencersButton.IsEnabled = UnityFieldsButton.IsEnabled;
+            RefreshSelectionButtons(AssetList.SelectedItem as AssetRecord);
+            StatusText.Text = "就绪";
+        }
+    }
+
+    /// <summary>P1.5: read-only structural summary of the selected Mesh /
+    /// AnimationClip / Font object; values come from the type tree, missing
+    /// fields are reported instead of guessed.</summary>
+    private async void ShowObjectSummary_Click(object sender, RoutedEventArgs e)
+    {
+        if (_project is null || AssetList.SelectedItem is not AssetRecord asset ||
+            !asset.UnityPathId.HasValue || string.IsNullOrWhiteSpace(asset.SourcePath) || !File.Exists(asset.SourcePath)) return;
+        var service = new LimbusModEditor.Formats.Unity.UnityAssetService();
+        var isBundle = asset.Metadata.ContainsKey("unityBundle") && !string.IsNullOrWhiteSpace(asset.ContainerPath);
+        var source = asset.SourcePath;
+        var container = asset.ContainerPath;
+        var pathId = asset.UnityPathId.Value;
+        ObjectSummaryButton.IsEnabled = false;
+        StatusText.Text = "正在生成对象摘要…";
+        try
+        {
+            var summary = await Task.Run(() => isBundle
+                ? service.ReadBundleObjectSummary(source, container!, pathId)
+                : service.ReadObjectSummary(source, pathId));
+            if (summary is null)
+            {
+                MessageBox.Show(this,
+                    "该对象类型暂无摘要支持（当前支持 Mesh / AnimationClip / Font）。字段树可通过「Unity 字段编辑」查看。",
+                    "对象摘要", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+            new ObjectSummaryWindow(summary) { Owner = this }.ShowDialog();
+        }
+        catch (Exception ex) { ShowError("对象摘要生成失败", ex); }
+        finally
+        {
+            RefreshSelectionButtons(AssetList.SelectedItem as AssetRecord);
             StatusText.Text = "就绪";
         }
     }

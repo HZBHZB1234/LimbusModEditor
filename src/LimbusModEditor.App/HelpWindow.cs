@@ -49,17 +49,25 @@ public sealed class HelpWindow : Window
 
         panel.Children.Add(MakeTitle("图片、图集与音频"));
         panel.Children.Add(MakeBody(
-            "• Texture2D 支持 PNG 预览与替换（RGB24/RGBA32/BGRA32/DXT1/DXT5）；\n" +
+            "• Texture2D 支持 PNG 预览与替换（RGB24/RGBA32/ARGB32/BGRA32/DXT1/DXT5）；\n" +
             "• Sprite 支持 rect/pivot/border 元数据编辑；图集可拆分与恢复；\n" +
             "• Bank 音频需要你提供合法的 fmod64.dll / fsbank64.dll 才能解码导出 WAV；\n" +
             "  本工具不附带、不伪造任何 FMOD 二进制文件。"));
+
+        panel.Children.Add(MakeTitle("对象摘要（Mesh / 动画 / 字体）"));
+        panel.Children.Add(MakeBody(
+            "• 选中 Mesh、AnimationClip 或 Font 类型资源后，点「查看对象摘要」：\n" +
+            "  Mesh 显示子网格数、顶点数、顶点/索引数据大小；动画显示采样率、类型；\n" +
+            "  字体显示字号、字符表条目数、内嵌数据大小与默认材质指向；\n" +
+            "• 数值全部来自该文件自己的类型树，某版本缺字段时明确标注「未包含」，\n" +
+            "  绝不用默认值补齐；可复制文本或导出 JSON 供存档。"));
 
         panel.Children.Add(MakeTitle("FMOD DLL 检测"));
         panel.Children.Add(MakeBody(
             "• 配置 FMOD DLL 目录后，点击「检测 FMOD DLL」查看每个 DLL 的：\n" +
             "  位数（x64/x86）、文件版本、导出符号数量，以及解码/FSB 编码接口是否齐全；\n" +
             "• 检测只读取文件头与导出表，不会加载或执行任何 DLL 代码；\n" +
-            "• 结果按 DLL 大小/时间戳缓存，目录变化后自动重新检测；\n" +
+            "• 结果按 DLL 大小/时间戳/内容指纹缓存，目录变化后自动重新检测；\n" +
             "• 32 位（x86）DLL 无法被本 64 位编辑器加载，报告中会给出红色警告。"));
 
         panel.Children.Add(MakeTitle("导出向导与导出报告"));

@@ -80,14 +80,11 @@ public sealed class ModExportService(FormatRegistry registry)
                 var report = await handler.ValidateAsync(package, cancellationToken);
                 if (!report.IsValid) throw new InvalidDataException(string.Join("; ", report.Diagnostics.Select(x => x.Message)));
                 var convertedOutput = Path.GetFullPath(outputPath); Directory.CreateDirectory(Path.GetDirectoryName(convertedOutput)!);
-                var convertedTemp = convertedOutput + ".lme-tmp";
-                try
+                await AtomicOutput.WriteAsync(convertedOutput, async (stream, token) =>
                 {
-                    await using (var output = File.Create(convertedTemp))
-                        await handler.ExportAsync(package, output, new(format, true, true, cancellationToken, new JovelerXzCodec()));
-                    File.Move(convertedTemp, convertedOutput, true);
-                }
-                finally { if (File.Exists(convertedTemp)) File.Delete(convertedTemp); }
+                    await using var output = stream;
+                    await handler.ExportAsync(package, output, new(format, true, true, token, new JovelerXzCodec()));
+                }, cancellationToken);
                 var diagnostics = converted.Diagnostics.Select(x => $"{x.RelativePath}: {x.Message}").ToArray();
                 return new(format, convertedOutput, replacementCount + converted.AddedObjects + converted.ModifiedObjects, diagnostics, statuses);
             }
@@ -99,17 +96,11 @@ public sealed class ModExportService(FormatRegistry registry)
         var effectiveCodec = codec;
         if (effectiveCodec is null && format is ModFormatKind.Carra or ModFormatKind.Carra2) effectiveCodec = new JovelerXzCodec();
         var outputFullPath = Path.GetFullPath(outputPath);
-        var temporaryOutput = outputFullPath + ".lme-tmp";
-        try
+        await AtomicOutput.WriteAsync(outputFullPath, async (stream, token) =>
         {
-            await using (var output = File.Create(temporaryOutput))
-                await handler.ExportAsync(package, output, new(format, true, true, cancellationToken, effectiveCodec));
-            File.Move(temporaryOutput, outputFullPath, true);
-        }
-        finally
-        {
-            if (File.Exists(temporaryOutput)) File.Delete(temporaryOutput);
-        }
+            await using var output = stream;
+            await handler.ExportAsync(package, output, new(format, true, true, token, effectiveCodec));
+        }, cancellationToken);
         return new(format, outputFullPath, applied, validation.Diagnostics.Select(x => x.Message).ToArray(), assetStatuses);
     }
 

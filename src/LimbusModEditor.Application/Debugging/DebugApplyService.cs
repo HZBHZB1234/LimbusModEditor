@@ -40,9 +40,7 @@ public sealed class DebugApplyService
                 session.Changes.Add(new(source, target, backupPath, existed, hash));
                 if (existed) { Directory.CreateDirectory(Path.GetDirectoryName(backupPath)!); File.Copy(target, backupPath, true); }
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-                var temp = target + ".lme-tmp";
-                File.Copy(source, temp, true);
-                File.Move(temp, target, true);
+                await LimbusModEditor.Application.Build.AtomicOutput.CopyAsync(source, target, cancellationToken);
                 var appliedHash = await Sha256Async(target, cancellationToken);
                 var changeIndex = session.Changes.Count - 1;
                 session.Changes[changeIndex] = session.Changes[changeIndex] with { AppliedHash = appliedHash };

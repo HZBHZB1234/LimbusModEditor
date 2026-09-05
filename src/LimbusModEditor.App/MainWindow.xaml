@@ -12,6 +12,7 @@
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                     <Button Content="新建项目" Click="NewProject_Click" Margin="6,0" Padding="14,6"/>
+                    <Button Content="新建模组向导…" Click="NewModWizard_Click" Margin="6,0" Padding="14,6"/>
                     <Button Content="打开项目" Click="OpenProject_Click" Margin="6,0" Padding="14,6"/>
                     <Button Content="保存" Click="SaveProject_Click" Margin="6,0" Padding="14,6"/>
                     <Button Content="使用教程" Click="Help_Click" Margin="6,0" Padding="14,6"/>

@@ -54,6 +54,22 @@ public partial class MainWindow : Window
         catch (Exception ex) { ShowError("创建项目失败", ex); }
     }
 
+    /// <summary>P3.1: new-mod wizard scaffolds a project plus a minimal,
+    /// handler-validated template package, then opens the project.</summary>
+    private async void NewModWizard_Click(object sender, RoutedEventArgs e)
+    {
+        var service = new LimbusModEditor.Application.Build.NewModTemplateService(_projects);
+        var wizard = new NewModWizardWindow(service) { Owner = this };
+        if (wizard.ShowDialog() != true || wizard.Result is null) return;
+        try
+        {
+            _project = await _projects.LoadAsync(wizard.Result.ProjectFile);
+            _projectFile = wizard.Result.ProjectFile;
+            RefreshProjectState("已通过向导创建项目");
+        }
+        catch (Exception ex) { ShowError("打开新建项目失败", ex); }
+    }
+
     private async void OpenProject_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new Microsoft.Win32.OpenFileDialog { Filter = "LME 项目 (*.lmeproj)|*.lmeproj|所有文件 (*.*)|*.*" };

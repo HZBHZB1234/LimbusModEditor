@@ -6,7 +6,12 @@
 ## 1. 准备工作
 
 1. 启动 `LimbusModEditor.App.exe`（或 `dotnet run --project src/LimbusModEditor.App`）。
-2. 点击 **新建项目**，选择 `.lmeproj` 保存位置。项目会在同目录创建：
+2. 点击 **新建模组向导…**（推荐）或 **新建项目**：
+   - **新建项目** 只选择 `.lmeproj` 保存位置；
+   - **新建模组向导** 额外收集名称/版本/作者/描述并生成空白模板：
+     Carra/Carra2 → 空对象包 `.carra2`；Rebank → 声明 `base_bank` 的 `.rebank`；
+     模板会先经对应格式处理器校验（校验失败不写盘），Lunartique 因必须以现有
+     模组为基底而置灰并给出原因。项目会在同目录创建：
    - `sources/` — 导入的原始资源（不会再改动）
    - `edits/` — 替换素材与记录
    - `previews/` — 预览缓存

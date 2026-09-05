@@ -70,6 +70,14 @@ public sealed class HelpWindow : Window
             "• 结果按 DLL 大小/时间戳/内容指纹缓存，目录变化后自动重新检测；\n" +
             "• 32 位（x86）DLL 无法被本 64 位编辑器加载，报告中会给出红色警告。"));
 
+        panel.Children.Add(MakeTitle("新建模组向导"));
+        panel.Children.Add(MakeBody(
+            "• 「新建模组向导…」一步创建项目结构与空白模板：\n" +
+            "  Carra/Carra2 生成空对象包；Rebank 生成声明 base_bank 的 rebank.json；\n" +
+            "  模板先经对应格式处理器校验再写出（事务写，失败不落盘）；\n" +
+            "• Lunartique 没有空白模板（由现有模组资源目录构成），向导中置灰并说明原因；\n" +
+            "• 空白模板不含资源 —— 创建后请继续「导入模组」登记源包并替换资源。"));
+
         panel.Children.Add(MakeTitle("导出向导与导出报告"));
         panel.Children.Add(MakeBody(
             "• 「导出模组」会先识别源格式，然后显示源→目标兼容性矩阵：\n" +

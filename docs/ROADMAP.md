@@ -152,8 +152,10 @@ FSB5 只读结构探测（`Fsb5Parser`：按 vgmstream/python-fsb5 双源核对�
 样本数）+ 元数据块（CHANNELS/FREQUENCY/LOOP 等）、u32 偏移名称表、相邻偏移推导
 数据大小、长度一致性诊断）与「查看 FSB 结构」窗口（`BankInspectorWindow`）。
 加密/未知负载给出明确原因，不做猜测或改写；独立复审曾发现初版解析器布局错误，
-已按权威布局重写并以合成样本测试固化。事件/总线级 FEV 索引展示与 WAV→FSB
-替换选项（P2.2）仍待后续轮次。
+已按权威布局重写并以合成样本测试固化。WAV→FSB 已在导出管线实现
+（`ModExportService.ApplyReplacementsAsync` 检测 RIFF/WAVE 后自动经用户配置的
+FSBANK 编码器转 FSB5 再写入 Bank，未配置编码器时给出明确错误）；事件/总线级
+FEV 索引展示仍待真实 FEV 样本（不猜测）。
 
 ### P2.2 FMOD DLL 管理
 
@@ -187,9 +189,14 @@ FSB5 只读结构探测（`Fsb5Parser`：按 vgmstream/python-fsb5 双源核对�
 - 根据格式生成最小合法 Carra/Rebank/Lunartique 工程模板。
 - 模板必须通过对应 handler 的 ValidateAsync，并给出输出路径预览。
 
-状态（部分完成）：向导的"辅助自动化"部分已先行落地 —— 「自动定位游戏目录」
-（扫描 Steam 库找 LimbusCompany.exe）与「自动建议 Unity 缓存目录」（验证含
-.bundle 的候选后由用户确认）。完整的新建模组模板向导仍待后续轮次。
+状态（完成）：「新建模组向导…」已落地（`NewModTemplateService` +
+`NewModWizardWindow`，测试 `NewModTemplateServiceTests`）：向导收集模组
+名称/版本/作者/描述，选择模板格式后创建项目结构并生成经格式处理器校验的最小
+合法模板 —— Carra/Carra2 生成空对象包、Rebank 生成声明 `base_bank` 的
+`rebank.json`（校验含 base_bank 声明检查）；模板经 `AtomicOutput` 事务写出，
+完成后项目直接在主窗口打开。Lunartique 无空白模板（真实模组才能确定其资源
+目录形态），向导中置灰并说明 —— 符合"不猜测"原则。向导的"辅助自动化"部分
+（自动定位游戏目录/Unity 缓存目录）此前已落地。
 
 ### P3.2 导出向导和兼容性矩阵
 

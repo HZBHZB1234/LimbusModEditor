@@ -96,6 +96,14 @@ Installation/Uninstallation 和 Carra/Carra2 样本。
 - 为所有格式标记有损/无损、平台限制和 mipmap 行为。
 - 支持 mipmap 层选择、保留/重建 mipmap、纹理尺寸和可读性检查。
 
+状态（部分完成）：全部无损/半压缩格式已实现并有测试（`ExtendedTextureFormatTests`，
+枚举值经权威工具链核对：ARGB32 为 B,G,R,A 字节序、RGBA4444=13、RG16 为 2 字节双 8 位
+通道）；`TextureFormatCatalog` 标注有损/无损与字节序说明并在预览行展示
+（`ReadTextureSummary`）；`UnityTextureMipmaps` 提供逐层布局、mip 数推断与
+`Slice`（含 DXT 块对齐）。DXT 编解码维持托管实现（有损已标注）。ETC/ASTC 需要可靠
+可再分发库，当前不提供预览也不声称支持（符合"不伪造"约束）；mipmap 重建式替换与
+可读性检查待后续。
+
 ### P1.4 Sprite、SpriteAtlas 和网格
 
 - 读取 SpriteAtlas 对象、页纹理、SpriteRect、packing tag、mesh 顶点和索引。

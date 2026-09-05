@@ -158,6 +158,28 @@ public partial class MainWindow : Window
         catch (Exception ex) { ShowError("导出模组失败", ex); }
     }
 
+    /// <summary>自动获取资源地址（续）：list verified Unity-cache candidates
+    /// (directories that actually contain .bundle files) and let the user pick.</summary>
+    private async void SuggestUnityCache_Click(object sender, RoutedEventArgs e)
+    {
+        if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }
+        try
+        {
+            var candidates = LimbusModEditor.Application.Debugging.UnityCacheLocator.SuggestCandidates(_project.GameDirectory);
+            if (candidates.Count == 0)
+            {
+                MessageBox.Show(this, "未在游戏目录与 LocalLow 中找到包含 .bundle 的候选目录。\n请手动选择 Unity 缓存目录。", "自动建议失败", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+            var picker = new UnityCachePickerWindow(candidates) { Owner = this };
+            if (picker.ShowDialog() != true || picker.Selected is null) return;
+            _project.UnityCacheDirectory = picker.Selected.Path;
+            await _projects.SaveAsync(_project, _projectFile);
+            StatusText.Text = $"已设置 Unity 缓存目录：{picker.Selected.Path}（含 {picker.Selected.BundleCount} 个 bundle）";
+        }
+        catch (Exception ex) { ShowError("自动建议 Unity 缓存目录失败", ex); }
+    }
+
     /// <summary>自动获取资源地址：scan known Steam libraries for the Limbus
     /// Company install and fill the game directory automatically.</summary>
     private async void AutoLocateGame_Click(object sender, RoutedEventArgs e)

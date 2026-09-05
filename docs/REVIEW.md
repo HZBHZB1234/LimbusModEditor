@@ -110,6 +110,6 @@
 
 ```text
 dotnet build LimbusModEditor.slnx --no-restore   ✓ 0 错误
-dotnet test LimbusModEditor.slnx --no-restore    ✓ 138 通过（50 Format + 88 Domain）
+dotnet test LimbusModEditor.slnx --no-restore    ✓ 142 通过（50 Format + 92 Domain）
 dotnet publish ... -o artifacts/publish-win-x64  ✓ LimbusModEditor.App.exe
 ```

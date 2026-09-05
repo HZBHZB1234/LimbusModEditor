@@ -158,6 +158,35 @@ public partial class MainWindow : Window
         catch (Exception ex) { ShowError("导出模组失败", ex); }
     }
 
+    /// <summary>P3.3 工作流: batch-register replacements from a folder, matching
+    /// files to assets by file name.</summary>
+    private async void BatchReplace_Click(object sender, RoutedEventArgs e)
+    {
+        if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            CheckFileExists = false,
+            ValidateNames = false,
+            FileName = "选择此文件夹",
+            Title = "选择替换文件所在文件夹（按文件名匹配资源）"
+        };
+        if (dialog.ShowDialog() != true) return;
+        var folder = Path.GetDirectoryName(dialog.FileName);
+        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder)) return;
+        try
+        {
+            var report = await _assetEdits.BatchReplaceFromDirectoryAsync(_project, folder, Path.GetDirectoryName(_projectFile)!);
+            await _projects.SaveAsync(_project, _projectFile);
+            RefreshProjectState($"批量替换已登记（{report.Matched} 个）");
+            var detail = report.Describe();
+            if (report.FilesWithoutAsset.Count > 0)
+                detail += "\n\n没有对应资源的文件（前 15 个）：\n" + string.Join("\n", report.FilesWithoutAsset.Take(15));
+            MessageBox.Show(this, detail, "批量登记替换", MessageBoxButton.OK,
+                report.Matched > 0 ? MessageBoxImage.Information : MessageBoxImage.Warning);
+        }
+        catch (Exception ex) { ShowError("批量登记替换失败", ex); }
+    }
+
     /// <summary>P3.4: hex dump of the selected asset's payload for
     /// identifying unknown data before replacing it.</summary>
     private void HexPreview_Click(object sender, RoutedEventArgs e)

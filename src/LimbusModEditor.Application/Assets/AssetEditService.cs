@@ -7,6 +7,18 @@ namespace LimbusModEditor.Application.Assets;
 
 public sealed record AssetReplacementResult(Guid AssetId, string StoredPath, long Size, string Hash);
 
+/// <summary>Outcome of a batch replacement registration (P3.3 工作流).</summary>
+public sealed record BatchReplacementReport(
+    int Matched,
+    IReadOnlyList<string> FilesWithoutAsset,
+    IReadOnlyList<string> AssetsWithoutFile,
+    int SkippedAlreadyReplaced)
+{
+    public string Describe() =>
+        $"匹配并登记 {Matched} 个替换；{FilesWithoutAsset.Count} 个文件没有对应的资源；" +
+        $"{AssetsWithoutFile.Count} 个资源没有提供文件；跳过已替换 {SkippedAlreadyReplaced} 个。";
+}
+
 /// <summary>
 /// Stores user replacement files inside the project workspace and records a
 /// reversible edit operation. Format-specific writers consume the stored file
@@ -14,6 +26,46 @@ public sealed record AssetReplacementResult(Guid AssetId, string StoredPath, lon
 /// </summary>
 public sealed class AssetEditService
 {
+    /// <summary>批量登记替换：matches files in a folder to project assets by
+    /// file name (case-insensitive) and registers every match through the same
+    /// reversible pipeline as single replacement.</summary>
+    public async Task<BatchReplacementReport> BatchReplaceFromDirectoryAsync(
+        ModProject project,
+        string folder,
+        string projectDirectory,
+        bool onlyUnreplaced = true,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(project);
+        ArgumentException.ThrowIfNullOrWhiteSpace(folder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(projectDirectory);
+        if (!Directory.Exists(folder)) throw new DirectoryNotFoundException($"替换文件夹不存在：{folder}");
+        var byFileName = project.Assets
+            .GroupBy(x => Path.GetFileName(x.LogicalPath), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+        var matched = 0;
+        var skipped = 0;
+        var filesWithoutAsset = new List<string>();
+        var matchedAssets = new HashSet<Guid>();
+        foreach (var file in Directory.EnumerateFiles(folder, "*", SearchOption.TopDirectoryOnly))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var fileName = Path.GetFileName(file);
+            if (fileName.StartsWith(".", StringComparison.Ordinal)) continue; // skip sidecar/temp files
+            if (!byFileName.TryGetValue(fileName, out var asset)) { filesWithoutAsset.Add(fileName); continue; }
+            if (onlyUnreplaced && asset.Metadata.ContainsKey("replacementPath")) { skipped++; continue; }
+            await ReplaceFromFileAsync(project, asset.AssetId, file, projectDirectory, cancellationToken);
+            matchedAssets.Add(asset.AssetId);
+            matched++;
+        }
+        var assetsWithoutFile = project.Assets
+            .Where(x => !matchedAssets.Contains(x.AssetId) &&
+                        (!onlyUnreplaced || !x.Metadata.ContainsKey("replacementPath")))
+            .Select(x => x.LogicalPath)
+            .ToList();
+        return new BatchReplacementReport(matched, filesWithoutAsset, assetsWithoutFile, skipped);
+    }
+
     public Task<AssetReplacementResult> ReplaceFromBytesAsync(
         ModProject project, Guid assetId, ReadOnlyMemory<byte> data,
         string suggestedExtension, string projectDirectory,

@@ -118,6 +118,7 @@
                         <TextBlock Grid.Row="3" Text="状态" Foreground="#7F93A4"/><TextBlock Grid.Row="3" Grid.Column="1" x:Name="SelectedStateText"/>
                     </Grid>
                     <Button x:Name="ReplaceAssetButton" Content="替换选中资源…" Click="ReplaceAsset_Click" IsEnabled="False" Margin="0,14,0,0" Padding="8,6"/>
+                    <Button Content="从文件夹批量登记替换…" Click="BatchReplace_Click" Margin="0,8,0,0" Padding="8,6"/>
                     <Button x:Name="HexPreviewButton" Content="十六进制预览" Click="HexPreview_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"/>
                     <Button x:Name="SpriteMetadataButton" Content="查看 Sprite 元数据" Click="InspectSprite_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"/>
                     <Button x:Name="UnityFieldsButton" Content="Unity 字段编辑" Click="EditUnityFields_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"/>

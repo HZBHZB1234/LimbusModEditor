@@ -78,6 +78,16 @@ Installation/Uninstallation 和 Carra/Carra2 样本。
 - 修改或删除对象前检查引用者，并提供阻止、保留空引用、重定向三种策略。
 - Bundle 重打包后验证引用仍可解析。
 
+状态（本轮）：已落地并有真实样本回归测试（`UnityDependencyTests`）。
+- 依赖解析：`ReadObjectDependencies`/`ReadBundleObjectDependencies` 把每个指针解析为
+  空引用/同文件/外部文件/悬空四种状态，附目标类型与外部路径、GUID。
+- 引用者扫描：`FindReferencers`（同文件）与 `FindBundleReferencers`（bundle 内跨文件，
+  支持 `archive:/...` 名称匹配）；UI「查找谁引用了此对象」直接展示。
+- 策略落地：保留空引用=允许 m_PathID→0；重定向=指针语义校验（新 InvalidTarget 状态，
+  同文件目标必须存在、m_FileID 不得越界，支持同批编辑兄弟字段联动）；阻止=构建前
+  预校验 + 重写后 `VerifySerializedReferences`/`VerifyBundleReferences` 引用完整性
+  diff，任何“可解析→悬空”回退中止构建。验证读取走独立后端，避免缓存污染。
+
 ### P1.3 Texture2D 编解码扩展
 
 - ETC1/ETC2：优先寻找可审计、可再分发的 Windows 库；没有可靠库时只提供只读预览或明确提示。

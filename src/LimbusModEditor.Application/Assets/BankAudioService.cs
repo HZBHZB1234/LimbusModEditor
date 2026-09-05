@@ -30,9 +30,17 @@ public sealed class BankAudioService
             return new BankFsbInspection(fsb.LongLength, null,
                 "该 FSB 不以 FSB5 魔数开头：可能是加密数据、旧版 FSB 或非音频负载。不会猜测其内容。", MagicMissing: true);
         var info = Fsb5Parser.TryParse(fsb);
-        return info is null
-            ? new BankFsbInspection(fsb.LongLength, null, "FSB5 头部无法解析（文件可能被截断）。", MagicMissing: false)
-            : new BankFsbInspection(fsb.LongLength, info, null, MagicMissing: false);
+        if (info is not null) return new BankFsbInspection(fsb.LongLength, info, null, MagicMissing: false);
+        // surface the parser's specific layout objection instead of a generic message
+        try
+        {
+            Fsb5Parser.Parse(fsb);
+            return new BankFsbInspection(fsb.LongLength, null, "FSB5 头部无法解析（文件可能被截断）。", MagicMissing: false);
+        }
+        catch (InvalidDataException ex)
+        {
+            return new BankFsbInspection(fsb.LongLength, null, $"FSB5 结构解析失败：{ex.Message}", MagicMissing: false);
+        }
     }
 
     public async Task<byte[]> DecodeToWaveAsync(AssetRecord asset, IFmodAudioCodec codec, CancellationToken cancellationToken = default)

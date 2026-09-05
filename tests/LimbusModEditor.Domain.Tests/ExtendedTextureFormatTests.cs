@@ -11,14 +11,30 @@ public class ExtendedTextureFormatTests
     private static UnityTextureCodec Codec() => new();
 
     [Fact]
-    public void Argb32_reads_bgra_byte_order()
+    public void Argb32_reads_alpha_first_byte_order()
     {
-        // B,G,R,A = 10,20,30,255 → R=30, G=20, B=10
+        // A,R,G,B = 10,20,30,255 (UnityPy decodes ARGB32 with Pillow rawmode "ARGB")
         var image = Codec().ToImage(new UnityTextureInfo(1, 1, UnityTexturePixelFormat.Argb32, [10, 20, 30, 255]));
-        Assert.Equal((byte)30, image[0, 0].R);
-        Assert.Equal((byte)20, image[0, 0].G);
-        Assert.Equal((byte)10, image[0, 0].B);
-        Assert.Equal((byte)255, image[0, 0].A);
+        Assert.Equal((byte)20, image[0, 0].R);
+        Assert.Equal((byte)30, image[0, 0].G);
+        Assert.Equal((byte)255, image[0, 0].B);
+        Assert.Equal((byte)10, image[0, 0].A);
+    }
+
+    [Fact]
+    public void R8_writes_red_channel_not_alpha()
+    {
+        using var source = new Image<Rgba32>(1, 1);
+        source[0, 0] = new Rgba32(200, 10, 20, 30);
+        using var pngStream = new MemoryStream();
+        source.SaveAsPng(pngStream);
+
+        var encoded = Codec().FromPng(pngStream.ToArray(), UnityTexturePixelFormat.R8);
+        Assert.Equal((byte)200, encoded.PixelData[0]); // red channel, not alpha (30)
+
+        // round-trip: reading that byte back gives gray level 200 in R
+        var image = Codec().ToImage(new UnityTextureInfo(1, 1, UnityTexturePixelFormat.R8, encoded.PixelData));
+        Assert.Equal((byte)200, image[0, 0].R);
     }
 
     [Fact]
@@ -159,7 +175,7 @@ public class ExtendedTextureFormatTests
         var rgba = TextureFormatCatalog.Describe(UnityTexturePixelFormat.Rgba32);
         Assert.True(rgba.Lossless);
         var argb32 = TextureFormatCatalog.Describe(UnityTexturePixelFormat.Argb32);
-        Assert.Contains("B,G,R,A", argb32.Notes);
+        Assert.Contains("A,R,G,B", argb32.Notes);
         Assert.Equal(14, TextureFormatCatalog.All().Count);
     }
 }

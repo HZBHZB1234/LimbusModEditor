@@ -12,7 +12,8 @@ public enum UnityTexturePixelFormat
     Argb4444 = 2,
     Rgb24 = 3,
     Rgba32 = 4,
-    /// <summary>Named ARGB32 by Unity but serialized in B,G,R,A byte order.</summary>
+    /// <summary>Serialized in A,R,G,B byte order (alpha first; UnityPy decodes
+    /// it with Pillow rawmode "ARGB"). BGRA32 is the separate B,G,R,A format.</summary>
     Argb32 = 5,
     Rgb565 = 7,
     Bgr24 = 8,
@@ -94,8 +95,9 @@ public sealed class UnityTextureCodec
         UnityTexturePixelFormat.Rgba4444 => Expand4444(BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(offset, 2)), argbOrder: false),
         UnityTexturePixelFormat.Rgb24 => new Rgba32(data[offset], data[offset + 1], data[offset + 2], 255),
         UnityTexturePixelFormat.Rgba32 => new Rgba32(data[offset], data[offset + 1], data[offset + 2], data[offset + 3]),
-        // ARGB32 is written in B,G,R,A byte order by Unity's serializer.
-        UnityTexturePixelFormat.Argb32 => new Rgba32(data[offset + 2], data[offset + 1], data[offset], data[offset + 3]),
+        // ARGB32 stores bytes in A,R,G,B order (UnityPy decodes it with Pillow
+        // rawmode "ARGB"; BGRA32 is the separate B,G,R,A format).
+        UnityTexturePixelFormat.Argb32 => new Rgba32(data[offset + 1], data[offset + 2], data[offset + 3], data[offset]),
         UnityTexturePixelFormat.Rgb565 => Expand565(BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(offset, 2))),
         UnityTexturePixelFormat.Bgr24 => new Rgba32(data[offset + 2], data[offset + 1], data[offset], 255),
         UnityTexturePixelFormat.R16 => Gray(Scale16To8(BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(offset, 2)))),
@@ -110,8 +112,9 @@ public sealed class UnityTextureCodec
         switch (format)
         {
             case UnityTexturePixelFormat.Alpha8:
-            case UnityTexturePixelFormat.R8:
                 data[offset] = pixel.A; break;
+            case UnityTexturePixelFormat.R8:
+                data[offset] = pixel.R; break; // R8 is a red-channel format, not alpha
             case UnityTexturePixelFormat.Argb4444:
                 BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(offset, 2),
                     (ushort)(((pixel.A / 17) << 12) | ((pixel.R / 17) << 8) | ((pixel.G / 17) << 4) | (pixel.B / 17)));
@@ -125,7 +128,7 @@ public sealed class UnityTextureCodec
             case UnityTexturePixelFormat.Rgba32:
                 data[offset] = pixel.R; data[offset + 1] = pixel.G; data[offset + 2] = pixel.B; data[offset + 3] = pixel.A; break;
             case UnityTexturePixelFormat.Argb32:
-                data[offset] = pixel.B; data[offset + 1] = pixel.G; data[offset + 2] = pixel.R; data[offset + 3] = pixel.A; break;
+                data[offset] = pixel.A; data[offset + 1] = pixel.R; data[offset + 2] = pixel.G; data[offset + 3] = pixel.B; break;
             case UnityTexturePixelFormat.Rgb565:
                 BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(offset, 2), Pack565(pixel)); break;
             case UnityTexturePixelFormat.Bgr24:
@@ -219,7 +222,7 @@ public static class TextureFormatCatalog
         UnityTexturePixelFormat.Argb4444 => new(format, "ARGB4444", 16, false, true, "每通道 4 位量化（有损）；字节序为小端 16 位，A 高 4 位、B 低 4 位。"),
         UnityTexturePixelFormat.Rgb24 => new(format, "RGB24", 24, true, true, "无 Alpha。"),
         UnityTexturePixelFormat.Rgba32 => new(format, "RGBA32", 32, true, true, "无压缩，最常用。"),
-        UnityTexturePixelFormat.Argb32 => new(format, "ARGB32", 32, true, true, "Unity 名为 ARGB32，实际序列化字节序为 B,G,R,A（与 BGRA32 相同布局）。"),
+        UnityTexturePixelFormat.Argb32 => new(format, "ARGB32", 32, true, true, "无压缩；字节序 A,R,G,B（alpha 在前，与 BGRA32 的 B,G,R,A 是两种格式）。"),
         UnityTexturePixelFormat.Rgb565 => new(format, "RGB565", 16, false, true, "R5/G6/B5 量化（有损）；无 Alpha。"),
         UnityTexturePixelFormat.Bgr24 => new(format, "BGR24", 24, true, true, "字节序 B,G,R。"),
         UnityTexturePixelFormat.R16 => new(format, "R16", 16, true, true, "单通道 16 位；预览以灰度显示。"),

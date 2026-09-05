@@ -110,8 +110,11 @@ public sealed class BankInspectorWindow : Window
         else if (inspection.Fsb is { } fsb)
         {
             var names = fsb.Samples.Count(s => s.Name is not null);
-            summary.Text = $"FSB5 版本 0x{fsb.Version:X8} ｜ 样本 {fsb.SampleCount} ｜ 条目区 0x{fsb.SampleHeaderSize:X} 字节 ｜ " +
-                           $"名称 {names}/{fsb.Samples.Count} ｜ Mode 0x{fsb.Mode:X} ｜ 数据起始 0x{fsb.DataStartOffset:X}";
+            var sizeWarning = fsb.SizeConsistent
+                ? string.Empty
+                : Environment.NewLine + "⚠ " + (fsb.Diagnostics.FirstOrDefault(d => d.Contains("长度不一致")) ?? "头/条目/名称/数据四区长度之和与文件大小不符。");
+            summary.Text = $"FSB5 版本 {fsb.Version}（基头 0x{fsb.BaseHeaderSize:X}）｜ 样本 {fsb.SampleCount} ｜ 条目区 0x{fsb.SampleHeaderSize:X} 字节 ｜ " +
+                           $"名称 {names}/{fsb.Samples.Count} ｜ 编码 {fsb.CodecName} ｜ 数据区 0x{fsb.DataStartOffset:X} 起共 0x{fsb.DataSize:X} 字节" + sizeWarning;
             summary.Foreground = Brushes.DimGray;
         }
 
@@ -125,12 +128,12 @@ public sealed class BankInspectorWindow : Window
         {
             Index = s.Index,
             Name = s.Name ?? "—",
-            Format = s.Format,
+            Format = fsb.CodecName,
             SampleRate = $"{s.SampleRate} Hz",
-            Channels = s.Channels,
-            DataSize = $"{s.DataSize:N0}",
+            Channels = s.Channels.ToString(),
+            DataSize = s.DataSize is { } size ? $"{size:N0}" : "不可知",
             DataOffset = $"0x{s.DataOffset:X}",
-            EntrySize = $"0x{s.HeaderEntrySize:X}"
+            EntrySize = $"0x{s.EntrySize:X}"
         }).ToArray();
     }
 }

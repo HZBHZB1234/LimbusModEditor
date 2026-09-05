@@ -347,6 +347,36 @@ public partial class MainWindow : Window
 
     private void SearchBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e) => RefreshAssetList();
 
+    /// <summary>P3.3: populates the type/state filter combos once.</summary>
+    private bool _filtersInitialized;
+    private void Filter_Changed(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (!_filtersInitialized) return;
+        RefreshAssetList();
+    }
+
+    private void Filter_Changed(object sender, RoutedEventArgs e) => RefreshAssetList();
+
+    private void ClearFilters_Click(object sender, RoutedEventArgs e)
+    {
+        SearchBox.Text = string.Empty;
+        TypeFilter.SelectedIndex = -1;
+        StateFilter.SelectedIndex = -1;
+        PathIdFilter.Text = string.Empty;
+        TypeIdFilter.Text = string.Empty;
+        MinSizeFilter.Text = string.Empty;
+        MaxSizeFilter.Text = string.Empty;
+        ReplacedOnlyFilter.IsChecked = false;
+        RefreshAssetList();
+    }
+
+    private static long? ParseLongFilter(System.Windows.Controls.TextBox box)
+    {
+        var text = box.Text.Trim();
+        if (string.IsNullOrEmpty(text)) return null;
+        return long.TryParse(text, out var value) ? value : long.MinValue;
+    }
+
     private void AssetList_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
         var asset = AssetList.SelectedItem as AssetRecord;
@@ -621,9 +651,44 @@ public partial class MainWindow : Window
 
     private void RefreshAssetList()
     {
-        AssetList.ItemsSource = _project is null
-            ? null
-            : _search.Search(_project, new AssetSearchQuery(SearchBox?.Text));
+        if (_project is null) { AssetList.ItemsSource = null; return; }
+        if (!_filtersInitialized)
+        {
+            _filtersInitialized = true;
+            TypeFilter.ItemsSource = Enum.GetValues<LimbusModEditor.Domain.Assets.AssetType>().Select(t => new
+            {
+                Value = (LimbusModEditor.Domain.Assets.AssetType?)t,
+                Label = t == LimbusModEditor.Domain.Assets.AssetType.Unknown ? "（全部类型）" : t.ToString()
+            });
+            TypeFilter.DisplayMemberPath = "Label";
+            TypeFilter.SelectedIndex = 0;
+            StateFilter.ItemsSource = Enum.GetValues<LimbusModEditor.Domain.Assets.AssetEditState>().Select(s => new
+            {
+                Value = (LimbusModEditor.Domain.Assets.AssetEditState?)s,
+                Label = s == LimbusModEditor.Domain.Assets.AssetEditState.Unchanged ? "（全部状态）" : s.ToString()
+            });
+            StateFilter.DisplayMemberPath = "Label";
+            StateFilter.SelectedIndex = 0;
+        }
+        var selectedType = (TypeFilter.SelectedItem as dynamic)?.Value as LimbusModEditor.Domain.Assets.AssetType?;
+        var selectedState = (StateFilter.SelectedItem as dynamic)?.Value as LimbusModEditor.Domain.Assets.AssetEditState?;
+        long? minKb = null, maxKb = null;
+        if (long.TryParse(MinSizeFilter.Text.Trim(), out var minSize) && minSize > 0) minKb = minSize * 1024;
+        if (long.TryParse(MaxSizeFilter.Text.Trim(), out var maxSize) && maxSize > 0) maxKb = maxSize * 1024;
+        AssetList.ItemsSource = _search.Search(_project, new AssetSearchQuery(
+            SearchBox?.Text,
+            selectedType,
+            selectedState,
+            null,
+            ParseLongFilter(PathIdFilter),
+            int.TryParse(TypeIdFilter.Text.Trim(), out var typeId) ? typeId : null,
+            minKb,
+            maxKb,
+            ReplacedOnlyFilter.IsChecked));
+        if (AssetList.Items.Count == _project.Assets.Count)
+            AssetCountText.Text = _project.Assets.Count.ToString();
+        else
+            AssetCountText.Text = $"{AssetList.Items.Count} / {_project.Assets.Count}";
     }
 
     private void ShowError(string title, Exception ex)

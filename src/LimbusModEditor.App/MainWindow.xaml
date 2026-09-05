@@ -46,10 +46,26 @@
             </Border>
             <Border Grid.Column="1" Background="#171D24" BorderBrush="#2A3540" BorderThickness="1" Padding="14" Margin="0,0,8,0">
                 <DockPanel>
-                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,10">
-                        <TextBox x:Name="SearchBox" Width="320" Height="28" VerticalContentAlignment="Center" ToolTip="搜索资源路径" TextChanged="SearchBox_TextChanged"/>
+                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,6">
+                        <TextBox x:Name="SearchBox" Width="300" Height="28" VerticalContentAlignment="Center" ToolTip="搜索资源路径" TextChanged="SearchBox_TextChanged"/>
                         <Button Content="导入资源" Click="Import_Click" Margin="8,0,0,0" Padding="14,4"/>
                         <Button Content="文件夹" Click="ImportDirectory_Click" Margin="8,0,0,0" Padding="14,4"/>
+                    </StackPanel>
+                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,10">
+                        <TextBlock Text="类型" VerticalAlignment="Center" Foreground="#7F93A4" Margin="0,0,4,0"/>
+                        <ComboBox x:Name="TypeFilter" Width="110" Height="28" SelectionChanged="Filter_Changed"/>
+                        <TextBlock Text="状态" VerticalAlignment="Center" Foreground="#7F93A4" Margin="8,0,4,0"/>
+                        <ComboBox x:Name="StateFilter" Width="100" Height="28" SelectionChanged="Filter_Changed"/>
+                        <TextBlock Text="Path ID" VerticalAlignment="Center" Foreground="#7F93A4" Margin="8,0,4,0"/>
+                        <TextBox x:Name="PathIdFilter" Width="80" Height="28" VerticalContentAlignment="Center" TextChanged="SearchBox_TextChanged"/>
+                        <TextBlock Text="Type ID" VerticalAlignment="Center" Foreground="#7F93A4" Margin="8,0,4,0"/>
+                        <TextBox x:Name="TypeIdFilter" Width="60" Height="28" VerticalContentAlignment="Center" TextChanged="SearchBox_TextChanged"/>
+                        <TextBlock Text="最小 KB" VerticalAlignment="Center" Foreground="#7F93A4" Margin="8,0,4,0"/>
+                        <TextBox x:Name="MinSizeFilter" Width="60" Height="28" VerticalContentAlignment="Center" TextChanged="SearchBox_TextChanged"/>
+                        <TextBlock Text="最大 KB" VerticalAlignment="Center" Foreground="#7F93A4" Margin="8,0,4,0"/>
+                        <TextBox x:Name="MaxSizeFilter" Width="60" Height="28" VerticalContentAlignment="Center" TextChanged="SearchBox_TextChanged"/>
+                        <CheckBox x:Name="ReplacedOnlyFilter" Content="仅已替换" VerticalAlignment="Center" Margin="10,0,0,0" Checked="Filter_Changed" Unchecked="Filter_Changed"/>
+                        <Button Content="清除筛选" Click="ClearFilters_Click" Margin="10,0,0,0" Padding="10,3"/>
                     </StackPanel>
                     <ListView x:Name="AssetList" Background="#11151A" BorderBrush="#2A3540" Foreground="#E8EDF2" SelectionChanged="AssetList_SelectionChanged">
                         <ListView.View>

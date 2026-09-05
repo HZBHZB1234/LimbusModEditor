@@ -77,6 +77,14 @@ public sealed class HelpWindow : Window
             "  大小区间（KB）与「仅已替换」开关；\n" +
             "• 「清除筛选」一键还原；筛选生效时右上角计数显示 “筛选后 / 总数”。"));
 
+        panel.Children.Add(MakeTitle("自动定位与预览"));
+        panel.Children.Add(MakeBody(
+            "• 「自动定位游戏目录」：扫描已知 Steam 库，找到含 LimbusCompany.exe 的安装目录；\n" +
+            "• 「自动建议 Unity 缓存目录」：从游戏目录与 LocalLow 推导候选，\n" +
+            "  只列出验证过含 .bundle 的目录并显示 bundle 数量，由你确认；\n" +
+            "• 「十六进制预览」：查看任意资源前 4 KiB 的 HEX 转储与 ASCII 边栏，\n" +
+            "  并显示文件大小与原始/当前哈希，便于判断未知数据再决定是否替换。"));
+
         panel.Children.Add(MakeTitle("安全边界"));
         panel.Children.Add(MakeBody(
             "• 原始资源永远保留在 sources/ 中，所有修改先记录、构建时才应用；\n" +

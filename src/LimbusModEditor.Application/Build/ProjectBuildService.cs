@@ -30,12 +30,7 @@ public sealed class ProjectBuildService
         {
             cancellationToken.ThrowIfCancellationRequested();
             var target = SafeCombine(output, edit.TargetPath);
-            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-            var temp = target + ".tmp";
-            await using (var input = File.OpenRead(edit.SourcePath!))
-            await using (var stream = File.Create(temp))
-                await input.CopyToAsync(stream, cancellationToken);
-            File.Move(temp, target, true);
+            await AtomicOutput.CopyAsync(edit.SourcePath!, target, cancellationToken);
             applied++;
         }
         diagnostics.Add($"已应用 {applied} 个文件级编辑操作。");
@@ -46,9 +41,11 @@ public sealed class ProjectBuildService
     {
         ArgumentNullException.ThrowIfNull(handler);
         ArgumentNullException.ThrowIfNull(package);
-        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outputPath))!);
-        await using var output = File.Create(outputPath);
-        await handler.ExportAsync(package, output, context with { CancellationToken = cancellationToken });
+        await AtomicOutput.WriteAsync(outputPath, async (stream, token) =>
+        {
+            await using var output = stream;
+            await handler.ExportAsync(package, output, context with { CancellationToken = token });
+        }, cancellationToken);
     }
 
     public static void ApplyCarraReplacements(CarraPackage package, ModProject project)

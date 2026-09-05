@@ -366,8 +366,7 @@ public partial class MainWindow : Window
                 ?.Metadata.GetValueOrDefault("originalSourcePath");
             var relative = GetSafeDebugRelativePath(project, original, Path.GetFileName(bundle.OutputPath));
             var target = Path.Combine(overlay, relative);
-            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-            File.Copy(bundle.OutputPath, target, true);
+            await LimbusModEditor.Application.Build.AtomicOutput.CopyAsync(bundle.OutputPath, target);
         }
         return bundles.Sum(x => x.AppliedAssets);
     }
@@ -383,8 +382,7 @@ public partial class MainWindow : Window
                 ?.Metadata.GetValueOrDefault("originalSourcePath");
             var relative = GetSafeDebugRelativePath(project, original, Path.GetFileName(file.OutputPath));
             var target = Path.Combine(overlay, relative);
-            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-            File.Copy(file.OutputPath, target, true);
+            await LimbusModEditor.Application.Build.AtomicOutput.CopyAsync(file.OutputPath, target);
         }
         return files.Sum(x => x.AppliedAssets);
     }

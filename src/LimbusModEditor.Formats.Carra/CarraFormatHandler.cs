@@ -24,11 +24,19 @@ public sealed class CarraFormatHandler : IModFormatHandler
             {
                 LogicalPath = entry.Key.LogicalPath,
                 ContainerPath = entry.SourcePath,
+                // Field-name caveat (kept for key round-trip): the "Account"
+                // segment is really the Unity cache OUTER key (a 32-hex
+                // directory name), not a player account, and the trailing
+                // ".<typeIdx>" is the target SerializedFile's TYPE TABLE index
+                // (verified against LimbusModLoader's patch.py:287-301), not a
+                // global Unity class ID. Without the target bundle the real
+                // class cannot be resolved, so imported objects surface as
+                // Binary instead of pretending to know better.
                 Account = entry.Key.Account,
                 Bundle = entry.Key.Bundle,
                 UnityPathId = entry.Key.PathId,
                 UnityTypeId = entry.Key.TypeId,
-                Type = MapAssetType(entry.Key.TypeId),
+                Type = AssetType.Binary,
                 Size = entry.CompressedData.LongLength
             });
         }
@@ -55,16 +63,4 @@ public sealed class CarraFormatHandler : IModFormatHandler
             data => CarraCodec.EncodeOrThrow(data, codec));
         return Task.CompletedTask;
     }
-
-    private static AssetType MapAssetType(int? typeId) => typeId switch
-    {
-        1 => AssetType.GameObject,
-        28 => AssetType.Texture,
-        83 => AssetType.Audio,
-        114 => AssetType.MonoBehaviour,
-        115 => AssetType.MonoScript,
-        128 => AssetType.Font,
-        213 => AssetType.Sprite,
-        _ => AssetType.Binary
-    };
 }

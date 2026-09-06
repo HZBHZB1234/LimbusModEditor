@@ -35,7 +35,7 @@ public sealed class UnityCachePickerWindow : Window
         foreach (var candidate in candidates)
             list.Items.Add(new ListBoxItem
             {
-                Content = $"{candidate.BundleCount,4} 个 bundle — {candidate.Path}",
+                Content = $"{candidate.EntryCount,4} 个缓存条目 — {candidate.Path}",
                 Tag = candidate
             });
         var ok = new Button { Content = "使用所选目录", Padding = new Thickness(14, 5, 14, 5), IsDefault = true, IsEnabled = false };

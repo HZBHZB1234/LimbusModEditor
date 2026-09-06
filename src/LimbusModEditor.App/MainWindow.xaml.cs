@@ -229,7 +229,7 @@ public partial class MainWindow : Window
             if (picker.ShowDialog() != true || picker.Selected is null) return;
             _project.UnityCacheDirectory = picker.Selected.Path;
             await _projects.SaveAsync(_project, _projectFile);
-            StatusText.Text = $"已设置 Unity 缓存目录：{picker.Selected.Path}（含 {picker.Selected.BundleCount} 个 bundle）";
+            StatusText.Text = $"已设置 Unity 缓存目录：{picker.Selected.Path}（含 {picker.Selected.EntryCount} 个缓存条目）";
         }
         catch (Exception ex) { ShowError("自动建议 Unity 缓存目录失败", ex); }
     }

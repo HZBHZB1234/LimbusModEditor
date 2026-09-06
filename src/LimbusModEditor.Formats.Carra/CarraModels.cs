@@ -3,6 +3,12 @@ using SharpCompress.Compressors.Xz;
 
 namespace LimbusModEditor.Formats.Carra;
 
+/// <summary>One Carra2 entry key: "<outer>/<bundle>/<pathId>[.<typeIdx>]".
+/// Per the real loader (LimbusModLoader patch.py), <paramref name="Account"/>
+/// is the Unity cache OUTER key (a 32-hex directory, stable across game
+/// versions, unrelated to player accounts), <paramref name="Bundle"/> the
+/// inner cache key, and <paramref name="TypeId"/> — when present — the
+/// target SerializedFile's TYPE TABLE index, never a global Unity class ID.</summary>
 public sealed record CarraObjectKey(string Account, string Bundle, long PathId, int? TypeId)
 {
     public string LogicalPath => TypeId is null

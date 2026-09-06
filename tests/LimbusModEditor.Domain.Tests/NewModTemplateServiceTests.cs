@@ -3,7 +3,6 @@ using LimbusModEditor.Application.Projects;
 using LimbusModEditor.Domain.Formats;
 using LimbusModEditor.Formats.Abstractions;
 using LimbusModEditor.Formats.Carra;
-using LimbusModEditor.Formats.Rebank;
 
 namespace LimbusModEditor.Domain.Tests;
 
@@ -40,29 +39,36 @@ public class NewModTemplateServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task Creates_rebank_template_with_declared_base_bank()
+    public async Task Empty_rebank_template_is_withdrawn_like_the_real_loader_judges_it()
     {
+        // LCTA's launcher (bankmod.py:189-198) treats a rebank with zero
+        // matching wavs as an error and rolls the install back, so the wizard
+        // must not scaffold one.
         var service = new NewModTemplateService(new ProjectService());
-        var result = await service.CreateAsync(
-            new NewModTemplateRequest("AudioMod", "1.0", "a", "d", ModFormatKind.Rebank, BaseBank: "common.bank"), _root);
+        var ex = await Assert.ThrowsAsync<NotSupportedException>(() => service.CreateAsync(
+            new NewModTemplateRequest("AudioMod", "1.0", "a", "d", ModFormatKind.Rebank, BaseBank: "common.bank"), _root));
+        Assert.Contains("Rebank", ex.Message);
 
-        Assert.True(File.Exists(result.TemplateFile));
-        var payload = RebankArchive.Read(File.OpenRead(result.TemplateFile));
-        Assert.Equal("common.bank", payload.Metadata["base_bank"].GetString());
-        Assert.Empty(payload.Files);
-
-        var validation = await new RebankFormatHandler().ValidateAsync(
-            new ModPackage { SourceFormat = ModFormatKind.Rebank, Payload = payload });
-        Assert.True(validation.IsValid);
-        Assert.DoesNotContain(validation.Diagnostics, d => d.Code == "REBANK_BASE");
+        var templates = NewModTemplateService.SupportedTemplates();
+        var rebank = templates.Single(t => t.Kind == ModFormatKind.Rebank);
+        Assert.NotNull(rebank.UnavailableReason);
+        Assert.Contains("回滚", rebank.UnavailableReason);
     }
 
     [Fact]
-    public async Task Rebank_requires_base_bank_and_unknown_templates_are_refused()
+    public async Task Base_bank_must_be_a_plain_file_name()
     {
         var service = new NewModTemplateService(new ProjectService());
         await Assert.ThrowsAsync<InvalidDataException>(() => service.CreateAsync(
-            new NewModTemplateRequest("X", "1", "a", "d", ModFormatKind.Rebank), _root));
+            new NewModTemplateRequest("X", "1", "a", "d", ModFormatKind.Carra2, BaseBank: "..\\evil.bank"), _root));
+        await Assert.ThrowsAsync<InvalidDataException>(() => service.CreateAsync(
+            new NewModTemplateRequest("X", "1", "a", "d", ModFormatKind.Carra2, BaseBank: "C:\\evil.bank"), _root));
+    }
+
+    [Fact]
+    public async Task Unknown_templates_are_refused()
+    {
+        var service = new NewModTemplateService(new ProjectService());
         await Assert.ThrowsAsync<NotSupportedException>(() => service.CreateAsync(
             new NewModTemplateRequest("X", "1", "a", "d", ModFormatKind.Lunartique), _root));
     }

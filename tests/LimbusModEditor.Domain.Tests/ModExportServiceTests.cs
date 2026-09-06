@@ -40,4 +40,37 @@ public class ModExportServiceTests
         }
         finally { Directory.Delete(root, true); }
     }
+
+    [Fact]
+    public async Task Export_reports_cache_alignment_for_mismatched_outer_keys()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "lme-align-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var source = Path.Combine(root, "source.carra2");
+        var output = Path.Combine(root, "out.carra2");
+        try
+        {
+            // two keys: one whose outer key exists in the fake cache with the
+            // bundle present, one that points at a vanished (updated-away) key
+            await using (var file = File.Create(source))
+            using (var archive = new ZipArchive(file, ZipArchiveMode.Create))
+            {
+                using (var present = archive.CreateEntry("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/1.0").Open())
+                    present.Write([1]);
+                using (var missing = archive.CreateEntry("ffffffffffffffffffffffffffffffff/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/2.1").Open())
+                    missing.Write([2]);
+            }
+            // fake Unity cache with only the first (outer, inner) present
+            var cache = Path.Combine(root, "cache", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            Directory.CreateDirectory(cache);
+            await File.WriteAllBytesAsync(Path.Combine(cache, "__data"), [0]);
+            var project = new ModProject { UnityCacheDirectory = Path.Combine(root, "cache") };
+            var result = await new ModExportService(BuiltInFormatRegistry.Create()).ExportWithEditsAsync(source, project, output);
+            var alignment = result.Diagnostics.Where(x => x.StartsWith("缓存对齐", StringComparison.Ordinal)).ToArray();
+            Assert.Single(alignment);
+            Assert.Contains("ffffffffffffffffffffffffffffffff", alignment[0]);
+            Assert.DoesNotContain(alignment, x => x.Contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", StringComparison.Ordinal));
+        }
+        finally { Directory.Delete(root, true); }
+    }
 }

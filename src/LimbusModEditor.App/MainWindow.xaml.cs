@@ -278,6 +278,28 @@ public partial class MainWindow : Window
         await SetProjectDirectoryAsync(value => _project!.UnityCacheDirectory = value, "选择 Unity 缓存目录");
     }
 
+    /// <summary>自动获取资源地址：suggest the mods root directory that the real
+    /// loader (LCTA launcher) manages — %APPDATA%\LimbusCompanyMods.</summary>
+    private async void AutoSuggestModDirectory_Click(object sender, RoutedEventArgs e)
+    {
+        if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }
+        try
+        {
+            var candidates = LimbusModEditor.Application.Debugging.ModDirectoryLocator.SuggestCandidates();
+            if (candidates.Count == 0)
+            {
+                MessageBox.Show(this, "未找到真实加载器使用的模组目录（%APPDATA%\\LimbusCompanyMods）。\n请手动选择模组目录。", "自动建议失败", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+            var chosen = candidates[0];
+            var entries = LimbusModEditor.Application.Debugging.ModDirectoryLocator.CountEntries(chosen);
+            _project.ModDirectory = chosen;
+            await _projects.SaveAsync(_project, _projectFile);
+            StatusText.Text = $"已自动建议模组目录：{chosen}（含 {entries} 个条目）";
+        }
+        catch (Exception ex) { ShowError("自动建议模组目录失败", ex); }
+    }
+
     private async void SetModDirectory_Click(object sender, RoutedEventArgs e)
     {
         await SetProjectDirectoryAsync(value => _project!.ModDirectory = value, "选择模组安装目录");

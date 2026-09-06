@@ -92,6 +92,12 @@ public sealed class ModExportService(FormatRegistry registry)
         var (applied, assetStatuses) = await ApplyReplacementsAsync(package, project, codec as IFmodAudioCodec, cancellationToken);
         var validation = await handler.ValidateAsync(package, cancellationToken);
         if (validation.Diagnostics.Any(x => x.Severity == DiagnosticSeverity.Error)) throw new InvalidDataException(string.Join("; ", validation.Diagnostics.Select(x => x.Message)));
+        // 真实加载器（LCTA launcher）按缓存外层键匹配 Carra 对象；游戏更新会
+        // 更换缓存外层键，旧键的模组会被静默跳过。导出时若配置了缓存目录，
+        // 逐外层键核对缓存中是否仍有对应 bundle，把失配写进导出诊断。
+        var alignment = format is ModFormatKind.Carra or ModFormatKind.Carra2 && package.Payload is CarraPackage carra
+            ? CheckCarraCacheAlignment(carra, project.UnityCacheDirectory).ToArray()
+            : [];
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outputPath))!);
         var effectiveCodec = codec;
         if (effectiveCodec is null && format is ModFormatKind.Carra or ModFormatKind.Carra2) effectiveCodec = new JovelerXzCodec();
@@ -101,7 +107,33 @@ public sealed class ModExportService(FormatRegistry registry)
             await using var output = stream;
             await handler.ExportAsync(package, output, new(format, true, true, token, effectiveCodec));
         }, cancellationToken);
-        return new(format, outputFullPath, applied, validation.Diagnostics.Select(x => x.Message).ToArray(), assetStatuses);
+        var finalDiagnostics = validation.Diagnostics.Select(x => x.Message)
+            .Concat(alignment.Select(x => $"缓存对齐：{x}"))
+            .ToArray();
+        return new(format, outputFullPath, applied, finalDiagnostics, assetStatuses);
+    }
+
+    /// <summary>真实加载器按 Carra2 键的第一段（Unity 缓存外层键）在
+    /// &lt;缓存根&gt;/&lt;外层&gt;/&lt;内层&gt;/__data 定位目标 bundle。本检查
+    /// 对每个外层键核对缓存中仍存在对应 bundle；缺失即游戏更新后该键已更换，
+    /// 加载器会静默跳过这些对象 —— 作为导出诊断给出，而不是静默成功。</summary>
+    private static IEnumerable<string> CheckCarraCacheAlignment(CarraPackage package, string? cacheDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(cacheDirectory) || !Directory.Exists(cacheDirectory)) yield break;
+        foreach (var group in package.Entries.GroupBy(x => x.Key.Account, StringComparer.Ordinal))
+        {
+            var outerDir = Path.Combine(cacheDirectory, group.Key);
+            if (!Directory.Exists(outerDir))
+            {
+                yield return $"外层键 {group.Key} 不在配置的缓存目录中（游戏可能已更新），这些对象将无法被加载器匹配";
+                continue;
+            }
+            foreach (var inner in group.Select(x => x.Key.Bundle).Distinct(StringComparer.Ordinal).Take(4))
+            {
+                if (!File.Exists(Path.Combine(outerDir, inner, "__data")))
+                    yield return $"bundle {inner} 不在缓存 {group.Key} 下（游戏可能已更新），相关对象将无法被匹配";
+            }
+        }
     }
 
     private IModFormatHandler FindHandler(ModFormatKind format)

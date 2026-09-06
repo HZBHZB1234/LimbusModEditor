@@ -33,6 +33,14 @@ public partial class MainWindow : Window
     private ModProject? _project;
     private string? _projectFile;
 
+    /// <summary>Current project (nullable). Exposed for the settings window.</summary>
+    public ModProject? Project => _project;
+    public string? ProjectFile => _projectFile;
+
+    /// <summary>Re-reads directory fields into the left-panel labels after the
+    /// settings window saves.</summary>
+    public void RefreshDirectoryLabels() => RefreshProjectState("设置已保存");
+
     public MainWindow() => InitializeComponent();
 
     private async void NewProject_Click(object sender, RoutedEventArgs e)
@@ -65,7 +73,17 @@ public partial class MainWindow : Window
         {
             _project = await _projects.LoadAsync(wizard.Result.ProjectFile);
             _projectFile = wizard.Result.ProjectFile;
-            RefreshProjectState("已通过向导创建项目");
+            // 无感自动化（同打开项目）：目录缺失时自动定位真实安装。
+            var autoReport = await Task.Run(() => LimbusModEditor.Application.Debugging.ProjectAutoConfigureService.Apply(_project));
+            if (autoReport.Any)
+            {
+                await _projects.SaveAsync(_project, _projectFile);
+                RefreshProjectState($"已通过向导创建项目，并自动配置：{autoReport.Describe()}");
+            }
+            else
+            {
+                RefreshProjectState("已通过向导创建项目");
+            }
         }
         catch (Exception ex) { ShowError("打开新建项目失败", ex); }
     }
@@ -78,7 +96,18 @@ public partial class MainWindow : Window
         {
             _project = await _projects.LoadAsync(dialog.FileName);
             _projectFile = dialog.FileName;
-            RefreshProjectState("已打开项目");
+            // 无感自动化：缺失的目录自动从真实安装定位（游戏/缓存/模组），
+            // 用户手动设置过的值不会被覆盖。
+            var autoReport = await Task.Run(() => LimbusModEditor.Application.Debugging.ProjectAutoConfigureService.Apply(_project));
+            if (autoReport.Any)
+            {
+                await _projects.SaveAsync(_project, _projectFile);
+                RefreshProjectState($"已打开项目，并自动配置：{autoReport.Describe()}");
+            }
+            else
+            {
+                RefreshProjectState("已打开项目");
+            }
         }
         catch (Exception ex) { ShowError("打开项目失败", ex); }
     }
@@ -172,6 +201,53 @@ public partial class MainWindow : Window
             new ExportReportWindow(result) { Owner = this }.ShowDialog();
         }
         catch (Exception ex) { ShowError("导出模组失败", ex); }
+    }
+
+    /// <summary>导出全部（多格式项目）：a standard project mixes Unity-bundle
+    /// edits (Carra2) and audio edits (Bank/Rebank); each registered source is
+    /// exported to its own format into the chosen directory.</summary>
+    private async void ExportAll_Click(object sender, RoutedEventArgs e)
+    {
+        if (_project is null) { StatusText.Text = "请先创建或打开项目"; return; }
+        if (!_project.Sources.Any())
+        {
+            MessageBox.Show(this, "项目还没有登记任何源模组。\n请先「导入资源包」再导出。", "导出全部", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            CheckFileExists = false,
+            ValidateNames = false,
+            FileName = "选择此文件夹",
+            Title = "选择导出输出目录"
+        };
+        if (dialog.ShowDialog() != true) return;
+        var directory = Path.GetDirectoryName(dialog.FileName);
+        if (string.IsNullOrWhiteSpace(directory)) return;
+        try
+        {
+            using NativeFmodAudioCodec? nativeCodec = !string.IsNullOrWhiteSpace(_project.FmodLibraryDirectory) && Directory.Exists(_project.FmodLibraryDirectory)
+                ? new NativeFmodAudioCodec(_project.FmodLibraryDirectory) : null;
+            var result = await _exporter.ExportAllAsync(_project, directory, nativeCodec);
+            StatusText.Text = $"导出全部完成：成功 {result.SucceededCount}，失败 {result.FailedCount} → {directory}";
+            new MultiExportReportWindow(result, directory) { Owner = this }.ShowDialog();
+        }
+        catch (Exception ex) { ShowError("导出全部失败", ex); }
+    }
+
+    /// <summary>设置（二级窗口）：集中修改目录与元数据；日常自动获取，
+    /// 手动调整在这里。</summary>
+    private void ProjectSettings_Click(object sender, RoutedEventArgs e)
+    {
+        if (_project is null) { StatusText.Text = "请先创建或打开项目"; return; }
+        new ProjectSettingsWindow(this, _ => _projectFile is not null && SaveProjectInternal()) { Owner = this }.ShowDialog();
+    }
+
+    private bool SaveProjectInternal()
+    {
+        if (_project is null || _projectFile is null) return false;
+        _projects.SaveAsync(_project, _projectFile).GetAwaiter().GetResult();
+        return true;
     }
 
     /// <summary>P3.3 工作流: batch-register replacements from a folder, matching

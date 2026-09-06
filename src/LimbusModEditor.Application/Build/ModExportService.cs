@@ -22,9 +22,87 @@ public sealed record ModExportResult(
         : this(format, outputPath, appliedReplacements, diagnostics, []) { }
 }
 
+/// <summary>One per-source outcome of a multi-format (导出全部) run.</summary>
+public sealed record MultiFormatExportItem(
+    string SourceName,
+    ModFormatKind Format,
+    bool Succeeded,
+    string? OutputPath,
+    string? Error,
+    ModExportResult? Result);
+
+/// <summary>Aggregated outcome of exporting every registered source of a
+/// multi-format project (a standard Limbus project mixes Unity-bundle edits
+/// (Carra2) and audio edits (Bank/Rebank) and exports each to its own format).
+/// </summary>
+public sealed record MultiFormatExportResult(IReadOnlyList<MultiFormatExportItem> Items)
+{
+    public int SucceededCount => Items.Count(x => x.Succeeded);
+    public int FailedCount => Items.Count(x => !x.Succeeded);
+}
+
 /// <summary>Builds a portable package from project sources and replacements.</summary>
 public sealed class ModExportService(FormatRegistry registry)
 {
+    /// <summary>Canonical output extension per format (mirrors the export
+    /// wizard's mapping).</summary>
+    public static string ExtensionFor(ModFormatKind kind) => kind switch
+    {
+        ModFormatKind.Carra => ".carra",
+        ModFormatKind.Carra2 => ".carra2",
+        ModFormatKind.Rebank => ".rebank",
+        ModFormatKind.Bank => ".bank",
+        ModFormatKind.Lunartique => ".zip",
+        _ => ".bin"
+    };
+
+    /// <summary>导出全部（多格式项目）：a standard project may hold Unity-bundle
+    /// edits and bank edits at once. Each registered file source is exported to
+    /// its own registered format; failures are collected per source instead of
+    /// aborting the whole run. Directory sources are skipped (they need an
+    /// interactive target-format choice).</summary>
+    public async Task<MultiFormatExportResult> ExportAllAsync(ModProject project, string outputDirectory,
+        object? codec = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(project);
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
+        Directory.CreateDirectory(outputDirectory);
+        var items = new List<MultiFormatExportItem>();
+        foreach (var source in project.Sources)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var name = string.IsNullOrWhiteSpace(source.DisplayName) ? Path.GetFileNameWithoutExtension(source.Path) : source.DisplayName;
+            if (source.Format is ModFormatKind.Unknown or ModFormatKind.Directory)
+            {
+                items.Add(new MultiFormatExportItem(name, source.Format, false, null, "该来源没有可自动选择的导出格式（目录来源请在导出向导中手动选择目标格式）。", null));
+                continue;
+            }
+            if (string.IsNullOrWhiteSpace(source.Path) || !File.Exists(source.Path))
+            {
+                items.Add(new MultiFormatExportItem(name, source.Format, false, null, "源文件不存在。", null));
+                continue;
+            }
+            var output = Path.Combine(outputDirectory, SanitizeFileName(name) + ExtensionFor(source.Format));
+            try
+            {
+                var result = await ExportWithEditsAsync(source.Path, project, output, source.Format, codec, cancellationToken);
+                items.Add(new MultiFormatExportItem(name, source.Format, true, result.OutputPath, null, result));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                items.Add(new MultiFormatExportItem(name, source.Format, false, null, ex.Message, null));
+            }
+        }
+        return new MultiFormatExportResult(items);
+    }
+
+    private static string SanitizeFileName(string name)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var cleaned = new string(name.Trim().Select(c => invalid.Contains(c) ? '_' : c).ToArray());
+        return string.IsNullOrWhiteSpace(cleaned) ? "export" : cleaned;
+    }
+
     public async Task<ModExportResult> ExportWithEditsAsync(string? sourcePackagePath, ModProject project, string outputPath, ModFormatKind? targetFormat = null, object? codec = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(project);

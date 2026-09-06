@@ -25,6 +25,7 @@
 | 合成 PE 导出数组与目录字段重叠、可选头布局错位 | 测试构造器字段偏移错误 | 重排布局：目录 40 字节之外再放函数/名称/序号数组；NumberOfRvaAndSizes 为 uint32 且位于偏移 108 |
 | `Probe_cache` 测试名字串写到游标终点而非起点 | RVAs 指向全零区 | 记录 `stringsStart` 并从该处写入 |
 | T1 真实写回验证发现所有 bundle 写回的修改被静默丢弃（重打包成功但内容不变） | AssetsTools.NET v3 的 `Pack` 只重压缩原始 `DataReader`，不处理 `SetNewData` 登记的 Replacer；旧 `WritePackedBundle` 直接 Pack | 先未压缩 `Write`（应用 Replacer）再重载并按 `originalCompression` 重打包；以真实流纹理端到端闭环覆盖（`docs/REALDATA-VERIFY.md`），此前 bundle 写回路径无任何测试 |
+| T3 首版按 staticmod.py 文档以 +0x44/+0x48 读 catalog 记录，全部 bundle 判为「与基线不符」 | CRC/大小字段位置在 catalog 格式版本间整体平移（staticmod 2026-08-22 实证为 +0x44/+0x48；2026-09-03 实测 catalog 为 +0x3C/+0x40），首版把共享常量误读为逐 bundle 记录 | 以真实数据对照确证通用布局（6 个 bundle 的实际文件大小与解压块 CRC 精确命中 +0x3C/+0x40），解析器按「大小值合理占比」双布局自校准；与 LCTA 交叉核对：名字数 1461=1461，未补丁 bundle CRC 10/10 一致 |
 
 ### 2.2 复查要点与结论
 

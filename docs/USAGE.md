@@ -142,6 +142,20 @@
 5. 所有构建输出统一经过事务写出（P0.2）：内容先写入临时文件再原子替换到目标；
    失败/取消时原文件保持不变、临时文件自动清理；目标被游戏占用时给出明确提示，
    请关闭游戏后重试。
+6. **文本模组（lang 补丁，T2）**：主窗口「文本模组（lang 补丁）…」打开
+   lang 补丁窗口。lang 根目录可「自动获取」（定位游戏目录后拼接
+   `LimbusCompany_Data/lang`）；窗口显示 config.json 中的活动语言。
+   「从目录差异生成补丁…」对比 原版目录 vs 修改目录，产出与真实加载器
+   （LCTA launcher/changes.py）兼容的 `{"patchs": {...}}` JSON——放进模组
+   目录即会被加载器在启动时应用（目标文件自动 .bak、退出还原）；修改目录
+   中多出的文件、原版有而修改目录缺失的文件会作为诊断明确报告（补丁通道
+   无法承载，绝不静默丢弃）。「应用补丁到 lang 目录…」把补丁就地写回
+   lang 目录（目标缺失的条目按真实加载器行为跳过并报告）。
+7. **vanilla 基线判定（T3）**：导入 bundle 时，若项目已设置游戏目录且其中
+   有官方 catalog（`StreamingAssets/aa/catalog.bin`），编辑器会只读解析
+   catalog 并判定该 bundle 相对 vanilla 的状态（vanilla 一致 / 与基线不符 /
+   不在 catalog / 基线未知），写入资源列表「vanilla 基线」列并出现在导入
+   诊断中。「与基线不符」通常意味着该缓存 bundle 已被模组补丁改写过。
 
 ## 6.1 资源筛选（P3.3）
 
@@ -179,6 +193,13 @@ dotnet test LimbusModEditor.slnx --no-restore
 Bank 探测、图像/图集操作、覆盖层备份/恢复、Unity 字段树与编辑校验、依赖解析、
 引用者扫描、指针语义校验与重写后引用完整性验证，以及本轮的 FMOD DLL 探测
 （合成 PE）、导出兼容性矩阵、资源搜索筛选与事务写出（锁定/取消/失败清理）。
+
+本轮新增：T1 真实写回链路验证（见 9.1）、RFC6902 文本补丁语义
+（`TextDiffServiceTests`，生成→应用→回读相等与非法补丁 fail fast）、
+lang 补丁文档与真实 lang 目录验证（`LangTextPatchServiceTests`）、
+catalog 解析与 vanilla 基线判定（`CatalogBaselineTests`，合成样本按记录区
+布局构造 + 真实 catalog 数量级门控；名字数与 LCTA 输出一致 1461=1461，
+未补丁 bundle 的解压 CRC 与 catalog 记录交叉核对 10/10 一致）。
 
 ### 9.1 写回链路真实数据验证（T1）
 

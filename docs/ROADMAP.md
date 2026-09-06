@@ -17,6 +17,11 @@
 - Unity Texture2D RGB24、RGBA32/BGRA32、DXT1、DXT5 PNG 预览/替换。
 - Unity Bundle 与独立 `.assets` 的对象索引、对象替换、Sprite 元数据编辑。
 - Unity 对象基础字段树读取，以及布尔/整数/浮点/字符串字段修改记录。
+- lang 文本模组通道：RFC6902 差分补丁的生成/应用（`TextDiffService`）与
+  真实加载器兼容的 `patchs` 文档读写（`LangTextPatchService`），主窗口
+  「文本模组（lang 补丁）…」入口。
+- 官方 catalog（catalog.bin/catalog_S1.bin）只读解析与 vanilla 基线判定：
+  导入 bundle 时自动判定相对 vanilla 是否被修改/新增，资源列表展示。
 - 图像预览、图集拆分/恢复、文本/JSON 编辑、资源替换记录。
 - 用户提供合法 FMOD/FSBank DLL 后的 FSB↔WAV 工作流。
 - Debug overlay 备份、应用、失败回滚、冲突保护和游戏启动。
@@ -49,6 +54,10 @@ Carra2 模组（3898 对象），并建立了随测试套件运行的真实样�
 2. ✅ 真实 Texture2D：像素存于 `m_StreamData`（`archive:/CAB-xxx.resS`
    容器内资源流）——`ReadTexture` 已支持 .resS 解析（6 个真实纹理像素读取
    成功）；`ReplaceTextureFromPng` 写回内联像素后清空 `m_StreamData`。
+   **T1（2026-09-06）端到端写回闭环已达成**：真实流纹理 PNG 替换 → 重打包
+   引用校验 → 真实 Carra2 结构导出/重导入 → 已安装进真实模组目录；过程中
+   发现并修复了「`Pack` 路径丢弃 Replacer」的严重写回缺陷
+   （详见 `docs/REALDATA-VERIFY.md`）。
 3. ✅ 真实 Carra2：条目键 `<缓存外层键>/<bundleHash>/<pathId>.<类型表索引>`
    实测（typeIdx 0..82，与全局类 ID 不同语义），逐条目 XZ，含 `carra.json`
    标记文件；往返保持逐字节一致。导入层已把 typeIdx 按 Binary 呈现
@@ -291,6 +300,22 @@ Lunartique→对象级 Carra/目录来源支持，其余禁用并给出原因）
 经典十六进制转储（偏移/HEX/ASCII 边栏）+ 文件大小 + 原始/当前哈希，优先显示
 替换后内容。结构化字段树（P1.1）与图片 PNG 预览此前已有；原图/修改后对比、
 波形显示仍待后续。
+
+### P3.5 lang 文本模组通道与 vanilla 基线（T2/T4/T3，2026-09-06 初版达成）
+
+- **lang 文本模组（T2/T4）**：真实加载器（LCTA launcher/changes.py）的
+  RFC6902 补丁通道已接入——`TextDiffService`（RFC6902 生成/应用，fail fast
+  中文报错）+ `LangTextPatchService`（patchs 文档读写、活动语言读取、目录
+  差分生成、应用回 lang 目录，新增/缺失文件明确诊断）。UI 入口「文本模组
+  （lang 补丁）…」。真实 lang 目录的「读→改→差分→应用→回读相等」已随测试
+  验证。后续：补丁内直接编辑操作的可视化 diff 视图。
+- **vanilla 基线（T3）**：官方 catalog 只读解析（名字数与 LCTA 输出完全一致
+  1461=1461）+ 缓存 bundle 基线判定（解压块 CRC32 口径与 LCTA
+  `bundle_decompressed_crc` 交叉核对 10/10 一致）。实测记录区的 CRC/大小字段
+  在格式版本间整体平移（2026-08-22 为 +0x44/+0x48，2026-09-03 为 +0x3C/
+  +0x40），解析器按「大小值合理占比」双布局自校准。导入 bundle 时自动判定
+  并在资源列表「vanilla 基线」列展示。后续：catalog 依赖图（bundle 间
+  依赖关系）展示与失配诊断整合。
 
 ## P4：工程质量和交付
 

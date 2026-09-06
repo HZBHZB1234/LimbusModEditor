@@ -9,9 +9,12 @@
 LimbusModEditor（C#/.NET 8 + WPF，Windows x64，AssetsTools.NET 3.0.5 适配层）已能：
 真实游戏数据读取验证（1459 个真实 bundle + 1531 个真实 .bank + 真实 Carra2 模组）、
 Carra2/Rebank/Lunartique/Bank 四格式导入导出、真实 Texture2D `.resS` 流读写、
-多格式项目导出、目录无感自动化、模组目录管理（`_disable` 约定）。
+多格式项目导出、目录无感自动化、模组目录管理（`_disable` 约定）、
+**真实写回闭环（T1：纹理替换→Carra2 导出→已装模组目录，含重大写回缺陷修复）**、
+**lang 文本模组通道（T2/T4：RFC6902 差分，与 LCTA changes.py 兼容）**、
+**官方 catalog 只读解析 + vanilla 基线判定（T3，CRC 口径与 LCTA 交叉验证一致）**。
 
-**当前基线：168 个测试全绿**（60 Format + 108 Domain）。最近一次提交 `367f87a`。
+**当前基线：197 个测试全绿**（61 Format + 136 Domain）。最近提交 `e4b4e4f`。
 
 基线命令（每轮开始和结束都必须跑）：
 
@@ -53,63 +56,59 @@ dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r 
 | 纹理格式 | 实测 RGBA32(4)/DXT5(12)/DXT1(10)/RGB24(3)/R8(29)，全部已实现 | 无 BC7/ASTC |
 | 纹理像素 | 存在 `m_StreamData`（`archive:/CAB-xxx.resS` 容器内流），内联数组为空 | 已实现 resS 读写 |
 
-## 3. 本轮（最近一轮）已完成
+## 3. 本轮（2026-09-06）已完成
 
-目标原文：「一个项目不一定只有一种格式。一个标准的项目格式应该是包含 bundle 文件修改
-以及 bank 文件修改的文件，在导出时在选择不同的格式导出。同时，尝试自动化获取各种目录，
-无感的自动化可以自动化的操作，如需修改则在设置的二级窗口中修改。」
+本轮按上一节交接任务顺序完成了 T1/T2/T3/T4（T5 持续）：
 
-- **多格式项目导出**：`ModExportService.ExportAllAsync`（`src/LimbusModEditor.Application/Build/ModExportService.cs`）
-  按 `ModProject.Sources` 中每个已登记来源（各自 Format）导出到各自扩展名
-  （`ExtensionFor`：.carra2/.rebank/.bank/.zip）；逐来源收集失败（源文件缺失、目录来源
-  需交互选择目标格式）；`MultiFormatExportResult` + `MultiExportReportWindow` 报告，
-  主窗口「导出全部（多格式）」按钮。
-- **设置二级窗口**：`ProjectSettingsWindow`（`src/LimbusModEditor.App/ProjectSettingsWindow.cs`）
-  集中修改 游戏目录/Unity 缓存/模组目录/FMOD DLL + 模组元数据（名称/版本/作者/描述）+
-  调试行为（RestoreDebugFilesOnClose），每行带「自动获取」按钮；主窗口「项目设置…」。
-- **无感自动化**：`ProjectAutoConfigureService.Apply`（`src/LimbusModEditor.Application/Debugging/ProjectAutoConfigureService.cs`）
-  打开/新建项目时**只填充从未设置过的**目录（游戏/缓存/模组），用户设置过的值永不覆盖，
-  FMOD 目录从不自动填；状态行提示自动配置了什么。
-- 测试：`MultiFormatExportTests`（3）、`ProjectAutoConfigureTests`（3，含真实机器门控）。
+- **T1 写回闭环**：`RealWriteBackTests`（真实样本驱动）+ 新增后端 API
+  `ReadBundleSerializedObject`（bundle 内对象原始字节 + 类型表索引，Carra2
+  键所需）；修复 `WritePackedBundle` 重大缺陷；报告 `docs/REALDATA-VERIFY.md`。
+- **T2/T4 lang 文本模组**：`src/LimbusModEditor.Application/Texts/`
+  （`TextDiffService` + `LangTextPatchService`）、UI `LangTextModWindow`、
+  测试 22 个。
+- **T3 catalog 基线**：`src/LimbusModEditor.Application/Catalog/`
+  （`CatalogFileService` + `CatalogBaselineService`）、导入自动判定 +
+  资源列表「vanilla 基线」列、测试 6 个。
+- 测试基线 168 → 197（61 Format + 136 Domain）。
 
 ## 4. 下一步明确任务（按优先级，每项含验收标准）
 
-### T1（P0）写回后在真实游戏中的验证 —— 目前唯一未被真实数据覆盖的链路
-- 现状：读取/解析/重建全部有真实样本验证；**写回后由游戏实际加载**从未验证。
-- 任务：做一个含真实纹理替换（或 Sprite 元数据编辑）的端到端流程：
-  1) 从真实 bundle 取一个 Texture2D（m_StreamData 流纹理），`ReplaceTextureFromPng`
-     写回（内联像素 + 清 m_StreamData）→ 产出新 bundle；
-  2) 用真实模组结构（carra2 或 Lunartique）承载 → 导出；
-  3) 放入 `%APPDATA%\LimbusCompanyMods`，让用户启动游戏验证；
-  4) 写一份「写回验证报告」（`docs/REALDATA-VERIFY.md`）。
-- 验收：至少一个真实 bundle 对象完成 读→改→写→（用户）游戏内确认；报告记录
-  bundle 前后哈希、重打包后 `VerifyBundleReferences` 通过、游戏内可见变化。
-- 注意：写回产物不要覆盖游戏缓存原件；先在副本上验证。
+### T1（P0）✅ 已完成（2026-09-06）——写回后在真实游戏中的验证
+- 端到端闭环已达成：真实流纹理 `Fx_T_Shape_LineFlash_01`（128×128 DXT1）
+  PNG 替换 → 内联像素 + 清 m_StreamData → 重打包 `VerifyBundleReferences`
+  通过 → 真实 Carra2 结构导出（键=外层/内层/pathId.类型表索引）→ 重新导入
+  逐字节还原 → 已安装 `%APPDATA%\LimbusCompanyMods\LME-写回验证-5e6bda62.carra2`。
+- **唯一待办：用户启动游戏做游戏内确认**（战斗特效中的线条闪光应变纯白）；
+  报告与卸载步骤见 `docs/REALDATA-VERIFY.md`。
+- 验证中修复重大缺陷：`Pack` 路径丢弃 Replacer（此前所有 bundle 写回的修改
+  都会被静默丢弃），详见 `docs/REVIEW.md` 与 REALDATA-VERIFY §4。
 
-### T2（P1）文本模组通道（lang JSON + RFC6902）
-- LCTA 事实：`LimbusCompany_Data/lang` 下有 config.json + 语言 JSON + RFC6902 patch
-  （`webutils/` 的 changes.py:24-52），是「改文本」的主流通道；我们的编辑器目前完全没有。
-- 任务：新增 `lang` 文本差分格式的导入/导出（或并入现有 Directory 流程）：
-  - 读取 config.json 确定活动语言；解析 RFC6902 patch 应用/生成；
-  - 导出为与 LCTA 兼容的文本模组（放入 mods 目录后加载器可应用）。
-- 验收：对真实 lang 目录生成/回读 patch，与 LCTA 输出语义一致；有合成样本测试；
-  UI 有入口（可在导入列表加 `.json` 识别或独立「文本模组」按钮）。
+### T2/T4（P1）✅ 已完成（2026-09-06）——lang 文本模组通道
+- `TextDiffService`（RFC6902 生成/应用）+ `LangTextPatchService`
+  （patchs 文档读写/目录差分/应用），UI「文本模组（lang 补丁）…」。
+- 真实 lang 目录「读→改→差分→应用→回读相等」随测试验证。
+- 后续可选：补丁操作的可视化 diff 视图。
 
-### T3（P1）catalog_S1.bin 与「vanilla 基线」支持
-- LCTA 事实：`resource_updater` 解析 catalog_S1.bin 获得 vanilla bundle 基线
-  （哈希对比判断哪些对象被修改/新增），静态模组替换依赖它。
-- 任务：只读解析 catalog_S1.bin（内容哈希表），在「导入 bundle 时显示该对象相对
-  vanilla 是否修改/新增」；不猜测字段，只按 LCTA 记录的布局实现并对照真实验证。
-- 验收：对真实 catalog_S1.bin 解析出合理条目数，与 LCTA 输出交叉核对（数量级一致）；
-  单元测试用合成样本。
+### T3（P1）✅ 已完成（2026-09-06）——catalog 解析与 vanilla 基线
+- `CatalogFileService`（只读解析，名字数与 LCTA 完全一致 1461=1461）+
+  `CatalogBaselineService`（vanilla/修改/不在 catalog/未知 四态判定，
+  CRC 口径与 LCTA 交叉验证 10/10 一致）。
+- 重要事实：记录区 CRC/大小字段在 catalog 格式版本间整体平移
+  （2026-08-22 +0x44/+0x48 → 2026-09-03 +0x3C/+0x40），解析器双布局自校准。
+- 导入 bundle 自动判定，资源列表「vanilla 基线」列展示。
 
-### T4（P2）文本/JSON 编辑与 RFC6902 双向（可并入 T2）
-- 真实 lang JSON 是普通 JSON；编辑器已有文本编辑能力。将 RFC6902 生成/应用做成
-  独立服务（`TextDiffService`），供 T2 使用，并加测试（生成→应用→回读相等）。
+### T5（P2）✅ 持续执行——文档同步
+- 每轮把结论写回 `docs/ROADMAP.md`（P3.5 新节）、`docs/REVIEW.md`（自审表）、
+  `docs/USAGE.md`（§6/§9）。
 
-### T5（P2）REVIEW.md / ROADMAP 定期同步
-- 每完成一项任务，把结论写回 `docs/ROADMAP.md`（状态节）与 `docs/REVIEW.md`
-  （自审表）。目前真实样本事实集中在 ROADMAP 的「真实环境事实」节。
+### 下一轮候选任务（按价值排序）
+1. **用户游戏内确认 T1 写回模组**（等待用户；唯一未闭环动作）。
+2. **.staticmod 静态数据模组通道**：模组目录里已有真实 `.staticmod`（zip：
+   manifest.json + patches/<dc>.json（jsonpatch/pathset）+ full/<dc>/<file>.json），
+   编辑器目前只能启停不能读写。LCTA `launcher/staticmod.py` 是布局事实来源。
+3. catalog 依赖图展示与「缓存对齐 + vanilla 基线」诊断合并报告。
+4. Sprite/Texture 编辑覆盖静态表（static bundle）后的 .staticmod 导出联动。
+5. ROADMAP P1.3 纹理格式扩展（BC7/ASTC 仍无真实样本，保持不猜测）。
 
 ## 5. 已知边界（不要试图在本轮解决，除非用户要求）
 
@@ -140,8 +139,12 @@ dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r 
 
 ## 7. 交接给其他 agent 时的建议起点
 
-1. 先跑基线三命令确认全绿；确认 `git log --oneline` 最近提交为 `367f87a` 或更新。
-2. 从 T1 开始（写回验证）——它是唯一缺失的验证闭环，且本机有全部真实数据。
-3. 每完成一个 T 任务：build + test 全绿 → 独立中文提交 → 更新 ROADMAP/USAGE/REVIEW。
-4. 若遇到「某个行为与 LCTA 不一致」，先去 `E:/desktop/work/LCTA-Limbus-company-transfer-auto`
+1. 先跑基线三命令确认全绿；确认 `git log --oneline` 最近提交为 `e4b4e4f` 或更新。
+2. 优先跟进「下一轮候选任务」（§4 末尾）：T1-T4 已完成，唯一待办的用户动作是
+   启动游戏确认 T1 写回模组的效果（见 `docs/REALDATA-VERIFY.md` §5）。
+3. 建议从 `.staticmod` 静态数据模组通道开始（模组目录已有真实样本，
+   LCTA `launcher/staticmod.py` 是布局事实来源，catalog 基线（T3）已就绪可复用）。
+4. 每完成一个任务：build + test 全绿 → 独立中文提交 → 更新 ROADMAP/USAGE/REVIEW。
+5. 若遇到「某个行为与 LCTA 不一致」，先去 `E:/desktop/work/LCTA-Limbus-company-transfer-auto`
    读对应源码（引用路径+行号），再决定是修我们这边还是记录为 LCTA 的偏差。
+   注意：catalog 记录布局会随游戏版本整体平移（T3 的双布局自校准就是为此）。

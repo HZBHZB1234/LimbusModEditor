@@ -49,6 +49,7 @@
                     <Button Content="导出模组" Click="Export_Click" Margin="0,8,0,0" Padding="8,6"/>
                     <Button Content="导出全部（多格式）" Click="ExportAll_Click" Margin="0,8,0,0" Padding="8,6"/>
                     <Button Content="文本模组（lang 补丁）…" Click="LangTextMod_Click" Margin="0,8,0,0" Padding="8,6"/>
+                    <Button Content="静态数据模组…" Click="StaticMod_Click" Margin="0,8,0,0" Padding="8,6"/>
                     <Button Content="项目设置…" Click="ProjectSettings_Click" Margin="0,8,0,0" Padding="8,6"/>
                 </StackPanel>
             </Border>

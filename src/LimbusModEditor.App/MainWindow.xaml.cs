@@ -255,6 +255,15 @@ public partial class MainWindow : Window
         StatusText.Text = "文本模组窗口已关闭（补丁文件放进模组目录后由加载器应用）。";
     }
 
+    /// <summary>静态数据模组通道：.staticmod 的读取/预览应用/生成（布局与真实
+    /// 加载器 LCTA launcher/staticmod.py 一致）；bundle 打补丁与 catalog 双写
+    /// 由加载器完成，编辑器只产出加载器可消费的模组包。</summary>
+    private void StaticMod_Click(object sender, RoutedEventArgs e)
+    {
+        new StaticModWindow() { Owner = this }.ShowDialog();
+        StatusText.Text = "静态数据模组窗口已关闭（.staticmod 放进模组目录后由加载器应用）。";
+    }
+
     private bool SaveProjectInternal()
     {
         if (_project is null || _projectFile is null) return false;

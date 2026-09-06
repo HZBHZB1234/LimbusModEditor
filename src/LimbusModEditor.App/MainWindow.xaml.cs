@@ -305,6 +305,21 @@ public partial class MainWindow : Window
         await SetProjectDirectoryAsync(value => _project!.ModDirectory = value, "选择模组安装目录");
     }
 
+    /// <summary>真实加载器约定（LCTA launcher）："_disable" 后缀切换启用/禁用。
+    /// 管理窗口只做重命名，不修改文件内容。</summary>
+    private void ManageMods_Click(object sender, RoutedEventArgs e)
+    {
+        if (_project is null) { StatusText.Text = "请先创建或打开项目"; return; }
+        var modsDirectory = _project.ModDirectory;
+        if (string.IsNullOrWhiteSpace(modsDirectory) || !Directory.Exists(modsDirectory))
+        {
+            MessageBox.Show(this, "请先设置模组目录（可用「自动建议模组目录」）。\n真实加载器默认使用 %APPDATA%\\LimbusCompanyMods。", "管理已安装模组", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        new ModManagerWindow(modsDirectory) { Owner = this }.ShowDialog();
+        StatusText.Text = "模组目录管理已关闭（切换结果以加载器下次扫描为准）。";
+    }
+
     private async void SetFmodDirectory_Click(object sender, RoutedEventArgs e)
     {
         await SetProjectDirectoryAsync(value => _project!.FmodLibraryDirectory = value, "选择 FMOD/FSBANK DLL 目录");

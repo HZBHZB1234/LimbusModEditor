@@ -41,6 +41,7 @@
                     <Button Content="自动建议 Unity 缓存目录" Click="SuggestUnityCache_Click" Margin="0,8,0,0" Padding="8,6"/>
                     <Button Content="设置模组目录" Click="SetModDirectory_Click" Margin="0,8,0,0" Padding="8,6"/>
                     <Button Content="自动建议模组目录" Click="AutoSuggestModDirectory_Click" Margin="0,8,0,0" Padding="8,6"/>
+                    <Button Content="管理已安装模组" Click="ManageMods_Click" Margin="0,8,0,0" Padding="8,6"/>
                     <Button Content="设置 FMOD DLL 目录" Click="SetFmodDirectory_Click" Margin="0,8,0,0" Padding="8,6"/>
                     <Button Content="检测 FMOD DLL" Click="ProbeFmod_Click" Margin="0,8,0,0" Padding="8,6"/>
                     <Button Content="导入资源包" Click="Import_Click" Margin="0,16,0,0" Padding="8,6"/>

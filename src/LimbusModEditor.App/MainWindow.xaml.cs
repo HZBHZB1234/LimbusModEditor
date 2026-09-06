@@ -243,6 +243,18 @@ public partial class MainWindow : Window
         new ProjectSettingsWindow(this, _ => _projectFile is not null && SaveProjectInternal()) { Owner = this }.ShowDialog();
     }
 
+    /// <summary>lang 文本模组通道（T2）：RFC6902 补丁的生成与应用，格式与真实
+    /// 加载器（LCTA launcher/changes.py）一致。lang 根目录默认取项目游戏目录。</summary>
+    private void LangTextMod_Click(object sender, RoutedEventArgs e)
+    {
+        var gameDirectory = _project?.GameDirectory;
+        var defaultLangRoot = string.IsNullOrWhiteSpace(gameDirectory)
+            ? string.Empty
+            : Path.Combine(gameDirectory, "LimbusCompany_Data", "lang");
+        new LangTextModWindow(defaultLangRoot, _project?.ModDirectory) { Owner = this }.ShowDialog();
+        StatusText.Text = "文本模组窗口已关闭（补丁文件放进模组目录后由加载器应用）。";
+    }
+
     private bool SaveProjectInternal()
     {
         if (_project is null || _projectFile is null) return false;

@@ -156,6 +156,13 @@
    catalog 并判定该 bundle 相对 vanilla 的状态（vanilla 一致 / 与基线不符 /
    不在 catalog / 基线未知），写入资源列表「vanilla 基线」列并出现在导入
    诊断中。「与基线不符」通常意味着该缓存 bundle 已被模组补丁改写过。
+8. **静态数据模组（.staticmod）**：主窗口「静态数据模组…」打开
+   .staticmod 窗口：读取真实加载器（LCTA launcher/staticmod.py）格式的
+   静态数据模组并列出条目（dataClass/file/opType/容器路径）；「预览应用
+   补丁到官方 JSON…」把选中的 pathset/jsonpatch 补丁应用到官方静态数据
+   JSON 并另存预览结果（不写入游戏）；「从官方/修改 JSON 生成补丁模组…」
+   以 RFC6902 差分生成新的 .staticmod（放进模组目录，由加载器在启动时
+   应用，需在 LCTA 配置页启用「静态数据 Mod」）。
 
 ## 6.1 资源筛选（P3.3）
 

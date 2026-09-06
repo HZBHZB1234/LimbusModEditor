@@ -12,9 +12,10 @@ Carra2/Rebank/Lunartique/Bank 四格式导入导出、真实 Texture2D `.resS` �
 多格式项目导出、目录无感自动化、模组目录管理（`_disable` 约定）、
 **真实写回闭环（T1：纹理替换→Carra2 导出→已装模组目录，含重大写回缺陷修复）**、
 **lang 文本模组通道（T2/T4：RFC6902 差分，与 LCTA changes.py 兼容）**、
-**官方 catalog 只读解析 + vanilla 基线判定（T3，CRC 口径与 LCTA 交叉验证一致）**。
+**官方 catalog 只读解析 + vanilla 基线判定（T3，CRC 口径与 LCTA 交叉验证一致）**、
+**.staticmod 静态数据模组通道（读取/预览应用/生成，两个真实样本导入验证通过）**。
 
-**当前基线：197 个测试全绿**（61 Format + 136 Domain）。最近提交 `e4b4e4f`。
+**当前基线：205 个测试全绿**（61 Format + 144 Domain）。最近提交 `3c04b08`。
 
 基线命令（每轮开始和结束都必须跑）：
 
@@ -69,7 +70,9 @@ dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r 
 - **T3 catalog 基线**：`src/LimbusModEditor.Application/Catalog/`
   （`CatalogFileService` + `CatalogBaselineService`）、导入自动判定 +
   资源列表「vanilla 基线」列、测试 6 个。
-- 测试基线 168 → 197（61 Format + 136 Domain）。
+- **.staticmod 静态数据模组通道**：`src/LimbusModEditor.Application/StaticMods/`
+  （`StaticModService`）、UI `StaticModWindow`、测试 8 个（含两个真实样本）。
+- 测试基线 168 → 205（61 Format + 144 Domain）。
 
 ## 4. 下一步明确任务（按优先级，每项含验收标准）
 
@@ -103,12 +106,12 @@ dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r 
 
 ### 下一轮候选任务（按价值排序）
 1. **用户游戏内确认 T1 写回模组**（等待用户；唯一未闭环动作）。
-2. **.staticmod 静态数据模组通道**：模组目录里已有真实 `.staticmod`（zip：
-   manifest.json + patches/<dc>.json（jsonpatch/pathset）+ full/<dc>/<file>.json），
-   编辑器目前只能启停不能读写。LCTA `launcher/staticmod.py` 是布局事实来源。
-3. catalog 依赖图展示与「缓存对齐 + vanilla 基线」诊断合并报告。
-4. Sprite/Texture 编辑覆盖静态表（static bundle）后的 .staticmod 导出联动。
-5. ROADMAP P1.3 纹理格式扩展（BC7/ASTC 仍无真实样本，保持不猜测）。
+2. catalog 依赖图展示与「缓存对齐 + vanilla 基线」诊断合并报告。
+3. ✅ .staticmod 静态数据模组通道已于本轮完成（读取/预览应用/生成，
+   真实样本导入验证通过）；后续可加：静态表编辑后从项目导出 .staticmod
+   （当前生成入口在「静态数据模组」窗口，按 JSON 对逐条生成）。
+4. ROADMAP P1.3 纹理格式扩展（BC7/ASTC 仍无真实样本，保持不猜测）。
+5. ROADMAP P1.4 SpriteAtlas mesh 重写（无真实样本支撑，保持阻止写回现状）。
 
 ## 5. 已知边界（不要试图在本轮解决，除非用户要求）
 
@@ -139,11 +142,10 @@ dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r 
 
 ## 7. 交接给其他 agent 时的建议起点
 
-1. 先跑基线三命令确认全绿；确认 `git log --oneline` 最近提交为 `e4b4e4f` 或更新。
-2. 优先跟进「下一轮候选任务」（§4 末尾）：T1-T4 已完成，唯一待办的用户动作是
-   启动游戏确认 T1 写回模组的效果（见 `docs/REALDATA-VERIFY.md` §5）。
-3. 建议从 `.staticmod` 静态数据模组通道开始（模组目录已有真实样本，
-   LCTA `launcher/staticmod.py` 是布局事实来源，catalog 基线（T3）已就绪可复用）。
+1. 先跑基线三命令确认全绿；确认 `git log --oneline` 最近提交为 `3c04b08` 或更新。
+2. 优先跟进「下一轮候选任务」（§4 末尾）：T1-T4 与 .staticmod 通道已完成，
+   唯一待办的用户动作是启动游戏确认 T1 写回模组的效果（见 `docs/REALDATA-VERIFY.md` §5）。
+3. 建议从「catalog 依赖图与诊断合并报告」开始（T3 的解析器已就绪可复用）。
 4. 每完成一个任务：build + test 全绿 → 独立中文提交 → 更新 ROADMAP/USAGE/REVIEW。
 5. 若遇到「某个行为与 LCTA 不一致」，先去 `E:/desktop/work/LCTA-Limbus-company-transfer-auto`
    读对应源码（引用路径+行号），再决定是修我们这边还是记录为 LCTA 的偏差。

@@ -20,6 +20,8 @@
 - lang 文本模组通道：RFC6902 差分补丁的生成/应用（`TextDiffService`）与
   真实加载器兼容的 `patchs` 文档读写（`LangTextPatchService`），主窗口
   「文本模组（lang 补丁）…」入口。
+- .staticmod 静态数据模组通道：staticmod/v1 包读取/写出/补丁应用预览/
+  从 JSON 差分生成（`StaticModService`），主窗口「静态数据模组…」入口。
 - 官方 catalog（catalog.bin/catalog_S1.bin）只读解析与 vanilla 基线判定：
   导入 bundle 时自动判定相对 vanilla 是否被修改/新增，资源列表展示。
 - 图像预览、图集拆分/恢复、文本/JSON 编辑、资源替换记录。
@@ -316,6 +318,12 @@ Lunartique→对象级 Carra/目录来源支持，其余禁用并给出原因）
   +0x40），解析器按「大小值合理占比」双布局自校准。导入 bundle 时自动判定
   并在资源列表「vanilla 基线」列展示。后续：catalog 依赖图（bundle 间
   依赖关系）展示与失配诊断整合。
+- **静态数据模组（.staticmod，2026-09-06）**：`StaticModService` 读取/写出
+  staticmod/v1 zip（manifest + patches + fullFiles + 未知文件保留），
+  pathset/jsonpatch 双 opType 的应用语义与真实加载器一致；支持从「官方 JSON
+  vs 修改 JSON」差异生成 jsonpatch 静态模组。UI「静态数据模组…」。
+  两个真实样本（环指回调 / 攻击容量修改）导入验证通过。边界：bundle 打补丁
+  与 catalog 双写由加载器完成（带风险开关），编辑器只产出模组包。
 
 ## P4：工程质量和交付
 

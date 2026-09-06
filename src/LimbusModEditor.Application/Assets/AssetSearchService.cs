@@ -18,10 +18,18 @@ public sealed class AssetSearchService
 {
     public IReadOnlyList<AssetRecord> Search(ModProject project, AssetSearchQuery query)
     {
+        ArgumentNullException.ThrowIfNull(project);
+        // 快照后交给重载：调用方可以先在 UI 线程取快照，再把过滤排序放到
+        // 后台线程，避免大项目（全缓存扫描 40 万级）冻结界面。
+        return Search(project.Assets.ToArray(), query);
+    }
+
+    public IReadOnlyList<AssetRecord> Search(IEnumerable<AssetRecord> assets, AssetSearchQuery query)
+    {
         if (query.MinSize is < 0) throw new ArgumentException("MinSize 不能为负。", nameof(query));
         if (query.MaxSize is < 0) throw new ArgumentException("MaxSize 不能为负（负值曾经静默关闭上限）。", nameof(query));
         var text = query.Text?.Trim();
-        return project.Assets.Where(asset =>
+        return assets.Where(asset =>
             (string.IsNullOrEmpty(text) || asset.LogicalPath.Contains(text, StringComparison.OrdinalIgnoreCase) || asset.SourcePath?.Contains(text, StringComparison.OrdinalIgnoreCase) == true) &&
             (query.Type is null || asset.Type == query.Type) &&
             (query.State is null || asset.EditState == query.State) &&

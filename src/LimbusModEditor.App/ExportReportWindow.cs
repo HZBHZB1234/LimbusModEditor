@@ -26,10 +26,21 @@ public sealed class ExportReportWindow : Window
 
         var panel = new DockPanel { Margin = new Thickness(12) };
         var headerRow = new DockPanel { Margin = new Thickness(0, 0, 0, 10) };
-        var save = new Button { Content = "保存为 JSON…", Padding = new Thickness(10, 4, 10, 4), VerticalAlignment = VerticalAlignment.Top };
+        var save = new Button { Content = "保存为 JSON…", Padding = new Thickness(10, 4, 10, 4), VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(8, 0, 0, 0) };
         save.Click += async (_, _) => await SaveAsJsonAsync();
+        var reveal = new Button { Content = "打开输出位置", Padding = new Thickness(10, 4, 10, 4), VerticalAlignment = VerticalAlignment.Top };
+        reveal.Click += (_, _) =>
+        {
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"/select,\"{_result.OutputPath}\"") { UseShellExecute = true });
+            }
+            catch (Exception ex) { MessageBox.Show(this, $"打开资源管理器失败：{ex.Message}", "导出报告", MessageBoxButton.OK, MessageBoxImage.Error); }
+        };
         DockPanel.SetDock(save, Dock.Right);
+        DockPanel.SetDock(reveal, Dock.Right);
         headerRow.Children.Add(save);
+        headerRow.Children.Add(reveal);
         headerRow.Children.Add(new TextBlock
         {
             TextWrapping = TextWrapping.Wrap,

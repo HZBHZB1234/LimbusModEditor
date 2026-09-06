@@ -346,6 +346,35 @@ Lunartique→对象级 Carra/目录来源支持，其余禁用并给出原因）
   git 忽略二进制）+ `FmodLibraryLocator` 自动发现 + 加载/探测候选扩展。
 - 新增测试 13 个（共享配置/发现/扫描/实体化/导出），基线 205 → 218。
 
+### P3.7 交互打磨与撤销能力（2026-09-06，完成）
+
+目标：继续清除「不合理处」—— 补上撤销能力、大项目卡顿、长操作无反馈、
+缺少快捷交互四个缺口（对应 REVIEW §4 的便捷性提案落地）。
+
+- **撤销修改**：`AssetEditService.ClearEdits`（清除 replacementPath /
+  unityFieldEdits / spriteMetadata 三类编辑标记，还原 originalSize 与
+  Unchanged 状态，项目 edits/assets 内暂存文件一并删除；项目外文件不动）。
+  UI 为右栏「撤销此资源的修改」按钮 + 右键菜单项，带确认对话框。
+  替换时新增 `originalSize` 元数据（首次替换时捕获，重复替换不覆盖）。
+- **大项目不卡顿**：搜索 300ms 防抖 + 后台线程过滤排序
+  （`AssetSearchService.Search(IEnumerable)` 快照重载，UI 线程只取快照；
+  代际守卫丢弃过期结果；选中项按 AssetId 跨刷新保留）；纹理预览解码
+  移入后台线程（同样代际守卫）；项目保存去掉 sync-over-async
+  （设置窗口回调改 `Func<_, Task<bool>>`，扫描后保存走后台线程）。
+- **长操作有反馈**：`ExportProgressWindow`（阶段消息 + 不确定进度条，
+  主窗口期间禁用）；`UnityCacheExportService` 增加可选
+  `IProgress<string>`（实体化逐资源 / 重打包 / 逐对象读回 / 压缩写出）；
+  ScanDialog 显示预计剩余时间（按实测速率估算）；导出报告新增
+  「打开输出位置」（explorer /select）。
+- **快捷交互**：资源列表右键菜单（替换/字段编辑/hex/撤销/复制路径，
+  右键先选中所在行）；双击 = 图像替换、其余字段编辑或 hex 预览；
+  窗口级拖放（包/文件夹拖入即导入、逐文件容错；单张图片拖到选中图像
+  资源上可一键替换）；Ctrl+F 聚焦搜索、Esc 清空；行悬停显示完整路径；
+  大小列人性化（B/KB/MB/GB）；「已修改资源」数与提示条/一键导出同一
+  口径（HasEdits），不再显示虚增的 Edits 历史条数；左栏新增
+  「打开模组目录」「打开项目文件夹」。
+- 新增测试 5 个（ClearEdits×4 + 快照搜索口径一致），基线 218 → 223。
+
 ## P4：工程质量和交付
 
 - 把当前代码后置 UI 逐步迁移到 MVVM，但不牺牲现有 Windows-only 可运行性。

@@ -106,11 +106,21 @@ public sealed class ScanDialog : Window
         _started = true;
         _startButton.IsEnabled = false;
         _state.Text = "正在扫描…";
+        var watch = System.Diagnostics.Stopwatch.StartNew();
         var progress = new Progress<UnityCacheScanProgress>(p =>
         {
             _progress.Maximum = Math.Max(1, p.TotalEntries);
             _progress.Value = p.ProcessedEntries;
-            _state.Text = $"[{p.ProcessedEntries}/{p.TotalEntries}] {Path.GetFileName(Path.GetDirectoryName(p.CurrentPath))}  " +
+            var eta = string.Empty;
+            if (p.ProcessedEntries > 4 && watch.Elapsed.TotalSeconds > 3)
+            {
+                var rate = p.ProcessedEntries / watch.Elapsed.TotalSeconds;
+                var remaining = TimeSpan.FromSeconds((p.TotalEntries - p.ProcessedEntries) / Math.Max(0.1, rate));
+                eta = remaining.TotalSeconds >= 90
+                    ? $"，预计剩余约 {Math.Ceiling(remaining.TotalMinutes)} 分钟"
+                    : $"，预计剩余约 {Math.Max(1, (int)Math.Round(remaining.TotalSeconds))} 秒";
+            }
+            _state.Text = $"[{p.ProcessedEntries}/{p.TotalEntries}] {Path.GetFileName(Path.GetDirectoryName(p.CurrentPath))}{eta}" +
                           $"（新建索引 {p.BundlesScanned}，缓存命中 {p.BundlesFromIndex}）";
         });
         try

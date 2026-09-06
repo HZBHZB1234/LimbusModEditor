@@ -89,4 +89,15 @@ public class AssetSearchServiceTests : IDisposable
         var combined = service.Search(Project(), new AssetSearchQuery(Container: "bundleB", State: AssetEditState.Added));
         Assert.Equal("data/stats.json", combined.Single().LogicalPath);
     }
+
+    [Fact]
+    public void Snapshot_overload_matches_project_overload()
+    {
+        // UI 在后台线程过滤时先在 UI 线程取快照：两个口径必须一致。
+        var project = Project();
+        var service = new AssetSearchService();
+        var fromProject = service.Search(project, new AssetSearchQuery(Text: "ui", Type: AssetType.Texture));
+        var fromSnapshot = service.Search(project.Assets.ToArray(), new AssetSearchQuery(Text: "ui", Type: AssetType.Texture));
+        Assert.Equal(fromProject.Select(x => x.AssetId), fromSnapshot.Select(x => x.AssetId));
+    }
 }

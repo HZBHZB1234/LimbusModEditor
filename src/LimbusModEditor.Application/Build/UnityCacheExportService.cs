@@ -23,9 +23,11 @@ public sealed class UnityCacheExportService
     /// <param name="projectRoot">项目根目录（.lmeproj 所在目录），重打包
     /// 中间产物写入 &lt;projectRoot&gt;/builds/unity-bundles。</param>
     /// <param name="unityCacheDirectory">可选：用于缓存对齐诊断。</param>
+    /// <param name="progress">可选：阶段与逐对象进度消息（供 UI 进度窗口）。</param>
     public async Task<ModExportResult> ExportCarra2Async(
         ModProject project, string projectRoot, string outputPath,
-        string? unityCacheDirectory = null, CancellationToken cancellationToken = default)
+        string? unityCacheDirectory = null, CancellationToken cancellationToken = default,
+        IProgress<string>? progress = null)
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentException.ThrowIfNullOrWhiteSpace(projectRoot);
@@ -38,7 +40,9 @@ public sealed class UnityCacheExportService
 
         // 1) 重打包所有被编辑的 bundle（BuildAsync 自带 staging + 引用完整性验证）。
         var buildsDirectory = Path.Combine(Path.GetFullPath(projectRoot), "builds", "unity-bundles");
+        progress?.Report($"正在重打包被编辑的 bundle（实体化 → 验证 → 写出）…");
         var builds = await _bundleBuilder.BuildAsync(project, buildsDirectory, cancellationToken);
+        progress?.Report($"已重打包 {builds.Count} 个 bundle，开始逐对象读取修改后的数据…");
         var bySource = builds.ToDictionary(
             x => Path.GetFullPath(x.SourcePath), x => x.OutputPath, StringComparer.OrdinalIgnoreCase);
 
@@ -46,9 +50,12 @@ public sealed class UnityCacheExportService
         var package = new CarraPackage();
         var statuses = new List<ExportAssetStatus>();
         using var backend = new AssetsToolsBackend();
+        var objectIndex = 0;
         foreach (var asset in edited)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            objectIndex++;
+            progress?.Report($"[{objectIndex}/{edited.Count}] {asset.LogicalPath}");
             if (asset.SourcePath is null ||
                 !bySource.TryGetValue(Path.GetFullPath(asset.SourcePath), out var repacked))
             {
@@ -91,6 +98,7 @@ public sealed class UnityCacheExportService
 
         var outputFullPath = Path.GetFullPath(outputPath);
         Directory.CreateDirectory(Path.GetDirectoryName(outputFullPath)!);
+        progress?.Report($"正在压缩写出 {package.Entries.Count} 个对象（逐条目 XZ）…");
         await AtomicOutput.WriteAsync(outputFullPath, async (stream, token) =>
         {
             await using var output = stream;

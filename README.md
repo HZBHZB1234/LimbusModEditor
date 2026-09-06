@@ -23,10 +23,13 @@ not as a launcher replacement.
    the program cache (`cache/unity-cache-index.json`), so rescans are
    near-instant. Damaged/unknown bundles are reported as per-entry
    diagnostics instead of aborting the scan.
-4. **Edit** — search the merged asset index, replace textures, edit Sprite
-   metadata / serialized fields; editing a scanned bundle copies it into the
-   project once (`sources/cache/<outer>_<inner>.bundle`) so game cache
-   changes cannot corrupt work in progress.
+4. **Edit** — search the merged asset index (debounced, background-filtered),
+   replace textures, edit Sprite metadata / serialized fields; drag & drop is
+   supported (packages/folders to import, an image onto a selected texture to
+   replace it), plus a right-click menu, double-click actions, Ctrl+F and
+   per-asset undo. Editing a scanned bundle copies it into the project once
+   (`sources/cache/<outer>_<inner>.bundle`) so game cache changes cannot
+   corrupt work in progress.
 5. **Export** — one click builds a real-loader Carra2 package
    (`<缓存外层键>/<内层键>/<pathId>.<类型表索引>`, per-entry XZ) from all
    edits, defaulting to the mods directory (`%APPDATA%\LimbusCompanyMods`).

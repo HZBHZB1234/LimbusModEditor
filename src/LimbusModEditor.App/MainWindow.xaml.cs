@@ -1,6 +1,7 @@
 using System.IO;
 using System.Windows;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using LimbusModEditor.Application.AppConfig;
 using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Application.Build;
@@ -38,6 +39,9 @@ public partial class MainWindow : Window
     private DebugApplySession? _debugSession;
     private ModProject? _project;
     private string? _projectFile;
+    private readonly DispatcherTimer _searchTimer;
+    private int _searchGeneration;
+    private int _previewGeneration;
 
     /// <summary>Current project (nullable). Exposed for the settings window.</summary>
     public ModProject? Project => _project;
@@ -50,6 +54,10 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        // 搜索防抖：全缓存扫描后有数十万资产，逐键即时过滤会卡顿；
+        // 停止输入 300ms 后才真正过滤（过滤与排序在后台线程）。
+        _searchTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+        _searchTimer.Tick += (_, _) => { _searchTimer.Stop(); _ = RunSearchAsync(); };
         UpdateDirectoryStatus();
         UpdateHint();
         Loaded += async (_, _) => await OnWindowLoadedAsync();
@@ -169,7 +177,7 @@ public partial class MainWindow : Window
         {
             var cacheDirectory = _env.EffectiveUnityCacheDirectory(_project);
             if (UnityCacheScanService.EnumerateCacheEntries(cacheDirectory).Count > 0)
-                PromptScan(autoStart: true);
+                await PromptScanAsync(autoStart: true);
         }
         UpdateHint();
     }
@@ -202,12 +210,7 @@ public partial class MainWindow : Window
             var updated = 0;
             foreach (var file in dialog.FileNames)
             {
-                var extension = Path.GetExtension(file);
-                var result = extension.Equals(".bundle", StringComparison.OrdinalIgnoreCase)
-                    ? await _importer.ImportUnityBundleIntoProjectAsync(file, _project)
-                    : extension.Equals(".assets", StringComparison.OrdinalIgnoreCase)
-                        ? await _importer.ImportSerializedFileIntoProjectAsync(file, _project)
-                        : await _importer.ImportIntoProjectAsync(file, _project);
+                var result = await ImportSingleFileAsync(file);
                 added += result.AddedAssets;
                 updated += result.UpdatedAssets;
             }
@@ -215,6 +218,17 @@ public partial class MainWindow : Window
             RefreshProjectState($"导入完成：新增 {added}，更新 {updated}");
         }
         catch (Exception ex) { ShowError("导入失败", ex); }
+    }
+
+    /// <summary>单个文件按扩展名分发到对应导入管道（按钮导入与拖放共用）。</summary>
+    private Task<ImportResult> ImportSingleFileAsync(string file)
+    {
+        var extension = Path.GetExtension(file);
+        return extension.Equals(".bundle", StringComparison.OrdinalIgnoreCase)
+            ? _importer.ImportUnityBundleIntoProjectAsync(file, _project!)
+            : extension.Equals(".assets", StringComparison.OrdinalIgnoreCase)
+                ? _importer.ImportSerializedFileIntoProjectAsync(file, _project!)
+                : _importer.ImportIntoProjectAsync(file, _project!);
     }
 
     private async void ImportDirectory_Click(object sender, RoutedEventArgs e)
@@ -301,11 +315,11 @@ public partial class MainWindow : Window
     }
 
     /// <summary>设置（二级窗口）：集中修改目录与元数据；日常自动获取，
-    /// 手动调整在这里。</summary>
+    /// 手动调整在这里。项目保存走后台线程（全缓存扫描后项目很大）。</summary>
     private void ProjectSettings_Click(object sender, RoutedEventArgs e)
     {
         if (_project is null) { StatusText.Text = "请先创建或打开项目"; return; }
-        new ProjectSettingsWindow(this, _ => _projectFile is not null && SaveProjectInternal()) { Owner = this }.ShowDialog();
+        new ProjectSettingsWindow(this, _ => SaveProjectInternalAsync()) { Owner = this }.ShowDialog();
     }
 
     /// <summary>lang 文本模组通道（T2）：RFC6902 补丁的生成与应用，格式与真实
@@ -340,11 +354,17 @@ public partial class MainWindow : Window
         StatusText.Text = "静态数据模组窗口已关闭（.staticmod 放进模组目录后由加载器应用）。";
     }
 
-    private bool SaveProjectInternal()
+    /// <summary>项目保存的同步入口已被 async 版本取代：全缓存扫描后项目
+    /// 含数十万资产，序列化必须在后台线程完成，不能阻塞 UI。</summary>
+    private async Task<bool> SaveProjectInternalAsync()
     {
         if (_project is null || _projectFile is null) return false;
-        _projects.SaveAsync(_project, _projectFile).GetAwaiter().GetResult();
-        return true;
+        try
+        {
+            await _projects.SaveAsync(_project, _projectFile);
+            return true;
+        }
+        catch (Exception ex) { ShowError("保存项目失败", ex); return false; }
     }
 
     /// <summary>P3.3 工作流: batch-register replacements from a folder, matching
@@ -399,9 +419,9 @@ public partial class MainWindow : Window
 
     /// <summary>扫描游戏资源入口（左栏「① 获取资源」）。autoStart=true 时
     /// 窗口打开即开始（用于新建/打开空项目后的自动引导）。</summary>
-    private async void Scan_Click(object sender, RoutedEventArgs e) => PromptScan(autoStart: false);
+    private async void Scan_Click(object sender, RoutedEventArgs e) => await PromptScanAsync(autoStart: false);
 
-    private void PromptScan(bool autoStart)
+    private async Task PromptScanAsync(bool autoStart)
     {
         if (_project is null) { StatusText.Text = "请先创建或打开项目"; return; }
         var cacheDirectory = _env.EffectiveUnityCacheDirectory(_project);
@@ -417,7 +437,7 @@ public partial class MainWindow : Window
         dialog.ShowDialog();
         if (dialog.Result is not null && _projectFile is not null)
         {
-            SaveProjectInternal();
+            await SaveProjectQuietlyAsync();
             RefreshProjectState($"扫描完成：新增 {dialog.Result.AddedAssets} 个资源，更新 {dialog.Result.UpdatedAssets} 个 —— 现在就可以在列表中搜索并编辑了");
         }
         else
@@ -446,19 +466,27 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog() != true) return;
         OneClickExportButton.IsEnabled = false;
         StatusText.Text = "正在导出（重打包被编辑的 bundle 并生成 Carra2）…";
+        var progressWindow = new ExportProgressWindow(
+            "一键导出模组",
+            "导出完成后会显示逐资源报告；长时间无进展请检查被编辑的 bundle 是否过大。") { Owner = this };
+        var progress = new Progress<string>(progressWindow.Report);
+        void CloseProgress() { try { progressWindow.Close(); } catch { /* 已关闭 */ } }
+        IsEnabled = false;
+        progressWindow.Show();
         try
         {
-            await MaterializeEditedAssetsAsync();
+            await MaterializeEditedAssetsAsync(progress);
             await SaveProjectQuietlyAsync();
             var result = await _cacheExporter.ExportCarra2Async(
                 _project, Path.GetDirectoryName(_projectFile)!, dialog.FileName,
-                _env.EffectiveUnityCacheDirectory(_project));
+                _env.EffectiveUnityCacheDirectory(_project), default, progress);
+            CloseProgress();
             StatusText.Text = $"导出完成：{result.AppliedReplacements} 个对象 → {result.OutputPath}";
             new ExportReportWindow(result) { Owner = this }.ShowDialog();
             UpdateHint();
         }
-        catch (Exception ex) { ShowError("一键导出失败", ex); }
-        finally { OneClickExportButton.IsEnabled = true; }
+        catch (Exception ex) { CloseProgress(); ShowError("一键导出失败", ex); }
+        finally { IsEnabled = true; OneClickExportButton.IsEnabled = true; }
     }
 
     private static string SanitizeFileName(string name)
@@ -471,14 +499,19 @@ public partial class MainWindow : Window
     /// <summary>导出/构建前的统一实体化：把所有「已编辑但仍是缓存引用」的
     /// 资源实体化为项目本地副本（每个 bundle 只复制一次）。缓存里所有
     /// bundle 都叫 __data，不实体化会在构建输出目录互相覆盖。</summary>
-    private async Task MaterializeEditedAssetsAsync()
+    private async Task MaterializeEditedAssetsAsync(IProgress<string>? progress = null)
     {
         if (_project is null) return;
         var seeds = _project.Assets.Where(x =>
             x.Metadata.TryGetValue("reference", out var reference) && reference == "true" &&
             (x.Metadata.ContainsKey("replacementPath") || x.Metadata.ContainsKey("unityFieldEdits") || x.Metadata.ContainsKey("spriteMetadata"))).ToList();
-        foreach (var seed in seeds)
+        progress?.Report(seeds.Count == 0
+            ? "没有需要实体化的缓存引用资源。"
+            : $"正在把 {seeds.Count} 个已编辑资源实体化（复制所属 bundle 到项目）…");
+        for (var i = 0; i < seeds.Count; i++)
         {
+            var seed = seeds[i];
+            progress?.Report($"[{i + 1}/{seeds.Count}] 实体化 {seed.LogicalPath}");
             await UnityCacheMaterializationService.MaterializeForEditingAsync(_project, seed, _projectFile is null ? null : Path.GetDirectoryName(_projectFile));
         }
     }
@@ -487,8 +520,7 @@ public partial class MainWindow : Window
     private void UpdateHint()
     {
         NoProjectOverlay.Visibility = _project is null ? Visibility.Visible : Visibility.Collapsed;
-        var edits = _project?.Assets.Count(x =>
-            x.Metadata.ContainsKey("replacementPath") || x.Metadata.ContainsKey("unityFieldEdits") || x.Metadata.ContainsKey("spriteMetadata")) ?? 0;
+        var edits = _project?.Assets.Count(AssetEditService.HasEdits) ?? 0;
         if (_project is null)
         {
             HintText.Text = "👋 欢迎使用 Limbus Mod Editor —— 点击「新建模组项目」开始：填一个名字，其余（目录、游戏路径、资源扫描）全部自动完成。";
@@ -719,24 +751,35 @@ public partial class MainWindow : Window
     {
         ProjectNameText.Text = _project?.Name ?? "未打开项目";
         AssetCountText.Text = (_project?.Assets.Count ?? 0).ToString();
-        EditCountText.Text = (_project?.Edits.Count ?? 0).ToString();
+        // 与提示条/一键导出同一口径：按编辑标记统计「已修改资源」数，
+        // 而不是 Edits 历史条数（重复替换会让历史虚增）。
+        EditCountText.Text = (_project?.Assets.Count(AssetEditService.HasEdits) ?? 0).ToString();
         UpdateDirectoryStatus();
         RefreshAssetList();
         UpdateHint();
         if (status is not null) StatusText.Text = $"{status}：{_project?.Name}";
     }
 
-    private void SearchBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e) => RefreshAssetList();
+    private void SearchBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+    {
+        _searchTimer.Stop();
+        _searchTimer.Start();
+    }
 
     /// <summary>P3.3: populates the type/state filter combos once.</summary>
     private bool _filtersInitialized;
     private void Filter_Changed(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
         if (!_filtersInitialized) return;
-        RefreshAssetList();
+        _searchTimer.Stop();
+        _ = RunSearchAsync();
     }
 
-    private void Filter_Changed(object sender, RoutedEventArgs e) => RefreshAssetList();
+    private void Filter_Changed(object sender, RoutedEventArgs e)
+    {
+        _searchTimer.Stop();
+        _ = RunSearchAsync();
+    }
 
     private void ClearFilters_Click(object sender, RoutedEventArgs e)
     {
@@ -748,7 +791,8 @@ public partial class MainWindow : Window
         MinSizeFilter.Text = string.Empty;
         MaxSizeFilter.Text = string.Empty;
         ReplacedOnlyFilter.IsChecked = false;
-        RefreshAssetList();
+        _searchTimer.Stop();
+        _ = RunSearchAsync();
     }
 
     private static long? ParseLongFilter(System.Windows.Controls.TextBox box)
@@ -777,6 +821,7 @@ public partial class MainWindow : Window
     {
         ReplaceAssetButton.IsEnabled = asset is not null && _projectFile is not null;
         HexPreviewButton.IsEnabled = asset is not null;
+        ClearEditsButton.IsEnabled = asset is not null && AssetEditService.HasEdits(asset);
         SpriteMetadataButton.IsEnabled = asset?.Type == AssetType.Sprite &&
             asset.UnityPathId.HasValue && !string.IsNullOrWhiteSpace(asset.SourcePath) &&
             File.Exists(asset.SourcePath) && _projectFile is not null;
@@ -802,8 +847,13 @@ public partial class MainWindow : Window
         RepackAtlasButton.IsEnabled = isImage && asset?.Metadata.ContainsKey("atlasLayoutPath") == true && _projectFile is not null;
     }
 
-    private void UpdatePreview(AssetRecord? asset)
+    private void UpdatePreview(AssetRecord? asset) => _ = UpdatePreviewAsync(asset);
+
+    /// <summary>异步预览：纹理解码（可能是 DXT 压缩的大图）放在后台线程，
+    /// 代际守卫保证快速切换选中项时旧结果不会覆盖新选中项的预览。</summary>
+    private async Task UpdatePreviewAsync(AssetRecord? asset)
     {
+        var generation = ++_previewGeneration;
         PreviewImage.Source = null;
         PreviewInfoText.Text = "无图像预览";
         if (asset is null || asset.Type is not (AssetType.Texture or AssetType.Sprite)) return;
@@ -811,19 +861,37 @@ public partial class MainWindow : Window
             !(asset.Metadata.TryGetValue("replacementPath", out var existingReplacement) && File.Exists(existingReplacement)) &&
             !string.IsNullOrWhiteSpace(asset.SourcePath) && File.Exists(asset.SourcePath))
         {
+            var source = asset.SourcePath;
+            var pathId = asset.UnityPathId.Value;
             try
             {
-                var unityService = new LimbusModEditor.Formats.Unity.UnityAssetService();
-                var png = unityService.ReadTexturePng(asset.SourcePath, asset.UnityPathId.Value);
+                var (png, summary) = await Task.Run(() =>
+                {
+                    var unityService = new LimbusModEditor.Formats.Unity.UnityAssetService();
+                    var decoded = unityService.ReadTexturePng(source, pathId);
+                    string? described = null;
+                    if (decoded is not null)
+                    {
+                        try { described = unityService.ReadTextureSummary(source, pathId)?.Describe(); }
+                        catch (Exception) { described = null; }
+                    }
+                    return (decoded, described);
+                });
+                if (generation != _previewGeneration) return;
                 if (png is not null)
                 {
                     SetPreviewBitmap(png);
-                    try { PreviewInfoText.Text = unityService.ReadTextureSummary(asset.SourcePath, asset.UnityPathId.Value)?.Describe() ?? "Unity Texture2D PNG preview"; }
-                    catch (Exception) { PreviewInfoText.Text = "Unity Texture2D PNG preview"; }
+                    PreviewInfoText.Text = summary ?? "Unity Texture2D PNG preview";
                     return;
                 }
             }
-            catch (Exception ex) { PreviewInfoText.Text = $"Unity texture preview failed: {ex.Message}"; return; }
+            catch (Exception ex)
+            {
+                if (generation != _previewGeneration) return;
+                PreviewInfoText.Text = $"Unity texture preview failed: {ex.Message}";
+                return;
+            }
+            if (generation != _previewGeneration) return;
         }
         var replacement = asset.Metadata.TryGetValue("replacementPath", out var path) ? path : null;
         if (string.IsNullOrWhiteSpace(replacement) || !File.Exists(replacement))
@@ -831,11 +899,16 @@ public partial class MainWindow : Window
         if (string.IsNullOrWhiteSpace(replacement) || !File.Exists(replacement) || !ImagePreviewService.IsSupportedExtension(Path.GetExtension(replacement))) return;
         try
         {
-            var preview = _imagePreview.CreatePreviewFromFile(replacement);
+            var preview = await Task.Run(() => _imagePreview.CreatePreviewFromFile(replacement));
+            if (generation != _previewGeneration) return;
             SetPreviewBitmap(preview.ThumbnailPng);
             PreviewInfoText.Text = $"{preview.Width} × {preview.Height} · {preview.Format}" + (preview.HasAlpha ? " · Alpha" : string.Empty);
         }
-        catch (Exception ex) { PreviewInfoText.Text = $"预览失败：{ex.Message}"; }
+        catch (Exception ex)
+        {
+            if (generation != _previewGeneration) return;
+            PreviewInfoText.Text = $"预览失败：{ex.Message}";
+        }
     }
 
     private void SetPreviewBitmap(byte[] png)
@@ -905,6 +978,181 @@ public partial class MainWindow : Window
             AssetList.SelectedItem = asset;
         }
         catch (Exception ex) { ShowError("替换资源失败", ex); }
+    }
+
+    /// <summary>撤销选中资源上的全部修改（替换文件 / Unity 字段 / Sprite
+    /// 元数据），资源还原为未修改状态；导出不再包含它。</summary>
+    private async void ClearEdits_Click(object sender, RoutedEventArgs e)
+    {
+        if (_project is null || _projectFile is null || AssetList.SelectedItem is not AssetRecord asset) return;
+        if (!AssetEditService.HasEdits(asset)) { StatusText.Text = "此资源没有可撤销的修改"; return; }
+        var confirm = MessageBox.Show(this,
+            $"撤销资源 {asset.LogicalPath} 上的全部修改？\n\n替换文件、Unity 字段、Sprite 元数据会被清除；导出将不再包含此资源的修改。",
+            "撤销修改", MessageBoxButton.YesNo, MessageBoxImage.Question);
+        if (confirm != MessageBoxResult.Yes) return;
+        try
+        {
+            var cleared = _assetEdits.ClearEdits(_project, asset.AssetId, Path.GetDirectoryName(_projectFile)!);
+            await _projects.SaveAsync(_project, _projectFile);
+            RefreshProjectState(cleared ? "已撤销此资源的全部修改" : "此资源没有可撤销的修改");
+            AssetList.SelectedItem = asset;
+        }
+        catch (Exception ex) { ShowError("撤销修改失败", ex); }
+    }
+
+    /// <summary>双击资源 = 按类型做最常用的事：图像 → 替换；其余 → Unity
+    /// 字段编辑（可用时），否则十六进制预览。</summary>
+    private void AssetList_DoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (AssetList.SelectedItem is not AssetRecord asset) return;
+        if (asset.Type is AssetType.Texture or AssetType.Sprite && ReplaceAssetButton.IsEnabled)
+        {
+            ReplaceAsset_Click(sender, e);
+            return;
+        }
+        if (UnityFieldsButton.IsEnabled) { EditUnityFields_Click(sender, e); return; }
+        if (HexPreviewButton.IsEnabled) HexPreview_Click(sender, e);
+    }
+
+    /// <summary>右键菜单跟随光标：右键落在某行上时先选中该行。</summary>
+    private void AssetList_PreviewMouseRightButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (TryFindAncestor<System.Windows.Controls.ListViewItem>(e.OriginalSource as System.Windows.DependencyObject) is { } row)
+            row.IsSelected = true;
+    }
+
+    private static T? TryFindAncestor<T>(System.Windows.DependencyObject? from) where T : class
+    {
+        while (from is not null)
+        {
+            if (from is T match) return match;
+            from = System.Windows.Media.VisualTreeHelper.GetParent(from);
+        }
+        return null;
+    }
+
+    private void CopyAssetPath_Click(object sender, RoutedEventArgs e)
+    {
+        if (AssetList.SelectedItem is not AssetRecord asset) return;
+        try { Clipboard.SetText(asset.LogicalPath); StatusText.Text = "已复制资源路径"; }
+        catch (Exception) { StatusText.Text = "复制失败（剪贴板被其他程序占用）"; }
+    }
+
+    // ── 拖放：文件/文件夹拖进窗口即导入；单张图片拖到选中的图像资源上
+    //    询问是否直接作为替换图 ──────────────────────────────────────────
+
+    private void Window_DragOver(object sender, System.Windows.DragEventArgs e)
+    {
+        e.Effects = e.Data.GetDataPresent(System.Windows.DataFormats.FileDrop) &&
+                    e.Data.GetData(System.Windows.DataFormats.FileDrop) is string[] { Length: > 0 }
+            ? System.Windows.DragDropEffects.Copy
+            : System.Windows.DragDropEffects.None;
+        e.Handled = true;
+    }
+
+    private async void Window_Drop(object sender, System.Windows.DragEventArgs e)
+    {
+        if (e.Data.GetData(System.Windows.DataFormats.FileDrop) is not string[] paths || paths.Length == 0) return;
+        if (_project is null) { StatusText.Text = "请先创建或打开项目，再拖入文件"; return; }
+        if (paths.Length == 1 && File.Exists(paths[0]) &&
+            ImagePreviewService.IsSupportedExtension(Path.GetExtension(paths[0])) &&
+            AssetList.SelectedItem is AssetRecord selected &&
+            selected.Type is AssetType.Texture or AssetType.Sprite && _projectFile is not null)
+        {
+            var choice = MessageBox.Show(this,
+                $"把 {Path.GetFileName(paths[0])} 用作选中资源的替换图？\n\n资源：{selected.LogicalPath}\n\n（选「否」则按普通资源包导入）",
+                "拖放替换", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+            if (choice == MessageBoxResult.Cancel) return;
+            if (choice == MessageBoxResult.Yes)
+            {
+                try
+                {
+                    await _assetEdits.ReplaceFromFileAsync(_project, selected.AssetId, paths[0], Path.GetDirectoryName(_projectFile)!);
+                    await _projects.SaveAsync(_project, _projectFile);
+                    RefreshProjectState("拖放替换已登记");
+                    AssetList.SelectedItem = selected;
+                }
+                catch (Exception ex) { ShowError("拖放替换失败", ex); }
+                return;
+            }
+        }
+        await ImportPathsAsync(paths);
+    }
+
+    /// <summary>拖放的统一导入：文件夹走目录导入，文件按扩展名分发，与
+    /// 「导入资源包」按钮同一管道；逐文件容错（失败的文件不影响其余）。</summary>
+    private async Task ImportPathsAsync(string[] paths)
+    {
+        if (_project is null) return;
+        try
+        {
+            var added = 0;
+            var updated = 0;
+            var failed = new List<string>();
+            foreach (var path in paths)
+            {
+                try
+                {
+                    var result = Directory.Exists(path)
+                        ? await _importer.ImportDirectoryIntoProjectAsync(path, _project)
+                        : await ImportSingleFileAsync(path);
+                    added += result.AddedAssets;
+                    updated += result.UpdatedAssets;
+                }
+                catch (Exception ex) { failed.Add($"{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}：{ex.Message}"); }
+            }
+            if (_projectFile is not null) await _projects.SaveAsync(_project, _projectFile);
+            RefreshProjectState($"拖放导入完成：新增 {added}，更新 {updated}" + (failed.Count > 0 ? $"（失败 {failed.Count}）" : string.Empty));
+            if (failed.Count > 0)
+                MessageBox.Show(this,
+                    "以下文件导入失败：\n" + string.Join("\n", failed.Take(10)),
+                    "拖放导入", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        catch (Exception ex) { ShowError("拖放导入失败", ex); }
+    }
+
+    /// <summary>快捷键：Ctrl+F 聚焦搜索框，Esc 在搜索框内清空筛选。</summary>
+    private void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.KeyboardDevice.Modifiers == System.Windows.Input.ModifierKeys.Control && e.Key == System.Windows.Input.Key.F)
+        {
+            SearchBox.Focus();
+            SearchBox.SelectAll();
+            e.Handled = true;
+        }
+        else if (e.Key == System.Windows.Input.Key.Escape && SearchBox.IsKeyboardFocusWithin)
+        {
+            SearchBox.Text = string.Empty;
+            e.Handled = true;
+        }
+    }
+
+    // ── 快捷打开目录：导出后去模组目录确认、找回项目文件 ─────────────
+
+    private void OpenModsDirectory_Click(object sender, RoutedEventArgs e)
+    {
+        var mods = _env.EffectiveModDirectory(_project);
+        if (string.IsNullOrWhiteSpace(mods) || !Directory.Exists(mods))
+        {
+            MessageBox.Show(this,
+                "模组目录尚未配置或不存在（%APPDATA%\\LimbusCompanyMods）。\n可先点「重新自动获取目录」，或在「设置…」中手动指定。",
+                "打开模组目录", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        try { System.Diagnostics.Process.Start("explorer.exe", mods); }
+        catch (Exception ex) { ShowError("打开模组目录失败", ex); }
+    }
+
+    private void OpenProjectFolder_Click(object sender, RoutedEventArgs e)
+    {
+        var root = _projectFile is null ? null : Path.GetDirectoryName(Path.GetFullPath(_projectFile));
+        if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
+        {
+            StatusText.Text = "请先创建或打开项目";
+            return;
+        }
+        try { System.Diagnostics.Process.Start("explorer.exe", root); }
+        catch (Exception ex) { ShowError("打开项目文件夹失败", ex); }
     }
 
     private async void InspectSprite_Click(object sender, RoutedEventArgs e)
@@ -1111,6 +1359,8 @@ public partial class MainWindow : Window
         catch (Exception ex) { ShowError("导出 WAV 失败", ex); }
     }
 
+    /// <summary>初始化筛选下拉框（仅一次）并触发一次搜索。真正的过滤在
+    /// RunSearchAsync（后台线程 + 防抖）。</summary>
     private void RefreshAssetList()
     {
         if (_project is null) { AssetList.ItemsSource = null; return; }
@@ -1132,12 +1382,18 @@ public partial class MainWindow : Window
             StateFilter.DisplayMemberPath = "Label";
             StateFilter.SelectedIndex = 0;
         }
+        _searchTimer.Stop();
+        _ = RunSearchAsync();
+    }
+
+    private AssetSearchQuery BuildSearchQuery()
+    {
         var selectedType = (TypeFilter.SelectedItem as dynamic)?.Value as LimbusModEditor.Domain.Assets.AssetType?;
         var selectedState = (StateFilter.SelectedItem as dynamic)?.Value as LimbusModEditor.Domain.Assets.AssetEditState?;
         long? minKb = null, maxKb = null;
         if (long.TryParse(MinSizeFilter.Text.Trim(), out var minSize) && minSize > 0) minKb = minSize * 1024;
         if (long.TryParse(MaxSizeFilter.Text.Trim(), out var maxSize) && maxSize > 0) maxKb = maxSize * 1024;
-        AssetList.ItemsSource = _search.Search(_project, new AssetSearchQuery(
+        return new AssetSearchQuery(
             SearchBox?.Text,
             selectedType,
             selectedState,
@@ -1146,11 +1402,31 @@ public partial class MainWindow : Window
             int.TryParse(TypeIdFilter.Text.Trim(), out var typeId) ? typeId : null,
             minKb,
             maxKb,
-            ReplacedOnlyFilter.IsChecked));
-        if (AssetList.Items.Count == _project.Assets.Count)
-            AssetCountText.Text = _project.Assets.Count.ToString();
-        else
-            AssetCountText.Text = $"{AssetList.Items.Count} / {_project.Assets.Count}";
+            ReplacedOnlyFilter.IsChecked);
+    }
+
+    /// <summary>后台线程过滤 + 排序（快照先在 UI 线程取好，避免与集合修改
+    /// 竞争），带代际守卫：过期结果直接丢弃；选中项按 AssetId 跨刷新保留。</summary>
+    private async Task RunSearchAsync()
+    {
+        if (_project is null) { AssetList.ItemsSource = null; return; }
+        var generation = ++_searchGeneration;
+        var query = BuildSearchQuery();
+        var snapshot = _project.Assets.ToArray();
+        IReadOnlyList<AssetRecord> results;
+        try { results = await Task.Run(() => _search.Search(snapshot, query)); }
+        catch (ArgumentException) { return; }
+        if (generation != _searchGeneration) return;
+        var selectedId = (AssetList.SelectedItem as AssetRecord)?.AssetId;
+        AssetList.ItemsSource = results;
+        if (selectedId is { } id)
+        {
+            var restored = results.FirstOrDefault(x => x.AssetId == id);
+            if (restored is not null) AssetList.SelectedItem = restored;
+        }
+        AssetCountText.Text = results.Count == _project.Assets.Count
+            ? _project.Assets.Count.ToString()
+            : $"{results.Count} / {_project.Assets.Count}";
     }
 
     private void ShowError(string title, Exception ex)

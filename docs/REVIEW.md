@@ -107,11 +107,16 @@
 6. **诊断导出为 JSON**（P0.3 余项）：导出报告与字段校验诊断可保存为结构化
    文件，方便反馈与复盘。
 7. **SpriteAtlas 结构化支持**（P1.4 余项）：待真实样本到位后补 atlas mesh 重写。
+8. ~~撤销修改 + 拖放 + 长操作进度~~（P3.7 已实现，2026-09-06）：ClearEdits
+   （替换/字段/Sprite 三类标记可撤销，originalSize 还原）、窗口级拖放导入/
+   替换、右键菜单、双击动作、Ctrl+F/Esc、扫描 ETA、导出进度窗口、
+   「打开输出位置」、大小列人性化、防抖后台搜索与异步预览（大项目不卡顿）、
+   项目保存去 sync-over-async。
 
 ## 5. 基线状态
 
 ```text
 dotnet build LimbusModEditor.slnx --no-restore   ✓ 0 错误
-dotnet test LimbusModEditor.slnx --no-restore    ✓ 142 通过（50 Format + 92 Domain）
-dotnet publish ... -o artifacts/publish-win-x64  ✓ LimbusModEditor.App.exe
+dotnet test LimbusModEditor.slnx --no-build      ✓ 223 通过（61 Format + 162 Domain）
+dotnet publish ... -o artifacts/publish-win-x64  ✓ LimbusModEditor.App.exe（UI 冒烟启动通过）
 ```

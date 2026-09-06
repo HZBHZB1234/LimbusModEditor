@@ -17,7 +17,7 @@ public sealed class ProjectSettingsWindow : Window
 {
     private readonly MainWindow _ownerMain;
     private readonly AppEnvironment _env;
-    private readonly Func<string?, bool> _saveProject;
+    private readonly Func<string?, Task<bool>> _saveProject;
     private readonly TextBox _gameBox;
     private readonly TextBox _cacheBox;
     private readonly TextBox _modsBox;
@@ -29,7 +29,7 @@ public sealed class ProjectSettingsWindow : Window
     private readonly CheckBox _restoreCheck;
     private readonly TextBlock _status;
 
-    public ProjectSettingsWindow(MainWindow owner, Func<string?, bool> saveProject)
+    public ProjectSettingsWindow(MainWindow owner, Func<string?, Task<bool>> saveProject)
     {
         _ownerMain = owner;
         _saveProject = saveProject;
@@ -69,7 +69,7 @@ public sealed class ProjectSettingsWindow : Window
         panel.Children.Add(_restoreCheck);
 
         var save = new Button { Content = "保存设置", Padding = new Thickness(16, 8, 16, 8), HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 14, 0, 0) };
-        save.Click += (_, _) => Save();
+        save.Click += async (_, _) => await SaveAsync(save);
         panel.Children.Add(save);
         _status = new TextBlock { Margin = new Thickness(0, 10, 0, 0), Foreground = System.Windows.Media.Brushes.Gray, TextWrapping = TextWrapping.Wrap };
         panel.Children.Add(_status);
@@ -93,7 +93,7 @@ public sealed class ProjectSettingsWindow : Window
         _restoreCheck.IsChecked = project?.RestoreDebugFilesOnClose ?? true;
     }
 
-    private void Save()
+    private async Task SaveAsync(Button saveButton)
     {
         var project = _ownerMain.Project;
         // 共享目录写进共享配置（程序目录），所有项目立即生效。
@@ -110,8 +110,15 @@ public sealed class ProjectSettingsWindow : Window
             project.Description = _descriptionBox.Text.Trim();
             project.RestoreDebugFilesOnClose = _restoreCheck.IsChecked == true;
         }
-        if (_saveProject(null)) _status.Text = "设置已保存（共享目录 → 程序目录；元数据 → 项目）。";
-        else _status.Text = "共享目录已保存；项目元数据保存失败，请重试。";
+        // 项目可能很大（全缓存扫描后数十万资产），保存在后台线程执行，
+        // 期间禁用按钮避免重复提交。
+        saveButton.IsEnabled = false;
+        _status.Text = "正在保存项目…";
+        var ok = await _saveProject(null);
+        saveButton.IsEnabled = true;
+        _status.Text = ok
+            ? "设置已保存（共享目录 → 程序目录；元数据 → 项目）。"
+            : "共享目录已保存；项目元数据保存失败，请重试。";
         _ownerMain.RefreshDirectoryLabels();
     }
 

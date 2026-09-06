@@ -15,7 +15,7 @@ Carra2/Rebank/Lunartique/Bank 四格式导入导出、真实 Texture2D `.resS` �
 **官方 catalog 只读解析 + vanilla 基线判定（T3，CRC 口径与 LCTA 交叉验证一致）**、
 **.staticmod 静态数据模组通道（读取/预览应用/生成，两个真实样本导入验证通过）**。
 
-**当前基线：218 个测试全绿**（61 Format + 157 Domain）。最近提交见 git log。
+**当前基线：223 个测试全绿**（61 Format + 162 Domain）。最近提交见 git log。
 
 基线命令（每轮开始和结束都必须跑）：
 
@@ -114,11 +114,28 @@ dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r 
   （`LME_SCAN_BUDGET=N` 有界子集测吞吐）。
 - 基线 205 → 218。发布产物：`artifacts/publish-win-x64`（含 fmod/ 三 DLL）。
 
+## 3.6 本轮三（2026-09-06）：交互打磨与撤销能力（P3.7）
+
+继续清除「不合理处」，本轮交付（详见 ROADMAP P3.7 / USAGE §1.2）：
+
+- **撤销修改**：`AssetEditService.ClearEdits` + UI 按钮/右键菜单
+  （替换/字段/Sprite 三类编辑标记可撤销；`originalSize` 还原显示大小；
+  项目暂存文件一并清理）。
+- **大项目不卡顿**：搜索 300ms 防抖 + 后台线程过滤排序（快照重载 +
+  代际守卫 + 选中项保留）、异步纹理预览、项目保存去 sync-over-async。
+- **长操作反馈**：ExportProgressWindow（一键导出阶段进度）、ScanDialog
+  预计剩余时间、导出报告「打开输出位置」。
+- **快捷交互**：窗口级拖放导入/替换、右键菜单、双击动作、Ctrl+F/Esc、
+  大小列人性化、已修改行高亮、「打开模组目录/项目文件夹」、「已修改资源」
+  计数与提示条口径统一。
+- 新测试 5 个（ClearEdits×4 + 快照搜索口径一致），基线 218 → 223。
+
 ## 4. 下一轮明确任务（按优先级，每项含验收标准）
 
 ### T6（P1）傻瓜化后续打磨（候选）
+- ~~首扫体验：扫描窗口显示预计剩余时间~~（P3.7 已完成 ETA；「稍后再扫」入口
+  保留为候选）。
 - 全缓存 40 万级资产下的检索性能（必要时给 AssetList 加虚拟化/分页）。
-- 首扫体验：扫描窗口显示预计剩余时间；「稍后再扫」入口。
 - 欢迎窗口与提示条的用户实测反馈回收。
 
 ### T1（P0）✅ 已完成（2026-09-06）——写回后在真实游戏中的验证

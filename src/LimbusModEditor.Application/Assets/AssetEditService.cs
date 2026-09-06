@@ -130,6 +130,7 @@ public sealed class AssetEditService
         var hash = Convert.ToHexString(await SHA256.HashDataAsync(hashInput, cancellationToken));
         asset.ModifiedHash = hash;
         asset.EditState = asset.EditState == AssetEditState.Added ? AssetEditState.Added : AssetEditState.Modified;
+        CaptureOriginalSize(asset);
         asset.Size = info.Length;
         asset.Metadata["replacementPath"] = stored;
         project.Edits.Add(new EditOperation
@@ -172,9 +173,66 @@ public sealed class AssetEditService
         var hash = Convert.ToHexString(await SHA256.HashDataAsync(hashInput, cancellationToken));
         asset.ModifiedHash = hash;
         asset.EditState = asset.EditState == AssetEditState.Added ? AssetEditState.Added : AssetEditState.Modified;
+        CaptureOriginalSize(asset);
         asset.Size = info.Length;
         asset.Metadata["replacementPath"] = stored;
         project.Edits.Add(new EditOperation { Kind = EditOperationKind.ReplaceAsset, AssetId = asset.AssetId, TargetPath = asset.LogicalPath, SourcePath = stored, BeforeHash = asset.OriginalHash, AfterHash = hash });
         return new(asset.AssetId, stored, info.Length, hash);
+    }
+
+    /// <summary>首次替换时记下原始大小，撤销修改时还原列表显示。</summary>
+    private static void CaptureOriginalSize(AssetRecord asset)
+    {
+        if (!asset.Metadata.ContainsKey("originalSize"))
+            asset.Metadata["originalSize"] = asset.Size.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>资源上是否存在任何可导出的编辑（替换文件 / Unity 字段 /
+    /// Sprite 元数据）。这是导出与「已修改」判定的唯一口径。</summary>
+    public static bool HasEdits(AssetRecord asset) =>
+        asset.Metadata.ContainsKey("replacementPath") ||
+        asset.Metadata.ContainsKey("unityFieldEdits") ||
+        asset.Metadata.ContainsKey("spriteMetadata");
+
+    /// <summary>撤销一个资源上的全部编辑：清除替换文件 / Unity 字段 /
+    /// Sprite 元数据三类编辑标记并把资源还原为 Unchanged。替换的暂存文件
+    /// （位于项目 edits/assets 下）会被删除；替换前的显示大小由
+    /// originalSize 还原。资源本身没有编辑时返回 false。</summary>
+    public bool ClearEdits(ModProject project, Guid assetId, string? projectDirectory = null)
+    {
+        ArgumentNullException.ThrowIfNull(project);
+        var asset = project.Assets.FirstOrDefault(x => x.AssetId == assetId)
+            ?? throw new KeyNotFoundException($"未找到资源: {assetId}");
+        if (!HasEdits(asset)) return false;
+
+        if (asset.Metadata.TryGetValue("replacementPath", out var stored) && !string.IsNullOrWhiteSpace(stored))
+        {
+            try
+            {
+                var fullStored = Path.GetFullPath(stored);
+                var editsRoot = string.IsNullOrWhiteSpace(projectDirectory)
+                    ? null
+                    : Path.GetFullPath(Path.Combine(projectDirectory, "edits", "assets"))
+                        .TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                // 只删项目 edits/assets 内的暂存文件；用户手选的外部文件不动。
+                if (editsRoot is null || fullStored.StartsWith(editsRoot, StringComparison.OrdinalIgnoreCase))
+                    if (File.Exists(fullStored)) File.Delete(fullStored);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // 删不掉暂存文件不阻断撤销：编辑标记已清除，导出不会再带上它。
+            }
+        }
+
+        asset.Metadata.Remove("replacementPath");
+        asset.Metadata.Remove("unityFieldEdits");
+        asset.Metadata.Remove("spriteMetadata");
+        if (asset.Metadata.TryGetValue("originalSize", out var original) &&
+            long.TryParse(original, out var size))
+            asset.Size = size;
+        asset.Metadata.Remove("originalSize");
+        asset.ModifiedHash = null;
+        asset.EditState = AssetEditState.Unchanged;
+        return true;
     }
 }

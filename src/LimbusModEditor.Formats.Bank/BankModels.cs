@@ -43,6 +43,10 @@ public static class BankParser
             pos += 8;
             if (type.SequenceEqual("SNDH"u8))
             {
+                // Real game event banks (<name>.bank, e.g. 1D101A.bank) ship an
+                // EMPTY SNDH (size 0) because they carry no FSB payloads; the
+                // audio banks (<name>.assets.bank) hold the (offset, size) table.
+                if (size == 0) return new([], [], false, pos);
                 if (size < 4 || size > int.MaxValue || pos + size > data.Length) return null;
                 if ((size - 4) % 8 != 0) return null;
                 var count = checked((int)((size - 4) / 8));

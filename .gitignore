@@ -50,3 +50,5 @@ $RECYCLE.BIN/
 *.bak
 *.swp
 *~
+# FMOD 二进制不入库（许可要求）；发布脚本会把它复制进安装包
+third_party/fmod/

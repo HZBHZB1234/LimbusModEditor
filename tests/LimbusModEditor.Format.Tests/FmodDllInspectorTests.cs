@@ -143,9 +143,10 @@ public class FmodDllInspectorTests : IDisposable
     public void Directory_probe_reports_missing_dlls()
     {
         var reports = FmodDllInspector.InspectDirectory(_root);
-        Assert.Equal(2, reports.Count);
+        Assert.Equal(5, reports.Count); // fmod64/fmod/fmodstudio/fsbank64/libfsbvorbis64
         Assert.All(reports, r => Assert.False(r.Present));
         Assert.Contains("fsbank64.dll", reports.Select(r => r.FileName));
+        Assert.Contains("fmodstudio.dll", reports.Select(r => r.FileName));
     }
 
     [Fact]

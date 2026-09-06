@@ -325,6 +325,27 @@ Lunartique→对象级 Carra/目录来源支持，其余禁用并给出原因）
   两个真实样本（环指回调 / 攻击容量修改）导入验证通过。边界：bundle 打补丁
   与 catalog 双写由加载器完成（带风险开关），编辑器只产出模组包。
 
+### P3.6 傻瓜化改造（2026-09-06，完成）
+
+目标：专一化、傻瓜化 —— 进软件即引导建/开项目，自动扫描后立刻可编辑；
+共享设置与缓存放程序目录；FMOD DLL 随包分发。
+
+- **启动引导**：WelcomeDialog（新建/打开/最近项目）、上次项目自动恢复、
+  主窗口「下一步」提示条、无项目全屏引导；左栏按「① 获取资源 /
+  ② 产出模组」重组。
+- **共享配置**：`AppEnvironment`（`config/shared-config.json` + `cache/`，
+  均在程序目录）；目录解析「共享 → 旧项目字段 → 自动发现」，手动值不覆盖，
+  旧项目值首开迁移；FMOD 动态发现不落盘。
+- **扫描通道**：`UnityCacheScanService` 引用模式 + 程序目录增量索引缓存 +
+  逐 bundle 容错 + catalog 基线；实测 60 bundle≈1.6s（≈280 资产/bundle），
+  全缓存 1459 bundle 首扫 ≈1-2 分钟，重扫近瞬时。
+- **一键导出**：`UnityCacheMaterializationService`（编辑实体化，规避全缓存
+  同名 `__data` 构建冲突）+ `UnityCacheExportService`（重打包→逐对象读回→
+  真实加载器 Carra2 键打包），真实数据端到端验证。
+- **FMOD 随包**：`scripts/publish.ps1`（third_party/fmod → 发布输出 fmod/，
+  git 忽略二进制）+ `FmodLibraryLocator` 自动发现 + 加载/探测候选扩展。
+- 新增测试 13 个（共享配置/发现/扫描/实体化/导出），基线 205 → 218。
+
 ## P4：工程质量和交付
 
 - 把当前代码后置 UI 逐步迁移到 MVVM，但不牺牲现有 Windows-only 可运行性。

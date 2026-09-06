@@ -33,8 +33,10 @@ public sealed class FmodCodecLibrary : IDisposable
 
         Dispose();
         _lastError = null;
+        // 现代游戏随附的 FMOD 运行库常不带位数后缀（fmod.dll / fmodstudio.dll
+        // 即 x64），同样导出 FMOD_System_*，一并作为加载候选。
         var candidates = IntPtr.Size == 8
-            ? new[] { "fmod64.dll", "fsbank64.dll", "libfsbvorbis64.dll", "fmodstudio64.dll" }
+            ? new[] { "fmod64.dll", "fmod.dll", "fsbank64.dll", "libfsbvorbis64.dll", "fmodstudio64.dll", "fmodstudio.dll" }
             : new[] { "fmod.dll", "fsbank.dll", "libfsbvorbis.dll", "fmodstudio.dll" };
         foreach (var candidate in candidates)
         {

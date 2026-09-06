@@ -1,13 +1,15 @@
 using System.IO;
 using System.Windows;
 using System.Windows.Media.Imaging;
+using LimbusModEditor.Application.AppConfig;
 using LimbusModEditor.Application.Assets;
+using LimbusModEditor.Application.Build;
 using LimbusModEditor.Application.Formats;
 using LimbusModEditor.Application.Projects;
+using LimbusModEditor.Application.Scanning;
 using LimbusModEditor.Domain.Projects;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Editing.Images;
-using LimbusModEditor.Application.Build;
 using LimbusModEditor.Application.Debugging;
 using LimbusModEditor.Formats.Bank;
 
@@ -29,6 +31,10 @@ public partial class MainWindow : Window
     private readonly ModExportService _exporter = new(BuiltInFormatRegistry.Create());
     private readonly DebugApplyService _debugApply = new();
     private readonly GameLaunchService _gameLaunch = new();
+    private readonly AppEnvironment _env = AppEnvironment.Current;
+    private readonly UnityCacheScanService _cacheScan =
+        new(Path.Combine(AppEnvironment.Current.CacheDirectory, "unity-cache-index.json"));
+    private readonly UnityCacheExportService _cacheExporter = new();
     private DebugApplySession? _debugSession;
     private ModProject? _project;
     private string? _projectFile;
@@ -45,7 +51,47 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         UpdateDirectoryStatus();
+        UpdateHint();
+        Loaded += async (_, _) => await OnWindowLoadedAsync();
     }
+
+    /// <summary>启动引导（傻瓜化）：有上次项目就自动恢复；否则弹出欢迎窗口
+    /// 引导「新建 / 打开 / 最近项目」。</summary>
+    private async Task OnWindowLoadedAsync()
+    {
+        var last = _env.Config.LastProjectFile;
+        if (!string.IsNullOrWhiteSpace(last) && File.Exists(last))
+        {
+            try
+            {
+                await OpenProjectFileAsync(last, "已恢复上次项目");
+                return;
+            }
+            catch (Exception ex) { ShowError("恢复上次项目失败", ex); }
+        }
+        ShowWelcomeDialog();
+    }
+
+    private void ShowWelcomeDialog()
+    {
+        var dialog = new WelcomeDialog(_env.Config.RecentProjects) { Owner = this };
+        if (dialog.ShowDialog() != true || dialog.Result is null) return;
+        switch (dialog.Result.Choice)
+        {
+            case WelcomeChoice.CreateNew: NewModWizard_Click(this, new RoutedEventArgs()); break;
+            case WelcomeChoice.OpenFile: OpenProject_Click(this, new RoutedEventArgs()); break;
+            case WelcomeChoice.Recent when dialog.Result.RecentProjectFile is not null:
+                _ = OpenRecentAsync(dialog.Result.RecentProjectFile);
+                break;
+        }
+    }
+
+    private async Task OpenRecentAsync(string projectFile)
+    {
+        try { await OpenProjectFileAsync(projectFile, "已打开最近项目"); }
+        catch (Exception ex) { ShowError("打开最近项目失败", ex); }
+    }
+
 
     private async void NewProject_Click(object sender, RoutedEventArgs e)
     {
@@ -55,14 +101,16 @@ public partial class MainWindow : Window
             FileName = "MyMod.lmeproj",
             Title = "选择新模组项目位置"
         };
+        // 零操作默认位置：程序目录 projects/。
+        if (!Directory.Exists(_env.ProjectsDirectory)) Directory.CreateDirectory(_env.ProjectsDirectory);
+        dialog.InitialDirectory = _env.ProjectsDirectory;
         if (dialog.ShowDialog() != true) return;
         try
         {
             var directory = Path.GetDirectoryName(dialog.FileName)!;
             _project = await _projects.CreateAsync(directory, Path.GetFileNameWithoutExtension(dialog.FileName));
             _projectFile = dialog.FileName;
-            // 无感自动化：新建项目同样自动获取缺失目录（游戏/缓存/模组）。
-            await AutoConfigureAfterOpenAsync("已创建项目");
+            await AfterProjectOpenedAsync("已创建项目");
         }
         catch (Exception ex) { ShowError("创建项目失败", ex); }
     }
@@ -78,26 +126,54 @@ public partial class MainWindow : Window
         {
             _project = await _projects.LoadAsync(wizard.Result.ProjectFile);
             _projectFile = wizard.Result.ProjectFile;
-            // 无感自动化（同打开项目）：目录缺失时自动定位真实安装。
-            await AutoConfigureAfterOpenAsync("已通过向导创建项目");
+            await AfterProjectOpenedAsync("已通过向导创建项目");
         }
         catch (Exception ex) { ShowError("打开新建项目失败", ex); }
     }
 
     private async void OpenProject_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new Microsoft.Win32.OpenFileDialog { Filter = "LME 项目 (*.lmeproj)|*.lmeproj|所有文件 (*.*)|*.*" };
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Filter = "LME 项目 (*.lmeproj)|*.lmeproj|所有文件 (*.*)|*.*",
+            InitialDirectory = Directory.Exists(_env.ProjectsDirectory) ? _env.ProjectsDirectory : null
+        };
         if (dialog.ShowDialog() != true) return;
         try
         {
-            _project = await _projects.LoadAsync(dialog.FileName);
-            _projectFile = dialog.FileName;
-            // 无感自动化：缺失的目录自动从真实安装定位（游戏/缓存/模组），
-            // 用户手动设置过的值不会被覆盖。
-            await AutoConfigureAfterOpenAsync("已打开项目");
+            await OpenProjectFileAsync(dialog.FileName, "已打开项目");
         }
         catch (Exception ex) { ShowError("打开项目失败", ex); }
     }
+
+    /// <summary>打开项目的统一入口：加载 → 记录最近项目 → 无感自动配置 →
+    /// 需要时自动要求扫描 → 更新提示。</summary>
+    private async Task OpenProjectFileAsync(string projectFile, string? statusPrefix = null)
+    {
+        _project = await _projects.LoadAsync(projectFile);
+        _projectFile = Path.GetFullPath(projectFile);
+        _env.RegisterRecentProject(_projectFile, _project.Name);
+        await AfterProjectOpenedAsync(statusPrefix ?? "已打开项目");
+    }
+
+    /// <summary>项目就绪后的无感流程：共享目录自动配置；项目还没有资源时
+    /// 自动弹出扫描窗口（傻瓜化核心）。</summary>
+    private async Task AfterProjectOpenedAsync(string prefix)
+    {
+        RefreshProjectState(prefix);
+        await AutoConfigureAsync();
+        RefreshProjectState(prefix);
+
+        // 空项目自动要求扫描（扫描完成后即可直接编辑）。
+        if (_project is { Assets.Count: 0 })
+        {
+            var cacheDirectory = _env.EffectiveUnityCacheDirectory(_project);
+            if (UnityCacheScanService.EnumerateCacheEntries(cacheDirectory).Count > 0)
+                PromptScan(autoStart: true);
+        }
+        UpdateHint();
+    }
+
 
     private async void SaveProject_Click(object sender, RoutedEventArgs e)
     {
@@ -181,8 +257,9 @@ public partial class MainWindow : Window
         if (wizard.ShowDialog() != true || wizard.Result is not { } choice) return;
         try
         {
-            using NativeFmodAudioCodec? nativeCodec = choice.Target == LimbusModEditor.Domain.Formats.ModFormatKind.Bank && !string.IsNullOrWhiteSpace(_project.FmodLibraryDirectory) && Directory.Exists(_project.FmodLibraryDirectory)
-                ? new NativeFmodAudioCodec(_project.FmodLibraryDirectory) : null;
+            var fmodDirectory = _env.EffectiveFmodLibraryDirectory(_project);
+            using NativeFmodAudioCodec? nativeCodec = choice.Target == LimbusModEditor.Domain.Formats.ModFormatKind.Bank && !string.IsNullOrWhiteSpace(fmodDirectory) && Directory.Exists(fmodDirectory)
+                ? new NativeFmodAudioCodec(fmodDirectory) : null;
             var result = await _exporter.ExportWithEditsAsync(selectedSource, _project, choice.OutputPath, choice.Target, nativeCodec);
             StatusText.Text = $"导出完成：应用 {result.AppliedReplacements} 个替换 → {result.OutputPath}";
             new ExportReportWindow(result) { Owner = this }.ShowDialog();
@@ -213,8 +290,9 @@ public partial class MainWindow : Window
         if (string.IsNullOrWhiteSpace(directory)) return;
         try
         {
-            using NativeFmodAudioCodec? nativeCodec = !string.IsNullOrWhiteSpace(_project.FmodLibraryDirectory) && Directory.Exists(_project.FmodLibraryDirectory)
-                ? new NativeFmodAudioCodec(_project.FmodLibraryDirectory) : null;
+            var fmodDirectory = _env.EffectiveFmodLibraryDirectory(_project);
+            using NativeFmodAudioCodec? nativeCodec = !string.IsNullOrWhiteSpace(fmodDirectory) && Directory.Exists(fmodDirectory)
+                ? new NativeFmodAudioCodec(fmodDirectory) : null;
             var result = await _exporter.ExportAllAsync(_project, directory, nativeCodec);
             StatusText.Text = $"导出全部完成：成功 {result.SucceededCount}，失败 {result.FailedCount} → {directory}";
             new MultiExportReportWindow(result, directory) { Owner = this }.ShowDialog();
@@ -237,20 +315,17 @@ public partial class MainWindow : Window
     {
         try
         {
-            if (_project is not null && _projectFile is not null && string.IsNullOrWhiteSpace(_project.GameDirectory))
+            if (_project is not null && _projectFile is not null && string.IsNullOrWhiteSpace(_env.EffectiveGameDirectory(_project)))
             {
-                var report = await Task.Run(() => LimbusModEditor.Application.Debugging.ProjectAutoConfigureService.Apply(_project));
-                if (report.Any)
-                {
-                    await _projects.SaveAsync(_project, _projectFile);
-                    UpdateDirectoryStatus();
-                }
+                await Task.Run(() => _env.ApplyAutoConfigure(_project));
+                await SaveProjectQuietlyAsync();
+                UpdateDirectoryStatus();
             }
-            var gameDirectory = _project?.GameDirectory;
+            var gameDirectory = _env.EffectiveGameDirectory(_project);
             var defaultLangRoot = string.IsNullOrWhiteSpace(gameDirectory)
                 ? string.Empty
                 : Path.Combine(gameDirectory, "LimbusCompany_Data", "lang");
-            new LangTextModWindow(defaultLangRoot, _project?.ModDirectory) { Owner = this }.ShowDialog();
+            new LangTextModWindow(defaultLangRoot, _env.EffectiveModDirectory(_project)) { Owner = this }.ShowDialog();
             StatusText.Text = "文本模组窗口已关闭（补丁文件放进模组目录后由加载器应用）。";
         }
         catch (Exception ex) { ShowError("打开文本模组窗口失败", ex); }
@@ -310,64 +385,192 @@ public partial class MainWindow : Window
         catch (Exception ex) { ShowError("十六进制预览失败", ex); }
     }
 
-    /// <summary>无感自动化：打开/新建项目后调用。只填充缺失目录
-    /// （游戏 / Unity 缓存 / 模组），手动设置过的值永远不会被覆盖；
-    /// FMOD DLL 目录从不自动获取（必须由用户提供合法获得的 DLL）。</summary>
-    private async Task AutoConfigureAfterOpenAsync(string prefix)
+    /// <summary>无感自动化（共享配置版）：只填充从未配置过的目录（游戏 /
+    /// Unity 缓存 / 模组 / FMOD），旧项目里的目录值自动迁移进共享配置。
+    /// 手动值永远不会被覆盖。</summary>
+    private async Task AutoConfigureAsync()
     {
-        var report = await Task.Run(() => LimbusModEditor.Application.Debugging.ProjectAutoConfigureService.Apply(_project!));
-        if (report.Any)
+        if (_project is null) return;
+        var report = await Task.Run(() => _env.ApplyAutoConfigure(_project));
+        if (_projectFile is not null) await SaveProjectQuietlyAsync();
+        UpdateDirectoryStatus();
+        if (report.Any) StatusText.Text = $"自动配置：{report.Describe()}（共享设置已保存到程序目录）";
+    }
+
+    /// <summary>扫描游戏资源入口（左栏「① 获取资源」）。autoStart=true 时
+    /// 窗口打开即开始（用于新建/打开空项目后的自动引导）。</summary>
+    private async void Scan_Click(object sender, RoutedEventArgs e) => PromptScan(autoStart: false);
+
+    private void PromptScan(bool autoStart)
+    {
+        if (_project is null) { StatusText.Text = "请先创建或打开项目"; return; }
+        var cacheDirectory = _env.EffectiveUnityCacheDirectory(_project);
+        if (string.IsNullOrWhiteSpace(cacheDirectory) || !Directory.Exists(cacheDirectory))
         {
-            await _projects.SaveAsync(_project!, _projectFile!);
-            RefreshProjectState($"{prefix}，并自动获取：{report.Describe()}");
+            HintText.Text = "⚠ 尚未找到 Unity 缓存目录 —— 请确认游戏已启动过一次（生成缓存），或在「设置…」中指定缓存目录后重试扫描。";
+            MessageBox.Show(this,
+                "还没有可扫描的 Unity 缓存目录。\n\n请先启动一次游戏让缓存生成，或打开「设置…」手动指定缓存目录\n（LocalLow/Unity/ProjectMoon_LimbusCompany）。",
+                "扫描游戏资源", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        var dialog = new ScanDialog(_cacheScan, _project, cacheDirectory, _env.EffectiveGameDirectory(_project), autoStart) { Owner = this };
+        dialog.ShowDialog();
+        if (dialog.Result is not null && _projectFile is not null)
+        {
+            SaveProjectInternal();
+            RefreshProjectState($"扫描完成：新增 {dialog.Result.AddedAssets} 个资源，更新 {dialog.Result.UpdatedAssets} 个 —— 现在就可以在列表中搜索并编辑了");
         }
         else
         {
-            RefreshProjectState(prefix);
+            RefreshProjectState();
+        }
+        UpdateHint();
+    }
+
+    /// <summary>傻瓜化一键导出：扫描资源上的全部修改 → Carra2 → 模组目录。</summary>
+    private async void OneClickExport_Click(object sender, RoutedEventArgs e)
+    {
+        if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }
+        await AutoConfigureAsync();
+        var modDirectory = _env.EffectiveModDirectory(_project);
+        var defaultDirectory = !string.IsNullOrWhiteSpace(modDirectory) && Directory.Exists(modDirectory)
+            ? modDirectory
+            : Path.Combine(Path.GetDirectoryName(_projectFile)!, "builds");
+        var dialog = new Microsoft.Win32.SaveFileDialog
+        {
+            Filter = "Carra2 模组 (*.carra2)|*.carra2",
+            FileName = SanitizeFileName(_project.Name) + ".carra2",
+            InitialDirectory = defaultDirectory,
+            Title = "选择导出位置（默认放在模组目录，游戏加载器可直接读取）"
+        };
+        if (dialog.ShowDialog() != true) return;
+        OneClickExportButton.IsEnabled = false;
+        StatusText.Text = "正在导出（重打包被编辑的 bundle 并生成 Carra2）…";
+        try
+        {
+            await MaterializeEditedAssetsAsync();
+            await SaveProjectQuietlyAsync();
+            var result = await _cacheExporter.ExportCarra2Async(
+                _project, Path.GetDirectoryName(_projectFile)!, dialog.FileName,
+                _env.EffectiveUnityCacheDirectory(_project));
+            StatusText.Text = $"导出完成：{result.AppliedReplacements} 个对象 → {result.OutputPath}";
+            new ExportReportWindow(result) { Owner = this }.ShowDialog();
+            UpdateHint();
+        }
+        catch (Exception ex) { ShowError("一键导出失败", ex); }
+        finally { OneClickExportButton.IsEnabled = true; }
+    }
+
+    private static string SanitizeFileName(string name)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var cleaned = new string(name.Trim().Select(c => invalid.Contains(c) ? '_' : c).ToArray());
+        return string.IsNullOrWhiteSpace(cleaned) ? "MyMod" : cleaned;
+    }
+
+    /// <summary>导出/构建前的统一实体化：把所有「已编辑但仍是缓存引用」的
+    /// 资源实体化为项目本地副本（每个 bundle 只复制一次）。缓存里所有
+    /// bundle 都叫 __data，不实体化会在构建输出目录互相覆盖。</summary>
+    private async Task MaterializeEditedAssetsAsync()
+    {
+        if (_project is null) return;
+        var seeds = _project.Assets.Where(x =>
+            x.Metadata.TryGetValue("reference", out var reference) && reference == "true" &&
+            (x.Metadata.ContainsKey("replacementPath") || x.Metadata.ContainsKey("unityFieldEdits") || x.Metadata.ContainsKey("spriteMetadata"))).ToList();
+        foreach (var seed in seeds)
+        {
+            await UnityCacheMaterializationService.MaterializeForEditingAsync(_project, seed, _projectFile is null ? null : Path.GetDirectoryName(_projectFile));
         }
     }
 
-    /// <summary>左栏「自动获取目录」：无感自动化的手动兜底（例如项目创建时
-    /// 游戏尚未安装）。与打开项目时的自动配置是同一套逻辑。</summary>
+    /// <summary>下一步提示条：按当前状态告诉用户该做什么（傻瓜化指引）。</summary>
+    private void UpdateHint()
+    {
+        NoProjectOverlay.Visibility = _project is null ? Visibility.Visible : Visibility.Collapsed;
+        var edits = _project?.Assets.Count(x =>
+            x.Metadata.ContainsKey("replacementPath") || x.Metadata.ContainsKey("unityFieldEdits") || x.Metadata.ContainsKey("spriteMetadata")) ?? 0;
+        if (_project is null)
+        {
+            HintText.Text = "👋 欢迎使用 Limbus Mod Editor —— 点击「新建模组项目」开始：填一个名字，其余（目录、游戏路径、资源扫描）全部自动完成。";
+            return;
+        }
+        if (_project.Assets.Count == 0)
+        {
+            HintText.Text = "下一步：点击左栏「扫描游戏资源」把游戏素材加入项目（引用模式，不复制文件）——扫描完成后即可搜索并编辑。";
+            return;
+        }
+        if (edits == 0)
+        {
+            HintText.Text = $"已索引 {_project.Assets.Count} 个游戏资源。下一步：在列表中搜索你想要的素材（可用类型筛选），选中后用右侧按钮替换图片 / 编辑字段。";
+            return;
+        }
+        HintText.Text = $"已有 {edits} 处修改。下一步：点击左栏「一键导出模组」生成 .carra2 到模组目录（或继续编辑）。";
+    }
+
+    private async Task SaveProjectQuietlyAsync()
+    {
+        if (_project is null || _projectFile is null) return;
+        try { await _projects.SaveAsync(_project, _projectFile); }
+        catch (Exception ex) { StatusText.Text = $"项目保存失败：{ex.Message}"; }
+    }
+
+    /// <summary>左栏「重新自动获取目录」：无感自动化的手动兜底（例如项目
+    /// 创建时游戏尚未安装）。共享配置只填空位，手动值不会被覆盖。</summary>
     private async void AutoConfigure_Click(object sender, RoutedEventArgs e)
     {
-        if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }
+        if (_project is null) { StatusText.Text = "请先创建或打开项目"; return; }
         try
         {
-            var report = await Task.Run(() => LimbusModEditor.Application.Debugging.ProjectAutoConfigureService.Apply(_project));
-            if (report.Any)
-            {
-                await _projects.SaveAsync(_project, _projectFile);
-                RefreshProjectState($"已自动获取：{report.Describe()}");
-            }
-            else
-            {
-                UpdateDirectoryStatus();
-                StatusText.Text = "目录均已配置，无需自动获取。";
-            }
+            var report = await Task.Run(() => _env.ApplyAutoConfigure(_project));
+            UpdateDirectoryStatus();
+            StatusText.Text = report.Any
+                ? $"已自动获取：{report.Describe()}（共享设置已保存到程序目录）"
+                : "目录均已配置，无需自动获取。";
         }
         catch (Exception ex) { ShowError("自动获取目录失败", ex); }
     }
 
-    /// <summary>左栏目录状态一览：✓ 已配置 / ⚠ 目录不存在 / ✗ 未配置。</summary>
+    /// <summary>左栏目录状态一览：显示「生效值（来源）」——来源可为
+    /// 共享配置 / 本项目（旧）/ 自动发现。</summary>
     private void UpdateDirectoryStatus()
     {
-        GameDirectoryStatus.Text = DescribeDirectory("游戏目录", _project?.GameDirectory);
-        UnityCacheStatus.Text = DescribeDirectory("Unity 缓存", _project?.UnityCacheDirectory);
-        ModDirectoryStatus.Text = DescribeDirectory("模组目录", _project?.ModDirectory);
-        FmodDirectoryStatus.Text = DescribeDirectory("FMOD DLL", _project?.FmodLibraryDirectory);
-        GameDirectoryStatus.ToolTip = _project?.GameDirectory;
-        UnityCacheStatus.ToolTip = _project?.UnityCacheDirectory;
-        ModDirectoryStatus.ToolTip = _project?.ModDirectory;
-        FmodDirectoryStatus.ToolTip = _project?.FmodLibraryDirectory;
+        var (game, gameSource) = _env.ResolveWithSource(
+            _env.Config.GameDirectory, _project?.GameDirectory,
+            () => LimbusModEditor.Application.Debugging.GameDirectoryLocator
+                .Scan(LimbusModEditor.Application.Debugging.GameDirectoryLocator.DefaultCandidateRoots()).GameDirectory, "自动发现");
+        GameDirectoryStatus.Text = DescribeDirectory("游戏目录", game, gameSource);
+        var (cache, cacheSource) = _env.ResolveWithSource(
+            _env.Config.UnityCacheDirectory, _project?.UnityCacheDirectory,
+            () => FirstCacheCandidate(game), "自动发现");
+        UnityCacheStatus.Text = DescribeDirectory("Unity 缓存", cache, cacheSource);
+        var (mods, modsSource) = _env.ResolveWithSource(
+            _env.Config.ModDirectory, _project?.ModDirectory,
+            () => LimbusModEditor.Application.Debugging.ModDirectoryLocator.SuggestCandidates().FirstOrDefault(), "自动发现");
+        ModDirectoryStatus.Text = DescribeDirectory("模组目录", mods, modsSource);
+        var (fmod, fmodSource) = _env.ResolveWithSource(
+            _env.Config.FmodLibraryDirectory, _project?.FmodLibraryDirectory,
+            () => LimbusModEditor.Application.AppConfig.FmodLibraryLocator
+                .Discover(_env.BaseDirectory, game)?.Directory, "随包/自动发现");
+        FmodDirectoryStatus.Text = DescribeDirectory("FMOD DLL", fmod, fmodSource);
+        GameDirectoryStatus.ToolTip = game;
+        UnityCacheStatus.ToolTip = cache;
+        ModDirectoryStatus.ToolTip = mods;
+        FmodDirectoryStatus.ToolTip = fmod;
     }
 
-    private static string DescribeDirectory(string label, string? path)
+    private static string? FirstCacheCandidate(string? gameDirectory)
     {
+        var candidates = LimbusModEditor.Application.Debugging.UnityCacheLocator.SuggestCandidates(gameDirectory);
+        return candidates.FirstOrDefault()?.Path;
+    }
+
+    private static string DescribeDirectory(string label, string? path, string source)
+    {
+        var suffix = string.IsNullOrWhiteSpace(path) ? string.Empty : $"（{source}）";
         if (string.IsNullOrWhiteSpace(path)) return $"✗ {label}：未配置";
         return Directory.Exists(path)
-            ? $"✓ {label}：{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}"
-            : $"⚠ {label}：目录不存在";
+            ? $"✓ {label}：{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}{suffix}"
+            : $"⚠ {label}：目录不存在{suffix}";
     }
 
     /// <summary>真实加载器约定（LCTA launcher）："_disable" 后缀切换启用/禁用。
@@ -377,20 +580,21 @@ public partial class MainWindow : Window
         if (_project is null) { StatusText.Text = "请先创建或打开项目"; return; }
         try
         {
-            if (string.IsNullOrWhiteSpace(_project.ModDirectory) || !Directory.Exists(_project.ModDirectory))
+            var modsDirectory = _env.EffectiveModDirectory(_project);
+            if (string.IsNullOrWhiteSpace(modsDirectory) || !Directory.Exists(modsDirectory))
             {
                 var candidates = LimbusModEditor.Application.Debugging.ModDirectoryLocator.SuggestCandidates();
                 if (candidates.Count > 0)
                 {
-                    _project.ModDirectory = candidates[0];
-                    if (_projectFile is not null) await _projects.SaveAsync(_project, _projectFile);
+                    _env.Config.ModDirectory = candidates[0];
+                    _env.Save();
                     UpdateDirectoryStatus();
+                    modsDirectory = candidates[0];
                 }
             }
-            var modsDirectory = _project.ModDirectory;
             if (string.IsNullOrWhiteSpace(modsDirectory) || !Directory.Exists(modsDirectory))
             {
-                MessageBox.Show(this, "未能自动获取模组目录（%APPDATA%\\LimbusCompanyMods）。\n请在「项目设置…」中手动指定。", "管理已安装模组", MessageBoxButton.OK, MessageBoxImage.Information);
+                MessageBox.Show(this, "未能自动获取模组目录（%APPDATA%\\LimbusCompanyMods）。\n请在「设置…」中手动指定。", "管理已安装模组", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
             new ModManagerWindow(modsDirectory) { Owner = this }.ShowDialog();
@@ -403,30 +607,28 @@ public partial class MainWindow : Window
     {
         if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }
         // 目标目录缺失时先无感自动获取一次（只填缺失项，不覆盖手动值）。
-        var autoReport = await Task.Run(() => LimbusModEditor.Application.Debugging.ProjectAutoConfigureService.Apply(_project));
-        if (autoReport.Any)
-        {
-            await _projects.SaveAsync(_project, _projectFile);
-            UpdateDirectoryStatus();
-        }
-        var debugTarget = !string.IsNullOrWhiteSpace(_project.ModDirectory) && Directory.Exists(_project.ModDirectory)
-            ? _project.ModDirectory
-            : !string.IsNullOrWhiteSpace(_project.UnityCacheDirectory) && Directory.Exists(_project.UnityCacheDirectory)
-                ? _project.UnityCacheDirectory : _project.GameDirectory;
+        await Task.Run(() => _env.ApplyAutoConfigure(_project));
+        await SaveProjectQuietlyAsync();
+        UpdateDirectoryStatus();
+        var debugTarget = _env.EffectiveModDirectory(_project) is { } mods && Directory.Exists(mods) ? mods
+            : _env.EffectiveUnityCacheDirectory(_project) is { } cache && Directory.Exists(cache) ? cache
+            : _env.EffectiveGameDirectory(_project);
         if (string.IsNullOrWhiteSpace(debugTarget) || !Directory.Exists(debugTarget))
         {
-            StatusText.Text = "请先在项目配置中设置游戏目录";
+            StatusText.Text = "请先在设置中配置游戏目录";
             return;
         }
         try
         {
             var root = Path.GetDirectoryName(_projectFile)!;
             var overlay = Path.Combine(root, "builds", "debug-overlay");
+            await MaterializeEditedAssetsAsync();
+            await SaveProjectQuietlyAsync();
             await _builder.BuildOverlayAsync(_project, root, overlay);
             await AddUnityBundlesToOverlayAsync(_project, root, overlay);
             await AddUnitySerializedFilesToOverlayAsync(_project, root, overlay);
             _debugSession = await _debugApply.ApplyAsync(_project, overlay, debugTarget);
-            var launch = _gameLaunch.TryLaunch(_project.GameDirectory!, _project.GameExecutablePath);
+            var launch = _gameLaunch.TryLaunch(_env.EffectiveGameDirectory(_project)!, _project.GameExecutablePath);
             DebugStateText.Text = launch.Started
                 ? $"已应用 {_debugSession.Changes.Count} 个文件，游戏已启动，退出前可恢复"
                 : $"已应用 {_debugSession.Changes.Count} 个文件；{launch.Message}";
@@ -442,6 +644,8 @@ public partial class MainWindow : Window
         {
             var root = Path.GetDirectoryName(_projectFile)!;
             var output = Path.Combine(root, "builds", "debug-overlay");
+            await MaterializeEditedAssetsAsync();
+            await SaveProjectQuietlyAsync();
             var result = await _builder.BuildOverlayAsync(_project, root, output);
             var unity = await AddUnityBundlesToOverlayAsync(_project, root, output);
             var serialized = await AddUnitySerializedFilesToOverlayAsync(_project, root, output);
@@ -460,7 +664,7 @@ public partial class MainWindow : Window
             var original = project.Assets.FirstOrDefault(x =>
                 string.Equals(Path.GetFullPath(x.SourcePath ?? string.Empty), Path.GetFullPath(bundle.SourcePath), StringComparison.OrdinalIgnoreCase))
                 ?.Metadata.GetValueOrDefault("originalSourcePath");
-            var relative = GetSafeDebugRelativePath(project, original, Path.GetFileName(bundle.OutputPath));
+            var relative = GetSafeDebugRelativePath(_env, project, original, Path.GetFileName(bundle.OutputPath));
             var target = Path.Combine(overlay, relative);
             await LimbusModEditor.Application.Build.AtomicOutput.CopyAsync(bundle.OutputPath, target);
         }
@@ -476,18 +680,18 @@ public partial class MainWindow : Window
             var original = project.Assets.FirstOrDefault(x =>
                 string.Equals(Path.GetFullPath(x.SourcePath ?? string.Empty), Path.GetFullPath(file.SourcePath), StringComparison.OrdinalIgnoreCase))
                 ?.Metadata.GetValueOrDefault("originalSourcePath");
-            var relative = GetSafeDebugRelativePath(project, original, Path.GetFileName(file.OutputPath));
+            var relative = GetSafeDebugRelativePath(_env, project, original, Path.GetFileName(file.OutputPath));
             var target = Path.Combine(overlay, relative);
             await LimbusModEditor.Application.Build.AtomicOutput.CopyAsync(file.OutputPath, target);
         }
         return files.Sum(x => x.AppliedAssets);
     }
 
-    private static string GetSafeDebugRelativePath(ModProject project, string? original, string fallback)
+    private static string GetSafeDebugRelativePath(AppEnvironment env, ModProject project, string? original, string fallback)
     {
         if (string.IsNullOrWhiteSpace(original)) return fallback;
         var source = Path.GetFullPath(original);
-        foreach (var root in new[] { project.UnityCacheDirectory, project.GameDirectory, project.ModDirectory })
+        foreach (var root in new[] { env.EffectiveUnityCacheDirectory(project), env.EffectiveGameDirectory(project), env.EffectiveModDirectory(project) })
         {
             if (string.IsNullOrWhiteSpace(root)) continue;
             var fullRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
@@ -518,6 +722,7 @@ public partial class MainWindow : Window
         EditCountText.Text = (_project?.Edits.Count ?? 0).ToString();
         UpdateDirectoryStatus();
         RefreshAssetList();
+        UpdateHint();
         if (status is not null) StatusText.Text = $"{status}：{_project?.Name}";
     }
 
@@ -583,10 +788,11 @@ public partial class MainWindow : Window
             asset.Type is AssetType.Mesh or AssetType.Animation or AssetType.Font &&
             (asset.Metadata.ContainsKey("unityBundle") || asset.Metadata.ContainsKey("unitySerializedFile")) &&
             !string.IsNullOrWhiteSpace(asset.SourcePath) && File.Exists(asset.SourcePath) && _projectFile is not null;
+        var fmodDirectory = _env.EffectiveFmodLibraryDirectory(_project);
         DecodeAudioButton.IsEnabled = asset?.Type == AssetType.Audio &&
             asset.LogicalPath.StartsWith("fsb/", StringComparison.OrdinalIgnoreCase) &&
-            !string.IsNullOrWhiteSpace(_project?.FmodLibraryDirectory) &&
-            Directory.Exists(_project.FmodLibraryDirectory) && _projectFile is not null;
+            !string.IsNullOrWhiteSpace(fmodDirectory) &&
+            Directory.Exists(fmodDirectory) && _projectFile is not null;
         FsbInspectButton.IsEnabled = asset?.Type == AssetType.Audio &&
             asset.LogicalPath.StartsWith("fsb/", StringComparison.OrdinalIgnoreCase) &&
             !string.IsNullOrWhiteSpace(asset.SourcePath) && File.Exists(asset.SourcePath) && _projectFile is not null;
@@ -885,8 +1091,9 @@ public partial class MainWindow : Window
 
     private async void DecodeAudio_Click(object sender, RoutedEventArgs e)
     {
+        var fmodDirectory = _env.EffectiveFmodLibraryDirectory(_project);
         if (_project is null || AssetList.SelectedItem is not AssetRecord asset || asset.Type != AssetType.Audio ||
-            string.IsNullOrWhiteSpace(_project.FmodLibraryDirectory) || !Directory.Exists(_project.FmodLibraryDirectory)) return;
+            string.IsNullOrWhiteSpace(fmodDirectory) || !Directory.Exists(fmodDirectory)) return;
         var dialog = new Microsoft.Win32.SaveFileDialog
         {
             Filter = "WAV audio (*.wav)|*.wav|All files (*.*)|*.*",
@@ -896,7 +1103,7 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog() != true) return;
         try
         {
-            using var codec = new NativeFmodAudioCodec(_project.FmodLibraryDirectory);
+            using var codec = new NativeFmodAudioCodec(fmodDirectory);
             var data = await new BankAudioService().DecodeToWaveAsync(asset, codec);
             await File.WriteAllBytesAsync(dialog.FileName, data);
             StatusText.Text = $"音频已导出：{dialog.FileName}";

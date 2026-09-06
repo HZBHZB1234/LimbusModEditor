@@ -4,30 +4,38 @@ Windows-only C#/.NET 8 WPF authoring workbench for Limbus Company mods. The
 project is structured as a creator tool (Assets Studio + FMOD Studio workflow),
 not as a launcher replacement.
 
-## Current workflow
+## Current workflow (three steps, zero configuration)
 
-1. Create an `.lmeproj` project. The project creates `sources`, `edits`,
-   `previews`, `builds`, `backups` and `logs` folders.
-2. Import `.carra`, `.carra2`, `.rebank`, `.bank`, Lunartique ZIPs, Unity
-   `.bundle` files, or a normal resource directory. Imported archives and
-   directories are copied into the project source area and recorded in the
-   project file.
-3. Search the merged asset index, inspect Unity object metadata, preview and
-   split/repack supported images, inspect/edit Sprite rect/pivot/border metadata,
-   import standalone Unity SerializedFiles (`.assets`) as editable object trees,
-   inspect/edit Unity serialized fields (validated primitives, enum values,
-   PPtr pointers, vector arrays and byte-array info, with per-field
-   original/new/diff view),
-   export indexed Bank audio to WAV when user-provided FMOD DLLs are configured,
-   edit text/JSON resources, and record replacements in `edits/assets`.
-4. Export using the source format or choose the Carra/Carra2/Rebank/Lunartique
-   output supported by the current handler. Lunartique Installation pairs can
-   be converted to object-level Carra/Carra2 output by comparing Unity object
-   payload hashes; unsupported deletion-only or malformed resources are
-   reported instead of copied blindly. A project source can be reused after
-   reopening the editor.
-5. Build a debug overlay, apply it to the configured game directory with a
-   backup, launch `LimbusCompany.exe`, and restore files when the editor closes.
+1. **Launch** — the editor resumes your last project or opens a welcome dialog
+   (new project / open project / recent projects). A contextual hint bar always
+   shows the next action; with no project open, a full-screen guide covers the
+   workspace.
+2. **Create or open a project** — the new-mod wizard only asks for a mod name
+   (project defaults to `<程序目录>/projects/<name>`). Game directory, Unity
+   cache, mods directory and FMOD DLLs are auto-discovered and stored as
+   **shared settings in the program directory**
+   (`config/shared-config.json`) — every project reuses them; values from old
+   `.lmeproj` files migrate into the shared config on first open (empty slots
+   only, manual values are never overwritten).
+3. **Scan** — an empty project automatically prompts for a game-resource scan:
+   the editor indexes every Unity cache bundle (`<outer>/<inner>/__data`) in
+   reference mode (no files are copied) with a persistent incremental index in
+   the program cache (`cache/unity-cache-index.json`), so rescans are
+   near-instant. Damaged/unknown bundles are reported as per-entry
+   diagnostics instead of aborting the scan.
+4. **Edit** — search the merged asset index, replace textures, edit Sprite
+   metadata / serialized fields; editing a scanned bundle copies it into the
+   project once (`sources/cache/<outer>_<inner>.bundle`) so game cache
+   changes cannot corrupt work in progress.
+5. **Export** — one click builds a real-loader Carra2 package
+   (`<缓存外层键>/<内层键>/<pathId>.<类型表索引>`, per-entry XZ) from all
+   edits, defaulting to the mods directory (`%APPDATA%\LimbusCompanyMods`).
+   The classic export wizard, multi-format export, debug overlay and lang /
+   staticmod channels remain available.
+
+Legacy flow (importing existing mod packages as project sources) is unchanged:
+import copies packages into the project source area and records them in the
+project file; export re-targets Carra/Carra2/Rebank/Bank/Lunartique.
 
 ## Format boundaries
 
@@ -39,15 +47,18 @@ not as a launcher replacement.
   [Joveler.Compression.XZ](https://www.nuget.org/packages/Joveler.Compression.XZ)
   liblzma adapter on the Windows x64 runtime. The original XZ stream is decoded
   by SharpCompress; modified entries are encoded with liblzma.
-- FMOD bank inspection only parses the small RIFF/FEV/SNDH index layer. The
-  runtime loader can probe separate `fmod64.dll` and `fsbank64.dll` files from
-  the user-selected directory, but no proprietary binaries are shipped.
-  `NativeFmodAudioCodec` binds the documented FMOD/FSBank C ABI at runtime for
-  FSB→WAV preview/export and WAV→FSB replacement. FSB/WAV codecs and
-  WAV-based `.bank` rebuilding therefore require a legitimately obtained,
-  compatible FMOD/FSBANK DLL. Complete raw FSB5 replacements can be assembled
-  without that DLL; no proprietary codec is reverse engineered or redistributed
-  by this repository. `.rebank` authoring remains available.
+- FMOD bank inspection only parses the small RIFF/FEV/SNDH index layer. Since
+  2026-09 (user decision) the FMOD/FSBank DLLs are **distributed with the
+  package**: `scripts/publish.ps1` copies legally obtained
+  `fmod64.dll`/`fsbank64.dll`/`libfsbvorbis64.dll` (staged in
+  `third_party/fmod/`, git-ignored) into the publish output's `fmod/` folder,
+  and the editor auto-discovers them at startup in order
+  `<程序目录>/fmod` → `<程序目录>` → the game's own runtime directory
+  (owner-supplied game files, decode only). A manually configured directory in
+  shared settings always wins. `NativeFmodAudioCodec` binds the documented
+  FMOD/FSBank C ABI at runtime for FSB→WAV preview/export and WAV→FSB
+  replacement. Complete raw FSB5 replacements can be assembled without any
+  DLL. `.rebank` authoring remains available.
 - Lunartique is represented as paired `Installation`/`Uninstallation` data
   files. Sprite metadata editing is available. Texture2D PNG preview/replacement
   supports Unity RGB24, RGBA32/BGRA32, DXT1 and DXT5 (DXT encoding is lossy);
@@ -62,6 +73,15 @@ LimbusModEditor.Cli.exe import <project.lmeproj> <file-or-directory>
 LimbusModEditor.Cli.exe export <project.lmeproj> <output> [source]
 ```
 
+## Packaging
+
+```text
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/publish.ps1
+```
+
+Publishes Release win-x64 to `artifacts/publish-win-x64` and copies the FMOD
+DLLs from `third_party/fmod/` into `fmod/` inside the output (3/3 when staged).
+
 ## Verification
 
 ```text
@@ -69,7 +89,10 @@ dotnet build LimbusModEditor.slnx --no-restore
 dotnet test LimbusModEditor.slnx --no-restore
 ```
 
-The tests cover project persistence, source materialization, directory and
-package import, Carra/Lunartique/Rebank round trips, XZ compression round trips,
-bank probing, image/atlas operations, overlay backup/restore, and game launch
-path validation.
+The tests cover shared-config persistence/migration, FMOD discovery, cache
+scan (reference mode + incremental index + per-entry fault tolerance),
+cache-bundle materialization, one-click Carra2 export round-trips (real-sample
+gated), project persistence, source materialization, directory and package
+import, Carra/Lunartique/Rebank round trips, XZ compression round trips, bank
+probing, image/atlas operations, overlay backup/restore, and game launch path
+validation.

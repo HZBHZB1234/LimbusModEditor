@@ -1,19 +1,22 @@
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using LimbusModEditor.Application.AppConfig;
 using LimbusModEditor.Application.Debugging;
 using LimbusModEditor.Formats.Bank;
 
 namespace LimbusModEditor.App;
 
 /// <summary>
-/// 设置（二级窗口）：所有目录与项目元数据集中在此修改。目录由
-/// 无感自动化（打开/新建项目时自动填充，左栏显示状态）获取，需要手动
-/// 调整时在这里改；FMOD DLL 检测也在此触发。
+/// 设置（二级窗口）：目录部分是<b>全局共享设置</b>（保存在程序目录
+/// config/shared-config.json，所有项目共用，自动获取 + 手动微调都在这里）；
+/// 模组元数据与调试行为属于当前项目。FMOD DLL 目录留空时自动使用随包
+/// DLL（程序目录 fmod/）或游戏自带运行库，手动指定永远优先。
 /// </summary>
 public sealed class ProjectSettingsWindow : Window
 {
     private readonly MainWindow _ownerMain;
+    private readonly AppEnvironment _env;
     private readonly Func<string?, bool> _saveProject;
     private readonly TextBox _gameBox;
     private readonly TextBox _cacheBox;
@@ -30,28 +33,38 @@ public sealed class ProjectSettingsWindow : Window
     {
         _ownerMain = owner;
         _saveProject = saveProject;
-        Title = $"项目设置 — {_ownerMain.Project?.Name}";
-        Width = 640;
-        Height = 620;
+        _env = AppEnvironment.Current;
+        Title = "设置 — 共享目录与项目元数据";
+        Width = 660;
+        Height = 640;
         MinWidth = 560;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
         Owner = owner;
 
         var panel = new StackPanel { Margin = new Thickness(16) };
-        panel.Children.Add(MakeSectionTitle("目录（自动获取在打开/新建项目时进行，手动修改在这里）"));
+        panel.Children.Add(MakeSectionTitle(
+            "共享目录（保存在程序目录，所有项目共用；自动获取失败时在这里手动填写）"));
         (_gameBox, panel) = AddDirectoryRow(panel, "游戏目录", ("自动获取", AutoGame));
         (_cacheBox, panel) = AddDirectoryRow(panel, "Unity 缓存目录", ("自动获取", AutoCache));
         (_modsBox, panel) = AddDirectoryRow(panel, "模组目录", ("自动获取", AutoMods));
-        (_fmodBox, panel) = AddDirectoryRow(panel, "FMOD DLL 目录（从不自动获取，请手动选择合法获得的 DLL）",
-            ("浏览…", AutoFmod), ("检测兼容性", ProbeFmod));
+        (_fmodBox, panel) = AddDirectoryRow(panel, "FMOD DLL 目录（留空 = 自动使用随包/游戏自带 DLL）",
+            ("浏览…", AutoFmod), ("恢复自动发现", ClearFmod), ("检测兼容性", ProbeFmod));
+        var openBase = new Button
+        {
+            Content = "打开程序目录（共享配置 / 缓存所在位置）",
+            Padding = new Thickness(10, 5, 10, 5),
+            HorizontalAlignment = HorizontalAlignment.Left
+        };
+        openBase.Click += (_, _) => System.Diagnostics.Process.Start("explorer.exe", _env.BaseDirectory);
+        panel.Children.Add(openBase);
 
-        panel.Children.Add(MakeSectionTitle("模组元数据"));
+        panel.Children.Add(MakeSectionTitle("当前项目元数据"));
         (_nameBox, panel) = AddTextBoxRow(panel, "名称");
         (_versionBox, panel) = AddTextBoxRow(panel, "版本");
         (_authorBox, panel) = AddTextBoxRow(panel, "作者");
         (_descriptionBox, panel) = AddTextBoxRow(panel, "描述");
 
-        panel.Children.Add(MakeSectionTitle("调试行为"));
+        panel.Children.Add(MakeSectionTitle("调试行为（当前项目）"));
         _restoreCheck = new CheckBox { Content = "关闭编辑器时恢复被覆盖的游戏文件", Margin = new Thickness(0, 6, 0, 6) };
         panel.Children.Add(_restoreCheck);
 
@@ -62,16 +75,17 @@ public sealed class ProjectSettingsWindow : Window
         panel.Children.Add(_status);
         Content = new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
 
-        LoadFromProject();
+        LoadValues();
     }
 
-    private void LoadFromProject()
+    private void LoadValues()
     {
         var project = _ownerMain.Project;
-        _gameBox.Text = project?.GameDirectory ?? string.Empty;
-        _cacheBox.Text = project?.UnityCacheDirectory ?? string.Empty;
-        _modsBox.Text = project?.ModDirectory ?? string.Empty;
-        _fmodBox.Text = project?.FmodLibraryDirectory ?? string.Empty;
+        // 显示生效值：共享配置优先，回退旧项目字段（保存时会写入共享配置）。
+        _gameBox.Text = _env.EffectiveGameDirectory(project) ?? string.Empty;
+        _cacheBox.Text = _env.EffectiveUnityCacheDirectory(project) ?? string.Empty;
+        _modsBox.Text = _env.EffectiveModDirectory(project) ?? string.Empty;
+        _fmodBox.Text = _env.EffectiveFmodLibraryDirectory(project) ?? string.Empty;
         _nameBox.Text = project?.Name ?? string.Empty;
         _versionBox.Text = project?.Version ?? string.Empty;
         _authorBox.Text = project?.Author ?? string.Empty;
@@ -82,18 +96,22 @@ public sealed class ProjectSettingsWindow : Window
     private void Save()
     {
         var project = _ownerMain.Project;
-        if (project is null) { _status.Text = "没有打开的项目。"; return; }
-        project.Name = _nameBox.Text.Trim();
-        project.Version = _versionBox.Text.Trim();
-        project.Author = _authorBox.Text.Trim();
-        project.Description = _descriptionBox.Text.Trim();
-        project.GameDirectory = _gameBox.Text.Trim();
-        project.UnityCacheDirectory = _cacheBox.Text.Trim();
-        project.ModDirectory = _modsBox.Text.Trim();
-        project.FmodLibraryDirectory = _fmodBox.Text.Trim();
-        project.RestoreDebugFilesOnClose = _restoreCheck.IsChecked == true;
-        if (_saveProject(null)) _status.Text = "设置已保存。";
-        else _status.Text = "保存失败，请重试。";
+        // 共享目录写进共享配置（程序目录），所有项目立即生效。
+        _env.Config.GameDirectory = _gameBox.Text.Trim();
+        _env.Config.UnityCacheDirectory = _cacheBox.Text.Trim();
+        _env.Config.ModDirectory = _modsBox.Text.Trim();
+        _env.Config.FmodLibraryDirectory = _fmodBox.Text.Trim();
+        _env.Save();
+        if (project is not null)
+        {
+            project.Name = _nameBox.Text.Trim();
+            project.Version = _versionBox.Text.Trim();
+            project.Author = _authorBox.Text.Trim();
+            project.Description = _descriptionBox.Text.Trim();
+            project.RestoreDebugFilesOnClose = _restoreCheck.IsChecked == true;
+        }
+        if (_saveProject(null)) _status.Text = "设置已保存（共享目录 → 程序目录；元数据 → 项目）。";
+        else _status.Text = "共享目录已保存；项目元数据保存失败，请重试。";
         _ownerMain.RefreshDirectoryLabels();
     }
 
@@ -131,7 +149,7 @@ public sealed class ProjectSettingsWindow : Window
         _status.Text = $"已建议模组目录（{ModDirectoryLocator.CountEntries(candidates[0])} 个条目）。";
     }
 
-    private async void AutoFmod()
+    private void AutoFmod()
     {
         var dialog = new Microsoft.Win32.OpenFileDialog
         {
@@ -143,11 +161,16 @@ public sealed class ProjectSettingsWindow : Window
         if (dialog.ShowDialog() != true) return;
         var dir = Path.GetDirectoryName(dialog.FileName);
         if (!string.IsNullOrWhiteSpace(dir)) _fmodBox.Text = dir;
-        await Task.CompletedTask;
+    }
+
+    private void ClearFmod()
+    {
+        _fmodBox.Text = string.Empty;
+        _status.Text = "已清除手动指定：将自动使用随包 DLL（程序目录 fmod/）或游戏自带运行库。";
     }
 
     /// <summary>P2.2：PE 指纹探测（从不加载 DLL），报告与本编辑器的兼容性。
-    /// 从主窗口「检测 FMOD DLL」按钮迁移至此，紧跟目录配置。</summary>
+    /// 探测缓存保存在程序目录 cache/ 下，按 DLL 指纹去重。</summary>
     private void ProbeFmod()
     {
         var dir = _fmodBox.Text.Trim();
@@ -158,10 +181,8 @@ public sealed class ProjectSettingsWindow : Window
         }
         try
         {
-            var projectFile = _ownerMain.ProjectFile;
-            var cacheFile = string.IsNullOrWhiteSpace(projectFile)
-                ? Path.Combine(Path.GetTempPath(), "LimbusModEditor", "fmod-probe.json")
-                : Path.Combine(Path.GetDirectoryName(projectFile)!, "logs", "fmod-probe.json");
+            Directory.CreateDirectory(_env.CacheDirectory);
+            var cacheFile = Path.Combine(_env.CacheDirectory, "fmod-probe.json");
             var cache = new FmodCompatibilityService().Probe(dir, cacheFile);
             new FmodReportWindow(dir, cache) { Owner = this }.ShowDialog();
         }
@@ -197,6 +218,7 @@ public sealed class ProjectSettingsWindow : Window
         Text = text,
         FontWeight = FontWeights.Bold,
         Margin = new Thickness(0, 12, 0, 4),
-        Foreground = System.Windows.Media.Brushes.LightSteelBlue
+        Foreground = System.Windows.Media.Brushes.LightSteelBlue,
+        TextWrapping = TextWrapping.Wrap
     };
 }

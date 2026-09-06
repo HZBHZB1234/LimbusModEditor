@@ -15,7 +15,7 @@ Carra2/Rebank/Lunartique/Bank 四格式导入导出、真实 Texture2D `.resS` �
 **官方 catalog 只读解析 + vanilla 基线判定（T3，CRC 口径与 LCTA 交叉验证一致）**、
 **.staticmod 静态数据模组通道（读取/预览应用/生成，两个真实样本导入验证通过）**。
 
-**当前基线：205 个测试全绿**（61 Format + 144 Domain）。最近提交 `3c04b08`。
+**当前基线：218 个测试全绿**（61 Format + 157 Domain）。最近提交见 git log。
 
 基线命令（每轮开始和结束都必须跑）：
 
@@ -30,8 +30,11 @@ dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r 
 1. **只扩展 AssetsTools.NET 适配层**，不手写完整 Unity Bundle/SerializedFile 解析器。
 2. **不猜测**：未知负载/未知压缩/未知字段一律 fail fast 并给中文错误；没有真实样本
    验证就不宣称兼容。
-3. **不加载/不分发 FMOD DLL**：FMOD/FSBank 二进制必须由用户合法提供；只能 PE 探测
-   （不 LoadLibrary）、按用户明确配置的目录加载。
+3. **FMOD DLL 随包分发（2026-09-06 用户修订）**：FMOD/FSBank 二进制由发布
+   脚本随包分发（`scripts/publish.ps1` 把 `third_party/fmod/` 下合法获得的
+   fmod64/fsbank64/libfsbvorbis64 复制进发布输出 `fmod/`；该目录不入 git）。
+   编辑器按「程序目录\fmod → 程序目录 → 游戏自带运行库」自动发现，手动指定
+   优先；`NativeFmodAudioCodec` 仍只绑定公开 C ABI。
 4. **真实加载器 = LCTA**（`E:/desktop/work/LCTA-Limbus-company-transfer-auto`，GPL-3.0；
    其 `launcher/` 基于 LimbusModLoader v1.8）。LCTA 代码只可读作事实来源，**不得整段
    复制**；格式事实（字段布局/路径/常量）可以引用。
@@ -74,7 +77,49 @@ dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r 
   （`StaticModService`）、UI `StaticModWindow`、测试 8 个（含两个真实样本）。
 - 测试基线 168 → 205（61 Format + 144 Domain）。
 
-## 4. 下一步明确任务（按优先级，每项含验收标准）
+## 3.5 本轮二（2026-09-06）：傻瓜化改造（启动引导 / 共享配置 / 扫描 / 随包 FMOD）
+
+用户指出三大问题：不够傻瓜化、.lmeproj 共享设置重复配置、缺少操作指引，
+并要求 FMOD DLL 随包分发。本轮交付：
+
+- **共享配置（程序目录）**：`Application/AppConfig/`（`AppEnvironment` +
+  `SharedAppConfigService`）。游戏/缓存/模组/FMOD 目录与最近项目存
+  `<程序目录>/config/shared-config.json`，所有项目共用；旧项目目录值首开
+  自动迁移（只填空位）；缓存统一放 `<程序目录>/cache/`（FMOD 探测、
+  扫描索引）。设置窗口改为「共享目录 + 项目元数据」两段。
+- **启动引导**：`WelcomeDialog`（新建/打开/最近项目）+ 上次项目自动恢复 +
+  主窗口「下一步」提示条 + 无项目全屏引导覆盖层 + 左栏按「① 获取资源 /
+  ② 产出模组」分组。新建向导默认项目目录 = 程序目录 `projects/<名>/`。
+- **游戏资源扫描**：`Application/Scanning/UnityCacheScanService` —— 引用
+  模式索引全部缓存 bundle（不复制文件），程序目录索引缓存增量复用，
+  catalog 基线单次加载，逐 bundle 容错（失败进诊断不中断）。
+  **性能事实（实测）**：60 bundle≈1.6s（约 280 资产/bundle）→ 全缓存
+  1459 bundle ≈ 1-2 分钟；索引重建近瞬时。曾有的 O(N²) 合并已修复
+  （字典索引）。
+- **编辑实体化**：`UnityCacheMaterializationService` —— 首次导出/构建前把
+  「已编辑的引用资源」所属 bundle 复制进项目 `sources/cache/<外>_<内>.bundle`
+  （全缓存都叫 `__data`，不实体化会在构建输出互相覆盖）。
+- **一键导出**：`Application/Build/UnityCacheExportService` —— 编辑过的
+  bundle 经 `UnityBundleBuildService` 重打包（含引用完整性验证）后逐对象
+  读回原始字节，按真实加载器 Carra2 键打包（口径=T1），一键产出
+  `<名>.carra2` 到模组目录。真实数据端到端测试
+  `UnityCacheExportServiceTests` 验证 导出→探针→重导入→键一致。
+- **FMOD 随包**：`third_party/fmod/`（git 忽略）+ `scripts/publish.ps1`
+  （纯 ASCII，PS5.1 兼容）复制进发布输出 `fmod/`；`FmodLibraryLocator`
+  自动发现；`FmodCodecLibrary`/`FmodDllInspector` 候选扩展
+  （fmod.dll/fmodstudio.dll 也可解码）。本机实测 3/3 DLL 齐套。
+- **新测试 13 个**：SharedConfigTests(9)、UnityCacheScanServiceTests(3,
+  真实样本门控)、UnityCacheExportServiceTests(1, 真实样本门控)；
+  `RealFullScanSmokeTests` 保留为 `LME_FULL_SCAN_SMOKE=1` 手动冒烟
+  （`LME_SCAN_BUDGET=N` 有界子集测吞吐）。
+- 基线 205 → 218。发布产物：`artifacts/publish-win-x64`（含 fmod/ 三 DLL）。
+
+## 4. 下一轮明确任务（按优先级，每项含验收标准）
+
+### T6（P1）傻瓜化后续打磨（候选）
+- 全缓存 40 万级资产下的检索性能（必要时给 AssetList 加虚拟化/分页）。
+- 首扫体验：扫描窗口显示预计剩余时间；「稍后再扫」入口。
+- 欢迎窗口与提示条的用户实测反馈回收。
 
 ### T1（P0）✅ 已完成（2026-09-06）——写回后在真实游戏中的验证
 - 端到端闭环已达成：真实流纹理 `Fx_T_Shape_LineFlash_01`（128×128 DXT1）

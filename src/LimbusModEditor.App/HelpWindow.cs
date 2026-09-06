@@ -21,13 +21,17 @@ public sealed class HelpWindow : Window
         var scroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Padding = new Thickness(16) };
         var panel = new StackPanel();
 
-        panel.Children.Add(MakeTitle("工作流程总览"));
+        panel.Children.Add(MakeTitle("工作流程总览（三步出模组）"));
         panel.Children.Add(MakeBody(
-            "1. 新建项目（.lmeproj）并配置游戏目录、Unity 缓存目录、模组目录；\n" +
-            "2. 导入资源：.carra/.carra2/.rebank/.bank/Lunartique ZIP/Unity .bundle/.assets 或资源目录；\n" +
-            "3. 在索引中检索资源，检查元数据，进行字段/图片/文本编辑；\n" +
-            "4. 导出模组（来源格式或 Carra/Carra2/Rebank/Lunartique）；\n" +
-            "5. 构建调试覆盖层 → 应用并启动调试（自动备份，可恢复）。"));
+            "1. 启动即引导：新建（或打开）模组项目 —— 只需填模组名，\n" +
+            "   游戏目录 / Unity 缓存 / 模组目录自动配置（共享设置保存在程序目录）；\n" +
+            "2. 自动扫描游戏资源：引用模式，不复制文件，只建索引；扫描完成后\n" +
+            "   在列表中搜索，选中即可替换图片 / 编辑字段；\n" +
+            "3. 一键导出模组：把全部修改按真实加载器的 Carra2 布局打包，\n" +
+            "   输出到模组目录（%APPDATA%\\LimbusCompanyMods）即可被游戏加载。\n\n" +
+            "顶部的提示条会随时告诉你「下一步该做什么」；也可导入现有模组\n" +
+            "（.carra/.carra2/.rebank/.bank/Lunartique ZIP/Unity .bundle/.assets）；\n" +
+            "调试覆盖层 → 应用并启动调试（自动备份，可恢复）仍可用于本地验证。"));
 
         panel.Children.Add(MakeTitle("Unity 字段编辑"));
         panel.Children.Add(MakeBody(
@@ -51,8 +55,9 @@ public sealed class HelpWindow : Window
         panel.Children.Add(MakeBody(
             "• Texture2D 支持 PNG 预览与替换（RGB24/RGBA32/ARGB32/BGRA32/DXT1/DXT5）；\n" +
             "• Sprite 支持 rect/pivot/border 元数据编辑；图集可拆分与恢复；\n" +
-            "• Bank 音频需要你提供合法的 fmod64.dll / fsbank64.dll 才能解码导出 WAV；\n" +
-            "  本工具不附带、不伪造任何 FMOD 二进制文件。"));
+            "• Bank 音频解码/编码使用随包提供的 fmod64.dll / fsbank64.dll\n" +
+            "  （发布包 fmod/ 目录，启动时自动发现，无需配置）；未随包提供时\n" +
+            "  可在「设置…」指定自己合法获得的 DLL 目录，或使用游戏自带运行库。"));
 
         panel.Children.Add(MakeTitle("对象摘要（Mesh / 动画 / 字体）"));
         panel.Children.Add(MakeBody(

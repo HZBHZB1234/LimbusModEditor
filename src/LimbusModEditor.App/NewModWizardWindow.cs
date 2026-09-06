@@ -100,10 +100,18 @@ public sealed class NewModWizardWindow : Window
         directoryRow.Children.Add(browse);
         panel.Children.Add(directoryRow);
 
+        // 傻瓜化：默认在程序目录 projects/ 下按模组名建目录，用户零操作即可创建。
+        _directoryBox.Text = DefaultDirectory(_nameBox.Text);
+        _nameBox.TextChanged += (_, _) =>
+        {
+            if (_directoryBox.Text.StartsWith(_environment.ProjectsDirectory, StringComparison.OrdinalIgnoreCase))
+                _directoryBox.Text = DefaultDirectory(_nameBox.Text);
+        };
+
         _note = new TextBlock
         {
-            Text = "说明：向导会创建项目结构（sources/、builds/ 等）、生成经过格式校验的空白模板，\n" +
-                   "并在主窗口打开新项目。空白模板不含任何资源 —— 请继续导入现有模组或替换资源。",
+            Text = "说明：向导会创建项目结构（sources/、builds/ 等）并生成经过格式校验的空白模板，\n" +
+                   "然后在主窗口打开新项目并自动扫描游戏资源 —— 扫描完成后即可直接编辑。",
             TextWrapping = TextWrapping.Wrap,
             Foreground = System.Windows.Media.Brushes.DimGray,
             Margin = new Thickness(0, 12, 0, 0)
@@ -115,6 +123,17 @@ public sealed class NewModWizardWindow : Window
         panel.Children.Add(_createButton);
 
         Content = new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+    }
+
+    private static readonly LimbusModEditor.Application.AppConfig.AppEnvironment _environment =
+        LimbusModEditor.Application.AppConfig.AppEnvironment.Current;
+
+    private static string DefaultDirectory(string name)
+    {
+        var invalid = System.IO.Path.GetInvalidFileNameChars();
+        var safe = new string(name.Trim().Select(c => invalid.Contains(c) ? '_' : c).ToArray());
+        if (string.IsNullOrWhiteSpace(safe)) safe = "MyMod";
+        return System.IO.Path.Combine(_environment.ProjectsDirectory, safe);
     }
 
     public NewModTemplateResult? Result => _result;

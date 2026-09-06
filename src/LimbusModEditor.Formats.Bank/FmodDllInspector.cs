@@ -49,7 +49,8 @@ public static class FmodDllInspector
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
         var reports = new List<FmodDllReport>();
-        foreach (var name in new[] { "fmod64.dll", "fsbank64.dll" })
+        // 游戏随附的 fmod.dll / fmodstudio.dll 同样可承担解码，一并探测。
+        foreach (var name in new[] { "fmod64.dll", "fmod.dll", "fmodstudio.dll", "fsbank64.dll", "libfsbvorbis64.dll" })
         {
             var path = Path.Combine(directory, name);
             reports.Add(File.Exists(path) ? InspectFile(path) : new FmodDllReport(

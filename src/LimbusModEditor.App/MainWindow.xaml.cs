@@ -41,7 +41,11 @@ public partial class MainWindow : Window
     /// settings window saves.</summary>
     public void RefreshDirectoryLabels() => RefreshProjectState("设置已保存");
 
-    public MainWindow() => InitializeComponent();
+    public MainWindow()
+    {
+        InitializeComponent();
+        UpdateDirectoryStatus();
+    }
 
     private async void NewProject_Click(object sender, RoutedEventArgs e)
     {
@@ -57,7 +61,8 @@ public partial class MainWindow : Window
             var directory = Path.GetDirectoryName(dialog.FileName)!;
             _project = await _projects.CreateAsync(directory, Path.GetFileNameWithoutExtension(dialog.FileName));
             _projectFile = dialog.FileName;
-            RefreshProjectState("已创建项目");
+            // 无感自动化：新建项目同样自动获取缺失目录（游戏/缓存/模组）。
+            await AutoConfigureAfterOpenAsync("已创建项目");
         }
         catch (Exception ex) { ShowError("创建项目失败", ex); }
     }
@@ -74,16 +79,7 @@ public partial class MainWindow : Window
             _project = await _projects.LoadAsync(wizard.Result.ProjectFile);
             _projectFile = wizard.Result.ProjectFile;
             // 无感自动化（同打开项目）：目录缺失时自动定位真实安装。
-            var autoReport = await Task.Run(() => LimbusModEditor.Application.Debugging.ProjectAutoConfigureService.Apply(_project));
-            if (autoReport.Any)
-            {
-                await _projects.SaveAsync(_project, _projectFile);
-                RefreshProjectState($"已通过向导创建项目，并自动配置：{autoReport.Describe()}");
-            }
-            else
-            {
-                RefreshProjectState("已通过向导创建项目");
-            }
+            await AutoConfigureAfterOpenAsync("已通过向导创建项目");
         }
         catch (Exception ex) { ShowError("打开新建项目失败", ex); }
     }
@@ -98,16 +94,7 @@ public partial class MainWindow : Window
             _projectFile = dialog.FileName;
             // 无感自动化：缺失的目录自动从真实安装定位（游戏/缓存/模组），
             // 用户手动设置过的值不会被覆盖。
-            var autoReport = await Task.Run(() => LimbusModEditor.Application.Debugging.ProjectAutoConfigureService.Apply(_project));
-            if (autoReport.Any)
-            {
-                await _projects.SaveAsync(_project, _projectFile);
-                RefreshProjectState($"已打开项目，并自动配置：{autoReport.Describe()}");
-            }
-            else
-            {
-                RefreshProjectState("已打开项目");
-            }
+            await AutoConfigureAfterOpenAsync("已打开项目");
         }
         catch (Exception ex) { ShowError("打开项目失败", ex); }
     }
@@ -244,15 +231,29 @@ public partial class MainWindow : Window
     }
 
     /// <summary>lang 文本模组通道（T2）：RFC6902 补丁的生成与应用，格式与真实
-    /// 加载器（LCTA launcher/changes.py）一致。lang 根目录默认取项目游戏目录。</summary>
-    private void LangTextMod_Click(object sender, RoutedEventArgs e)
+    /// 加载器（LCTA launcher/changes.py）一致。lang 根目录默认取项目游戏目录；
+    /// 游戏目录缺失时先无感自动获取一次。</summary>
+    private async void LangTextMod_Click(object sender, RoutedEventArgs e)
     {
-        var gameDirectory = _project?.GameDirectory;
-        var defaultLangRoot = string.IsNullOrWhiteSpace(gameDirectory)
-            ? string.Empty
-            : Path.Combine(gameDirectory, "LimbusCompany_Data", "lang");
-        new LangTextModWindow(defaultLangRoot, _project?.ModDirectory) { Owner = this }.ShowDialog();
-        StatusText.Text = "文本模组窗口已关闭（补丁文件放进模组目录后由加载器应用）。";
+        try
+        {
+            if (_project is not null && _projectFile is not null && string.IsNullOrWhiteSpace(_project.GameDirectory))
+            {
+                var report = await Task.Run(() => LimbusModEditor.Application.Debugging.ProjectAutoConfigureService.Apply(_project));
+                if (report.Any)
+                {
+                    await _projects.SaveAsync(_project, _projectFile);
+                    UpdateDirectoryStatus();
+                }
+            }
+            var gameDirectory = _project?.GameDirectory;
+            var defaultLangRoot = string.IsNullOrWhiteSpace(gameDirectory)
+                ? string.Empty
+                : Path.Combine(gameDirectory, "LimbusCompany_Data", "lang");
+            new LangTextModWindow(defaultLangRoot, _project?.ModDirectory) { Owner = this }.ShowDialog();
+            StatusText.Text = "文本模组窗口已关闭（补丁文件放进模组目录后由加载器应用）。";
+        }
+        catch (Exception ex) { ShowError("打开文本模组窗口失败", ex); }
     }
 
     /// <summary>静态数据模组通道：.staticmod 的读取/预览应用/生成（布局与真实
@@ -309,160 +310,105 @@ public partial class MainWindow : Window
         catch (Exception ex) { ShowError("十六进制预览失败", ex); }
     }
 
-    /// <summary>自动获取资源地址（续）：list verified Unity-cache candidates
-    /// (directories that actually contain .bundle files) and let the user pick.</summary>
-    private async void SuggestUnityCache_Click(object sender, RoutedEventArgs e)
+    /// <summary>无感自动化：打开/新建项目后调用。只填充缺失目录
+    /// （游戏 / Unity 缓存 / 模组），手动设置过的值永远不会被覆盖；
+    /// FMOD DLL 目录从不自动获取（必须由用户提供合法获得的 DLL）。</summary>
+    private async Task AutoConfigureAfterOpenAsync(string prefix)
+    {
+        var report = await Task.Run(() => LimbusModEditor.Application.Debugging.ProjectAutoConfigureService.Apply(_project!));
+        if (report.Any)
+        {
+            await _projects.SaveAsync(_project!, _projectFile!);
+            RefreshProjectState($"{prefix}，并自动获取：{report.Describe()}");
+        }
+        else
+        {
+            RefreshProjectState(prefix);
+        }
+    }
+
+    /// <summary>左栏「自动获取目录」：无感自动化的手动兜底（例如项目创建时
+    /// 游戏尚未安装）。与打开项目时的自动配置是同一套逻辑。</summary>
+    private async void AutoConfigure_Click(object sender, RoutedEventArgs e)
     {
         if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }
         try
         {
-            var candidates = LimbusModEditor.Application.Debugging.UnityCacheLocator.SuggestCandidates(_project.GameDirectory);
-            if (candidates.Count == 0)
+            var report = await Task.Run(() => LimbusModEditor.Application.Debugging.ProjectAutoConfigureService.Apply(_project));
+            if (report.Any)
             {
-                MessageBox.Show(this, "未在游戏目录与 LocalLow 中找到包含 .bundle 的候选目录。\n请手动选择 Unity 缓存目录。", "自动建议失败", MessageBoxButton.OK, MessageBoxImage.Information);
-                return;
+                await _projects.SaveAsync(_project, _projectFile);
+                RefreshProjectState($"已自动获取：{report.Describe()}");
             }
-            var picker = new UnityCachePickerWindow(candidates) { Owner = this };
-            if (picker.ShowDialog() != true || picker.Selected is null) return;
-            _project.UnityCacheDirectory = picker.Selected.Path;
-            await _projects.SaveAsync(_project, _projectFile);
-            StatusText.Text = $"已设置 Unity 缓存目录：{picker.Selected.Path}（含 {picker.Selected.EntryCount} 个缓存条目）";
-        }
-        catch (Exception ex) { ShowError("自动建议 Unity 缓存目录失败", ex); }
-    }
-
-    /// <summary>自动获取资源地址：scan known Steam libraries for the Limbus
-    /// Company install and fill the game directory automatically.</summary>
-    private async void AutoLocateGame_Click(object sender, RoutedEventArgs e)
-    {
-        if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }
-        try
-        {
-            var lookup = LimbusModEditor.Application.Debugging.GameDirectoryLocator.Scan(
-                LimbusModEditor.Application.Debugging.GameDirectoryLocator.DefaultCandidateRoots());
-            if (!lookup.Found)
+            else
             {
-                MessageBox.Show(this, "未能在已知的 Steam 库中找到 LimbusCompany.exe。\n请手动选择游戏目录。", "自动定位失败", MessageBoxButton.OK, MessageBoxImage.Information);
-                return;
+                UpdateDirectoryStatus();
+                StatusText.Text = "目录均已配置，无需自动获取。";
             }
-            _project.GameDirectory = lookup.GameDirectory;
-            await _projects.SaveAsync(_project, _projectFile);
-            StatusText.Text = $"已自动定位游戏目录：{lookup.GameDirectory}（{lookup.Method}）";
         }
-        catch (Exception ex) { ShowError("自动定位游戏目录失败", ex); }
+        catch (Exception ex) { ShowError("自动获取目录失败", ex); }
     }
 
-    private async void SetGameDirectory_Click(object sender, RoutedEventArgs e)
+    /// <summary>左栏目录状态一览：✓ 已配置 / ⚠ 目录不存在 / ✗ 未配置。</summary>
+    private void UpdateDirectoryStatus()
     {
-        if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }
-        var dialog = new Microsoft.Win32.OpenFileDialog
-        {
-            CheckFileExists = false,
-            ValidateNames = false,
-            FileName = "选择此文件夹",
-            Title = "选择 Limbus Company 游戏目录"
-        };
-        if (dialog.ShowDialog() != true) return;
-        var directory = Path.GetDirectoryName(dialog.FileName);
-        if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory)) return;
-        _project.GameDirectory = directory;
-        await _projects.SaveAsync(_project, _projectFile);
-        StatusText.Text = $"游戏目录已设置：{directory}";
+        GameDirectoryStatus.Text = DescribeDirectory("游戏目录", _project?.GameDirectory);
+        UnityCacheStatus.Text = DescribeDirectory("Unity 缓存", _project?.UnityCacheDirectory);
+        ModDirectoryStatus.Text = DescribeDirectory("模组目录", _project?.ModDirectory);
+        FmodDirectoryStatus.Text = DescribeDirectory("FMOD DLL", _project?.FmodLibraryDirectory);
+        GameDirectoryStatus.ToolTip = _project?.GameDirectory;
+        UnityCacheStatus.ToolTip = _project?.UnityCacheDirectory;
+        ModDirectoryStatus.ToolTip = _project?.ModDirectory;
+        FmodDirectoryStatus.ToolTip = _project?.FmodLibraryDirectory;
     }
 
-    private async void SetUnityCacheDirectory_Click(object sender, RoutedEventArgs e)
+    private static string DescribeDirectory(string label, string? path)
     {
-        await SetProjectDirectoryAsync(value => _project!.UnityCacheDirectory = value, "选择 Unity 缓存目录");
-    }
-
-    /// <summary>自动获取资源地址：suggest the mods root directory that the real
-    /// loader (LCTA launcher) manages — %APPDATA%\LimbusCompanyMods.</summary>
-    private async void AutoSuggestModDirectory_Click(object sender, RoutedEventArgs e)
-    {
-        if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }
-        try
-        {
-            var candidates = LimbusModEditor.Application.Debugging.ModDirectoryLocator.SuggestCandidates();
-            if (candidates.Count == 0)
-            {
-                MessageBox.Show(this, "未找到真实加载器使用的模组目录（%APPDATA%\\LimbusCompanyMods）。\n请手动选择模组目录。", "自动建议失败", MessageBoxButton.OK, MessageBoxImage.Information);
-                return;
-            }
-            var chosen = candidates[0];
-            var entries = LimbusModEditor.Application.Debugging.ModDirectoryLocator.CountEntries(chosen);
-            _project.ModDirectory = chosen;
-            await _projects.SaveAsync(_project, _projectFile);
-            StatusText.Text = $"已自动建议模组目录：{chosen}（含 {entries} 个条目）";
-        }
-        catch (Exception ex) { ShowError("自动建议模组目录失败", ex); }
-    }
-
-    private async void SetModDirectory_Click(object sender, RoutedEventArgs e)
-    {
-        await SetProjectDirectoryAsync(value => _project!.ModDirectory = value, "选择模组安装目录");
+        if (string.IsNullOrWhiteSpace(path)) return $"✗ {label}：未配置";
+        return Directory.Exists(path)
+            ? $"✓ {label}：{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}"
+            : $"⚠ {label}：目录不存在";
     }
 
     /// <summary>真实加载器约定（LCTA launcher）："_disable" 后缀切换启用/禁用。
-    /// 管理窗口只做重命名，不修改文件内容。</summary>
-    private void ManageMods_Click(object sender, RoutedEventArgs e)
+    /// 管理窗口只做重命名，不修改文件内容。模组目录缺失时先无感自动获取。</summary>
+    private async void ManageMods_Click(object sender, RoutedEventArgs e)
     {
         if (_project is null) { StatusText.Text = "请先创建或打开项目"; return; }
-        var modsDirectory = _project.ModDirectory;
-        if (string.IsNullOrWhiteSpace(modsDirectory) || !Directory.Exists(modsDirectory))
-        {
-            MessageBox.Show(this, "请先设置模组目录（可用「自动建议模组目录」）。\n真实加载器默认使用 %APPDATA%\\LimbusCompanyMods。", "管理已安装模组", MessageBoxButton.OK, MessageBoxImage.Information);
-            return;
-        }
-        new ModManagerWindow(modsDirectory) { Owner = this }.ShowDialog();
-        StatusText.Text = "模组目录管理已关闭（切换结果以加载器下次扫描为准）。";
-    }
-
-    private async void SetFmodDirectory_Click(object sender, RoutedEventArgs e)
-    {
-        await SetProjectDirectoryAsync(value => _project!.FmodLibraryDirectory = value, "选择 FMOD/FSBANK DLL 目录");
-    }
-
-    /// <summary>P2.2: probes the configured FMOD DLL directory (cached by file
-    /// fingerprint) and shows the compatibility report without loading DLLs.</summary>
-    private void ProbeFmod_Click(object sender, RoutedEventArgs e)
-    {
-        if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }
-        var directory = _project.FmodLibraryDirectory;
-        if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory))
-        {
-            MessageBox.Show(this, "请先在右侧设置 FMOD DLL 目录（含 fmod64.dll / fsbank64.dll）。", "尚未配置", MessageBoxButton.OK, MessageBoxImage.Information);
-            return;
-        }
         try
         {
-            var cacheFile = Path.Combine(Path.GetDirectoryName(_projectFile)!, "logs", "fmod-probe.json");
-            var cache = new LimbusModEditor.Formats.Bank.FmodCompatibilityService().Probe(directory, cacheFile);
-            new FmodReportWindow(directory, cache) { Owner = this }.ShowDialog();
+            if (string.IsNullOrWhiteSpace(_project.ModDirectory) || !Directory.Exists(_project.ModDirectory))
+            {
+                var candidates = LimbusModEditor.Application.Debugging.ModDirectoryLocator.SuggestCandidates();
+                if (candidates.Count > 0)
+                {
+                    _project.ModDirectory = candidates[0];
+                    if (_projectFile is not null) await _projects.SaveAsync(_project, _projectFile);
+                    UpdateDirectoryStatus();
+                }
+            }
+            var modsDirectory = _project.ModDirectory;
+            if (string.IsNullOrWhiteSpace(modsDirectory) || !Directory.Exists(modsDirectory))
+            {
+                MessageBox.Show(this, "未能自动获取模组目录（%APPDATA%\\LimbusCompanyMods）。\n请在「项目设置…」中手动指定。", "管理已安装模组", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+            new ModManagerWindow(modsDirectory) { Owner = this }.ShowDialog();
+            StatusText.Text = "模组目录管理已关闭（切换结果以加载器下次扫描为准）。";
         }
-        catch (Exception ex) { ShowError("FMOD DLL 检测失败", ex); }
-    }
-
-    private async Task SetProjectDirectoryAsync(Action<string> assign, string title)
-    {
-        if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }
-        var dialog = new Microsoft.Win32.OpenFileDialog
-        {
-            CheckFileExists = false,
-            ValidateNames = false,
-            FileName = "选择此文件夹",
-            Title = title
-        };
-        if (dialog.ShowDialog() != true) return;
-        var directory = Path.GetDirectoryName(dialog.FileName);
-        if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory)) return;
-        assign(directory);
-        await _projects.SaveAsync(_project, _projectFile);
-        StatusText.Text = $"目录已设置：{directory}";
+        catch (Exception ex) { ShowError("管理已安装模组失败", ex); }
     }
 
     private async void DebugApply_Click(object sender, RoutedEventArgs e)
     {
         if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }
+        // 目标目录缺失时先无感自动获取一次（只填缺失项，不覆盖手动值）。
+        var autoReport = await Task.Run(() => LimbusModEditor.Application.Debugging.ProjectAutoConfigureService.Apply(_project));
+        if (autoReport.Any)
+        {
+            await _projects.SaveAsync(_project, _projectFile);
+            UpdateDirectoryStatus();
+        }
         var debugTarget = !string.IsNullOrWhiteSpace(_project.ModDirectory) && Directory.Exists(_project.ModDirectory)
             ? _project.ModDirectory
             : !string.IsNullOrWhiteSpace(_project.UnityCacheDirectory) && Directory.Exists(_project.UnityCacheDirectory)
@@ -570,6 +516,7 @@ public partial class MainWindow : Window
         ProjectNameText.Text = _project?.Name ?? "未打开项目";
         AssetCountText.Text = (_project?.Assets.Count ?? 0).ToString();
         EditCountText.Text = (_project?.Edits.Count ?? 0).ToString();
+        UpdateDirectoryStatus();
         RefreshAssetList();
         if (status is not null) StatusText.Text = $"{status}：{_project?.Name}";
     }

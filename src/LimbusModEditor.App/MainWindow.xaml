@@ -26,31 +26,29 @@
             <Grid.ColumnDefinitions><ColumnDefinition Width="220"/><ColumnDefinition Width="*"/><ColumnDefinition Width="250"/></Grid.ColumnDefinitions>
             <Border Grid.Column="0" Background="#171D24" BorderBrush="#2A3540" BorderThickness="1" Padding="12" Margin="0,0,8,0">
                 <StackPanel>
-                    <TextBlock Text="项目工作区" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,14"/>
-                    <TextBlock Text="资源浏览器" Foreground="#B8C7D4" Margin="0,6"/>
-                    <TextBlock Text="Unity / Carra" Foreground="#B8C7D4" Margin="0,6"/>
-                    <TextBlock Text="FMOD / Bank" Foreground="#B8C7D4" Margin="0,6"/>
-                    <TextBlock Text="文件编辑器" Foreground="#B8C7D4" Margin="0,6"/>
-                    <TextBlock Text="差异与诊断" Foreground="#B8C7D4" Margin="0,6"/>
-                    <Separator Margin="0,16"/>
+                    <TextBlock Text="项目工作区" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,10"/>
                     <TextBlock Text="当前项目" Foreground="#7F93A4"/>
-                    <TextBlock x:Name="ProjectNameText" Text="未打开项目" TextWrapping="Wrap" Margin="0,6"/>
-                    <Button Content="设置游戏目录" Click="SetGameDirectory_Click" Margin="0,8,0,0" Padding="8,6"/>
-                    <Button Content="自动定位游戏目录" Click="AutoLocateGame_Click" Margin="0,8,0,0" Padding="8,6"/>
-                    <Button Content="设置 Unity 缓存目录" Click="SetUnityCacheDirectory_Click" Margin="0,8,0,0" Padding="8,6"/>
-                    <Button Content="自动建议 Unity 缓存目录" Click="SuggestUnityCache_Click" Margin="0,8,0,0" Padding="8,6"/>
-                    <Button Content="设置模组目录" Click="SetModDirectory_Click" Margin="0,8,0,0" Padding="8,6"/>
-                    <Button Content="自动建议模组目录" Click="AutoSuggestModDirectory_Click" Margin="0,8,0,0" Padding="8,6"/>
-                    <Button Content="管理已安装模组" Click="ManageMods_Click" Margin="0,8,0,0" Padding="8,6"/>
-                    <Button Content="设置 FMOD DLL 目录" Click="SetFmodDirectory_Click" Margin="0,8,0,0" Padding="8,6"/>
-                    <Button Content="检测 FMOD DLL" Click="ProbeFmod_Click" Margin="0,8,0,0" Padding="8,6"/>
-                    <Button Content="导入资源包" Click="Import_Click" Margin="0,16,0,0" Padding="8,6"/>
+                    <TextBlock x:Name="ProjectNameText" Text="未打开项目" TextWrapping="Wrap" Margin="0,4,0,10"/>
+                    <TextBlock Text="目录状态（自动获取）" Foreground="#7F93A4"/>
+                    <TextBlock x:Name="GameDirectoryStatus" Text="—" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                    <TextBlock x:Name="UnityCacheStatus" Text="—" Margin="0,2,0,0" TextWrapping="Wrap"/>
+                    <TextBlock x:Name="ModDirectoryStatus" Text="—" Margin="0,2,0,0" TextWrapping="Wrap"/>
+                    <TextBlock x:Name="FmodDirectoryStatus" Text="—" Margin="0,2,0,0" TextWrapping="Wrap"/>
+                    <Button Content="自动获取目录" Click="AutoConfigure_Click" Margin="0,8,0,0" Padding="8,6"
+                            ToolTip="只填充从未设置过的目录：游戏目录、Unity 缓存、模组目录。打开/新建项目时已自动执行一次，此按钮用于事后补齐。手动设置过的值不会被覆盖；FMOD DLL 出于合规从不自动获取，请在「项目设置…」中指定。"/>
+                    <Separator Margin="0,14"/>
+                    <Button Content="导入资源包" Click="Import_Click" Padding="8,6"/>
                     <Button Content="导入文件夹" Click="ImportDirectory_Click" Margin="0,8,0,0" Padding="8,6"/>
                     <Button Content="导出模组" Click="Export_Click" Margin="0,8,0,0" Padding="8,6"/>
                     <Button Content="导出全部（多格式）" Click="ExportAll_Click" Margin="0,8,0,0" Padding="8,6"/>
+                    <Separator Margin="0,14"/>
+                    <TextBlock Text="模组工具" Foreground="#7F93A4" Margin="0,0,0,6"/>
+                    <Button Content="管理已安装模组" Click="ManageMods_Click" Padding="8,6"/>
                     <Button Content="文本模组（lang 补丁）…" Click="LangTextMod_Click" Margin="0,8,0,0" Padding="8,6"/>
                     <Button Content="静态数据模组…" Click="StaticMod_Click" Margin="0,8,0,0" Padding="8,6"/>
-                    <Button Content="项目设置…" Click="ProjectSettings_Click" Margin="0,8,0,0" Padding="8,6"/>
+                    <Separator Margin="0,14"/>
+                    <Button Content="项目设置…" Click="ProjectSettings_Click" Padding="8,6"
+                            ToolTip="所有目录与项目元数据都在这里手动调整。"/>
                 </StackPanel>
             </Border>
             <Border Grid.Column="1" Background="#171D24" BorderBrush="#2A3540" BorderThickness="1" Padding="14" Margin="0,0,8,0">

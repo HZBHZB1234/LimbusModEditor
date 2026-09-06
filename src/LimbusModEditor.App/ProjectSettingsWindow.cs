@@ -2,13 +2,14 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using LimbusModEditor.Application.Debugging;
+using LimbusModEditor.Formats.Bank;
 
 namespace LimbusModEditor.App;
 
 /// <summary>
-/// 设置（二级窗口）：所有目录与项目元数据集中在此修改。日常流程中目录由
-/// 无感自动化（面板上的自动按钮 / 打开项目时的自动填充）获取，需要手动
-/// 调整时在这里改。
+/// 设置（二级窗口）：所有目录与项目元数据集中在此修改。目录由
+/// 无感自动化（打开/新建项目时自动填充，左栏显示状态）获取，需要手动
+/// 调整时在这里改；FMOD DLL 检测也在此触发。
 /// </summary>
 public sealed class ProjectSettingsWindow : Window
 {
@@ -37,11 +38,12 @@ public sealed class ProjectSettingsWindow : Window
         Owner = owner;
 
         var panel = new StackPanel { Margin = new Thickness(16) };
-        panel.Children.Add(MakeSectionTitle("目录（可自动获取，手动修改在这里）"));
-        (_gameBox, panel) = AddDirectoryRow(panel, "游戏目录", AutoGame);
-        (_cacheBox, panel) = AddDirectoryRow(panel, "Unity 缓存目录", AutoCache);
-        (_modsBox, panel) = AddDirectoryRow(panel, "模组目录", AutoMods);
-        (_fmodBox, panel) = AddDirectoryRow(panel, "FMOD DLL 目录（不可自动获取，请手动选择合法 DLL）", AutoFmod);
+        panel.Children.Add(MakeSectionTitle("目录（自动获取在打开/新建项目时进行，手动修改在这里）"));
+        (_gameBox, panel) = AddDirectoryRow(panel, "游戏目录", ("自动获取", AutoGame));
+        (_cacheBox, panel) = AddDirectoryRow(panel, "Unity 缓存目录", ("自动获取", AutoCache));
+        (_modsBox, panel) = AddDirectoryRow(panel, "模组目录", ("自动获取", AutoMods));
+        (_fmodBox, panel) = AddDirectoryRow(panel, "FMOD DLL 目录（从不自动获取，请手动选择合法获得的 DLL）",
+            ("浏览…", AutoFmod), ("检测兼容性", ProbeFmod));
 
         panel.Children.Add(MakeSectionTitle("模组元数据"));
         (_nameBox, panel) = AddTextBoxRow(panel, "名称");
@@ -106,8 +108,19 @@ public sealed class ProjectSettingsWindow : Window
     {
         var candidates = UnityCacheLocator.SuggestCandidates(_gameBox.Text.Trim());
         if (candidates.Count == 0) { _status.Text = "未找到包含缓存条目的目录。"; return; }
-        _cacheBox.Text = candidates[0].Path;
-        _status.Text = $"已建议缓存目录（{candidates[0].EntryCount} 个条目）。";
+        if (candidates.Count == 1)
+        {
+            _cacheBox.Text = candidates[0].Path;
+            _status.Text = $"已获取缓存目录（{candidates[0].EntryCount} 个条目）。";
+            return;
+        }
+        // 多个候选时弹出选择器（与无感自动化同一套已验证候选列表）。
+        var picker = new UnityCachePickerWindow(candidates) { Owner = this };
+        if (picker.ShowDialog() == true && picker.Selected is not null)
+        {
+            _cacheBox.Text = picker.Selected.Path;
+            _status.Text = $"已获取缓存目录（{picker.Selected.EntryCount} 个条目）。";
+        }
     }
 
     private void AutoMods()
@@ -133,16 +146,38 @@ public sealed class ProjectSettingsWindow : Window
         await Task.CompletedTask;
     }
 
-    private static (TextBox, StackPanel) AddDirectoryRow(StackPanel panel, string label, Action? auto)
+    /// <summary>P2.2：PE 指纹探测（从不加载 DLL），报告与本编辑器的兼容性。
+    /// 从主窗口「检测 FMOD DLL」按钮迁移至此，紧跟目录配置。</summary>
+    private void ProbeFmod()
+    {
+        var dir = _fmodBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(dir) || !Directory.Exists(dir))
+        {
+            _status.Text = "请先填写存在的 FMOD DLL 目录（含 fmod64.dll / fsbank64.dll）。";
+            return;
+        }
+        try
+        {
+            var projectFile = _ownerMain.ProjectFile;
+            var cacheFile = string.IsNullOrWhiteSpace(projectFile)
+                ? Path.Combine(Path.GetTempPath(), "LimbusModEditor", "fmod-probe.json")
+                : Path.Combine(Path.GetDirectoryName(projectFile)!, "logs", "fmod-probe.json");
+            var cache = new FmodCompatibilityService().Probe(dir, cacheFile);
+            new FmodReportWindow(dir, cache) { Owner = this }.ShowDialog();
+        }
+        catch (Exception ex) { _status.Text = $"FMOD 检测失败：{ex.Message}"; }
+    }
+
+    private static (TextBox, StackPanel) AddDirectoryRow(StackPanel panel, string label, params (string Text, Action Click)[] buttons)
     {
         panel.Children.Add(new TextBlock { Text = label, Foreground = System.Windows.Media.Brushes.Gray });
         var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 10) };
         var box = new TextBox { Width = 380, VerticalContentAlignment = VerticalAlignment.Center };
         row.Children.Add(box);
-        if (auto is not null)
+        foreach (var (text, click) in buttons)
         {
-            var btn = new Button { Content = "自动获取", Margin = new Thickness(8, 0, 0, 0), Padding = new Thickness(10, 4, 10, 4) };
-            btn.Click += (_, _) => auto();
+            var btn = new Button { Content = text, Margin = new Thickness(8, 0, 0, 0), Padding = new Thickness(10, 4, 10, 4) };
+            btn.Click += (_, _) => click();
             row.Children.Add(btn);
         }
         panel.Children.Add(row);

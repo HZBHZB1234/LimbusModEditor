@@ -24,6 +24,7 @@
 | RG16 编码按 2×u16 处理（4 字节/像素）导致越界 | 误记格式定义 | 更正为 2 字节（两个 8 位通道），并补目录断言 |
 | 合成 PE 导出数组与目录字段重叠、可选头布局错位 | 测试构造器字段偏移错误 | 重排布局：目录 40 字节之外再放函数/名称/序号数组；NumberOfRvaAndSizes 为 uint32 且位于偏移 108 |
 | `Probe_cache` 测试名字串写到游标终点而非起点 | RVAs 指向全零区 | 记录 `stringsStart` 并从该处写入 |
+| T1 真实写回验证发现所有 bundle 写回的修改被静默丢弃（重打包成功但内容不变） | AssetsTools.NET v3 的 `Pack` 只重压缩原始 `DataReader`，不处理 `SetNewData` 登记的 Replacer；旧 `WritePackedBundle` 直接 Pack | 先未压缩 `Write`（应用 Replacer）再重载并按 `originalCompression` 重打包；以真实流纹理端到端闭环覆盖（`docs/REALDATA-VERIFY.md`），此前 bundle 写回路径无任何测试 |
 
 ### 2.2 复查要点与结论
 

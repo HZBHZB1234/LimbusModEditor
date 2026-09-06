@@ -8,6 +8,13 @@ namespace LimbusModEditor.Formats.Unity;
 
 public sealed record UnityAssetDescriptor(string ContainerPath, long PathId, int TypeId, uint ByteSize, AssetType AssetType);
 public sealed record UnitySerializedObject(long PathId, int TypeId, byte[] Data);
+/// <summary>Raw serialized payload of one object inside a bundle, with the
+/// SerializedFile's TYPE TABLE facts. <paramref name="TypeTableIndex"/> is the
+/// per-object stored type index (UnityPy's obj.type_id) — the value real Carra2
+/// keys carry — while <paramref name="TypeTableClassId"/> is the global class id
+/// of the referenced type-table entry.</summary>
+public sealed record UnityBundleSerializedObject(
+    string ContainerPath, long PathId, int TypeTableIndex, int TypeTableClassId, int TypeTableCount, byte[] Data);
 public sealed record UnityTextureObject(string ContainerPath, long PathId, int Width, int Height, int TextureFormat, byte[] PixelData);
 public readonly record struct UnitySpriteRect(float X, float Y, float Width, float Height);
 public readonly record struct UnitySpriteVector2(float X, float Y);
@@ -515,6 +522,41 @@ public sealed class AssetsToolsBackend : IDisposable
         return result;
     }
 
+    /// <summary>Reads one object's raw serialized bytes from a SerializedFile
+    /// inside a bundle (the payload shape real Carra2 mods carry per entry),
+    /// together with the type-table index the real loader checks against.</summary>
+    public UnityBundleSerializedObject ReadBundleSerializedObject(string bundlePath, string serializedFileName, long pathId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(bundlePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(serializedFileName);
+        var bundle = _manager.LoadBundleFile(bundlePath, unpackIfPacked: true)
+            ?? throw new InvalidDataException($"无法读取 Unity Bundle: {bundlePath}");
+        _bundles.Add(bundle);
+        var index = bundle.file.GetFileIndex(serializedFileName);
+        if (index < 0 || !bundle.file.IsAssetsFile(index)) throw new KeyNotFoundException($"Bundle 中不存在 SerializedFile: {serializedFileName}");
+        var instance = _manager.LoadAssetsFileFromBundle(bundle, serializedFileName, loadDeps: false)
+            ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFileName}");
+        var info = instance.file.GetAssetInfo(pathId)
+            ?? throw new KeyNotFoundException($"SerializedFile 中不存在 Path ID: {pathId}");
+        var types = instance.file.Metadata.TypeTreeTypes;
+        var typeIndex = info.TypeIdOrIndex;
+        if (typeIndex < 0 || typeIndex >= types.Count)
+            throw new InvalidDataException($"类型表索引越界: {typeIndex}（类型表共 {types.Count} 项，暂不支持无类型表的文件）");
+        var offset = info.GetAbsoluteByteOffset(instance.file);
+        if (offset < 0 || info.ByteSize > int.MaxValue || offset + info.ByteSize > instance.AssetsStream.Length)
+            throw new InvalidDataException($"SerializedFile 对象范围无效: {info.PathId}");
+        instance.AssetsStream.Position = offset;
+        var data = new byte[info.ByteSize];
+        var read = 0;
+        while (read < data.Length)
+        {
+            var count = instance.AssetsStream.Read(data, read, data.Length - read);
+            if (count == 0) throw new EndOfStreamException($"SerializedFile 对象数据不完整: {info.PathId}");
+            read += count;
+        }
+        return new(serializedFileName, info.PathId, typeIndex, types[typeIndex].TypeId, types.Count, data);
+    }
+
     public UnityTextureObject? ReadTexture(string path, long pathId, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -824,15 +866,7 @@ public sealed class AssetsToolsBackend : IDisposable
         var directory = bundle.file.BlockAndDirInfo.DirectoryInfos.FirstOrDefault(x => string.Equals(x.Name, entryName, StringComparison.Ordinal))
             ?? throw new KeyNotFoundException($"Bundle 目录中不存在文件: {entryName}");
         directory.SetNewData(replacementData);
-        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outputPath))!);
-        var temporary = outputPath + ".tmp";
-        try
-        {
-            using var writer = new AssetsFileWriter(temporary);
-            bundle.file.Pack(writer, bundle.file.GetCompressionType(), true, null);
-            File.Move(temporary, outputPath, true);
-        }
-        finally { if (File.Exists(temporary)) File.Delete(temporary); }
+        WritePackedBundle(bundle, outputPath);
     }
 
     /// <summary>
@@ -945,9 +979,22 @@ public sealed class AssetsToolsBackend : IDisposable
         var temporary = outputPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
+            // SetNewData 只登记 Replacer，真正的数据落盘发生在未压缩 Write 路径；
+            // 直接 Pack 只会重新压缩原始 DataReader，把全部修改静默丢弃
+            // （AssetsTools.NET v3 的 Pack 不处理 Replacer，已在真实 bundle 上复现）。
+            // 因此先写未压缩 UnityFS（此步应用修改），再重载并按原压缩类型打包。
+            using (var uncompressed = new MemoryStream())
             {
-                using var writer = new AssetsFileWriter(temporary);
-                bundle.file.Pack(writer, bundle.file.GetCompressionType(), true, null);
+                // AssetsFileWriter(=BinaryWriter) 释放时会关闭底层流；沿用
+                // AssetsTools 自家 BundleHelper 的用法：不 dispose，直接复用流
+                var writer = new AssetsFileWriter(uncompressed);
+                bundle.file.Write(writer, -1);
+                writer.Flush();
+                uncompressed.Position = 0;
+                var repacked = new AssetBundleFile();
+                repacked.Read(new AssetsFileReader(uncompressed));
+                using (var packWriter = new AssetsFileWriter(temporary))
+                    repacked.Pack(packWriter, bundle.originalCompression, true, null);
             }
             // dispose before moving: the writer holds the temp stream open
             MoveWithRetry(temporary, outputPath);

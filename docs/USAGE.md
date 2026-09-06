@@ -179,3 +179,14 @@ dotnet test LimbusModEditor.slnx --no-restore
 Bank 探测、图像/图集操作、覆盖层备份/恢复、Unity 字段树与编辑校验、依赖解析、
 引用者扫描、指针语义校验与重写后引用完整性验证，以及本轮的 FMOD DLL 探测
 （合成 PE）、导出兼容性矩阵、资源搜索筛选与事务写出（锁定/取消/失败清理）。
+
+### 9.1 写回链路真实数据验证（T1）
+
+`RealWriteBackTests`（`tests/LimbusModEditor.Format.Tests/`）在本机存在真实
+Unity 缓存时执行端到端写回验证：真实流纹理 PNG 替换 → 内联像素 + 清
+`m_StreamData` → 重打包引用校验 → 真实 Carra2 结构导出（键 =
+`<缓存外层>/<内层>/<pathId>.<类型表索引>`）→ 重新导入逐字节核对。
+只验证时产物写入 `artifacts/realdata-verify/`；追加环境变量
+`LME_REALDATA_INSTALL=1` 会把验证模组复制进 `%APPDATA%\LimbusCompanyMods`
+（游戏内确认与卸载步骤见 `docs/REALDATA-VERIFY.md`）。无真实样本的机器上
+测试自动跳过。

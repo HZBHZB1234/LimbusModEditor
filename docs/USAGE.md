@@ -9,9 +9,11 @@
 2. 点击 **新建模组向导…**（推荐）或 **新建项目**：
    - **新建项目** 只选择 `.lmeproj` 保存位置；
    - **新建模组向导** 额外收集名称/版本/作者/描述并生成空白模板：
-     Carra/Carra2 → 空对象包 `.carra2`；Rebank → 声明 `base_bank` 的 `.rebank`；
-     模板会先经对应格式处理器校验（校验失败不写盘），Lunartique 因必须以现有
-     模组为基底而置灰并给出原因。项目会在同目录创建：
+     Carra/Carra2 → 空对象包 `.carra2`；Rebank 与 Lunartique **不再提供空白模板**
+     ——真实加载器会把 wav 数为 0 的 Rebank 判为错误并回滚安装
+     （launcher/bankmod.py:189-198），Lunartique 必须以现有模组为基底；
+     两者在向导中置灰并显示原因。模板会先经对应格式处理器校验
+     （校验失败不写盘）。项目会在同目录创建：
    - `sources/` — 导入的原始资源（不会再改动）
    - `edits/` — 替换素材与记录
    - `previews/` — 预览缓存
@@ -23,9 +25,11 @@
      可手动选择，也可点击 **「自动定位游戏目录」**：编辑器会扫描已知的 Steam 库
      （注册表 Steam 路径 + `libraryfolders.vdf` + 常见安装位置），找到包含
      `LimbusCompany.exe` 的安装目录并自动填入；未找到时请改用手动选择。
-   - **Unity 缓存目录** — 游戏的全局游戏数据目录，用于导入 bundle 时补全依赖信息。
-     可点击 **「自动建议 Unity 缓存目录」**：编辑器从游戏目录与 LocalLow 推导候选，
-     只列出验证过实际包含 .bundle 的目录并显示 bundle 数量，由你确认后填入。
+   - **Unity 缓存目录** — 游戏的 Addressables 缓存根目录，用于导入 bundle 时补全
+     依赖信息。真实布局为 `LocalLow/Unity/ProjectMoon_LimbusCompany`（可能是迁移到
+     其它盘的 junction）下的 `<32位hex外层键>/<32位hex内层键>/__data`。可点击
+     **「自动建议 Unity 缓存目录」**：编辑器从游戏目录与 LocalLow 推导候选，只列出
+     验证过实际包含缓存条目的目录并显示条目数量，由你确认后填入。
    - **模组目录** — 你的模组存放根目录（导出时默认位置）
    - **FMOD DLL 目录** — 含 `fmod64.dll` / `fsbank64.dll` 的目录。**必须使用你合法获得的
      DLL**，本工具不附带任何 FMOD 二进制文件；没有它时音频只能探测索引，不能解码。

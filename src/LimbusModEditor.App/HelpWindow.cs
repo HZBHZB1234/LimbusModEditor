@@ -73,9 +73,10 @@ public sealed class HelpWindow : Window
         panel.Children.Add(MakeTitle("新建模组向导"));
         panel.Children.Add(MakeBody(
             "• 「新建模组向导…」一步创建项目结构与空白模板：\n" +
-            "  Carra/Carra2 生成空对象包；Rebank 生成声明 base_bank 的 rebank.json；\n" +
-            "  模板先经对应格式处理器校验再写出（事务写，失败不落盘）；\n" +
-            "• Lunartique 没有空白模板（由现有模组资源目录构成），向导中置灰并说明原因；\n" +
+            "  Carra/Carra2 生成空对象包；模板先经对应格式处理器校验再写出" +
+            "（事务写，失败不落盘）；\n" +
+            "• Rebank 与 Lunartique 没有空白模板（真实加载器会把 wav 数为 0 的\n" +
+            "  Rebank 判错并回滚安装；Lunartique 需要现有模组作基底），向导中置灰并说明原因；\n" +
             "• 空白模板不含资源 —— 创建后请继续「导入模组」登记源包并替换资源。"));
 
         panel.Children.Add(MakeTitle("导出向导与导出报告"));
@@ -97,7 +98,8 @@ public sealed class HelpWindow : Window
         panel.Children.Add(MakeBody(
             "• 「自动定位游戏目录」：扫描已知 Steam 库，找到含 LimbusCompany.exe 的安装目录；\n" +
             "• 「自动建议 Unity 缓存目录」：从游戏目录与 LocalLow 推导候选，\n" +
-            "  只列出验证过含 .bundle 的目录并显示 bundle 数量，由你确认；\n" +
+            "  真实缓存根为 LocalLow/Unity/ProjectMoon_LimbusCompany（可能是 junction），\n" +
+            "  按缓存条目（外层键/内层键/__data）验证并显示数量，由你确认；\n" +
             "• 「十六进制预览」：查看任意资源前 4 KiB 的 HEX 转储与 ASCII 边栏，\n" +
             "  并显示文件大小与原始/当前哈希，便于判断未知数据再决定是否替换。"));
 

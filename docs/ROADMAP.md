@@ -37,13 +37,45 @@ dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r 
 输入：至少一组真实游戏版本的 Bundle、SerializedFile、Lunartique
 Installation/Uninstallation 和 Carra/Carra2 样本。
 
-验收：
+**状态（读取层已达成，2026-08 经 LCTA 文档化路径在本机发现真实样本）**：
+按 LCTA 记录的真实路径（`resource_updater/core.py:78-94`：缓存根
+`LocalLow/Unity/ProjectMoon_LimbusCompany`，junction 透传；模组目录
+`%APPDATA%\LimbusCompanyMods`）在本机发现 **1459 个真实 bundle** 与一个真实
+Carra2 模组（3898 对象），并建立了随测试套件运行的真实样本回归
+（`RealSampleTests`，无样本环境自动跳过）：
+
+1. ✅ 真实 bundle 扫描：`ScanBundle` 在 6 个样本上成功（对象数 2–497，
+   识别 GameObject/Texture/Sprite/Mesh/Animation/MonoBehaviour）。
+2. ✅ 真实 Texture2D：像素存于 `m_StreamData`（`archive:/CAB-xxx.resS`
+   容器内资源流）——`ReadTexture` 已支持 .resS 解析（6 个真实纹理像素读取
+   成功）；`ReplaceTextureFromPng` 写回内联像素后清空 `m_StreamData`。
+3. ✅ 真实 Carra2：条目键 `<缓存外层键>/<bundleHash>/<pathId>.<类型表索引>`
+   实测（typeIdx 0..82，与全局类 ID 不同语义），逐条目 XZ，含 `carra.json`
+   标记文件；往返保持逐字节一致。导入层已把 typeIdx 按 Binary 呈现
+   （不再误映射为全局类 ID）。
+4. ✅ 真实 bundle 的 SerializedFile 全部内嵌类型树（勘察 12/12，
+   `TypeTreeEnabled=true`），Unity 版本字符串被抹为 `0.0.0`（bundle 头为
+   `5.x.x`）——对 AssetsTools.NET 的内嵌类型树解析无影响。
+5. ⚠ 仍缺：写回后在真实游戏中的加载验证（本机无游戏 exe 与 .bank/FEV 样本，
+   FMOD 音频链路依旧无法端到端）。
+
+原验收项保留作为后续写回验证清单：
 
 1. 导入后对象数量、Path ID、Type ID 与 AssetsTools.NET/UnityPy 交叉核对。
 2. 对 Texture2D、Sprite、MonoBehaviour、ScriptableObject 各选一个对象，完成预览、修改、写回。
 3. 用游戏或独立验证器重新加载写回文件，确认 Bundle/SerializedFile 未损坏。
 4. 安装/卸载调试 overlay 后，原文件哈希可恢复，重复应用不会累积临时文件。
 5. 记录 Unity 版本、压缩方式、失败对象和兼容性诊断，不把未知对象静默丢弃。
+
+真实环境事实（供后续任务引用，来源 LCTA + 本机实测）：
+
+- 游戏 Unity 版本为 **6000.3.12f1**（不是 2021.3）；官方 bundle 的
+  SerializedFile 版本被抹为 `0.0.0`。
+- Carra2 的 `.typeIdx` 是目标 SerializedFile 的**类型表索引**
+  （LimbusModLoader patch.py:287-301），不是全局 Unity 类 ID；第一段是
+  Unity 缓存外层键（32 位 hex，跨版本稳定，与玩家账号无关）。
+- 真实 Rebank 加载器把 wav 数为 0 的 rebank 判为错误并回滚安装
+  （launcher/bankmod.py:189-198）——向导已撤下空白 Rebank 模板。
 
 ### P0.2 构建事务和文件锁
 
@@ -123,20 +155,26 @@ WPF/CLI 共用同一诊断模型的工作仍待后续。
 - 提供 atlas 可视化：原图、SpriteRect、pivot、border、mesh overlay。
 - 添加 SpriteAtlas 真实样本端到端测试。
 
+状态（读取侧推进，2026-08）：真实 bundle 样本已可扫描（真实 Sprite/Texture/
+Mesh/Animation 对象均被识别），Texture2D 现已支持真实 .resS 流数据的读取与
+替换清流；Sprite 元数据编辑此前已落地。SpriteAtlas 页纹理与 atlas mesh 重写
+仍需真实 SpriteAtlas 样本支撑（不猜测）。
+
 ### P1.5 Mesh、Animation、Font 只读和基础替换
 
 - 先实现安全只读摘要和导出（顶点数、材质、骨骼、曲线、字体信息）。
 - 再按真实样本确定可写字段；每种资源单独设计版本化替换器。
 
-状态（第一步完成）：只读摘要已落地（`UnityObjectSummaryBuilder` +
+状态（第一步完成 + 真实样本验证）：只读摘要已落地（`UnityObjectSummaryBuilder` +
 `UnityAssetService.ReadObjectSummary`/`ReadBundleObjectSummary`，合成样本测试
 `UnityObjectSummaryTests`）：Mesh 报告子网格数/顶点数/顶点与索引数据大小，
 AnimationClip 报告采样率与动画类型（Legacy/Generic/Humanoid 为 Unity 公开常量），
 Font 报告字号/字符表条目数/内嵌数据大小/默认材质依赖解析；UI 入口
 「查看对象摘要」带复制与 JSON 导出（AtomicOutput）。数值一律来自文件自身类型树，
-缺失字段明确标注「未包含」而不是补默认值；MeshRenderer 材质引用、骨骼/曲线细节、
-以及各类型可写字段需真实样本（P1.5 第二步）后再扩展。Mesh(43)/AnimationClip(74)
-类 ID 映射已并入 `UnityClassId`。
+缺失字段明确标注「未包含」而不是补默认值；真实样本回归确认真实 bundle 中的
+Mesh/AnimationClip 摘要可读（`RealSampleTests`）。MeshRenderer 材质引用、
+骨骼/曲线细节、以及各类型可写字段需真实样本（P1.5 第二步）后再扩展。
+Mesh(43)/AnimationClip(74) 类 ID 映射已并入 `UnityClassId`。
 
 ## P2：音频和 Bank/FMOD 工作流
 
@@ -189,14 +227,16 @@ FEV 索引展示仍待真实 FEV 样本（不猜测）。
 - 根据格式生成最小合法 Carra/Rebank/Lunartique 工程模板。
 - 模板必须通过对应 handler 的 ValidateAsync，并给出输出路径预览。
 
-状态（完成）：「新建模组向导…」已落地（`NewModTemplateService` +
+状态（完成，2026-08 修订）：「新建模组向导…」已落地（`NewModTemplateService` +
 `NewModWizardWindow`，测试 `NewModTemplateServiceTests`）：向导收集模组
 名称/版本/作者/描述，选择模板格式后创建项目结构并生成经格式处理器校验的最小
-合法模板 —— Carra/Carra2 生成空对象包、Rebank 生成声明 `base_bank` 的
-`rebank.json`（校验含 base_bank 声明检查）；模板经 `AtomicOutput` 事务写出，
-完成后项目直接在主窗口打开。Lunartique 无空白模板（真实模组才能确定其资源
-目录形态），向导中置灰并说明 —— 符合"不猜测"原则。向导的"辅助自动化"部分
-（自动定位游戏目录/Unity 缓存目录）此前已落地。
+合法模板 —— Carra/Carra2 生成空对象包；模板经 `AtomicOutput` 事务写出，
+完成后项目直接在主窗口打开。**Rebank 空白模板已撤下**（真实加载器把 wav 数
+为 0 的 rebank 判错并回滚，launcher/bankmod.py:189-198）；Lunartique 无空白
+模板（真实模组才能确定其资源目录形态）；两者向导中置灰并说明 —— 符合"不猜测"
+原则。`base_bank` 校验为纯文件名（与 bankmod.py:104-108 一致）。向导的
+"辅助自动化"部分（自动定位游戏目录/Unity 缓存目录）此前已落地，缓存候选已按
+真实布局修正（LocalLow/Unity/ProjectMoon_LimbusCompany，cache-v2 条目计数）。
 
 ### P3.2 导出向导和兼容性矩阵
 

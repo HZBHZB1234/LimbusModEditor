@@ -76,6 +76,16 @@ Carra2 模组（3898 对象），并建立了随测试套件运行的真实样�
   Unity 缓存外层键（32 位 hex，跨版本稳定，与玩家账号无关）。
 - 真实 Rebank 加载器把 wav 数为 0 的 rebank 判为错误并回滚安装
   （launcher/bankmod.py:189-198）——向导已撤下空白 Rebank 模板。
+- 真实 .bank 实测（1531 个）：事件 bank（`<id>.bank`）的 SNDH 合法地为
+  size 0（无 FSB 负载）；音频 bank（`<id>.assets.bank`）的 SNDH 表
+  (offset,size) 直指 FSB5 payload；FSB codec 实测为 16（Vorbis）——
+  `BankParser`/`Fsb5Parser` 已全部经真实数据回归（`RealBankTests`）。
+- 真实加载器（LCTA launcher）按 `<缓存根>/<外层键>/<内层键>/__data`
+  匹配 Carra 对象，游戏更新更换外层键后旧模组被静默跳过——导出时已
+  增加「缓存对齐」诊断（配置缓存目录后逐外层键核对）。
+- 模组目录约定：`%APPDATA%\LimbusCompanyMods`，条目为平铺文件或每模组
+  一目录，`_disable` 后缀切换禁用——已实现「自动建议模组目录」与
+  「管理已安装模组」（只重命名切换，不改文件内容）。
 
 ### P0.2 构建事务和文件锁
 
@@ -193,7 +203,10 @@ FSB5 只读结构探测（`Fsb5Parser`：按 vgmstream/python-fsb5 双源核对�
 已按权威布局重写并以合成样本测试固化。WAV→FSB 已在导出管线实现
 （`ModExportService.ApplyReplacementsAsync` 检测 RIFF/WAVE 后自动经用户配置的
 FSBANK 编码器转 FSB5 再写入 Bank，未配置编码器时给出明确错误）；事件/总线级
-FEV 索引展示仍待真实 FEV 样本（不猜测）。
+FEV 索引展示仍待真实 FEV 样本（不猜测）。**真实数据验证（2026-08）**：本机
+1531 个真实 .bank 全部经 `BankParser` 解析（事件 bank 空 SNDH 已支持），6 个
+真实 FSB（codec 16=Vorbis）89 个样本经 `Fsb5Parser` 解析成功且未修改重建逐
+字节无损——0x3C/0x40 基头布局首获真实数据验证（`RealBankTests`）。
 
 ### P2.2 FMOD DLL 管理
 

@@ -100,8 +100,18 @@ public sealed class HelpWindow : Window
             "• 「自动建议 Unity 缓存目录」：从游戏目录与 LocalLow 推导候选，\n" +
             "  真实缓存根为 LocalLow/Unity/ProjectMoon_LimbusCompany（可能是 junction），\n" +
             "  按缓存条目（外层键/内层键/__data）验证并显示数量，由你确认；\n" +
+            "• 「自动建议模组目录」：真实加载器默认使用 %APPDATA%/LimbusCompanyMods；\n" +
+            "• 「管理已安装模组」：按加载器自身的 _disable 后缀约定切换启用/禁用\n" +
+            "  （只重命名，不改文件内容）；\n" +
             "• 「十六进制预览」：查看任意资源前 4 KiB 的 HEX 转储与 ASCII 边栏，\n" +
             "  并显示文件大小与原始/当前哈希，便于判断未知数据再决定是否替换。"));
+
+        panel.Children.Add(MakeTitle("缓存对齐（导出诊断）"));
+        panel.Children.Add(MakeBody(
+            "• 真实加载器按 <缓存根>/<外层键>/<内层键>/__data 匹配 Carra 对象；\n" +
+            "  游戏更新会更换缓存外层键，旧键模组会被静默跳过；\n" +
+            "• 导出 Carra/Carra2 时若已配置 Unity 缓存目录，编辑器逐外层键核对\n" +
+            "  缓存中是否仍有对应 bundle，失配以「缓存对齐：…」写入导出报告。"));
 
         panel.Children.Add(MakeTitle("安全边界"));
         panel.Children.Add(MakeBody(

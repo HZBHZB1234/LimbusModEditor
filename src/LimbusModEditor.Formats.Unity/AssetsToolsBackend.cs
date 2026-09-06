@@ -522,6 +522,27 @@ public sealed class AssetsToolsBackend : IDisposable
         return result;
     }
 
+    /// <summary>打开 bundle 的「全部块解压后拼接」数据流（vanilla 基线 CRC 对比
+    /// 用，口径与 LCTA staticmod.bundle_decompressed_crc 一致）。流由本后端持有
+    /// （随 Dispose 释放），不是可解压的 UnityFS 时返回 false。</summary>
+    public bool TryLoadBundleForCrc(string bundlePath, out Stream decompressed)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(bundlePath);
+        try
+        {
+            var bundle = _manager.LoadBundleFile(bundlePath, unpackIfPacked: true);
+            if (bundle is null) { decompressed = Stream.Null; return false; }
+            _bundles.Add(bundle);
+            decompressed = bundle.DataStream;
+            return true;
+        }
+        catch (Exception ex) when (ex is InvalidDataException or IOException or NotSupportedException or EndOfStreamException)
+        {
+            decompressed = Stream.Null;
+            return false;
+        }
+    }
+
     /// <summary>Reads one object's raw serialized bytes from a SerializedFile
     /// inside a bundle (the payload shape real Carra2 mods carry per entry),
     /// together with the type-table index the real loader checks against.</summary>

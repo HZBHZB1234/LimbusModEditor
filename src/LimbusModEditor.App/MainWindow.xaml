@@ -81,6 +81,7 @@
                                 <GridViewColumn Header="资源路径" DisplayMemberBinding="{Binding LogicalPath}" Width="420"/>
                                 <GridViewColumn Header="类型" DisplayMemberBinding="{Binding Type}" Width="120"/>
                                 <GridViewColumn Header="状态" DisplayMemberBinding="{Binding EditState}" Width="110"/>
+                                <GridViewColumn Header="vanilla 基线" DisplayMemberBinding="{Binding CatalogBaseline}" Width="110"/>
                                 <GridViewColumn Header="大小" DisplayMemberBinding="{Binding Size}" Width="100"/>
                             </GridView>
                         </ListView.View>

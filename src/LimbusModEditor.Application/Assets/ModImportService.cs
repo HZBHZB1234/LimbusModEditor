@@ -1,6 +1,7 @@
 using LimbusModEditor.Domain.Projects;
 using LimbusModEditor.Domain.Formats;
 using LimbusModEditor.Domain.Edits;
+using LimbusModEditor.Application.Catalog;
 using LimbusModEditor.Application.Formats;
 using LimbusModEditor.Formats.Abstractions;
 using LimbusModEditor.Formats.Unity;
@@ -48,7 +49,9 @@ public sealed class ModImportService(FormatRegistry registry)
 
     /// <summary>Inspects a UnityFS/UnityRaw bundle with AssetsTools.NET and
     /// merges its object index into the project. The original bundle is copied
-    /// into sources so the project remains portable.</summary>
+    /// into sources so the project remains portable. 若项目配置了游戏目录且其中
+    /// 有官方 catalog，会对该 bundle 做 vanilla 基线判定并写入每个对象的
+    /// catalogBaseline 元数据（相对 vanilla 是否被修改/新增）。</summary>
     public async Task<ImportResult> ImportUnityBundleIntoProjectAsync(
         string bundlePath, ModProject project, CancellationToken cancellationToken = default)
     {
@@ -58,11 +61,13 @@ public sealed class ModImportService(FormatRegistry registry)
         if (!File.Exists(full)) throw new FileNotFoundException("Unity Bundle 不存在。", full);
         var sourcePath = await MaterializeSourceAsync(full, project, ModFormatKind.Directory, cancellationToken);
         var descriptors = new UnityAssetService().ScanBundle(sourcePath, cancellationToken: cancellationToken);
+        var baseline = EvaluateCatalogBaseline(full, project);
         var added = 0;
         var updated = 0;
         foreach (var asset in descriptors)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (baseline is { } result) asset.Metadata["catalogBaseline"] = result.Summary;
             var existing = project.Assets.FirstOrDefault(x => string.Equals(x.LogicalPath, asset.LogicalPath, StringComparison.OrdinalIgnoreCase));
             if (existing is null)
             {
@@ -87,7 +92,30 @@ public sealed class ModImportService(FormatRegistry registry)
                 updated++;
             }
         }
-        return new(ModFormatKind.Directory, added, updated, []);
+        var diagnostics = new List<string>();
+        if (baseline is { } verdict)
+            diagnostics.Add($"vanilla 基线：{verdict.Summary} — {verdict.Detail}");
+        return new(ModFormatKind.Directory, added, updated, diagnostics);
+    }
+
+    /// <summary>vanilla 基线判定：catalog 取自项目游戏目录的官方
+    /// StreamingAssets/aa/catalog.bin；目录未配置或文件缺失时返回 null（不判定，
+    /// 不猜测）。catalog 解析与 CRC 计算失败时给出「基线未知」结果。</summary>
+    private static CatalogBaselineResult? EvaluateCatalogBaseline(string bundlePath, ModProject project)
+    {
+        var gameDirectory = project.GameDirectory;
+        if (string.IsNullOrWhiteSpace(gameDirectory)) return null;
+        var catalogPath = Path.Combine(gameDirectory, "LimbusCompany_Data", "StreamingAssets", "aa", "catalog.bin");
+        if (!File.Exists(catalogPath)) return null;
+        try
+        {
+            var catalog = CatalogFileService.Load(catalogPath);
+            return CatalogBaselineService.Evaluate(catalog, bundlePath);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or IOException)
+        {
+            return new CatalogBaselineResult(CatalogVerdict.Uncertain, string.Empty, $"catalog 解析失败（{ex.Message}），无法对比 vanilla 基线");
+        }
     }
 
     public async Task<ImportResult> ImportDirectoryIntoProjectAsync(

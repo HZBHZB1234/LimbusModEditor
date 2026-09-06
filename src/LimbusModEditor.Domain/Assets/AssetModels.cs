@@ -48,4 +48,8 @@ public sealed class AssetRecord
     public AssetEditState EditState { get; set; } = AssetEditState.Unchanged;
     public long Size { get; set; }
     public Dictionary<string, string> Metadata { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>导入 bundle 时对照官方 catalog（vanilla 基线）的判定摘要，
+    /// 仅供列表显示；底层事实在 Metadata["catalogBaseline"]。</summary>
+    public string? CatalogBaseline => Metadata.TryGetValue("catalogBaseline", out var value) ? value : null;
 }

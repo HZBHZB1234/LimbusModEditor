@@ -468,6 +468,26 @@ public sealed class AssetsToolsBackend : IDisposable
         return assets;
     }
 
+    /// <summary>Read-only diagnostic probe (used by real-sample verification):
+    /// reports, for each SerializedFile inside a bundle, whether embedded type
+    /// trees are present, the recorded Unity version string and the embedded
+    /// type count. Makes no changes to the file.</summary>
+    public IReadOnlyList<(bool TypeTreeEnabled, string UnityVersion, int TypeCount)> SurveyBundle(string path)
+    {
+        var bundle = _manager.LoadBundleFile(path, unpackIfPacked: true) ?? throw new InvalidDataException($"无法读取 Unity Bundle: {path}");
+        _bundles.Add(bundle);
+        var results = new List<(bool, string, int)>();
+        foreach (var fileName in bundle.file.GetAllFileNames())
+        {
+            if (!bundle.file.IsAssetsFile(bundle.file.GetFileIndex(fileName))) continue;
+            var file = _manager.LoadAssetsFileFromBundle(bundle, fileName, loadDeps: false);
+            if (file is null) continue;
+            results.Add((file.file.Metadata.TypeTreeEnabled, file.file.Metadata.UnityVersion ?? string.Empty,
+                file.file.Metadata.TypeTreeTypes.Count));
+        }
+        return results;
+    }
+
     /// <summary>Enumerates raw object payloads in a standalone SerializedFile
     /// (for example a Lunartique __data file).</summary>
     public IReadOnlyList<UnitySerializedObject> ReadSerializedObjects(string path)
@@ -513,11 +533,91 @@ public sealed class AssetsToolsBackend : IDisposable
             var width = ReadInt(fields, "m_Width", "width");
             var height = ReadInt(fields, "m_Height", "height");
             var format = ReadInt(fields, "m_TextureFormat", "textureFormat");
-            var pixels = FindField(fields, "m_TextureData", "m_ImageData", "image data", "data")?.AsByteArray;
+            var pixels = ReadTexturePixelData(bundle, fields, pathId);
             if (width <= 0 || height <= 0 || format < 0 || pixels is null || pixels.Length == 0) return null;
-            return new UnityTextureObject(fileName, pathId, width, height, format, pixels.ToArray());
+            return new UnityTextureObject(fileName, pathId, width, height, format, pixels);
         }
         return null;
+    }
+
+    /// <summary>Reads the pixel payload of a Texture2D. Modern Unity objects
+    /// keep their bytes in a .resS resource stream referenced by m_StreamData
+    /// ("archive:/CAB-xxx/CAB-xxx.resS" = a file inside this bundle; anything
+    /// else = a file next to the bundle); older objects store an inline byte
+    /// array. Returns null only when neither source can be located.</summary>
+    private byte[]? ReadTexturePixelData(BundleFileInstance bundle, AssetTypeValueField fields, long pathId)
+    {
+        var direct = FindField(fields, "m_TextureData", "m_ImageData", "image data", "data")?.AsByteArray;
+        if (direct is { Length: > 0 }) return direct;
+
+        var streamData = FindField(fields, "m_StreamData");
+        if (streamData is null) return null;
+        var resPath = FindField(streamData, "path")?.Value?.AsString;
+        if (string.IsNullOrEmpty(resPath)) return null;
+        var offset = FindField(streamData, "offset")?.Value?.AsLong ?? 0;
+        var size = FindField(streamData, "size")?.Value?.AsLong ?? 0;
+        if (offset < 0 || size <= 0) return null;
+
+        // Unity's virtual archive:/ paths point at container files inside the
+        // bundle; the block directory gives each file's byte range in the
+        // (already unpacked) data stream.
+        if (resPath.StartsWith("archive:/", StringComparison.OrdinalIgnoreCase))
+        {
+            var inner = resPath["archive:/".Length..];
+            foreach (var name in new[] { inner, Path.GetFileName(inner) })
+            {
+                var resIndex = bundle.file.GetFileIndex(name);
+                if (resIndex < 0) continue;
+                bundle.file.GetFileRange(resIndex, out var rangeOffset, out var rangeSize);
+                if (offset + size > rangeSize)
+                    throw new InvalidDataException($"纹理流数据越界（Path {pathId}）: {resPath} 范围 {offset}+{size} 超过块大小 {rangeSize}");
+                var data = new byte[size];
+                lock (bundle.DataStream)
+                {
+                    bundle.DataStream.Position = rangeOffset + offset;
+                    var read = 0;
+                    while (read < data.Length)
+                    {
+                        var count = bundle.DataStream.Read(data, read, data.Length - read);
+                        if (count == 0) throw new EndOfStreamException($"纹理流数据不完整（Path {pathId}）: {resPath}");
+                        read += count;
+                    }
+                }
+                return data;
+            }
+            return null;
+        }
+
+        var external = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(bundle.path))!, resPath);
+        if (!File.Exists(external)) return null;
+        using var source = File.OpenRead(external);
+        if (offset + size > source.Length)
+            throw new InvalidDataException($"纹理流数据越界（Path {pathId}）: {resPath} 范围 {offset}+{size} 超过文件大小 {source.Length}");
+        source.Position = offset;
+        var externalData = new byte[size];
+        var total = 0;
+        while (total < externalData.Length)
+        {
+            var count = source.Read(externalData, total, externalData.Length - total);
+            if (count == 0) throw new EndOfStreamException($"纹理流数据不完整（Path {pathId}）: {resPath}");
+            total += count;
+        }
+        return externalData;
+    }
+
+    /// <summary>Neutralizes a Texture2D's m_StreamData after the pixel bytes
+    /// have been written inline, so the game reads the new data instead of the
+    /// stale .resS stream. A no-op when the type tree has no such field.</summary>
+    private static void ClearStreamData(AssetTypeValueField fields)
+    {
+        var streamData = FindField(fields, "m_StreamData");
+        if (streamData is null) return;
+        var path = FindField(streamData, "path");
+        var offset = FindField(streamData, "offset");
+        var size = FindField(streamData, "size");
+        if (path?.Value is not null) path.Value.AsString = string.Empty;
+        if (offset?.Value is not null) offset.Value.AsLong = 0;
+        if (size?.Value is not null) size.Value.AsLong = 0;
     }
 
     /// <summary>Reads the editable metadata of a Sprite object. Pixel data remains
@@ -698,6 +798,9 @@ public sealed class AssetsToolsBackend : IDisposable
         var dataField = FindField(fields, "m_TextureData", "m_ImageData", "image data", "data")
             ?? throw new InvalidDataException("Texture2D 中未找到像素数据字段。");
         dataField.AsByteArray = texture.PixelData;
+        // pixel bytes are now inline: an m_StreamData still pointing at the
+        // original .resS stream would make the game read the OLD image
+        ClearStreamData(fields);
         info.SetNewData(fields);
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outputPath))!);
         var temporary = outputPath + ".tmp";
@@ -825,6 +928,9 @@ public sealed class AssetsToolsBackend : IDisposable
         var dataField = FindField(fields, "m_TextureData", "m_ImageData", "image data", "data")
             ?? throw new InvalidDataException("Texture2D 中未找到像素数据字段。");
         dataField.AsByteArray = texture.PixelData;
+        // pixel bytes are now inline: an m_StreamData still pointing at the
+        // original .resS stream would make the game read the OLD image
+        ClearStreamData(fields);
         info.SetNewData(fields);
         var directory = bundle.file.BlockAndDirInfo.DirectoryInfos.FirstOrDefault(x =>
             string.Equals(x.Name, serializedFileName, StringComparison.Ordinal))

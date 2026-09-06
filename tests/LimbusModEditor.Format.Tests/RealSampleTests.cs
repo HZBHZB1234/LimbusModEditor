@@ -1,3 +1,4 @@
+using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Formats.Carra;
 using LimbusModEditor.Formats.Unity;
 
@@ -81,5 +82,65 @@ public class RealSampleTests
         }
         // probe output is captured by the test framework log
         Console.WriteLine("真实 bundle 解析结果:\n" + string.Join("\n", stats));
+    }
+
+    [Fact]
+    public void Real_bundle_objects_survive_the_field_read_pipeline()
+    {
+        var root = RealSamples.UnityCacheRoot;
+        if (root is null) return;
+
+        var service = new UnityAssetService();
+        var readTextures = 0;
+        var readSummaries = 0;
+        foreach (var bundle in RealSamples.BundleDataFiles(limit: 60))
+        {
+            var descriptors = service.ScanBundle(bundle);
+            var texture = descriptors.FirstOrDefault(d => d.Type == AssetType.Texture && d.UnityPathId.HasValue);
+            if (texture is { UnityPathId: not null })
+            {
+                var summary = service.ReadTextureSummary(bundle, texture.UnityPathId.Value);
+                if (summary is not null)
+                {
+                    Assert.True(summary.Width > 0 && summary.Height > 0);
+                    readTextures++;
+                }
+            }
+            // P1.5 summaries exist only for Mesh/AnimationClip/Font; probe those
+            var supported = descriptors.FirstOrDefault(d => d.UnityPathId.HasValue &&
+                d.Type is AssetType.Mesh or AssetType.Animation or AssetType.Font);
+            if (supported is { UnityPathId: not null, ContainerPath: not null })
+            {
+                var objectSummary = service.ReadBundleObjectSummary(bundle, supported.ContainerPath, supported.UnityPathId.Value);
+                if (objectSummary is not null) readSummaries++;
+            }
+            if (readSummaries >= 2 && readTextures >= 5) break;
+        }
+        // real data must flow through the field-read pipelines, not come back
+        // silently empty
+        Assert.True(readSummaries >= 1, $"Mesh/AnimationClip/Font 摘要在真实 bundle 上读取了 {readSummaries} 个");
+        Assert.True(readTextures >= 5, $"真实纹理摘要读取了 {readTextures} 个");
+        Console.WriteLine($"真实对象读取: 纹理摘要 {readTextures} 个, Mesh/Animation/Font 摘要 {readSummaries} 个");
+    }
+
+    [Fact]
+    public void Real_bundle_typetree_availability_survey()
+    {
+        var root = RealSamples.UnityCacheRoot;
+        if (root is null) return;
+
+        using var backend = new AssetsToolsBackend();
+        var withTrees = 0;
+        var withoutTrees = 0;
+        var versions = new List<string>();
+        foreach (var bundle in RealSamples.BundleDataFiles(limit: 12))
+        {
+            foreach (var (enabled, version, types) in backend.SurveyBundle(bundle))
+            {
+                if (enabled) withTrees++; else withoutTrees++;
+                versions.Add($"{version} types={types}");
+            }
+        }
+        Console.WriteLine($"真实 bundle 类型树勘察: 内嵌类型树 {withTrees}, 剥离 {withoutTrees}; 版本: {string.Join("; ", versions.Take(6))}");
     }
 }

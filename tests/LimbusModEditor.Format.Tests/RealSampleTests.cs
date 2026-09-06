@@ -1,4 +1,5 @@
 using LimbusModEditor.Domain.Assets;
+using LimbusModEditor.Formats.Abstractions;
 using LimbusModEditor.Formats.Carra;
 using LimbusModEditor.Formats.Unity;
 
@@ -121,6 +122,47 @@ public class RealSampleTests
         Assert.True(readSummaries >= 1, $"Mesh/AnimationClip/Font 摘要在真实 bundle 上读取了 {readSummaries} 个");
         Assert.True(readTextures >= 5, $"真实纹理摘要读取了 {readTextures} 个");
         Console.WriteLine($"真实对象读取: 纹理摘要 {readTextures} 个, Mesh/Animation/Font 摘要 {readSummaries} 个");
+    }
+
+    [Fact]
+    public async Task Real_carra2_imports_through_the_format_handler_as_binary()
+    {
+        var modPath = RealSamples.RealCarra2;
+        if (modPath is null) return;
+
+        using var input = File.OpenRead(modPath);
+        var handler = new CarraFormatHandler();
+        var package = await handler.ImportAsync(input, new ImportContext(CancellationToken: CancellationToken.None));
+        var assets = package.Project.Assets;
+        // the real mod carries its full object payload through the handler
+        Assert.NotEmpty(assets);
+        // corrected semantics: the ".<typeIdx>" suffix is a type-table index,
+        // so every imported object surfaces as Binary (never a global class ID)
+        Assert.All(assets, a => Assert.Equal(AssetType.Binary, a.Type));
+        // and the logical path still round-trips the exact key
+        Assert.All(assets, a => Assert.Matches(@"^[0-9a-f]{32}/[0-9a-f]{32}/-?\d+\.\d+$", a.LogicalPath));
+    }
+
+    [Fact]
+    public void Real_texture_format_survey()
+    {
+        var root = RealSamples.UnityCacheRoot;
+        if (root is null) return;
+
+        var service = new UnityAssetService();
+        var formats = new Dictionary<int, int>();
+        foreach (var bundle in RealSamples.BundleDataFiles(limit: 40))
+        {
+            foreach (var descriptor in service.ScanBundle(bundle).Where(d => d.Type == AssetType.Texture && d.UnityPathId.HasValue).Take(3))
+            {
+                var summary = service.ReadTextureSummary(bundle, descriptor.UnityPathId!.Value);
+                if (summary is null) continue;
+                formats[summary.TextureFormat] = formats.TryGetValue(summary.TextureFormat, out var n) ? n + 1 : 1;
+            }
+        }
+        Assert.NotEmpty(formats);
+        var report = string.Join(", ", formats.OrderByDescending(x => x.Value).Select(x => $"format {x.Key}: {x.Value}"));
+        Console.WriteLine("真实纹理格式分布: " + report);
     }
 
     [Fact]

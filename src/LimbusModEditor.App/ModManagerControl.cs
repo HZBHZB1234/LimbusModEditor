@@ -6,21 +6,17 @@ namespace LimbusModEditor.App;
 
 /// <summary>管理真实加载器模组目录（%APPDATA%\LimbusCompanyMods）：
 /// 列出已安装模组并按加载器自身的 "_disable" 后缀约定切换启用/禁用。
-/// 只做重命名，不修改任何文件内容。</summary>
-public sealed class ModManagerWindow : Window
+/// 只做重命名，不修改任何文件内容。作为「模组管理」工作台嵌入主窗口
+/// （VS Code 式 tab）。</summary>
+public sealed class ModManagerControl : UserControl
 {
     private readonly string _modsDirectory;
     private readonly ListBox _list;
     private readonly TextBlock _status;
 
-    public ModManagerWindow(string modsDirectory)
+    public ModManagerControl(string modsDirectory)
     {
         _modsDirectory = modsDirectory;
-        Title = $"模组目录管理 — {modsDirectory}";
-        Width = 620;
-        Height = 460;
-        MinWidth = 520;
-        WindowStartupLocation = WindowStartupLocation.CenterOwner;
 
         var panel = new StackPanel { Margin = new Thickness(14) };
         panel.Children.Add(new TextBlock

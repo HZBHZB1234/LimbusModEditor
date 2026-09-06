@@ -6,27 +6,24 @@ using LimbusModEditor.Application.Texts;
 
 namespace LimbusModEditor.App;
 
-/// <summary>lang 文本模组通道（T2）：围绕真实加载器（LCTA launcher/changes.py）
+/// <summary>lang 文本模组工作台（T2）：围绕真实加载器（LCTA launcher/changes.py）
 /// 的 RFC6902 补丁约定，提供「目录差分生成补丁」与「应用补丁到 lang 目录」两个
 /// 入口。补丁文件放进模组目录即可被加载器应用；应用语义与加载器一致
-/// （目标缺失跳过并报告）。本窗口不做 .bak 备份——那是加载器启动/退出时的
-/// 自动行为，窗口内明确提示。</summary>
-public sealed class LangTextModWindow : Window
+/// （目标缺失跳过并报告）。不做 .bak 备份——那是加载器启动/退出时的自动行为。
+/// 作为「文本模组」工作台嵌入主窗口（VS Code 式 tab）；ownerWindow 用于
+/// 承载文件对话框与消息框的所有权。</summary>
+public sealed class LangTextModControl : UserControl
 {
     private readonly LangTextPatchService _service = new();
+    private readonly Window? _ownerWindow;
     private readonly TextBox _langRootBox;
     private readonly TextBlock _activeLang;
     private readonly ListBox _report;
     private readonly TextBlock _status;
 
-    public LangTextModWindow(string defaultLangRoot, string? modsDirectory)
+    public LangTextModControl(string defaultLangRoot, string? modsDirectory, Window? ownerWindow = null)
     {
-        Title = "文本模组（lang 补丁 · RFC6902）";
-        Width = 720;
-        Height = 560;
-        MinWidth = 620;
-        MinHeight = 460;
-        WindowStartupLocation = WindowStartupLocation.CenterOwner;
+        _ownerWindow = ownerWindow;
 
         var panel = new StackPanel { Margin = new Thickness(14) };
         panel.Children.Add(new TextBlock
@@ -69,6 +66,15 @@ public sealed class LangTextModWindow : Window
         RefreshActiveLanguage();
     }
 
+    private bool? ShowDialog(Microsoft.Win32.CommonDialog dialog)
+        => _ownerWindow is { } owner ? dialog.ShowDialog(owner) : dialog.ShowDialog();
+
+    private void MessageBoxInfo(string message, string title, MessageBoxImage image = MessageBoxImage.Information)
+    {
+        if (_ownerWindow is { } owner) MessageBox.Show(owner, message, title, MessageBoxButton.OK, image);
+        else MessageBox.Show(message, title, MessageBoxButton.OK, image);
+    }
+
     private void AutoLocateLangRoot()
     {
         var lookup = GameDirectoryLocator.Scan(GameDirectoryLocator.DefaultCandidateRoots());
@@ -106,7 +112,7 @@ public sealed class LangTextModWindow : Window
             Filter = "文本补丁 (*.json)|*.json",
             FileName = "lang-patch.json"
         };
-        if (save.ShowDialog(this) != true) return;
+        if (ShowDialog(save) != true) return;
 
         try
         {
@@ -136,7 +142,7 @@ public sealed class LangTextModWindow : Window
         var root = _langRootBox.Text;
         if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
         {
-            MessageBox.Show(this, "请先设置有效的 lang 根目录。", "应用补丁", MessageBoxButton.OK, MessageBoxImage.Information);
+            MessageBoxInfo("请先设置有效的 lang 根目录。", "应用补丁");
             return;
         }
         var open = new Microsoft.Win32.OpenFileDialog
@@ -144,12 +150,17 @@ public sealed class LangTextModWindow : Window
             Title = "选择文本补丁 JSON",
             Filter = "文本补丁 (*.json)|*.json|所有文件 (*.*)|*.*"
         };
-        if (open.ShowDialog(this) != true) return;
+        if (ShowDialog(open) != true) return;
 
-        var confirm = MessageBox.Show(this,
-            "将把补丁逐文件就地写回 lang 目录（目标缺失的条目会跳过并报告）。\n" +
-            "真实加载器在启动时会自动备份原文件并在退出时还原；直接应用前请自行确认 lang 目录可回滚。\n\n继续？",
-            "应用补丁", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+        var confirm = _ownerWindow is { } owner
+            ? MessageBox.Show(owner,
+                "将把补丁逐文件就地写回 lang 目录（目标缺失的条目会跳过并报告）。\n" +
+                "真实加载器在启动时会自动备份原文件并在退出时还原；直接应用前请自行确认 lang 目录可回滚。\n\n继续？",
+                "应用补丁", MessageBoxButton.YesNo, MessageBoxImage.Warning)
+            : MessageBox.Show(
+                "将把补丁逐文件就地写回 lang 目录（目标缺失的条目会跳过并报告）。\n" +
+                "真实加载器在启动时会自动备份原文件并在退出时还原；直接应用前请自行确认 lang 目录可回滚。\n\n继续？",
+                "应用补丁", MessageBoxButton.YesNo, MessageBoxImage.Warning);
         if (confirm != MessageBoxResult.Yes) return;
 
         try
@@ -173,7 +184,7 @@ public sealed class LangTextModWindow : Window
         foreach (var line in lines) _report.Items.Add(line);
     }
 
-    private static string? PickFolder(string title)
+    private string? PickFolder(string title)
     {
         var dialog = new Microsoft.Win32.OpenFileDialog
         {
@@ -182,7 +193,7 @@ public sealed class LangTextModWindow : Window
             FileName = "选择此文件夹",
             Title = title
         };
-        if (dialog.ShowDialog() != true) return null;
+        if (ShowDialog(dialog) != true) return null;
         var directory = Path.GetDirectoryName(dialog.FileName);
         return directory is not null && Directory.Exists(directory) ? directory : null;
     }

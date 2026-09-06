@@ -42,6 +42,31 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _searchTimer;
     private int _searchGeneration;
     private int _previewGeneration;
+    // 当前选中资源：列表与目录树两个视图共用（右键菜单/双击/按钮都以此为准）。
+    private AssetRecord? _selectedAsset;
+    // 最近一次搜索结果快照：目录树视图按它重建根层。
+    private IReadOnlyList<AssetRecord>? _lastResults;
+    private bool _treeMode;
+
+    // ── 目录定位器记忆化：UpdateDirectoryStatus 每次 RefreshProjectState 都会
+    //    调用，而定位器要扫盘（候选根列表）；结果按输入键缓存到进程级，
+    //    配置变更时通过 ResetLocatorCache 失效 ─────────────────────────────
+    private static bool _memoGameDone;
+    private static string? _memoGameDirectory;
+    private static (string? Game, string? Path) _memoCacheCandidate;
+    private static bool _memoModsDone;
+    private static string? _memoModsDirectory;
+    private static (string? Base, string? Game, string? Dir) _memoFmod;
+
+    private static void ResetLocatorCache()
+    {
+        _memoGameDone = false;
+        _memoGameDirectory = null;
+        _memoCacheCandidate = default;
+        _memoModsDone = false;
+        _memoModsDirectory = null;
+        _memoFmod = default;
+    }
 
     /// <summary>Current project (nullable). Exposed for the settings window.</summary>
     public ModProject? Project => _project;
@@ -49,7 +74,11 @@ public partial class MainWindow : Window
 
     /// <summary>Re-reads directory fields into the left-panel labels after the
     /// settings window saves.</summary>
-    public void RefreshDirectoryLabels() => RefreshProjectState("设置已保存");
+    public void RefreshDirectoryLabels()
+    {
+        ResetLocatorCache();
+        RefreshProjectState("设置已保存");
+    }
 
     public MainWindow()
     {
@@ -333,16 +362,19 @@ public partial class MainWindow : Window
             {
                 await Task.Run(() => _env.ApplyAutoConfigure(_project));
                 await SaveProjectQuietlyAsync();
+                ResetLocatorCache();
                 UpdateDirectoryStatus();
             }
             var gameDirectory = _env.EffectiveGameDirectory(_project);
             var defaultLangRoot = string.IsNullOrWhiteSpace(gameDirectory)
                 ? string.Empty
                 : Path.Combine(gameDirectory, "LimbusCompany_Data", "lang");
-            new LangTextModWindow(defaultLangRoot, _env.EffectiveModDirectory(_project)) { Owner = this }.ShowDialog();
-            StatusText.Text = "文本模组窗口已关闭（补丁文件放进模组目录后由加载器应用）。";
+            // VS Code 式工作台：不再弹独立窗口，作为标签页打开（重复点击 = 回到已打开的标签）。
+            OpenWorkbench("lang", "文本模组",
+                () => new LangTextModControl(defaultLangRoot, _env.EffectiveModDirectory(_project), this));
+            StatusText.Text = "文本模组工作台已打开（补丁文件放进模组目录后由加载器应用）。";
         }
-        catch (Exception ex) { ShowError("打开文本模组窗口失败", ex); }
+        catch (Exception ex) { ShowError("打开文本模组工作台失败", ex); }
     }
 
     /// <summary>静态数据模组通道：.staticmod 的读取/预览应用/生成（布局与真实
@@ -350,8 +382,8 @@ public partial class MainWindow : Window
     /// 由加载器完成，编辑器只产出加载器可消费的模组包。</summary>
     private void StaticMod_Click(object sender, RoutedEventArgs e)
     {
-        new StaticModWindow() { Owner = this }.ShowDialog();
-        StatusText.Text = "静态数据模组窗口已关闭（.staticmod 放进模组目录后由加载器应用）。";
+        OpenWorkbench("static", "静态数据模组", () => new StaticModControl(this));
+        StatusText.Text = "静态数据模组工作台已打开（.staticmod 放进模组目录后由加载器应用）。";
     }
 
     /// <summary>项目保存的同步入口已被 async 版本取代：全缓存扫描后项目
@@ -400,7 +432,7 @@ public partial class MainWindow : Window
     /// identifying unknown data before replacing it.</summary>
     private void HexPreview_Click(object sender, RoutedEventArgs e)
     {
-        if (AssetList.SelectedItem is not AssetRecord asset) return;
+        if (_selectedAsset is not AssetRecord asset) return;
         try { new HexPreviewWindow(asset) { Owner = this }.ShowDialog(); }
         catch (Exception ex) { ShowError("十六进制预览失败", ex); }
     }
@@ -413,6 +445,7 @@ public partial class MainWindow : Window
         if (_project is null) return;
         var report = await Task.Run(() => _env.ApplyAutoConfigure(_project));
         if (_projectFile is not null) await SaveProjectQuietlyAsync();
+        ResetLocatorCache();
         UpdateDirectoryStatus();
         if (report.Any) StatusText.Text = $"自动配置：{report.Describe()}（共享设置已保存到程序目录）";
     }
@@ -554,6 +587,7 @@ public partial class MainWindow : Window
         try
         {
             var report = await Task.Run(() => _env.ApplyAutoConfigure(_project));
+            ResetLocatorCache();
             UpdateDirectoryStatus();
             StatusText.Text = report.Any
                 ? $"已自动获取：{report.Describe()}（共享设置已保存到程序目录）"
@@ -568,21 +602,19 @@ public partial class MainWindow : Window
     {
         var (game, gameSource) = _env.ResolveWithSource(
             _env.Config.GameDirectory, _project?.GameDirectory,
-            () => LimbusModEditor.Application.Debugging.GameDirectoryLocator
-                .Scan(LimbusModEditor.Application.Debugging.GameDirectoryLocator.DefaultCandidateRoots()).GameDirectory, "自动发现");
+            ResolveGameDirectoryMemoized, "自动发现");
         GameDirectoryStatus.Text = DescribeDirectory("游戏目录", game, gameSource);
         var (cache, cacheSource) = _env.ResolveWithSource(
             _env.Config.UnityCacheDirectory, _project?.UnityCacheDirectory,
-            () => FirstCacheCandidate(game), "自动发现");
+            () => FirstCacheCandidateMemoized(game), "自动发现");
         UnityCacheStatus.Text = DescribeDirectory("Unity 缓存", cache, cacheSource);
         var (mods, modsSource) = _env.ResolveWithSource(
             _env.Config.ModDirectory, _project?.ModDirectory,
-            () => LimbusModEditor.Application.Debugging.ModDirectoryLocator.SuggestCandidates().FirstOrDefault(), "自动发现");
+            FirstModCandidateMemoized, "自动发现");
         ModDirectoryStatus.Text = DescribeDirectory("模组目录", mods, modsSource);
         var (fmod, fmodSource) = _env.ResolveWithSource(
             _env.Config.FmodLibraryDirectory, _project?.FmodLibraryDirectory,
-            () => LimbusModEditor.Application.AppConfig.FmodLibraryLocator
-                .Discover(_env.BaseDirectory, game)?.Directory, "随包/自动发现");
+            () => FmodDirectoryMemoized(game), "随包/自动发现");
         FmodDirectoryStatus.Text = DescribeDirectory("FMOD DLL", fmod, fmodSource);
         GameDirectoryStatus.ToolTip = game;
         UnityCacheStatus.ToolTip = cache;
@@ -590,10 +622,44 @@ public partial class MainWindow : Window
         FmodDirectoryStatus.ToolTip = fmod;
     }
 
-    private static string? FirstCacheCandidate(string? gameDirectory)
+    private static string? ResolveGameDirectoryMemoized()
     {
-        var candidates = LimbusModEditor.Application.Debugging.UnityCacheLocator.SuggestCandidates(gameDirectory);
-        return candidates.FirstOrDefault()?.Path;
+        if (!_memoGameDone)
+        {
+            _memoGameDirectory = LimbusModEditor.Application.Debugging.GameDirectoryLocator
+                .Scan(LimbusModEditor.Application.Debugging.GameDirectoryLocator.DefaultCandidateRoots()).GameDirectory;
+            _memoGameDone = true;
+        }
+        return _memoGameDirectory;
+    }
+
+    private static string? FirstCacheCandidateMemoized(string? gameDirectory)
+    {
+        if (_memoCacheCandidate.Game != gameDirectory)
+            _memoCacheCandidate = (gameDirectory,
+                LimbusModEditor.Application.Debugging.UnityCacheLocator.SuggestCandidates(gameDirectory)
+                    .FirstOrDefault()?.Path);
+        return _memoCacheCandidate.Path;
+    }
+
+    private static string? FirstModCandidateMemoized()
+    {
+        if (!_memoModsDone)
+        {
+            _memoModsDirectory = LimbusModEditor.Application.Debugging.ModDirectoryLocator.SuggestCandidates().FirstOrDefault();
+            _memoModsDone = true;
+        }
+        return _memoModsDirectory;
+    }
+
+    private string? FmodDirectoryMemoized(string? game)
+    {
+        var baseDirectory = _env.BaseDirectory;
+        if (_memoFmod.Base != baseDirectory || _memoFmod.Game != game)
+            _memoFmod = (baseDirectory, game,
+                LimbusModEditor.Application.AppConfig.FmodLibraryLocator
+                    .Discover(baseDirectory, game)?.Directory);
+        return _memoFmod.Dir;
     }
 
     private static string DescribeDirectory(string label, string? path, string source)
@@ -620,6 +686,7 @@ public partial class MainWindow : Window
                 {
                     _env.Config.ModDirectory = candidates[0];
                     _env.Save();
+                    ResetLocatorCache();
                     UpdateDirectoryStatus();
                     modsDirectory = candidates[0];
                 }
@@ -629,8 +696,8 @@ public partial class MainWindow : Window
                 MessageBox.Show(this, "未能自动获取模组目录（%APPDATA%\\LimbusCompanyMods）。\n请在「设置…」中手动指定。", "管理已安装模组", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
-            new ModManagerWindow(modsDirectory) { Owner = this }.ShowDialog();
-            StatusText.Text = "模组目录管理已关闭（切换结果以加载器下次扫描为准）。";
+            OpenWorkbench("mods", "模组管理", () => new ModManagerControl(modsDirectory));
+            StatusText.Text = "模组管理工作台已打开（切换结果以加载器下次扫描为准）。";
         }
         catch (Exception ex) { ShowError("管理已安装模组失败", ex); }
     }
@@ -641,6 +708,7 @@ public partial class MainWindow : Window
         // 目标目录缺失时先无感自动获取一次（只填缺失项，不覆盖手动值）。
         await Task.Run(() => _env.ApplyAutoConfigure(_project));
         await SaveProjectQuietlyAsync();
+        ResetLocatorCache();
         UpdateDirectoryStatus();
         var debugTarget = _env.EffectiveModDirectory(_project) is { } mods && Directory.Exists(mods) ? mods
             : _env.EffectiveUnityCacheDirectory(_project) is { } cache && Directory.Exists(cache) ? cache
@@ -803,8 +871,13 @@ public partial class MainWindow : Window
     }
 
     private void AssetList_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+        => ApplyAssetSelection(AssetList.SelectedItem as AssetRecord);
+
+    /// <summary>统一的选中处理：列表与目录树两个视图共用（右侧状态、按钮
+    /// 可用性、预览都以此为准；右键菜单/双击读取 <see cref="_selectedAsset"/>）。</summary>
+    private void ApplyAssetSelection(AssetRecord? asset)
     {
-        var asset = AssetList.SelectedItem as AssetRecord;
+        _selectedAsset = asset;
         SelectedAssetPathText.Text = asset?.LogicalPath ?? "未选择";
         SelectedAssetTypeText.Text = asset?.Type.ToString() ?? string.Empty;
         SelectedPathIdText.Text = asset?.UnityPathId?.ToString() ?? "—";
@@ -921,7 +994,7 @@ public partial class MainWindow : Window
 
     private async void SplitAtlas_Click(object sender, RoutedEventArgs e)
     {
-        if (_project is null || _projectFile is null || AssetList.SelectedItem is not AssetRecord asset) return;
+        if (_project is null || _projectFile is null || _selectedAsset is not AssetRecord asset) return;
         if (!TryGetImageSource(asset, out var source)) { StatusText.Text = "当前资源没有可读取的本地图像文件"; return; }
         if (!int.TryParse(AtlasColumnsBox.Text, out var columns) || !int.TryParse(AtlasRowsBox.Text, out var rows) || columns <= 0 || rows <= 0)
         { StatusText.Text = "列数和行数必须是正整数"; return; }
@@ -937,7 +1010,7 @@ public partial class MainWindow : Window
 
     private async void RepackAtlas_Click(object sender, RoutedEventArgs e)
     {
-        if (_project is null || _projectFile is null || AssetList.SelectedItem is not AssetRecord asset) return;
+        if (_project is null || _projectFile is null || _selectedAsset is not AssetRecord asset) return;
         try
         {
             await _atlasEdits.RepackAsync(_project, asset.AssetId, Path.GetDirectoryName(_projectFile)!);
@@ -958,7 +1031,7 @@ public partial class MainWindow : Window
 
     private async void ReplaceAsset_Click(object sender, RoutedEventArgs e)
     {
-        if (_project is null || _projectFile is null || AssetList.SelectedItem is not AssetRecord asset) return;
+        if (_project is null || _projectFile is null || _selectedAsset is not AssetRecord asset) return;
         var dialog = new Microsoft.Win32.OpenFileDialog
         {
             Filter = asset.Type switch
@@ -984,7 +1057,7 @@ public partial class MainWindow : Window
     /// 元数据），资源还原为未修改状态；导出不再包含它。</summary>
     private async void ClearEdits_Click(object sender, RoutedEventArgs e)
     {
-        if (_project is null || _projectFile is null || AssetList.SelectedItem is not AssetRecord asset) return;
+        if (_project is null || _projectFile is null || _selectedAsset is not AssetRecord asset) return;
         if (!AssetEditService.HasEdits(asset)) { StatusText.Text = "此资源没有可撤销的修改"; return; }
         var confirm = MessageBox.Show(this,
             $"撤销资源 {asset.LogicalPath} 上的全部修改？\n\n替换文件、Unity 字段、Sprite 元数据会被清除；导出将不再包含此资源的修改。",
@@ -1000,18 +1073,25 @@ public partial class MainWindow : Window
         catch (Exception ex) { ShowError("撤销修改失败", ex); }
     }
 
-    /// <summary>双击资源 = 按类型做最常用的事：图像 → 替换；其余 → Unity
-    /// 字段编辑（可用时），否则十六进制预览。</summary>
+    /// <summary>双击资源 = 按类型做最常用的事（列表与目录树共用：
+    /// <see cref="ActivateDefaultAction"/>)。</summary>
     private void AssetList_DoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
-        if (AssetList.SelectedItem is not AssetRecord asset) return;
+        if (_selectedAsset is not AssetRecord asset) return;
+        ActivateDefaultAction(asset);
+    }
+
+    /// <summary>按类型做最常用的事：图像 → 替换；其余 → Unity 字段编辑
+    /// （可用时），否则十六进制预览。</summary>
+    private void ActivateDefaultAction(AssetRecord asset)
+    {
         if (asset.Type is AssetType.Texture or AssetType.Sprite && ReplaceAssetButton.IsEnabled)
         {
-            ReplaceAsset_Click(sender, e);
+            ReplaceAsset_Click(this, new RoutedEventArgs());
             return;
         }
-        if (UnityFieldsButton.IsEnabled) { EditUnityFields_Click(sender, e); return; }
-        if (HexPreviewButton.IsEnabled) HexPreview_Click(sender, e);
+        if (UnityFieldsButton.IsEnabled) { EditUnityFields_Click(this, new RoutedEventArgs()); return; }
+        if (HexPreviewButton.IsEnabled) HexPreview_Click(this, new RoutedEventArgs());
     }
 
     /// <summary>右键菜单跟随光标：右键落在某行上时先选中该行。</summary>
@@ -1033,7 +1113,7 @@ public partial class MainWindow : Window
 
     private void CopyAssetPath_Click(object sender, RoutedEventArgs e)
     {
-        if (AssetList.SelectedItem is not AssetRecord asset) return;
+        if (_selectedAsset is not AssetRecord asset) return;
         try { Clipboard.SetText(asset.LogicalPath); StatusText.Text = "已复制资源路径"; }
         catch (Exception) { StatusText.Text = "复制失败（剪贴板被其他程序占用）"; }
     }
@@ -1056,7 +1136,7 @@ public partial class MainWindow : Window
         if (_project is null) { StatusText.Text = "请先创建或打开项目，再拖入文件"; return; }
         if (paths.Length == 1 && File.Exists(paths[0]) &&
             ImagePreviewService.IsSupportedExtension(Path.GetExtension(paths[0])) &&
-            AssetList.SelectedItem is AssetRecord selected &&
+            _selectedAsset is AssetRecord selected &&
             selected.Type is AssetType.Texture or AssetType.Sprite && _projectFile is not null)
         {
             var choice = MessageBox.Show(this,
@@ -1111,13 +1191,25 @@ public partial class MainWindow : Window
         catch (Exception ex) { ShowError("拖放导入失败", ex); }
     }
 
-    /// <summary>快捷键：Ctrl+F 聚焦搜索框，Esc 在搜索框内清空筛选。</summary>
+    /// <summary>快捷键：Ctrl+F 聚焦搜索框；Esc 在搜索框内清空筛选；
+    /// Ctrl+Tab / Ctrl+Shift+Tab 在工作台标签页间循环（VS Code 同款）。</summary>
     private void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
         if (e.KeyboardDevice.Modifiers == System.Windows.Input.ModifierKeys.Control && e.Key == System.Windows.Input.Key.F)
         {
             SearchBox.Focus();
             SearchBox.SelectAll();
+            e.Handled = true;
+        }
+        else if (e.KeyboardDevice.Modifiers.HasFlag(System.Windows.Input.ModifierKeys.Control) && e.Key == System.Windows.Input.Key.Tab)
+        {
+            var shift = e.KeyboardDevice.Modifiers.HasFlag(System.Windows.Input.ModifierKeys.Shift);
+            var count = WorkbenchTabs.Items.Count;
+            if (count > 1)
+            {
+                var index = WorkbenchTabs.SelectedIndex < 0 ? 0 : WorkbenchTabs.SelectedIndex;
+                WorkbenchTabs.SelectedIndex = shift ? (index - 1 + count) % count : (index + 1) % count;
+            }
             e.Handled = true;
         }
         else if (e.Key == System.Windows.Input.Key.Escape && SearchBox.IsKeyboardFocusWithin)
@@ -1157,7 +1249,7 @@ public partial class MainWindow : Window
 
     private async void InspectSprite_Click(object sender, RoutedEventArgs e)
     {
-        if (AssetList.SelectedItem is not AssetRecord asset || asset.Type != AssetType.Sprite ||
+        if (_selectedAsset is not AssetRecord asset || asset.Type != AssetType.Sprite ||
             !asset.UnityPathId.HasValue || string.IsNullOrWhiteSpace(asset.SourcePath) || !File.Exists(asset.SourcePath)) return;
         try
         {
@@ -1176,7 +1268,7 @@ public partial class MainWindow : Window
 
     private async void EditUnityFields_Click(object sender, RoutedEventArgs e)
     {
-        if (_project is null || _projectFile is null || AssetList.SelectedItem is not AssetRecord asset ||
+        if (_project is null || _projectFile is null || _selectedAsset is not AssetRecord asset ||
             !asset.UnityPathId.HasValue || string.IsNullOrWhiteSpace(asset.SourcePath) || !File.Exists(asset.SourcePath)) return;
         UnityFieldsButton.IsEnabled = false;
         StatusText.Text = "正在读取对象字段…";
@@ -1234,7 +1326,7 @@ public partial class MainWindow : Window
         catch (Exception ex) { ShowError("Unity 字段读取或保存失败", ex); }
         finally
         {
-            RefreshSelectionButtons(AssetList.SelectedItem as AssetRecord);
+            RefreshSelectionButtons(_selectedAsset);
             StatusText.Text = "就绪";
         }
     }
@@ -1243,7 +1335,7 @@ public partial class MainWindow : Window
     /// Bank audio entry; unknown/encrypted payloads are explained in-window.</summary>
     private async void InspectFsb_Click(object sender, RoutedEventArgs e)
     {
-        if (_project is null || AssetList.SelectedItem is not AssetRecord asset ||
+        if (_project is null || _selectedAsset is not AssetRecord asset ||
             string.IsNullOrWhiteSpace(asset.SourcePath) || !File.Exists(asset.SourcePath)) return;
         try
         {
@@ -1262,7 +1354,7 @@ public partial class MainWindow : Window
     /// off the UI thread because it walks every object in the file/bundle.</summary>
     private async void FindReferencers_Click(object sender, RoutedEventArgs e)
     {
-        if (_project is null || AssetList.SelectedItem is not AssetRecord asset ||
+        if (_project is null || _selectedAsset is not AssetRecord asset ||
             !asset.UnityPathId.HasValue || string.IsNullOrWhiteSpace(asset.SourcePath) || !File.Exists(asset.SourcePath)) return;
         ReferencersButton.IsEnabled = false;
         StatusText.Text = "正在扫描引用者…";
@@ -1296,7 +1388,7 @@ public partial class MainWindow : Window
         catch (Exception ex) { ShowError("引用者检查失败", ex); }
         finally
         {
-            RefreshSelectionButtons(AssetList.SelectedItem as AssetRecord);
+            RefreshSelectionButtons(_selectedAsset);
             StatusText.Text = "就绪";
         }
     }
@@ -1306,7 +1398,7 @@ public partial class MainWindow : Window
     /// fields are reported instead of guessed.</summary>
     private async void ShowObjectSummary_Click(object sender, RoutedEventArgs e)
     {
-        if (_project is null || AssetList.SelectedItem is not AssetRecord asset ||
+        if (_project is null || _selectedAsset is not AssetRecord asset ||
             !asset.UnityPathId.HasValue || string.IsNullOrWhiteSpace(asset.SourcePath) || !File.Exists(asset.SourcePath)) return;
         var service = new LimbusModEditor.Formats.Unity.UnityAssetService();
         var isBundle = asset.Metadata.ContainsKey("unityBundle") && !string.IsNullOrWhiteSpace(asset.ContainerPath);
@@ -1332,7 +1424,7 @@ public partial class MainWindow : Window
         catch (Exception ex) { ShowError("对象摘要生成失败", ex); }
         finally
         {
-            RefreshSelectionButtons(AssetList.SelectedItem as AssetRecord);
+            RefreshSelectionButtons(_selectedAsset);
             StatusText.Text = "就绪";
         }
     }
@@ -1340,7 +1432,7 @@ public partial class MainWindow : Window
     private async void DecodeAudio_Click(object sender, RoutedEventArgs e)
     {
         var fmodDirectory = _env.EffectiveFmodLibraryDirectory(_project);
-        if (_project is null || AssetList.SelectedItem is not AssetRecord asset || asset.Type != AssetType.Audio ||
+        if (_project is null || _selectedAsset is not AssetRecord asset || asset.Type != AssetType.Audio ||
             string.IsNullOrWhiteSpace(fmodDirectory) || !Directory.Exists(fmodDirectory)) return;
         var dialog = new Microsoft.Win32.SaveFileDialog
         {
@@ -1363,7 +1455,7 @@ public partial class MainWindow : Window
     /// RunSearchAsync（后台线程 + 防抖）。</summary>
     private void RefreshAssetList()
     {
-        if (_project is null) { AssetList.ItemsSource = null; return; }
+        if (_project is null) { AssetList.ItemsSource = null; _lastResults = null; AssetTree.ItemsSource = null; return; }
         if (!_filtersInitialized)
         {
             _filtersInitialized = true;
@@ -1409,7 +1501,7 @@ public partial class MainWindow : Window
     /// 竞争），带代际守卫：过期结果直接丢弃；选中项按 AssetId 跨刷新保留。</summary>
     private async Task RunSearchAsync()
     {
-        if (_project is null) { AssetList.ItemsSource = null; return; }
+        if (_project is null) { AssetList.ItemsSource = null; _lastResults = null; AssetTree.ItemsSource = null; return; }
         var generation = ++_searchGeneration;
         var query = BuildSearchQuery();
         var snapshot = _project.Assets.ToArray();
@@ -1417,6 +1509,7 @@ public partial class MainWindow : Window
         try { results = await Task.Run(() => _search.Search(snapshot, query)); }
         catch (ArgumentException) { return; }
         if (generation != _searchGeneration) return;
+        _lastResults = results;
         var selectedId = (AssetList.SelectedItem as AssetRecord)?.AssetId;
         AssetList.ItemsSource = results;
         if (selectedId is { } id)
@@ -1427,6 +1520,135 @@ public partial class MainWindow : Window
         AssetCountText.Text = results.Count == _project.Assets.Count
             ? _project.Assets.Count.ToString()
             : $"{results.Count} / {_project.Assets.Count}";
+        // 目录树视图：按最新搜索结果重建根层（展开仍是惰性的）。
+        if (_treeMode) RebuildTree();
+    }
+
+    // ── VS Code 式工作台标签页：固定「资源工作台」+ 按需打开的工具标签。
+    //    活动栏图标与左栏按钮都经由 OpenWorkbench 打开；key 相同的标签只保留
+    //    一份，重复点击 = 激活已打开的标签（不重复创建）。────────────────
+
+    /// <summary>打开（或激活）一个工作台标签页；内容用工厂惰性创建。</summary>
+    private void OpenWorkbench(string key, string title, Func<object> contentFactory)
+    {
+        if (FindWorkbenchTab(key) is { } existing)
+        {
+            WorkbenchTabs.SelectedItem = existing;
+            return;
+        }
+        var tab = new System.Windows.Controls.TabItem
+        {
+            Header = BuildClosableHeader(title, key),
+            Tag = key,
+            Content = contentFactory(),
+            ToolTip = title,
+        };
+        WorkbenchTabs.Items.Add(tab);
+        WorkbenchTabs.SelectedItem = tab;
+    }
+
+    private System.Windows.Controls.TabItem? FindWorkbenchTab(string key)
+        => WorkbenchTabs.Items.OfType<System.Windows.Controls.TabItem>().FirstOrDefault(t => Equals(t.Tag, key));
+
+    /// <summary>标签头 = 标题 + ✕ 关闭按钮；关闭后激活相邻标签（固定的
+    /// 资源工作台不走这里，由 XAML 直接声明）。</summary>
+    private System.Windows.Controls.TabItem? CloseWorkbenchTab(string key)
+    {
+        if (FindWorkbenchTab(key) is not { } tab) return null;
+        var index = WorkbenchTabs.Items.IndexOf(tab);
+        WorkbenchTabs.Items.Remove(tab);
+        if (WorkbenchTabs.SelectedItem is null && WorkbenchTabs.Items.Count > 0)
+            WorkbenchTabs.SelectedIndex = Math.Max(0, index - 1);
+        return tab;
+    }
+
+    private object BuildClosableHeader(string title, string key)
+    {
+        var panel = new System.Windows.Controls.StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal };
+        panel.Children.Add(new System.Windows.Controls.TextBlock
+        {
+            Text = title,
+            VerticalAlignment = VerticalAlignment.Center,
+        });
+        var closeButton = new System.Windows.Controls.Button
+        {
+            Content = "✕",
+            Margin = new Thickness(8, 0, 0, 0),
+            Padding = new Thickness(4, 0, 4, 0),
+            Background = System.Windows.Media.Brushes.Transparent,
+            Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x9F, 0xB0, 0xBF)),
+            BorderThickness = new Thickness(0),
+            FontWeight = FontWeights.Bold,
+            Cursor = System.Windows.Input.Cursors.Hand,
+        };
+        closeButton.Click += (_, _) => CloseWorkbenchTab(key);
+        panel.Children.Add(closeButton);
+        return panel;
+    }
+
+    private void ActivateAssetsWorkbench_Click(object sender, RoutedEventArgs e)
+        => WorkbenchTabs.SelectedItem = AssetsTab;
+
+    // ── 列表 / 目录树视图切换 ────────────────────────────────────────────
+
+    /// <summary>列表 / 目录树切换：两个视图共享同一份搜索结果
+    /// （<see cref="_lastResults"/>），树视图按容器路径惰性分层。
+    /// 用 Click 而不是 Checked：点击已选中的 ToggleButton 会先取消勾选，
+    /// 这里在每次点击后强制两态互斥。</summary>
+    private void AssetViewMode_Click(object sender, RoutedEventArgs e)
+    {
+        // XAML 解析期间事件可能先于其他元素就绪：跳过首次触发。
+        if (AssetTree is null || AssetViewListToggle is null || AssetViewTreeToggle is null) return;
+        var treeSelected = ReferenceEquals(sender, AssetViewTreeToggle);
+        AssetViewListToggle.IsChecked = !treeSelected;
+        AssetViewTreeToggle.IsChecked = treeSelected;
+        _treeMode = treeSelected;
+        AssetList.Visibility = treeSelected ? Visibility.Collapsed : Visibility.Visible;
+        AssetTree.Visibility = treeSelected ? Visibility.Visible : Visibility.Collapsed;
+        if (_treeMode) RebuildTree();
+    }
+
+    private void RebuildTree()
+    {
+        if (_lastResults is null) { AssetTree.ItemsSource = null; return; }
+        AssetTree.ItemsSource = AssetTreeBuilder.BuildRoots(_lastResults).Select(MakeTreeItem).ToList();
+    }
+
+    /// <summary>包装一个树节点：目录节点先放一个占位子项，真正展开时才
+    /// 生成下一层（40 万级索引也不会在构建树时卡顿）。</summary>
+    private static System.Windows.Controls.TreeViewItem MakeTreeItem(AssetTreeNode node)
+    {
+        var item = new System.Windows.Controls.TreeViewItem
+        {
+            Header = node.IsLeaf ? node.Name : $"{node.Name} ({node.Count})",
+            Tag = node,
+        };
+        if (!node.IsLeaf) item.Items.Add(new object());
+        return item;
+    }
+
+    private void AssetTree_Expanded(object sender, System.Windows.RoutedEventArgs e)
+    {
+        if (e.OriginalSource is not System.Windows.Controls.TreeViewItem item ||
+            item.Tag is not AssetTreeNode node || node.IsLeaf) return;
+        if (item.Items.Count == 1 && item.Items[0] is not AssetTreeNode)
+        {
+            item.Items.Clear();
+            foreach (var child in node.Expand())
+                item.Items.Add(MakeTreeItem(child));
+        }
+    }
+
+    private void AssetTree_SelectedItemChanged(object sender, System.Windows.RoutedPropertyChangedEventArgs<object> e)
+    {
+        if (e.NewValue is System.Windows.Controls.TreeViewItem { Tag: AssetTreeNode { IsLeaf: true } leaf })
+            ApplyAssetSelection(leaf.Asset);
+    }
+
+    private void AssetTree_DoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (AssetTree.SelectedItem is System.Windows.Controls.TreeViewItem { Tag: AssetTreeNode { IsLeaf: true, Asset: { } asset } })
+            ActivateDefaultAction(asset);
     }
 
     private void ShowError(string title, Exception ex)

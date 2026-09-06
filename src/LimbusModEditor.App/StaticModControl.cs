@@ -6,28 +6,25 @@ using LimbusModEditor.Application.StaticMods;
 
 namespace LimbusModEditor.App;
 
-/// <summary>静态数据模组（.staticmod）通道：读取真实加载器（LCTA
+/// <summary>静态数据模组（.staticmod）工作台：读取真实加载器（LCTA
 /// launcher/staticmod.py）格式的静态数据模组并展示条目；支持把补丁预览
 /// 应用到官方 JSON、以及从「官方 JSON vs 修改 JSON」差异生成 jsonpatch
 /// 静态模组。bundle 打补丁与 catalog 双写由加载器在启动时完成（带风险
-/// 开关），本窗口只做包的读写与预览，不改写游戏缓存。</summary>
-public sealed class StaticModWindow : Window
+/// 开关），本工作台只做包的读写与预览，不改写游戏缓存。作为「静态数据」
+/// 工作台嵌入主窗口（VS Code 式 tab）。</summary>
+public sealed class StaticModControl : UserControl
 {
     private readonly StaticModService _service = new();
+    private readonly Window? _ownerWindow;
     private readonly TextBlock _manifestSummary;
     private readonly ListBox _entries;
     private readonly TextBlock _status;
     private StaticModPackage? _package;
     private string? _packagePath;
 
-    public StaticModWindow()
+    public StaticModControl(Window? ownerWindow = null)
     {
-        Title = "静态数据模组（.staticmod）";
-        Width = 760;
-        Height = 560;
-        MinWidth = 640;
-        MinHeight = 460;
-        WindowStartupLocation = WindowStartupLocation.CenterOwner;
+        _ownerWindow = ownerWindow;
 
         var panel = new StackPanel { Margin = new Thickness(14) };
         panel.Children.Add(new TextBlock
@@ -64,6 +61,9 @@ public sealed class StaticModWindow : Window
         Content = panel;
     }
 
+    private bool? ShowDialog(Microsoft.Win32.CommonDialog dialog)
+        => _ownerWindow is { } owner ? dialog.ShowDialog(owner) : dialog.ShowDialog();
+
     private void OpenPackage()
     {
         var dialog = new Microsoft.Win32.OpenFileDialog
@@ -71,7 +71,7 @@ public sealed class StaticModWindow : Window
             Title = "选择 .staticmod 文件",
             Filter = "静态数据模组 (*.staticmod)|*.staticmod|所有文件 (*.*)|*.*"
         };
-        if (dialog.ShowDialog(this) != true) return;
+        if (ShowDialog(dialog) != true) return;
         try
         {
             _package = _service.Read(dialog.FileName);
@@ -107,7 +107,8 @@ public sealed class StaticModWindow : Window
         if (_package is null) { _status.Text = "请先打开 .staticmod。"; return; }
         if (_entries.SelectedItem is not ListBoxItem { Tag: StaticModPatchEntry patch })
         {
-            MessageBox.Show(this, "请先在列表中选择一条补丁条目。", "预览应用", MessageBoxButton.OK, MessageBoxImage.Information);
+            if (_ownerWindow is { } owner) MessageBox.Show(owner, "请先在列表中选择一条补丁条目。", "预览应用", MessageBoxButton.OK, MessageBoxImage.Information);
+            else MessageBox.Show("请先在列表中选择一条补丁条目。", "预览应用", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
         var official = PickJsonFile("选择该条目对应的官方 JSON（从 static bundle 解包或官方数据导出）");
@@ -118,7 +119,7 @@ public sealed class StaticModWindow : Window
             Filter = "JSON (*.json)|*.json",
             FileName = patch.File + ".patched.json"
         };
-        if (save.ShowDialog(this) != true) return;
+        if (ShowDialog(save) != true) return;
         try
         {
             var document = JsonNode.Parse(File.ReadAllText(official))
@@ -156,7 +157,7 @@ public sealed class StaticModWindow : Window
             Filter = "静态数据模组 (*.staticmod)|*.staticmod",
             FileName = name + ".staticmod"
         };
-        if (save.ShowDialog(this) != true) return;
+        if (ShowDialog(save) != true) return;
         try
         {
             var package = _service.CreateJsonPatchPackage(name, "1.0.0", string.Empty,
@@ -193,15 +194,16 @@ public sealed class StaticModWindow : Window
         }
     }
 
-    private static string? PickJsonFile(string title)
+    private string? PickJsonFile(string title)
     {
         var dialog = new Microsoft.Win32.OpenFileDialog { Title = title, Filter = "JSON (*.json)|*.json|所有文件 (*.*)|*.*" };
-        return dialog.ShowDialog() == true ? dialog.FileName : null;
+        return ShowDialog(dialog) == true ? dialog.FileName : null;
     }
 
     private string? Prompt(string message, string defaultValue)
     {
-        var input = new StaticModPromptWindow(message, defaultValue) { Owner = this };
+        var input = new StaticModPromptWindow(message, defaultValue);
+        if (_ownerWindow is { } owner) input.Owner = owner;
         input.ShowDialog();
         return input.Confirmed ? input.Value : null;
     }

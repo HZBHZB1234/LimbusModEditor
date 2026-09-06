@@ -8,6 +8,66 @@
         PreviewKeyDown="Window_PreviewKeyDown">
     <Window.Resources>
         <local:HumanSizeConverter x:Key="HumanSize"/>
+        <!-- VS Code 风格：深色标签页头部 -->
+        <Style x:Key="WorkbenchTabItem" TargetType="TabItem">
+            <Setter Property="Foreground" Value="#C8D4DE"/>
+            <Setter Property="Background" Value="#161B22"/>
+            <Setter Property="Padding" Value="12,7"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TabItem">
+                        <Border x:Name="TabBorder" Background="{TemplateBinding Background}" BorderBrush="#2A3540" BorderThickness="0,0,1,0" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter ContentSource="Header" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="TabBorder" Property="Background" Value="#11151A"/>
+                                <Setter TargetName="TabBorder" Property="BorderThickness" Value="0,2,1,0"/>
+                                <Setter TargetName="TabBorder" Property="BorderBrush" Value="#4C8DDA"/>
+                                <Setter Property="Foreground" Value="#FFFFFF"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="TabBorder" Property="Background" Value="#1D242E"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <!-- 活动栏图标按钮 -->
+        <Style x:Key="ActivityButton" TargetType="Button">
+            <Setter Property="Width" Value="48"/>
+            <Setter Property="Height" Value="44"/>
+            <Setter Property="FontSize" Value="19"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#9FB0BF"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Host" Background="{TemplateBinding Background}" BorderThickness="2,0,0,0" BorderBrush="Transparent">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Host" Property="Background" Value="#1D242E"/>
+                                <Setter Property="Foreground" Value="#FFFFFF"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <!-- 列表 / 树 切换按钮 -->
+        <Style x:Key="ViewToggle" TargetType="ToggleButton">
+            <Setter Property="Padding" Value="10,3"/>
+            <Setter Property="Margin" Value="0,0,6,0"/>
+            <Setter Property="Background" Value="#1B222B"/>
+            <Setter Property="Foreground" Value="#9FB0BF"/>
+            <Setter Property="BorderBrush" Value="#2A3540"/>
+            <Setter Property="BorderThickness" Value="1"/>
+        </Style>
     </Window.Resources>
     <DockPanel>
         <Border DockPanel.Dock="Top" Background="#1B222B" Padding="14,10">
@@ -22,7 +82,6 @@
                     <Button Content="新建项目" Click="NewProject_Click" Margin="6,0" Padding="14,6"/>
                     <Button Content="打开项目" Click="OpenProject_Click" Margin="6,0" Padding="14,6"/>
                     <Button Content="保存" Click="SaveProject_Click" Margin="6,0" Padding="14,6"/>
-                    <Button Content="使用教程" Click="Help_Click" Margin="6,0" Padding="14,6"/>
                 </StackPanel>
             </DockPanel>
         </Border>
@@ -33,175 +92,220 @@
         <StatusBar DockPanel.Dock="Bottom" Background="#1B222B" Foreground="#9FB0BF">
             <StatusBarItem><TextBlock x:Name="StatusText" Text="就绪"/></StatusBarItem>
         </StatusBar>
-        <Grid Margin="12">
-            <Grid.ColumnDefinitions><ColumnDefinition Width="220"/><ColumnDefinition Width="*"/><ColumnDefinition Width="250"/></Grid.ColumnDefinitions>
-            <Border Grid.Column="0" Background="#171D24" BorderBrush="#2A3540" BorderThickness="1" Padding="12" Margin="0,0,8,0">
-                <ScrollViewer VerticalScrollBarVisibility="Auto">
-                    <StackPanel>
-                        <TextBlock Text="项目工作区" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,10"/>
-                        <TextBlock Text="当前项目" Foreground="#7F93A4"/>
-                        <TextBlock x:Name="ProjectNameText" Text="未打开项目" TextWrapping="Wrap" Margin="0,4,0,10"/>
-                        <TextBlock Text="目录状态（共享配置 · 自动发现）" Foreground="#7F93A4" TextWrapping="Wrap"/>
-                        <TextBlock x:Name="GameDirectoryStatus" Text="—" Margin="0,4,0,0" TextWrapping="Wrap"/>
-                        <TextBlock x:Name="UnityCacheStatus" Text="—" Margin="0,2,0,0" TextWrapping="Wrap"/>
-                        <TextBlock x:Name="ModDirectoryStatus" Text="—" Margin="0,2,0,0" TextWrapping="Wrap"/>
-                        <TextBlock x:Name="FmodDirectoryStatus" Text="—" Margin="0,2,0,0" TextWrapping="Wrap"/>
-                        <Button Content="重新自动获取目录" Click="AutoConfigure_Click" Margin="0,8,0,0" Padding="8,6"
-                                ToolTip="只填充从未配置过的目录（游戏 / Unity 缓存 / 模组 / FMOD）。这些是全局共享设置，保存在程序目录，所有项目共用。"/>
-                        <Separator Margin="0,14"/>
-                        <TextBlock Text="① 获取资源" Foreground="#7F93A4" Margin="0,0,0,6"/>
-                        <Button Content="扫描游戏资源（推荐）" Click="Scan_Click" Padding="8,6"
-                                ToolTip="一键索引游戏 Unity 缓存中的全部资源包（引用模式，不复制文件）。扫描完成后在右侧列表即可搜索并编辑。"/>
-                        <Button Content="导入资源包…" Click="Import_Click" Margin="0,8,0,0" Padding="8,6"
-                                ToolTip="导入现有模组文件：.carra/.carra2/.rebank/.bank/Lunartique ZIP/Unity bundle。"/>
-                        <Button Content="导入文件夹…" Click="ImportDirectory_Click" Margin="0,8,0,0" Padding="8,6"/>
-                        <Separator Margin="0,14"/>
-                        <TextBlock Text="② 产出模组" Foreground="#7F93A4" Margin="0,0,0,6"/>
-                        <Button x:Name="OneClickExportButton" Content="一键导出模组（推荐）" Click="OneClickExport_Click" Padding="8,6"
-                                ToolTip="把扫描资源上的全部修改按真实加载器的 Carra2 布局打包，输出到模组目录即可生效。"/>
-                        <Button Content="导出模组（向导）…" Click="Export_Click" Margin="0,8,0,0" Padding="8,6"/>
-                        <Button Content="导出全部（多格式）" Click="ExportAll_Click" Margin="0,8,0,0" Padding="8,6"/>
-                        <Separator Margin="0,14"/>
-                        <TextBlock Text="模组工具" Foreground="#7F93A4" Margin="0,0,0,6"/>
-                        <Button Content="管理已安装模组" Click="ManageMods_Click" Padding="8,6"/>
-                        <Button Content="打开模组目录" Click="OpenModsDirectory_Click" Margin="0,8,0,0" Padding="8,6"
-                                ToolTip="在资源管理器中打开导出目标目录（%APPDATA%\LimbusCompanyMods），方便确认模组文件是否就位。"/>
-                        <Button Content="打开项目文件夹" Click="OpenProjectFolder_Click" Margin="0,8,0,0" Padding="8,6"/>
-                        <Button Content="文本模组（lang 补丁）…" Click="LangTextMod_Click" Margin="0,8,0,0" Padding="8,6"/>
-                        <Button Content="静态数据模组…" Click="StaticMod_Click" Margin="0,8,0,0" Padding="8,6"/>
-                        <Separator Margin="0,14"/>
-                        <Button Content="设置（共享目录 / 项目元数据）…" Click="ProjectSettings_Click" Padding="8,6"
-                                ToolTip="共享目录保存在程序目录，所有项目共用；模组名称、作者等元数据属于本项目。"/>
-                    </StackPanel>
-                </ScrollViewer>
-            </Border>
-            <Border Grid.Column="1" Background="#171D24" BorderBrush="#2A3540" BorderThickness="1" Padding="14" Margin="0,0,8,0">
-                <DockPanel>
-                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,6">
-                        <TextBox x:Name="SearchBox" Width="300" Height="28" VerticalContentAlignment="Center" ToolTip="搜索资源路径" TextChanged="SearchBox_TextChanged"/>
-                        <Button Content="导入资源" Click="Import_Click" Margin="8,0,0,0" Padding="14,4"/>
-                        <Button Content="文件夹" Click="ImportDirectory_Click" Margin="8,0,0,0" Padding="14,4"/>
-                    </StackPanel>
-                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,10">
-                        <TextBlock Text="类型" VerticalAlignment="Center" Foreground="#7F93A4" Margin="0,0,4,0"/>
-                        <ComboBox x:Name="TypeFilter" Width="110" Height="28" SelectionChanged="Filter_Changed"/>
-                        <TextBlock Text="状态" VerticalAlignment="Center" Foreground="#7F93A4" Margin="8,0,4,0"/>
-                        <ComboBox x:Name="StateFilter" Width="100" Height="28" SelectionChanged="Filter_Changed"/>
-                        <TextBlock Text="Path ID" VerticalAlignment="Center" Foreground="#7F93A4" Margin="8,0,4,0"/>
-                        <TextBox x:Name="PathIdFilter" Width="80" Height="28" VerticalContentAlignment="Center" TextChanged="SearchBox_TextChanged"/>
-                        <TextBlock Text="Type ID" VerticalAlignment="Center" Foreground="#7F93A4" Margin="8,0,4,0"/>
-                        <TextBox x:Name="TypeIdFilter" Width="60" Height="28" VerticalContentAlignment="Center" TextChanged="SearchBox_TextChanged"/>
-                        <TextBlock Text="最小 KB" VerticalAlignment="Center" Foreground="#7F93A4" Margin="8,0,4,0"/>
-                        <TextBox x:Name="MinSizeFilter" Width="60" Height="28" VerticalContentAlignment="Center" TextChanged="SearchBox_TextChanged"/>
-                        <TextBlock Text="最大 KB" VerticalAlignment="Center" Foreground="#7F93A4" Margin="8,0,4,0"/>
-                        <TextBox x:Name="MaxSizeFilter" Width="60" Height="28" VerticalContentAlignment="Center" TextChanged="SearchBox_TextChanged"/>
-                        <CheckBox x:Name="ReplacedOnlyFilter" Content="仅已替换" VerticalAlignment="Center" Margin="10,0,0,0" Checked="Filter_Changed" Unchecked="Filter_Changed"/>
-                        <Button Content="清除筛选" Click="ClearFilters_Click" Margin="10,0,0,0" Padding="10,3"/>
-                    </StackPanel>
-                    <ListView x:Name="AssetList" Background="#11151A" BorderBrush="#2A3540" Foreground="#E8EDF2" SelectionChanged="AssetList_SelectionChanged"
-                             MouseDoubleClick="AssetList_DoubleClick" PreviewMouseRightButtonDown="AssetList_PreviewMouseRightButtonDown">
-                        <ListView.ContextMenu>
-                            <ContextMenu>
-                                <MenuItem Header="替换…（图像双击同效）" Click="ReplaceAsset_Click"/>
-                                <MenuItem Header="Unity 字段编辑" Click="EditUnityFields_Click"/>
-                                <MenuItem Header="十六进制预览" Click="HexPreview_Click"/>
-                                <Separator/>
-                                <MenuItem Header="撤销此资源的修改" Click="ClearEdits_Click"/>
-                                <Separator/>
-                                <MenuItem Header="复制资源路径" Click="CopyAssetPath_Click"/>
-                            </ContextMenu>
-                        </ListView.ContextMenu>
-                        <ListView.ItemContainerStyle>
-                            <Style TargetType="ListViewItem">
-                                <Setter Property="ToolTip" Value="{Binding LogicalPath}"/>
-                                <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
-                                <Style.Triggers>
-                                    <DataTrigger Binding="{Binding EditState}" Value="Modified">
-                                        <Setter Property="Foreground" Value="#FFD37A"/>
-                                    </DataTrigger>
-                                </Style.Triggers>
-                            </Style>
-                        </ListView.ItemContainerStyle>
-                        <ListView.View>
-                            <GridView>
-                                <GridViewColumn Header="资源路径" DisplayMemberBinding="{Binding LogicalPath}" Width="420"/>
-                                <GridViewColumn Header="类型" DisplayMemberBinding="{Binding Type}" Width="120"/>
-                                <GridViewColumn Header="状态" DisplayMemberBinding="{Binding EditState}" Width="110"/>
-                                <GridViewColumn Header="vanilla 基线" DisplayMemberBinding="{Binding CatalogBaseline}" Width="110"/>
-                                <GridViewColumn Header="大小" DisplayMemberBinding="{Binding Size, Converter={StaticResource HumanSize}}" Width="100"/>
-                            </GridView>
-                        </ListView.View>
-                    </ListView>
-                </DockPanel>
-            </Border>
-            <Border Grid.Column="2" Background="#171D24" BorderBrush="#2A3540" BorderThickness="1" Padding="12">
-                <ScrollViewer VerticalScrollBarVisibility="Auto">
-                    <StackPanel>
-                        <TextBlock Text="创作状态" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,14"/>
-                        <TextBlock Text="资源" Foreground="#7F93A4"/>
-                        <TextBlock x:Name="AssetCountText" Text="0" FontSize="24" Margin="0,2,0,14"/>
-                        <TextBlock Text="编辑操作" Foreground="#7F93A4"/>
-                        <TextBlock x:Name="EditCountText" Text="0" FontSize="24" Margin="0,2,0,4"/>
-                        <TextBlock Text="（按「已修改资源」数统计，同一资源重复替换只算一次）" Foreground="#5F7285" FontSize="10.5" TextWrapping="Wrap" Margin="0,0,0,12"/>
-                        <TextBlock Text="调试状态" Foreground="#7F93A4"/>
-                        <TextBlock x:Name="DebugStateText" Text="未应用" TextWrapping="Wrap" Margin="0,2"/>
-                        <Separator Margin="0,16"/>
-                        <TextBlock Text="选中资源" FontWeight="SemiBold"/>
-                        <TextBlock x:Name="SelectedAssetPathText" Text="未选择" TextWrapping="Wrap" Margin="0,8,0,10"/>
-                        <Border Background="#11151A" BorderBrush="#2A3540" BorderThickness="1" Height="150" Margin="0,0,0,10">
-                            <Image x:Name="PreviewImage" Stretch="Uniform" Margin="6"/>
-                        </Border>
-                        <TextBlock x:Name="PreviewInfoText" Text="无图像预览" Foreground="#7F93A4" TextWrapping="Wrap" Margin="0,0,0,10"/>
-                        <StackPanel x:Name="AtlasPanel" Visibility="Collapsed">
-                            <TextBlock Text="图集工具" FontWeight="SemiBold" Margin="0,0,0,6"/>
-                            <Grid Margin="0,0,0,6">
-                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                <StackPanel Margin="0,0,4,0"><TextBlock Text="列" Foreground="#7F93A4"/><TextBox x:Name="AtlasColumnsBox" Text="2" Height="24"/></StackPanel>
-                                <StackPanel Grid.Column="1" Margin="4,0,0,0"><TextBlock Text="行" Foreground="#7F93A4"/><TextBox x:Name="AtlasRowsBox" Text="2" Height="24"/></StackPanel>
-                            </Grid>
-                            <StackPanel Orientation="Horizontal">
-                                <Button x:Name="SplitAtlasButton" Content="拆分图集" Click="SplitAtlas_Click" IsEnabled="False" Padding="8,4" Margin="0,0,4,0"/>
-                                <Button x:Name="RepackAtlasButton" Content="恢复图集" Click="RepackAtlas_Click" IsEnabled="False" Padding="8,4"/>
-                            </StackPanel>
-                        </StackPanel>
-                        <Grid>
-                            <Grid.ColumnDefinitions><ColumnDefinition Width="70"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                            <Grid.RowDefinitions><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/></Grid.RowDefinitions>
-                            <TextBlock Grid.Row="0" Text="类型" Foreground="#7F93A4"/><TextBlock Grid.Row="0" Grid.Column="1" x:Name="SelectedAssetTypeText"/>
-                            <TextBlock Grid.Row="1" Text="Path ID" Foreground="#7F93A4"/><TextBlock Grid.Row="1" Grid.Column="1" x:Name="SelectedPathIdText"/>
-                            <TextBlock Grid.Row="2" Text="容器" Foreground="#7F93A4"/><TextBlock Grid.Row="2" Grid.Column="1" x:Name="SelectedContainerText" TextWrapping="Wrap"/>
-                            <TextBlock Grid.Row="3" Text="状态" Foreground="#7F93A4"/><TextBlock Grid.Row="3" Grid.Column="1" x:Name="SelectedStateText"/>
-                        </Grid>
-                        <Button x:Name="ReplaceAssetButton" Content="替换选中资源…（可直接拖图进来）" Click="ReplaceAsset_Click" IsEnabled="False" Margin="0,14,0,0" Padding="8,6"/>
-                        <Button x:Name="ClearEditsButton" Content="撤销此资源的修改" Click="ClearEdits_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"
-                                ToolTip="清除替换文件 / Unity 字段 / Sprite 元数据三类编辑标记；导出将不再包含此资源的修改。"/>
-                        <Button Content="从文件夹批量登记替换…" Click="BatchReplace_Click" Margin="0,8,0,0" Padding="8,6"/>
-                        <Button x:Name="HexPreviewButton" Content="十六进制预览" Click="HexPreview_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"/>
-                        <Button x:Name="SpriteMetadataButton" Content="查看 Sprite 元数据" Click="InspectSprite_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"/>
-                        <Button x:Name="UnityFieldsButton" Content="Unity 字段编辑" Click="EditUnityFields_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"/>
-                        <Button x:Name="ReferencersButton" Content="查找谁引用了此对象" Click="FindReferencers_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"/>
-                        <Button x:Name="ObjectSummaryButton" Content="查看对象摘要（Mesh/动画/字体）" Click="ShowObjectSummary_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"/>
-                        <Button x:Name="DecodeAudioButton" Content="导出当前音频 WAV" Click="DecodeAudio_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"/>
-                        <Button x:Name="FsbInspectButton" Content="查看 FSB 结构" Click="InspectFsb_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"/>
-                        <Button Content="构建调试覆盖层" Click="BuildOverlay_Click" Margin="0,8,0,0" Padding="8,6"/>
-                        <Button Content="应用并启动调试" Click="DebugApply_Click" Margin="0,18,0,0" Padding="8,6"/>
-                    </StackPanel>
-                </ScrollViewer>
-            </Border>
-            <!-- 无项目引导覆盖层：进入软件后第一眼看到的东西 -->
-            <Border x:Name="NoProjectOverlay" Grid.ColumnSpan="3" Background="#E511151A" Visibility="Collapsed">
-                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="520">
-                    <TextBlock Text="开始制作模组" FontSize="26" FontWeight="Bold" HorizontalAlignment="Center"/>
-                    <TextBlock Text="新建或打开一个模组项目后，编辑器会自动配置游戏目录并要求扫描游戏资源；&#x0a;扫描完成即可在列表中搜索、替换、编辑，最后一键导出到模组目录。"
-                               TextAlignment="Center" Foreground="#8FA6BA" TextWrapping="Wrap" Margin="0,10,0,22"/>
-                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                        <Button Content="新建模组项目（推荐）" Click="NewModWizard_Click" Padding="18,9,18,9" FontSize="14" FontWeight="SemiBold" Margin="0,0,12,0"/>
-                        <Button Content="打开项目…" Click="OpenProject_Click" Padding="18,9,18,9" FontSize="14"/>
-                    </StackPanel>
-                    <TextBlock Text="提示：游戏资源扫描是引用模式，不会复制或修改任何游戏文件。"
-                               TextAlignment="Center" Foreground="#5F7285" FontSize="11" Margin="0,18,0,0"/>
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="48"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <!-- 活动栏：VS Code 左侧图标栏，图标开对应工作台标签 -->
+            <Border Grid.Column="0" Background="#161B22" BorderBrush="#2A3540" BorderThickness="0,0,1,0">
+                <StackPanel>
+                    <Button Style="{StaticResource ActivityButton}" Content="📦" ToolTip="资源工作台（搜索 / 树状浏览资源）"
+                            Click="ActivateAssetsWorkbench_Click"/>
+                    <Button Style="{StaticResource ActivityButton}" Content="📝" ToolTip="文本模组（lang 补丁）"
+                            Click="LangTextMod_Click"/>
+                    <Button Style="{StaticResource ActivityButton}" Content="🧩" ToolTip="静态数据模组"
+                            Click="StaticMod_Click"/>
+                    <Button Style="{StaticResource ActivityButton}" Content="🗂" ToolTip="模组管理"
+                            Click="ManageMods_Click"/>
+                    <Button Style="{StaticResource ActivityButton}" Content="📖" ToolTip="使用教程"
+                            Click="Help_Click"/>
+                    <Button Style="{StaticResource ActivityButton}" Content="⚙" ToolTip="设置（共享目录 / 项目元数据）"
+                            Click="ProjectSettings_Click"/>
                 </StackPanel>
             </Border>
+            <!-- 工作台标签区：第一个「资源工作台」固定，其余按需打开（VS Code 编辑器标签模式） -->
+            <TabControl x:Name="WorkbenchTabs" Grid.Column="1" Background="#11151A" BorderThickness="0"
+                        ItemContainerStyle="{StaticResource WorkbenchTabItem}">
+                <TabItem x:Name="AssetsTab" Header="资源工作台" ToolTip="固定标签：搜索与浏览游戏资源，执行替换与编辑。">
+                    <Grid Margin="12">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="220"/><ColumnDefinition Width="*"/><ColumnDefinition Width="250"/></Grid.ColumnDefinitions>
+                        <Border Grid.Column="0" Background="#171D24" BorderBrush="#2A3540" BorderThickness="1" Padding="12" Margin="0,0,8,0">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                <StackPanel>
+                                    <TextBlock Text="项目工作区" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,10"/>
+                                    <TextBlock Text="当前项目" Foreground="#7F93A4"/>
+                                    <TextBlock x:Name="ProjectNameText" Text="未打开项目" TextWrapping="Wrap" Margin="0,4,0,10"/>
+                                    <TextBlock Text="目录状态（共享配置 · 自动发现）" Foreground="#7F93A4" TextWrapping="Wrap"/>
+                                    <TextBlock x:Name="GameDirectoryStatus" Text="—" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                                    <TextBlock x:Name="UnityCacheStatus" Text="—" Margin="0,2,0,0" TextWrapping="Wrap"/>
+                                    <TextBlock x:Name="ModDirectoryStatus" Text="—" Margin="0,2,0,0" TextWrapping="Wrap"/>
+                                    <TextBlock x:Name="FmodDirectoryStatus" Text="—" Margin="0,2,0,0" TextWrapping="Wrap"/>
+                                    <Button Content="重新自动获取目录" Click="AutoConfigure_Click" Margin="0,8,0,0" Padding="8,6"
+                                            ToolTip="只填充从未配置过的目录（游戏 / Unity 缓存 / 模组 / FMOD）。这些是全局共享设置，保存在程序目录，所有项目共用。"/>
+                                    <Separator Margin="0,14"/>
+                                    <TextBlock Text="① 获取资源" Foreground="#7F93A4" Margin="0,0,0,6"/>
+                                    <Button Content="扫描游戏资源（推荐）" Click="Scan_Click" Padding="8,6"
+                                            ToolTip="一键索引游戏 Unity 缓存中的全部资源包（引用模式，不复制文件）。扫描完成后在右侧列表即可搜索并编辑。"/>
+                                    <Button Content="导入资源包…" Click="Import_Click" Margin="0,8,0,0" Padding="8,6"
+                                            ToolTip="导入现有模组文件：.carra/.carra2/.rebank/.bank/Lunartique ZIP/Unity bundle。"/>
+                                    <Button Content="导入文件夹…" Click="ImportDirectory_Click" Margin="0,8,0,0" Padding="8,6"/>
+                                    <Separator Margin="0,14"/>
+                                    <TextBlock Text="② 产出模组" Foreground="#7F93A4" Margin="0,0,0,6"/>
+                                    <Button x:Name="OneClickExportButton" Content="一键导出模组（推荐）" Click="OneClickExport_Click" Padding="8,6"
+                                            ToolTip="把扫描资源上的全部修改按真实加载器的 Carra2 布局打包，输出到模组目录即可生效。"/>
+                                    <Button Content="导出模组（向导）…" Click="Export_Click" Margin="0,8,0,0" Padding="8,6"/>
+                                    <Button Content="导出全部（多格式）" Click="ExportAll_Click" Margin="0,8,0,0" Padding="8,6"/>
+                                    <Separator Margin="0,14"/>
+                                    <TextBlock Text="模组工具" Foreground="#7F93A4" Margin="0,0,0,6"/>
+                                    <Button Content="管理已安装模组" Click="ManageMods_Click" Padding="8,6"/>
+                                    <Button Content="打开模组目录" Click="OpenModsDirectory_Click" Margin="0,8,0,0" Padding="8,6"
+                                            ToolTip="在资源管理器中打开导出目标目录（%APPDATA%\LimbusCompanyMods），方便确认模组文件是否就位。"/>
+                                    <Button Content="打开项目文件夹" Click="OpenProjectFolder_Click" Margin="0,8,0,0" Padding="8,6"/>
+                                    <Button Content="文本模组（lang 补丁）…" Click="LangTextMod_Click" Margin="0,8,0,0" Padding="8,6"/>
+                                    <Button Content="静态数据模组…" Click="StaticMod_Click" Margin="0,8,0,0" Padding="8,6"/>
+                                    <Separator Margin="0,14"/>
+                                    <Button Content="设置（共享目录 / 项目元数据）…" Click="ProjectSettings_Click" Padding="8,6"
+                                            ToolTip="共享目录保存在程序目录，所有项目共用；模组名称、作者等元数据属于本项目。"/>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </Border>
+                        <Border Grid.Column="1" Background="#171D24" BorderBrush="#2A3540" BorderThickness="1" Padding="14" Margin="0,0,8,0">
+                            <DockPanel>
+                                <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,6">
+                                    <TextBox x:Name="SearchBox" Width="300" Height="28" VerticalContentAlignment="Center" ToolTip="搜索资源路径" TextChanged="SearchBox_TextChanged"/>
+                                    <Button Content="导入资源" Click="Import_Click" Margin="8,0,0,0" Padding="14,4"/>
+                                    <Button Content="文件夹" Click="ImportDirectory_Click" Margin="8,0,0,0" Padding="14,4"/>
+                                </StackPanel>
+                                <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,10">
+                                    <TextBlock Text="类型" VerticalAlignment="Center" Foreground="#7F93A4" Margin="0,0,4,0"/>
+                                    <ComboBox x:Name="TypeFilter" Width="110" Height="28" SelectionChanged="Filter_Changed"/>
+                                    <TextBlock Text="状态" VerticalAlignment="Center" Foreground="#7F93A4" Margin="8,0,4,0"/>
+                                    <ComboBox x:Name="StateFilter" Width="100" Height="28" SelectionChanged="Filter_Changed"/>
+                                    <TextBlock Text="Path ID" VerticalAlignment="Center" Foreground="#7F93A4" Margin="8,0,4,0"/>
+                                    <TextBox x:Name="PathIdFilter" Width="80" Height="28" VerticalContentAlignment="Center" TextChanged="SearchBox_TextChanged"/>
+                                    <TextBlock Text="Type ID" VerticalAlignment="Center" Foreground="#7F93A4" Margin="8,0,4,0"/>
+                                    <TextBox x:Name="TypeIdFilter" Width="60" Height="28" VerticalContentAlignment="Center" TextChanged="SearchBox_TextChanged"/>
+                                    <TextBlock Text="最小 KB" VerticalAlignment="Center" Foreground="#7F93A4" Margin="8,0,4,0"/>
+                                    <TextBox x:Name="MinSizeFilter" Width="60" Height="28" VerticalContentAlignment="Center" TextChanged="SearchBox_TextChanged"/>
+                                    <TextBlock Text="最大 KB" VerticalAlignment="Center" Foreground="#7F93A4" Margin="8,0,4,0"/>
+                                    <TextBox x:Name="MaxSizeFilter" Width="60" Height="28" VerticalContentAlignment="Center" TextChanged="SearchBox_TextChanged"/>
+                                    <CheckBox x:Name="ReplacedOnlyFilter" Content="仅已替换" VerticalAlignment="Center" Margin="10,0,0,0" Checked="Filter_Changed" Unchecked="Filter_Changed"/>
+                                    <Button Content="清除筛选" Click="ClearFilters_Click" Margin="10,0,0,0" Padding="10,3"/>
+                                </StackPanel>
+                                <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,8">
+                                    <ToggleButton x:Name="AssetViewListToggle" Style="{StaticResource ViewToggle}" Content="☰ 列表"
+                                                  IsChecked="True" Click="AssetViewMode_Click" ToolTip="扁平列表视图（当前搜索结果）"/>
+                                    <ToggleButton x:Name="AssetViewTreeToggle" Style="{StaticResource ViewToggle}" Content="🗂 目录树"
+                                                  Click="AssetViewMode_Click" ToolTip="按容器路径分组的树状视图（类文件夹浏览，双击目录展开）"/>
+                                </StackPanel>
+                                <Grid>
+                                    <ListView x:Name="AssetList" Background="#11151A" BorderBrush="#2A3540" Foreground="#E8EDF2" SelectionChanged="AssetList_SelectionChanged"
+                                             MouseDoubleClick="AssetList_DoubleClick" PreviewMouseRightButtonDown="AssetList_PreviewMouseRightButtonDown">
+                                        <ListView.ContextMenu>
+                                            <ContextMenu>
+                                                <MenuItem Header="替换…（图像双击同效）" Click="ReplaceAsset_Click"/>
+                                                <MenuItem Header="Unity 字段编辑" Click="EditUnityFields_Click"/>
+                                                <MenuItem Header="十六进制预览" Click="HexPreview_Click"/>
+                                                <Separator/>
+                                                <MenuItem Header="撤销此资源的修改" Click="ClearEdits_Click"/>
+                                                <Separator/>
+                                                <MenuItem Header="复制资源路径" Click="CopyAssetPath_Click"/>
+                                            </ContextMenu>
+                                        </ListView.ContextMenu>
+                                        <ListView.ItemContainerStyle>
+                                            <Style TargetType="ListViewItem">
+                                                <Setter Property="ToolTip" Value="{Binding LogicalPath}"/>
+                                                <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding EditState}" Value="Modified">
+                                                        <Setter Property="Foreground" Value="#FFD37A"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </ListView.ItemContainerStyle>
+                                        <ListView.View>
+                                            <GridView>
+                                                <GridViewColumn Header="资源路径" DisplayMemberBinding="{Binding LogicalPath}" Width="420"/>
+                                                <GridViewColumn Header="类型" DisplayMemberBinding="{Binding Type}" Width="120"/>
+                                                <GridViewColumn Header="状态" DisplayMemberBinding="{Binding EditState}" Width="110"/>
+                                                <GridViewColumn Header="vanilla 基线" DisplayMemberBinding="{Binding CatalogBaseline}" Width="110"/>
+                                                <GridViewColumn Header="大小" DisplayMemberBinding="{Binding Size, Converter={StaticResource HumanSize}}" Width="100"/>
+                                            </GridView>
+                                        </ListView.View>
+                                    </ListView>
+                                    <TreeView x:Name="AssetTree" Visibility="Collapsed"
+                                              Background="#11151A" BorderBrush="#2A3540" Foreground="#E8EDF2"
+                                              VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
+                                              ScrollViewer.CanContentScroll="True"
+                                              SelectedItemChanged="AssetTree_SelectedItemChanged"
+                                              MouseDoubleClick="AssetTree_DoubleClick"
+                                              TreeViewItem.Expanded="AssetTree_Expanded"
+                                              ToolTip="按容器路径分组浏览；展开目录即时生成下一层。"/>
+                                </Grid>
+                            </DockPanel>
+                        </Border>
+                        <Border Grid.Column="2" Background="#171D24" BorderBrush="#2A3540" BorderThickness="1" Padding="12">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                <StackPanel>
+                                    <TextBlock Text="创作状态" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,14"/>
+                                    <TextBlock Text="资源" Foreground="#7F93A4"/>
+                                    <TextBlock x:Name="AssetCountText" Text="0" FontSize="24" Margin="0,2,0,14"/>
+                                    <TextBlock Text="编辑操作" Foreground="#7F93A4"/>
+                                    <TextBlock x:Name="EditCountText" Text="0" FontSize="24" Margin="0,2,0,4"/>
+                                    <TextBlock Text="（按「已修改资源」数统计，同一资源重复替换只算一次）" Foreground="#5F7285" FontSize="10.5" TextWrapping="Wrap" Margin="0,0,0,12"/>
+                                    <TextBlock Text="调试状态" Foreground="#7F93A4"/>
+                                    <TextBlock x:Name="DebugStateText" Text="未应用" TextWrapping="Wrap" Margin="0,2"/>
+                                    <Separator Margin="0,16"/>
+                                    <TextBlock Text="选中资源" FontWeight="SemiBold"/>
+                                    <TextBlock x:Name="SelectedAssetPathText" Text="未选择" TextWrapping="Wrap" Margin="0,8,0,10"/>
+                                    <Border Background="#11151A" BorderBrush="#2A3540" BorderThickness="1" Height="150" Margin="0,0,0,10">
+                                        <Image x:Name="PreviewImage" Stretch="Uniform" Margin="6"/>
+                                    </Border>
+                                    <TextBlock x:Name="PreviewInfoText" Text="无图像预览" Foreground="#7F93A4" TextWrapping="Wrap" Margin="0,0,0,10"/>
+                                    <StackPanel x:Name="AtlasPanel" Visibility="Collapsed">
+                                        <TextBlock Text="图集工具" FontWeight="SemiBold" Margin="0,0,0,6"/>
+                                        <Grid Margin="0,0,0,6">
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                            <StackPanel Margin="0,0,4,0"><TextBlock Text="列" Foreground="#7F93A4"/><TextBox x:Name="AtlasColumnsBox" Text="2" Height="24"/></StackPanel>
+                                            <StackPanel Grid.Column="1" Margin="4,0,0,0"><TextBlock Text="行" Foreground="#7F93A4"/><TextBox x:Name="AtlasRowsBox" Text="2" Height="24"/></StackPanel>
+                                        </Grid>
+                                        <StackPanel Orientation="Horizontal">
+                                            <Button x:Name="SplitAtlasButton" Content="拆分图集" Click="SplitAtlas_Click" IsEnabled="False" Padding="8,4" Margin="0,0,4,0"/>
+                                            <Button x:Name="RepackAtlasButton" Content="恢复图集" Click="RepackAtlas_Click" IsEnabled="False" Padding="8,4"/>
+                                        </StackPanel>
+                                    </StackPanel>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="70"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/></Grid.RowDefinitions>
+                                        <TextBlock Grid.Row="0" Text="类型" Foreground="#7F93A4"/><TextBlock Grid.Row="0" Grid.Column="1" x:Name="SelectedAssetTypeText"/>
+                                        <TextBlock Grid.Row="1" Text="Path ID" Foreground="#7F93A4"/><TextBlock Grid.Row="1" Grid.Column="1" x:Name="SelectedPathIdText"/>
+                                        <TextBlock Grid.Row="2" Text="容器" Foreground="#7F93A4"/><TextBlock Grid.Row="2" Grid.Column="1" x:Name="SelectedContainerText" TextWrapping="Wrap"/>
+                                        <TextBlock Grid.Row="3" Text="状态" Foreground="#7F93A4"/><TextBlock Grid.Row="3" Grid.Column="1" x:Name="SelectedStateText"/>
+                                    </Grid>
+                                    <Button x:Name="ReplaceAssetButton" Content="替换选中资源…（可直接拖图进来）" Click="ReplaceAsset_Click" IsEnabled="False" Margin="0,14,0,0" Padding="8,6"/>
+                                    <Button x:Name="ClearEditsButton" Content="撤销此资源的修改" Click="ClearEdits_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"
+                                            ToolTip="清除替换文件 / Unity 字段 / Sprite 元数据三类编辑标记；导出将不再包含此资源的修改。"/>
+                                    <Button Content="从文件夹批量登记替换…" Click="BatchReplace_Click" Margin="0,8,0,0" Padding="8,6"/>
+                                    <Button x:Name="HexPreviewButton" Content="十六进制预览" Click="HexPreview_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"/>
+                                    <Button x:Name="SpriteMetadataButton" Content="查看 Sprite 元数据" Click="InspectSprite_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"/>
+                                    <Button x:Name="UnityFieldsButton" Content="Unity 字段编辑" Click="EditUnityFields_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"/>
+                                    <Button x:Name="ReferencersButton" Content="查找谁引用了此对象" Click="FindReferencers_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"/>
+                                    <Button x:Name="ObjectSummaryButton" Content="查看对象摘要（Mesh/动画/字体）" Click="ShowObjectSummary_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"/>
+                                    <Button x:Name="DecodeAudioButton" Content="导出当前音频 WAV" Click="DecodeAudio_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"/>
+                                    <Button x:Name="FsbInspectButton" Content="查看 FSB 结构" Click="InspectFsb_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"/>
+                                    <Button Content="构建调试覆盖层" Click="BuildOverlay_Click" Margin="0,8,0,0" Padding="8,6"/>
+                                    <Button Content="应用并启动调试" Click="DebugApply_Click" Margin="0,18,0,0" Padding="8,6"/>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </Border>
+                        <!-- 无项目引导覆盖层：进入软件后第一眼看到的东西 -->
+                        <Border x:Name="NoProjectOverlay" Grid.ColumnSpan="3" Background="#E511151A" Visibility="Collapsed">
+                            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="520">
+                                <TextBlock Text="开始制作模组" FontSize="26" FontWeight="Bold" HorizontalAlignment="Center"/>
+                                <TextBlock Text="新建或打开一个模组项目后，编辑器会自动配置游戏目录并要求扫描游戏资源；&#x0a;扫描完成即可在列表中搜索、替换、编辑，最后一键导出到模组目录。"
+                                           TextAlignment="Center" Foreground="#8FA6BA" TextWrapping="Wrap" Margin="0,10,0,22"/>
+                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                    <Button Content="新建模组项目（推荐）" Click="NewModWizard_Click" Padding="18,9,18,9" FontSize="14" FontWeight="SemiBold" Margin="0,0,12,0"/>
+                                    <Button Content="打开项目…" Click="OpenProject_Click" Padding="18,9,18,9" FontSize="14"/>
+                                </StackPanel>
+                                <TextBlock Text="提示：游戏资源扫描是引用模式，不会复制或修改任何游戏文件。"
+                                           TextAlignment="Center" Foreground="#5F7285" FontSize="11" Margin="0,18,0,0"/>
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+                </TabItem>
+            </TabControl>
         </Grid>
     </DockPanel>
 </Window>

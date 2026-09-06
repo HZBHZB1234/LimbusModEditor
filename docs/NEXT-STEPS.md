@@ -15,7 +15,7 @@ Carra2/Rebank/Lunartique/Bank 四格式导入导出、真实 Texture2D `.resS` �
 **官方 catalog 只读解析 + vanilla 基线判定（T3，CRC 口径与 LCTA 交叉验证一致）**、
 **.staticmod 静态数据模组通道（读取/预览应用/生成，两个真实样本导入验证通过）**。
 
-**当前基线：223 个测试全绿**（61 Format + 162 Domain）。最近提交见 git log。
+**当前基线：228 个测试全绿**（61 Format + 167 Domain）。最近提交见 git log。
 
 基线命令（每轮开始和结束都必须跑）：
 
@@ -130,11 +130,30 @@ dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r 
   计数与提示条口径统一。
 - 新测试 5 个（ClearEdits×4 + 快照搜索口径一致），基线 218 → 223。
 
+## 3.7 本轮四（2026-09-06）：VS Code 式工作台与目录树（P3.8）
+
+继续清除「不合理处」——工作台化与类文件夹资源浏览（详见 ROADMAP P3.8 /
+USAGE §1.3）：
+
+- **工作台标签页**：48px 活动栏（📦/📝/🧩/🗂/📖/⚙）+ 深色标签区；
+  「资源工作台」固定首标签，文本模组 / 静态数据 / 模组管理由独立窗口改为
+  `UserControl` 嵌入式标签（可关闭、重复点击激活不重建）；
+  Ctrl+Tab / Ctrl+Shift+Tab 循环。
+- **目录树浏览**：`AssetTreeBuilder`（Application/Assets）把 LogicalPath
+  按路径段惰性分层（根层一次构建、展开才分组下一层），中栏「☰ 列表 /
+  🗂 目录树」切换，TreeView 虚拟化 + 占位懒展开；树跟随搜索结果，
+  叶子选中/双击与列表共用 `ApplyAssetSelection` / `ActivateDefaultAction`。
+- **性能清理**：`UpdateDirectoryStatus` 的四个目录定位器扫描进程级记忆化
+  （配置变更显式失效）。
+- 新增 `AssetTreeBuilderTests` 5 个（含真实缓存树遍历不丢不重），
+  基线 223 → 228。
+
 ## 4. 下一轮明确任务（按优先级，每项含验收标准）
 
 ### T6（P1）傻瓜化后续打磨（候选）
 - ~~首扫体验：扫描窗口显示预计剩余时间~~（P3.7 已完成 ETA；「稍后再扫」入口
   保留为候选）。
+- ~~工作台化（VS Code 式标签页）与目录树资源浏览~~（P3.8 已完成）。
 - 全缓存 40 万级资产下的检索性能（必要时给 AssetList 加虚拟化/分页）。
 - 欢迎窗口与提示条的用户实测反馈回收。
 
@@ -195,8 +214,10 @@ dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r 
   `Build/`（ModExportService.ExportAllAsync/缓存对齐、NewModTemplateService）、
   `Debugging/`（GameDirectoryLocator/UnityCacheLocator/ModDirectoryLocator/
   ModInstallService/ProjectAutoConfigureService）
-- `src/LimbusModEditor.App/` — `MainWindow`（按钮：导入/导出/导出全部/项目设置/管理模组）、
-  `ProjectSettingsWindow`、`ModManagerWindow`、`ExportReportWindow`、`MultiExportReportWindow`
+- `src/LimbusModEditor.App/` — `MainWindow`（活动栏 + 工作台标签页：资源/文本/
+  静态/模组管理；资源列表与目录树切换）、`LangTextModControl`、`StaticModControl`、
+  `ModManagerControl`（均作为工作台 UserControl 嵌入）、`ProjectSettingsWindow`、
+  `ExportReportWindow`、`MultiExportReportWindow`
 - `tests/LimbusModEditor.Format.Tests/` — 真实样本：`RealSamples`（缓存/模组定位）、
   `RealSampleTests`（bundle 扫描/纹理 resS/摘要/类型树勘察/格式分布）、`RealBankTests`
 - `tests/LimbusModEditor.Domain.Tests/` — `RealLocatorTests`、`MultiFormatExportTests`、

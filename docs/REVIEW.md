@@ -112,11 +112,15 @@
    替换、右键菜单、双击动作、Ctrl+F/Esc、扫描 ETA、导出进度窗口、
    「打开输出位置」、大小列人性化、防抖后台搜索与异步预览（大项目不卡顿）、
    项目保存去 sync-over-async。
+9. ~~工作台化 + 目录树资源浏览~~（P3.8 已实现，2026-09-06）：VS Code 式
+   活动栏 + 标签页（文本/静态/模组管理入 tab，Ctrl+Tab 循环）、
+   `AssetTreeBuilder` 惰性目录树（类文件夹浏览、跟随搜索结果）、
+   目录定位器进程级记忆化。
 
 ## 5. 基线状态
 
 ```text
 dotnet build LimbusModEditor.slnx --no-restore   ✓ 0 错误
-dotnet test LimbusModEditor.slnx --no-build      ✓ 223 通过（61 Format + 162 Domain）
+dotnet test LimbusModEditor.slnx --no-build      ✓ 228 通过（61 Format + 167 Domain）
 dotnet publish ... -o artifacts/publish-win-x64  ✓ LimbusModEditor.App.exe（UI 冒烟启动通过）
 ```

@@ -121,6 +121,19 @@
 
 ```text
 dotnet build LimbusModEditor.slnx --no-restore   ✓ 0 错误
-dotnet test LimbusModEditor.slnx --no-build      ✓ 228 通过（61 Format + 167 Domain）
+dotnet test LimbusModEditor.slnx --no-build      ✓ 231 通过（61 Format + 170 Domain，含 1 个 LME_BENCH 门控基准）
 dotnet publish ... -o artifacts/publish-win-x64  ✓ LimbusModEditor.App.exe（UI 冒烟启动通过）
 ```
+
+### 5.1 性能量化基线（P3.9，真实缓存 1459 bundle / 1,194,061 资产）
+
+| 路径 | 优化前（JSON 索引时代） | 优化后（SQLite + 项目瘦身） |
+|---|---|---|
+| 项目保存 | 12.4s / 1595MB | 0.4s / 1KB |
+| 项目加载 | 64.9s（阻塞） | 0.04s（+14s 后台索引回灌，不阻塞 UI） |
+| 热扫描（索引全命中） | 102.7s | 45.8s |
+| 冷扫描（含基线 CRC） | ≈240s | ≈295s（一次性；索引写回仅 18s） |
+| 全量搜索过滤+排序 | 5.4s（后台） | 4.8s（后台） |
+| 树根层构建 / 全展开 | 0.5s / 7.2s | 0.47s / 6.3s |
+
+冷扫描主体是 bundle 解析 + catalog 基线 CRC（生产必选、一次性），列后续候选。

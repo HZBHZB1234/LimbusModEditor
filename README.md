@@ -19,10 +19,12 @@ not as a launcher replacement.
    only, manual values are never overwritten).
 3. **Scan** — an empty project automatically prompts for a game-resource scan:
    the editor indexes every Unity cache bundle (`<outer>/<inner>/__data`) in
-   reference mode (no files are copied) with a persistent incremental index in
-   the program cache (`cache/unity-cache-index.json`), so rescans are
-   near-instant. Damaged/unknown bundles are reported as per-entry
-   diagnostics instead of aborting the scan.
+   reference mode (no files are copied) with a persistent incremental SQLite
+   index in the program cache (`cache/unity-cache-index.db`), so rescans only
+   do freshness checks plus incremental writes. Damaged/unknown bundles are
+   reported as per-entry diagnostics instead of aborting the scan. Scanned
+   (reference-mode) assets live in the index, not in the project file —
+   opening a project rehydrates them from the index in the background.
 4. **Edit** — the workspace uses a VS Code-style layout: an activity bar opens
    tabbed workbenches (assets / lang text / static data / mod management,
    Ctrl+Tab to cycle, fixed assets tab + closable tool tabs). Search the merged

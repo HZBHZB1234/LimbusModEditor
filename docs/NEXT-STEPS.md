@@ -15,7 +15,7 @@ Carra2/Rebank/Lunartique/Bank 四格式导入导出、真实 Texture2D `.resS` �
 **官方 catalog 只读解析 + vanilla 基线判定（T3，CRC 口径与 LCTA 交叉验证一致）**、
 **.staticmod 静态数据模组通道（读取/预览应用/生成，两个真实样本导入验证通过）**。
 
-**当前基线：228 个测试全绿**（61 Format + 167 Domain）。最近提交见 git log。
+**当前基线：231 个测试全绿**（61 Format + 170 Domain，含 1 个 LME_BENCH 门控基准）。最近提交见 git log。
 
 基线命令（每轮开始和结束都必须跑）：
 
@@ -147,6 +147,26 @@ USAGE §1.3）：
   （配置变更显式失效）。
 - 新增 `AssetTreeBuilderTests` 5 个（含真实缓存树遍历不丢不重），
   基线 223 → 228。
+
+## 3.8 本轮五（2026-09-06）：性能改造（阶段 C，P3.9）
+
+「先量化、再优化」：新增 `PerformanceBaselineTests`（`LME_BENCH=1` 门控，
+真实缓存 1459 bundle / **1,194,061 资产**）量化热点路径后逐项处置
+（详见 ROADMAP P3.9 / REVIEW §5.1 的量化对照表）：
+
+- **项目文件瘦身**：`SkipReferenceAssetsConverter` 写入时跳过纯引用资产
+  （可由索引重建；读取向后兼容旧项目文件）——保存 12.4s/1595MB →
+  0.4s/1KB，打开 64.9s → 0.04s。
+- **打开即后台回灌**：`RehydrateFromIndexAsync` 从索引库重建引用资产
+  （14s，不解析 bundle、不阻塞 UI；实体化资产按 LogicalPath 优先）。
+- **扫描索引 SQLite 化**：`UnityCacheSqliteIndexStore`（Microsoft.Data.Sqlite，
+  `cache/unity-cache-index.db`）取代 164MB JSON 全文件重写——新鲜度检查
+  内存字典化（实测逐 bundle 开连接查询会拖慢一个数量级，必须一次载入）、
+  资产行单条流式查询分组、写回单事务批量（WAL + synchronous=NORMAL，
+  索引可整库重建故安全）。热扫描 102.7s → 45.8s。
+- **量化结论**：冷扫描 ≈4-5 分钟主体是 bundle 解析 + catalog 基线 CRC
+  （生产必选、一次性），索引写回仅 18s；搜索/树构建本就良好，未动。
+- 新增测试 3 个（瘦身往返×2 + 门控基准），基线 228 → 231。
 
 ## 4. 下一轮明确任务（按优先级，每项含验收标准）
 

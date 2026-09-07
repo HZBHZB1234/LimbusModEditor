@@ -85,7 +85,7 @@ public class UnityCacheScanServiceTests : IDisposable
             Assert.Equal(picked.InnerKey, asset.Metadata["cacheInner"]);
             Assert.True(File.Exists(asset.SourcePath!));
         });
-        Assert.True(File.Exists(indexFile), "扫描索引应写进指定缓存文件");
+        Assert.True(File.Exists(Path.ChangeExtension(indexFile, ".db")), "扫描索引应写进指定路径（SQLite 索引库 .db）");
 
         // 第二次扫描走索引缓存：不再解析 bundle，结果等价。
         var project2 = new ModProject { Name = "ScanTest2" };

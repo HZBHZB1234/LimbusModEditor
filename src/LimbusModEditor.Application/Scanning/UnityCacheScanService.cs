@@ -1,7 +1,5 @@
 using System.Collections.Concurrent;
 using System.IO;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using LimbusModEditor.Application.Catalog;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Domain.Projects;
@@ -29,18 +27,24 @@ public sealed record UnityCacheScanResult(
 /// 傻瓜化核心：一键扫描游戏 Unity 缓存，把全部 bundle 的对象索引登记进项目。
 /// 「引用模式」——不复制任何文件，资源直接指向缓存中的 <c>__data</c>（只读），
 /// 首次编辑某个 bundle 时才把该 bundle 复制进项目（见
-/// UnityCacheMaterializationService）。扫描结果增量缓存在程序目录
-/// <c>cache/unity-cache-index.json</c>，二次扫描只处理变化过的 bundle。
+/// UnityCacheMaterializationService）。
+/// 扫描索引持久化为 SQLite（<c>cache/unity-cache-index.db</c>，阶段 C 性能改造：
+/// 原单文件 JSON 164MB 全量解析/重写在真实 119 万资产规模下热扫描 ≈100s，
+/// SQLite 后新鲜度检查与读回都是按 bundle 的索引查询，写回只增删变化的
+/// bundle）。索引损坏只影响速度不影响正确性：删除 .db 重建即可。
 /// </summary>
 public sealed class UnityCacheScanService
 {
-    private readonly string? _indexCacheFile;
+    private readonly UnityCacheSqliteIndexStore? _store;
 
-    /// <param name="indexCacheFile">索引缓存文件；默认放在程序目录 cache/ 下，
-    /// 测试可传入临时目录。</param>
+    /// <param name="indexCacheFile">索引文件路径；默认放在程序目录 cache/ 下
+    /// （习惯名 unity-cache-index.json，实际存储为同名 .db 的 SQLite 库，
+    /// 与旧版 JSON 索引共存但不再读写 JSON）。测试可传入临时目录。</param>
     public UnityCacheScanService(string? indexCacheFile = null)
     {
-        _indexCacheFile = indexCacheFile;
+        _store = indexCacheFile is null
+            ? null
+            : new UnityCacheSqliteIndexStore(Path.ChangeExtension(indexCacheFile, ".db"));
     }
 
     /// <summary>Enumerates <c>&lt;root&gt;/&lt;outer&gt;/&lt;inner&gt;/__data</c>
@@ -83,7 +87,20 @@ public sealed class UnityCacheScanService
         if (entries.Count == 0)
             throw new InvalidDataException($"缓存目录里没有 <外层>/<内层>/__data 缓存条目：{cacheDirectory}");
 
-        var index = LoadIndex();
+        var store = _store;
+        if (store is not null)
+        {
+            // 建表必须先于并行扫描阶段；建表失败（损坏/无写权限）降级为
+            // 纯扫描不持久化，不影响扫描正确性。
+            try { store.EnsureSchema(); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or Microsoft.Data.Sqlite.SqliteException)
+            { store = null; }
+        }
+        // 新鲜度检查用一次性载入的内存字典（阶段 C3：实测逐 bundle 开连接
+        // 查询会把并行解析阶段拖慢一个数量级；bundle 元数据只有 1459 行级别）。
+        var bundleIndex = store is not null
+            ? store.ReadBundleIndex(StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, UnityCacheIndexBundle>(StringComparer.OrdinalIgnoreCase);
         var catalog = LoadCatalog(gameDirectory);
         var diagnostics = new List<string>();
         if (catalog is null && !string.IsNullOrWhiteSpace(gameDirectory))
@@ -96,7 +113,7 @@ public sealed class UnityCacheScanService
         var added = 0;
         var updated = 0;
 
-        var results = new ConcurrentBag<(UnityCacheScanEntry Entry, IReadOnlyList<AssetRecord> Assets, bool FromCache)>();
+        var results = new ConcurrentBag<(UnityCacheScanEntry Entry, bool FromCache, UnityCacheIndexBundle Bundle, IReadOnlyList<AssetRecord>? Records, IReadOnlyList<UnityCacheIndexRow>? Rows)>();
         var failures = new ConcurrentQueue<string>();
         await Task.Run(() =>
         {
@@ -109,10 +126,21 @@ public sealed class UnityCacheScanService
                 cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
-                    var (assets, fromCache) = ScanEntry(entry, index, catalog);
-                    results.Add((entry, assets, fromCache));
-                    if (fromCache) Interlocked.Increment(ref indexed);
-                    else Interlocked.Increment(ref scanned);
+                    // 并行阶段零 DB 访问：新鲜度查内存字典；未命中才解析 bundle。
+                    var info = new FileInfo(entry.DataPath);
+                    if (bundleIndex.TryGetValue(entry.DataPath, out var cached) &&
+                        cached.Size == info.Length &&
+                        cached.MTimeUtcTicks == info.LastWriteTimeUtc.Ticks)
+                    {
+                        results.Add((entry, true, cached, null, null));
+                        Interlocked.Increment(ref indexed);
+                    }
+                    else
+                    {
+                        var (records, bundle, rows) = ParseEntry(entry, catalog);
+                        results.Add((entry, false, bundle, records, rows));
+                        Interlocked.Increment(ref scanned);
+                    }
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
@@ -127,47 +155,76 @@ public sealed class UnityCacheScanService
         diagnostics.AddRange(failures.OrderBy(x => x, StringComparer.Ordinal));
 
         // 合并（单线程；MainWindow 的列表绑定的是检索结果快照，可直接改集合）。
-        // 全缓存 ≈ 10 万+ 资产：必须用字典索引，逐条 FirstOrDefault 是 O(N²)。
+        // 全缓存 ≈ 119 万资产：必须用字典索引，逐条 FirstOrDefault 是 O(N²)。
+        // 阶段 C2 惰性构记录：未变化的 bundle（索引命中）只产出路径字符串，
+        // 路径已存在就不再构造 AssetRecord（项目刚回灌时 119 万条几乎零成本）。
         var existingByPath = new Dictionary<string, AssetRecord>(StringComparer.OrdinalIgnoreCase);
         foreach (var existingAsset in project.Assets)
             existingByPath.TryAdd(existingAsset.LogicalPath, existingAsset);
         var cacheSourceRegistered = project.Sources.Any(x =>
             string.Equals(x.Path, cacheDirectory, StringComparison.OrdinalIgnoreCase));
-        foreach (var (entry, assets, _) in results.OrderBy(x => x.Entry.OuterKey, StringComparer.Ordinal)
+        // 索引命中的 bundle 需要行数据参与合并：单条流式查询分组载入
+        // （冷扫描没有命中项，完全跳过这一步）。
+        var rowsByBundle = store is not null && results.Any(x => x.FromCache)
+            ? store.ReadAllRowsGrouped(StringComparer.OrdinalIgnoreCase)
+            : null;
+        foreach (var (entry, fromCache, _, records, _) in results.OrderBy(x => x.Entry.OuterKey, StringComparer.Ordinal)
                      .ThenBy(x => x.Entry.InnerKey, StringComparer.Ordinal))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            foreach (var asset in assets)
+            if (fromCache)
             {
-                if (!existingByPath.TryGetValue(asset.LogicalPath, out var existing))
+                // bundle 未变化：数据与索引完全同源（含 vanilla 基线），已有记录
+                // 无需刷新字段；只有项目里缺失的路径（如从未扫描过的新项目）
+                // 才构造记录。
+                var cachedRows = rowsByBundle is not null && rowsByBundle.TryGetValue(entry.DataPath, out var rows)
+                    ? rows
+                    : (IReadOnlyList<UnityCacheIndexRow>)Array.Empty<UnityCacheIndexRow>();
+                foreach (var row in cachedRows)
                 {
+                    var logicalPath = $"{entry.OuterKey}/{entry.InnerKey}/{row.Container}/{row.PathId}.{row.TypeId}";
+                    if (existingByPath.ContainsKey(logicalPath)) { updated++; continue; }
+                    var asset = BuildRecord(entry.DataPath, entry.OuterKey, entry.InnerKey, row);
                     project.Assets.Add(asset);
-                    existingByPath.Add(asset.LogicalPath, asset);
+                    existingByPath.Add(logicalPath, asset);
                     added++;
-                    continue;
                 }
-                if (existing.Metadata.ContainsKey("reference"))
+            }
+            else
+            {
+                // 变化过的 bundle（或首轮解析）：整条刷新/新增。
+                foreach (var asset in records!)
                 {
-                    // 仍是纯引用：整条刷新（含指向缓存的 SourcePath）。
-                    existing.SourcePath = asset.SourcePath;
-                    existing.ContainerPath = asset.ContainerPath;
-                    existing.Account = asset.Account;
-                    existing.Bundle = asset.Bundle;
-                    existing.UnityPathId = asset.UnityPathId;
-                    existing.UnityTypeId = asset.UnityTypeId;
-                    existing.Type = asset.Type;
-                    existing.Size = asset.Size;
-                    foreach (var pair in asset.Metadata) existing.Metadata[pair.Key] = pair.Value;
+                    if (!existingByPath.TryGetValue(asset.LogicalPath, out var existing))
+                    {
+                        project.Assets.Add(asset);
+                        existingByPath.Add(asset.LogicalPath, asset);
+                        added++;
+                        continue;
+                    }
+                    if (existing.Metadata.ContainsKey("reference"))
+                    {
+                        // 仍是纯引用：整条刷新（含指向缓存的 SourcePath）。
+                        existing.SourcePath = asset.SourcePath;
+                        existing.ContainerPath = asset.ContainerPath;
+                        existing.Account = asset.Account;
+                        existing.Bundle = asset.Bundle;
+                        existing.UnityPathId = asset.UnityPathId;
+                        existing.UnityTypeId = asset.UnityTypeId;
+                        existing.Type = asset.Type;
+                        existing.Size = asset.Size;
+                        foreach (var pair in asset.Metadata) existing.Metadata[pair.Key] = pair.Value;
+                    }
+                    else
+                    {
+                        // 已实体化（本地有编辑副本）：保留本地 SourcePath，只刷新描述性字段。
+                        existing.Type = asset.Type;
+                        existing.Size = asset.Size;
+                        if (asset.Metadata.TryGetValue("catalogBaseline", out var baseline))
+                            existing.Metadata["catalogBaseline"] = baseline;
+                    }
+                    updated++;
                 }
-                else
-                {
-                    // 已实体化（本地有编辑副本）：保留本地 SourcePath，只刷新描述性字段。
-                    existing.Type = asset.Type;
-                    existing.Size = asset.Size;
-                    if (asset.Metadata.TryGetValue("catalogBaseline", out var baseline))
-                        existing.Metadata["catalogBaseline"] = baseline;
-                }
-                updated++;
             }
             // 登记缓存来源（导出全部会跳过 Directory 来源；缓存写回由
             // UnityCacheExportService 负责）。
@@ -183,24 +240,56 @@ public sealed class UnityCacheScanService
             }
         }
 
-        SaveIndex(index, entries, results);
+        PersistIndex(store, entries, results, cancellationToken);
         return new UnityCacheScanResult(total, scanned, indexed, added, updated, diagnostics);
     }
 
-    // ── 单个 bundle：命中索引缓存则直接重建记录，否则完整解析 ──────────
+    /// <summary>打开旧项目时的后台回灌：纯引用资产不再存进项目文件（阶段 C
+    /// 项目瘦身，保存 1.6GB→KB 级），打开时从扫描索引 SQLite 库重建。
+    /// 实体化过的资产（本地有编辑副本，随项目文件加载）按 LogicalPath 优先保留；
+    /// 索引库缺失时返回 0（提示用户重新扫描即可）。整体替换 <c>Assets</c>
+    /// 集合引用（不做逐条 CollectionChanged），期间 UI 读到的要么是旧集合
+    /// 要么是新集合，两者都一致。</summary>
+    public async Task<int> RehydrateFromIndexAsync(
+        ModProject project, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(project);
+        var store = _store;
+        if (store is null || !store.Exists) return 0;
 
-    private (IReadOnlyList<AssetRecord> Assets, bool FromCache) ScanEntry(
+        var rehydrated = await Task.Run(() =>
+        {
+            // 先快照既有资产（实体化/导入的优先），按 LogicalPath 去重。
+            var merged = new List<AssetRecord>(project.Assets.Count + 1_200_000);
+            var byPath = new Dictionary<string, AssetRecord>(StringComparer.OrdinalIgnoreCase);
+            foreach (var existing in project.Assets)
+            {
+                merged.Add(existing);
+                byPath.TryAdd(existing.LogicalPath, existing);
+            }
+            foreach (var (bundle, rows) in store.ReadAll())
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                foreach (var record in RebuildRecords(bundle.DataPath, bundle.Outer, bundle.Inner, rows))
+                {
+                    if (byPath.TryAdd(record.LogicalPath, record)) merged.Add(record);
+                }
+            }
+            var added = merged.Count - project.Assets.Count;
+            project.Assets = new System.Collections.ObjectModel.ObservableCollection<AssetRecord>(merged);
+            return added;
+        }, cancellationToken).ConfigureAwait(false);
+        return rehydrated;
+    }
+
+    // ── 单个 bundle：完整解析（仅新鲜度未命中时才走到这里）─────────────
+
+    private (IReadOnlyList<AssetRecord> Records, UnityCacheIndexBundle Bundle, IReadOnlyList<UnityCacheIndexRow> Rows) ParseEntry(
         UnityCacheScanEntry entry,
-        UnityCacheIndexFile index,
         CatalogFileService? catalog)
     {
         var info = new FileInfo(entry.DataPath);
-        if (index.Entries.TryGetValue(entry.DataPath, out var cached) &&
-            cached.Size == info.Length &&
-            cached.MTimeUtcTicks == info.LastWriteTimeUtc.Ticks)
-        {
-            return (RebuildFromIndex(entry, cached), true);
-        }
+        var bundle = new UnityCacheIndexBundle(entry.DataPath, info.Length, info.LastWriteTimeUtc.Ticks, entry.OuterKey, entry.InnerKey);
 
         var descriptors = new UnityAssetService().ScanBundle(entry.DataPath);
         var records = new List<AssetRecord>(descriptors.Count);
@@ -210,10 +299,19 @@ public sealed class UnityCacheScanService
             try { baselineSummary = CatalogBaselineService.Evaluate(catalog, entry.DataPath).Summary; }
             catch (Exception) { baselineSummary = null; }
         }
+        var rows = new List<UnityCacheIndexRow>(descriptors.Count);
         for (var i = 0; i < descriptors.Count; i++)
         {
             var descriptor = descriptors[i];
-            var record = new AssetRecord
+            rows.Add(new UnityCacheIndexRow(
+                i,
+                descriptor.ContainerPath ?? string.Empty,
+                descriptor.UnityPathId ?? 0,
+                descriptor.UnityTypeId ?? 0,
+                descriptor.Type,
+                descriptor.Size,
+                baselineSummary is { Length: > 0 } ? baselineSummary : null));
+            records.Add(new AssetRecord
             {
                 LogicalPath = $"{entry.OuterKey}/{entry.InnerKey}/{descriptor.ContainerPath}/{descriptor.UnityPathId}.{descriptor.UnityTypeId}",
                 SourcePath = entry.DataPath,
@@ -234,106 +332,69 @@ public sealed class UnityCacheScanService
                     ["sourcePackagePath"] = Path.GetDirectoryName(entry.DataPath) ?? entry.DataPath,
                     ["reference"] = "true"
                 }
-            };
-            if (baselineSummary is { Length: > 0 }) record.Metadata["catalogBaseline"] = baselineSummary;
-            records.Add(record);
+            });
+            if (baselineSummary is { Length: > 0 }) records[^1].Metadata["catalogBaseline"] = baselineSummary;
         }
-        // 回写索引缓存（线程安全：按 DataPath 独立键）。
-        lock (index.Entries)
-        {
-            index.Entries[entry.DataPath] = new UnityCacheIndexEntry
-            {
-                Size = info.Length,
-                MTimeUtcTicks = info.LastWriteTimeUtc.Ticks,
-                Outer = entry.OuterKey,
-                Inner = entry.InnerKey,
-                Assets = records.Select(r => new UnityCacheIndexAsset
-                {
-                    Container = r.ContainerPath ?? string.Empty,
-                    PathId = r.UnityPathId ?? 0,
-                    TypeId = r.UnityTypeId ?? 0,
-                    Type = r.Type,
-                    Size = r.Size,
-                    Baseline = r.Metadata.TryGetValue("catalogBaseline", out var b) ? b : null
-                }).ToList()
-            };
-        }
-        return (records, false);
+        return (records, bundle, rows);
     }
 
-    private static IReadOnlyList<AssetRecord> RebuildFromIndex(UnityCacheScanEntry entry, UnityCacheIndexEntry cached)
+    private static AssetRecord BuildRecord(
+        string dataPath, string outerKey, string innerKey, UnityCacheIndexRow item)
     {
-        var records = new List<AssetRecord>(cached.Assets.Count);
-        for (var i = 0; i < cached.Assets.Count; i++)
+        var record = new AssetRecord
         {
-            var item = cached.Assets[i];
-            var record = new AssetRecord
+            LogicalPath = $"{outerKey}/{innerKey}/{item.Container}/{item.PathId}.{item.TypeId}",
+            SourcePath = dataPath,
+            ContainerPath = item.Container,
+            Account = outerKey,
+            Bundle = innerKey,
+            UnityPathId = item.PathId,
+            UnityTypeId = item.TypeId,
+            Type = item.Type,
+            Size = item.Size,
+            Metadata =
             {
-                LogicalPath = $"{entry.OuterKey}/{entry.InnerKey}/{item.Container}/{item.PathId}.{item.TypeId}",
-                SourcePath = entry.DataPath,
-                ContainerPath = item.Container,
-                Account = entry.OuterKey,
-                Bundle = entry.InnerKey,
-                UnityPathId = item.PathId,
-                UnityTypeId = item.TypeId,
-                Type = item.Type,
-                Size = item.Size,
-                Metadata =
-                {
-                    ["bundleIndex"] = i.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                    ["unityBundle"] = "true",
-                    ["cacheOuter"] = entry.OuterKey,
-                    ["cacheInner"] = entry.InnerKey,
-                    ["originalSourcePath"] = entry.DataPath,
-                    ["sourcePackagePath"] = Path.GetDirectoryName(entry.DataPath) ?? entry.DataPath,
-                    ["reference"] = "true"
-                }
-            };
-            if (!string.IsNullOrEmpty(item.Baseline)) record.Metadata["catalogBaseline"] = item.Baseline!;
-            records.Add(record);
-        }
+                ["bundleIndex"] = item.BundleIndex.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["unityBundle"] = "true",
+                ["cacheOuter"] = outerKey,
+                ["cacheInner"] = innerKey,
+                ["originalSourcePath"] = dataPath,
+                ["sourcePackagePath"] = Path.GetDirectoryName(dataPath) ?? dataPath,
+                ["reference"] = "true"
+            }
+        };
+        if (!string.IsNullOrEmpty(item.Baseline)) record.Metadata["catalogBaseline"] = item.Baseline!;
+        return record;
+    }
+
+    private static IReadOnlyList<AssetRecord> RebuildRecords(
+        string dataPath, string outerKey, string innerKey, IReadOnlyList<UnityCacheIndexRow> rows)
+    {
+        var records = new List<AssetRecord>(rows.Count);
+        foreach (var item in rows) records.Add(BuildRecord(dataPath, outerKey, innerKey, item));
         return records;
     }
 
-    // ── 索引缓存（程序目录）────────────────────────────────────────
+    // ── 索引持久化（SQLite；单事务批量写，不再整文件/逐 bundle 重写）──
 
-    internal UnityCacheIndexFile LoadIndex()
+    private static void PersistIndex(
+        UnityCacheSqliteIndexStore? store,
+        IReadOnlyList<UnityCacheScanEntry> entries,
+        ConcurrentBag<(UnityCacheScanEntry Entry, bool FromCache, UnityCacheIndexBundle Bundle, IReadOnlyList<AssetRecord>? Records, IReadOnlyList<UnityCacheIndexRow>? Rows)> results,
+        CancellationToken cancellationToken)
     {
+        if (store is null) return; // 未配置索引路径：只扫描不持久化（与旧内存模式一致）
         try
         {
-            if (_indexCacheFile is not null && File.Exists(_indexCacheFile))
-            {
-                using var document = JsonDocument.Parse(File.ReadAllText(_indexCacheFile));
-                var file = document.RootElement.Deserialize<UnityCacheIndexFile>(IndexOptions);
-                if (file is not null && file.Version == UnityCacheIndexFile.CurrentVersion) return file;
-            }
+            // 只写变化过的 bundle（索引命中的未变化 bundle 无需重写）；
+            // 收缩（游戏更新换键后旧索引自然淘汰）与 upsert 在同一事务完成。
+            store.PersistAll(entries, results
+                .Where(x => !x.FromCache && x.Rows is not null)
+                .Select(x => (x.Bundle, x.Rows!)));
         }
-        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or Microsoft.Data.Sqlite.SqliteException)
         {
-            // 索引缓存损坏只影响速度，不影响正确性：直接重建。
-        }
-        return new UnityCacheIndexFile();
-    }
-
-    private void SaveIndex(UnityCacheIndexFile index, IReadOnlyList<UnityCacheScanEntry> entries,
-        ConcurrentBag<(UnityCacheScanEntry Entry, IReadOnlyList<AssetRecord> Assets, bool FromCache)> results)
-    {
-        if (_indexCacheFile is null) return;
-        try
-        {
-            // 只保留本次枚举到的条目（游戏更新换键后旧索引自然淘汰）。
-            var currentPaths = entries.Select(x => x.DataPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var pruned = index.Entries.Where(kv => currentPaths.Contains(kv.Key))
-                .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase);
-            index.Entries = new ConcurrentDictionary<string, UnityCacheIndexEntry>(pruned, StringComparer.OrdinalIgnoreCase);
-            Directory.CreateDirectory(Path.GetDirectoryName(_indexCacheFile)!);
-            var temp = _indexCacheFile + ".tmp";
-            File.WriteAllText(temp, JsonSerializer.Serialize(index, IndexOptions));
-            File.Move(temp, _indexCacheFile, true);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // 缓存写失败不影响扫描结果。
+            // 缓存写失败不影响扫描结果（下次冷扫描重建）。
         }
     }
 
@@ -345,40 +406,4 @@ public sealed class UnityCacheScanService
         try { return CatalogFileService.Load(catalogPath); }
         catch (Exception ex) when (ex is InvalidDataException or IOException) { return null; }
     }
-
-    private static readonly JsonSerializerOptions IndexOptions = new(JsonSerializerDefaults.Web)
-    {
-        WriteIndented = false,
-        Converters = { new JsonStringEnumConverter() }
-    };
-}
-
-/// <summary>Persisted scan index (one JSON file in the program cache).</summary>
-public sealed class UnityCacheIndexFile
-{
-    public const int CurrentVersion = 1;
-    public int Version { get; set; } = CurrentVersion;
-
-    /// <summary>ConcurrentDictionary：扫描并行阶段按 DataPath 独立读写。</summary>
-    public ConcurrentDictionary<string, UnityCacheIndexEntry> Entries { get; set; } =
-        new(StringComparer.OrdinalIgnoreCase);
-}
-
-public sealed class UnityCacheIndexEntry
-{
-    public long Size { get; set; }
-    public long MTimeUtcTicks { get; set; }
-    public string Outer { get; set; } = string.Empty;
-    public string Inner { get; set; } = string.Empty;
-    public List<UnityCacheIndexAsset> Assets { get; set; } = [];
-}
-
-public sealed class UnityCacheIndexAsset
-{
-    public string Container { get; set; } = string.Empty;
-    public long PathId { get; set; }
-    public int TypeId { get; set; }
-    public AssetType Type { get; set; } = AssetType.Unknown;
-    public long Size { get; set; }
-    public string? Baseline { get; set; }
 }

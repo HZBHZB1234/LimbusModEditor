@@ -193,15 +193,18 @@ public partial class MainWindow : Window
         await AfterProjectOpenedAsync(statusPrefix ?? "已打开项目");
     }
 
-    /// <summary>项目就绪后的无感流程：共享目录自动配置；项目还没有资源时
+    /// <summary>项目就绪后的无感流程：共享目录自动配置；打开时从扫描索引
+    /// 后台回灌纯引用资产（项目文件已瘦身，不再携带它们）；项目仍无资源时
     /// 自动弹出扫描窗口（傻瓜化核心）。</summary>
     private async Task AfterProjectOpenedAsync(string prefix)
     {
         RefreshProjectState(prefix);
         await AutoConfigureAsync();
+        await RehydrateAssetsFromIndexAsync();
         RefreshProjectState(prefix);
 
-        // 空项目自动要求扫描（扫描完成后即可直接编辑）。
+        // 空项目自动要求扫描（扫描完成后即可直接编辑）。回灌成功过的项目
+        // 资产数 > 0，不会误触发。
         if (_project is { Assets.Count: 0 })
         {
             var cacheDirectory = _env.EffectiveUnityCacheDirectory(_project);
@@ -209,6 +212,22 @@ public partial class MainWindow : Window
                 await PromptScanAsync(autoStart: true);
         }
         UpdateHint();
+    }
+
+    /// <summary>阶段 C 项目瘦身配套：项目文件不再携带纯引用资产（真实全缓存
+    /// 项目曾把 .lmeproj 撑到 1.6GB），打开时从扫描索引 SQLite 库重建（不解析
+    /// 任何 bundle，秒级）。索引库缺失时静默返回 0（随后空项目逻辑会引导扫描）。</summary>
+    private async Task<int> RehydrateAssetsFromIndexAsync()
+    {
+        if (_project is null) return 0;
+        try
+        {
+            StatusText.Text = "正在从扫描索引重建资源列表（不解析 bundle，秒级）…";
+            var added = await _cacheScan.RehydrateFromIndexAsync(_project);
+            if (added > 0) StatusText.Text = $"资源索引已重建（{added} 条引用资产，后台完成，未解析任何 bundle）。";
+            return added;
+        }
+        catch (Exception ex) { ShowError("重建资源索引失败", ex); return 0; }
     }
 
 

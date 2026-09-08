@@ -310,7 +310,8 @@ public sealed class UnityCacheScanService
                 descriptor.UnityTypeId ?? 0,
                 descriptor.Type,
                 descriptor.Size,
-                baselineSummary is { Length: > 0 } ? baselineSummary : null));
+                baselineSummary is { Length: > 0 } ? baselineSummary : null,
+                descriptor.Metadata.TryGetValue("containerEntry", out var entryPath) ? entryPath : null));
             records.Add(new AssetRecord
             {
                 LogicalPath = $"{entry.OuterKey}/{entry.InnerKey}/{descriptor.ContainerPath}/{descriptor.UnityPathId}.{descriptor.UnityTypeId}",
@@ -333,6 +334,8 @@ public sealed class UnityCacheScanService
                     ["reference"] = "true"
                 }
             });
+            if (descriptor.Metadata.TryGetValue("containerEntry", out var containerEntry))
+                records[^1].Metadata["containerEntry"] = containerEntry;
             if (baselineSummary is { Length: > 0 }) records[^1].Metadata["catalogBaseline"] = baselineSummary;
         }
         return (records, bundle, rows);
@@ -364,6 +367,7 @@ public sealed class UnityCacheScanService
             }
         };
         if (!string.IsNullOrEmpty(item.Baseline)) record.Metadata["catalogBaseline"] = item.Baseline!;
+        if (!string.IsNullOrEmpty(item.ContainerEntry)) record.Metadata["containerEntry"] = item.ContainerEntry!;
         return record;
     }
 

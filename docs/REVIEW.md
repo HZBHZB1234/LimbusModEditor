@@ -113,15 +113,21 @@
    「打开输出位置」、大小列人性化、防抖后台搜索与异步预览（大项目不卡顿）、
    项目保存去 sync-over-async。
 9. ~~工作台化 + 目录树资源浏览~~（P3.8 已实现，2026-09-06）：VS Code 式
-   活动栏 + 标签页（文本/静态/模组管理入 tab，Ctrl+Tab 循环）、
-   `AssetTreeBuilder` 惰性目录树（类文件夹浏览、跟随搜索结果）、
+   活动栏 + 标签页（文本/静态入 tab，Ctrl+Tab 循环；模组管理标签已在
+   P3.10 移除）、`AssetTreeBuilder` 惰性目录树（类文件夹浏览、跟随搜索结果）、
    目录定位器进程级记忆化。
+10. ~~资源视图容器化与布局精简~~（P3.10 已实现，2026-09-10）：资源视图改为
+   基于 Unity `m_Container` 的类文件管理器目录树（默认视图）+ 扁平列表；
+   显示层不再暴露缓存键 / Path ID（Path ID、Type ID 筛选与 vanilla 基线列
+   一并移除）；新增排序（名称/大小双向/类型/修改在前）与默认开启的
+   「仅显示容器内资源」；左栏按「① 获取资源 / ② 产出模组 / 更多」重排，
+   右栏按 预览 / 选中资源 / 常用 / 高级操作 / 调试 重排。
 
 ## 5. 基线状态
 
 ```text
 dotnet build LimbusModEditor.slnx --no-restore   ✓ 0 错误
-dotnet test LimbusModEditor.slnx --no-build      ✓ 231 通过（61 Format + 170 Domain，含 1 个 LME_BENCH 门控基准）
+dotnet test LimbusModEditor.slnx --no-build      ✓ 256 通过（62 Format + 194 Domain，含 1 个 LME_BENCH 门控基准）
 dotnet publish ... -o artifacts/publish-win-x64  ✓ LimbusModEditor.App.exe（UI 冒烟启动通过）
 ```
 

@@ -12,7 +12,9 @@ public sealed record AssetSearchQuery(
     int? UnityTypeId = null,
     long? MinSize = null,
     long? MaxSize = null,
-    bool? HasReplacement = null);
+    bool? HasReplacement = null,
+    AssetSortKind Sort = AssetSortKind.Name,
+    bool? HasContainerEntry = null);
 
 public sealed class AssetSearchService
 {
@@ -30,7 +32,7 @@ public sealed class AssetSearchService
         if (query.MaxSize is < 0) throw new ArgumentException("MaxSize 不能为负（负值曾经静默关闭上限）。", nameof(query));
         var text = query.Text?.Trim();
         return assets.Where(asset =>
-            (string.IsNullOrEmpty(text) || asset.LogicalPath.Contains(text, StringComparison.OrdinalIgnoreCase) || asset.SourcePath?.Contains(text, StringComparison.OrdinalIgnoreCase) == true) &&
+            (string.IsNullOrEmpty(text) || MatchesText(asset, text)) &&
             (query.Type is null || asset.Type == query.Type) &&
             (query.State is null || asset.EditState == query.State) &&
             (string.IsNullOrEmpty(query.Container) || asset.ContainerPath?.Contains(query.Container, StringComparison.OrdinalIgnoreCase) == true) &&
@@ -38,8 +40,62 @@ public sealed class AssetSearchService
             (query.UnityTypeId is null || asset.UnityTypeId == query.UnityTypeId) &&
             (query.MinSize is null || asset.Size >= query.MinSize) &&
             (query.MaxSize is null || asset.Size <= query.MaxSize) &&
-            (query.HasReplacement is null || HasUsableReplacement(asset) == query.HasReplacement))
-            .OrderBy(x => x.LogicalPath, StringComparer.OrdinalIgnoreCase).ToArray();
+            (query.HasReplacement is null || HasUsableReplacement(asset) == query.HasReplacement) &&
+            (query.HasContainerEntry is null || HasContainerEntry(asset) == query.HasContainerEntry))
+            .OrderBy(x => x, CreateComparer(query.Sort)).ToArray();
+    }
+
+    /// <summary>对象是否在 m_Container 表里有游戏内资源路径（文件管理器视图
+    /// 的「看得见的文件」；容器外的支撑对象默认隐藏以减少技术噪音）。
+    /// 导入的旧式资源不算支撑对象（LogicalPath 就是它的名字），始终视为可见。</summary>
+    private static bool HasContainerEntry(AssetRecord asset)
+        => !AssetDisplay.IsCacheReference(asset) || !string.IsNullOrWhiteSpace(AssetDisplay.ContainerEntryPath(asset));
+
+    /// <summary>文本匹配覆盖：显示路径（容器路径 + 友好名）、LogicalPath、
+    /// 源文件路径 —— 用户按游戏内资源名搜索时不需要知道缓存键。</summary>
+    private static bool MatchesText(AssetRecord asset, string text)
+        => AssetDisplay.DisplayPath(asset).Contains(text, StringComparison.OrdinalIgnoreCase) ||
+           asset.LogicalPath.Contains(text, StringComparison.OrdinalIgnoreCase) ||
+           asset.SourcePath?.Contains(text, StringComparison.OrdinalIgnoreCase) == true;
+
+    private static IComparer<AssetRecord> CreateComparer(AssetSortKind sort) => sort switch
+    {
+        AssetSortKind.SizeDescending => Comparer<AssetRecord>.Create((a, b) =>
+        {
+            var bySize = b.Size.CompareTo(a.Size);
+            return bySize != 0 ? bySize : CompareByDisplayPath(a, b);
+        }),
+        AssetSortKind.SizeAscending => Comparer<AssetRecord>.Create((a, b) =>
+        {
+            var bySize = a.Size.CompareTo(b.Size);
+            return bySize != 0 ? bySize : CompareByDisplayPath(a, b);
+        }),
+        AssetSortKind.Type => Comparer<AssetRecord>.Create((a, b) =>
+        {
+            var byType = string.Compare(AssetDisplay.TypeLabel(a.Type), AssetDisplay.TypeLabel(b.Type), StringComparison.CurrentCulture);
+            return byType != 0 ? byType : CompareByDisplayPath(a, b);
+        }),
+        AssetSortKind.ModifiedFirst => Comparer<AssetRecord>.Create((a, b) =>
+        {
+            var modifiedA = a.EditState is not AssetEditState.Unchanged ? 0 : 1;
+            var modifiedB = b.EditState is not AssetEditState.Unchanged ? 0 : 1;
+            var byModified = modifiedA.CompareTo(modifiedB);
+            return byModified != 0 ? byModified : CompareByDisplayPath(a, b);
+        }),
+        _ => Comparer<AssetRecord>.Create(CompareByDisplayPath),
+    };
+
+    private static int CompareByDisplayPath(AssetRecord a, AssetRecord b)
+    {
+        var pathA = AssetDisplay.SplitTreePath(AssetDisplay.DisplayPath(a));
+        var pathB = AssetDisplay.SplitTreePath(AssetDisplay.DisplayPath(b));
+        for (var i = 0; i < Math.Min(pathA.Length, pathB.Length); i++)
+        {
+            var bySegment = AssetDisplay.CompareNames(pathA[i], pathB[i]);
+            if (bySegment != 0) return bySegment;
+        }
+        var byDepth = pathA.Length.CompareTo(pathB.Length);
+        return byDepth != 0 ? byDepth : string.Compare(a.LogicalPath, b.LogicalPath, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>An asset counts as "replaced" only when its registered

@@ -9,13 +9,13 @@
 LimbusModEditor（C#/.NET 8 + WPF，Windows x64，AssetsTools.NET 3.0.5 适配层）已能：
 真实游戏数据读取验证（1459 个真实 bundle + 1531 个真实 .bank + 真实 Carra2 模组）、
 Carra2/Rebank/Lunartique/Bank 四格式导入导出、真实 Texture2D `.resS` 流读写、
-多格式项目导出、目录无感自动化、模组目录管理（`_disable` 约定）、
+多格式项目导出、目录无感自动化、模组目录自动获取（`_disable` 约定）、
 **真实写回闭环（T1：纹理替换→Carra2 导出→已装模组目录，含重大写回缺陷修复）**、
 **lang 文本模组通道（T2/T4：RFC6902 差分，与 LCTA changes.py 兼容）**、
 **官方 catalog 只读解析 + vanilla 基线判定（T3，CRC 口径与 LCTA 交叉验证一致）**、
 **.staticmod 静态数据模组通道（读取/预览应用/生成，两个真实样本导入验证通过）**。
 
-**当前基线：231 个测试全绿**（61 Format + 170 Domain，含 1 个 LME_BENCH 门控基准）。最近提交见 git log。
+**当前基线：256 个测试全绿**（62 Format + 194 Domain，含 1 个 LME_BENCH 门控基准）。最近提交见 git log。
 
 基线命令（每轮开始和结束都必须跑）：
 
@@ -72,7 +72,7 @@ dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r 
   测试 22 个。
 - **T3 catalog 基线**：`src/LimbusModEditor.Application/Catalog/`
   （`CatalogFileService` + `CatalogBaselineService`）、导入自动判定 +
-  资源列表「vanilla 基线」列、测试 6 个。
+  资源元数据 `catalogBaseline` 与导入诊断（P3.10 起不再单列一列）、测试 6 个。
 - **.staticmod 静态数据模组通道**：`src/LimbusModEditor.Application/StaticMods/`
   （`StaticModService`）、UI `StaticModWindow`、测试 8 个（含两个真实样本）。
 - 测试基线 168 → 205（61 Format + 144 Domain）。
@@ -168,6 +168,38 @@ USAGE §1.3）：
   （生产必选、一次性），索引写回仅 18s；搜索/树构建本就良好，未动。
 - 新增测试 3 个（瘦身往返×2 + 门控基准），基线 228 → 231。
 
+## 3.9 本轮六（2026-09-10）：资源工作台 UI 重构（P3.10）
+
+用户指出的核心问题：资源视图按缓存键路径展示、筛选行/列表塞满 Path ID、
+Type ID、vanilla 基线等技术字段，还有「模组管理」这类与「做模组」无关的入口。
+目标交互：打开/创建 .lmeproj → 导入或扫描资源 → 改资源/音频/文本并预览 →
+修改暂存项目 → 导出时给出各种思路。
+
+- **m_Container 容器视图**：`AssetsToolsBackend.ReadContainerMap` 按真实 Unity 6
+  bundle 结构读出「游戏内资源路径 → PPtr」（`m_Container` → `Array` 子节点 →
+  pair `first`/`second`，PPtr 在 `second.asset` 下，`m_FileID` 0/-1，已对真实
+  bundle 验证：4330 对象中 516 个有条目），写入资源元数据 `containerEntry`；
+  扫描索引 SQLite 新增 `assets.container_entry` 列（`EnsureContainerEntryColumn`
+  自动迁移旧库）。**注意：`AssetRecord.ContainerPath`（CAB/SerializedFile 名）
+  仍被导出/构建链路消费，容器条目走独立字段，绝不可混用**（曾一度写错并回退）。
+- **显示层 `AssetDisplay`**：显示路径 = 容器条目；无条目归入「未命名资源」，
+  叶子名退化为「类型中文 #编号」；导入资源用 LogicalPath 并剥掉纯编号叶子；
+  中文类型/状态标签 + 自然名称比较（icon2 < icon10）。
+- **目录树为默认视图**（`AssetTreeBuilder` 改按显示路径逐段惰性展开），
+  列表一键切换，两视图共用同一份右键菜单（新增 `AssetTree_PreviewMouseRightButtonDown`）。
+- **搜索/排序/过滤**：`AssetSearchQuery` 追加 `Sort`（名称/大小双向/类型/修改在前）
+  与 `HasContainerEntry`（默认开启「仅显示容器内资源」）；文本匹配覆盖显示路径、
+  原路径、源文件。新增参数保持尾部可选，旧的 9 参位置调用不受影响。
+- **布局精简**：删掉「新建项目」按钮、活动栏 🗂 与 `ModManagerControl.cs`、
+  Path ID / Type ID 筛选框、vanilla 基线列、右栏 Path ID / 容器两行；
+  筛选行收拢 + 「高级筛选」折叠区；右栏重排为 创作状态 / 预览 / 选中资源 /
+  常用 / 高级操作 / 调试。
+- 列表行改用 `AssetRow`（`Name`/`TypeLabel`/`StateLabel`/`Size`/`DisplayPath`），
+  选中还原走新增的 `RestoreListSelection`。
+- 测试：新增 `AssetDisplayTests` 12 个，`AssetTreeBuilderTests` 改写为容器语义
+  7 个 + 真实缓存遍历，`AssetSearchServiceTests` +5。基线 231 → **256**
+  （62 Format + 194 Domain）。
+
 ## 4. 下一轮明确任务（按优先级，每项含验收标准）
 
 ### T6（P1）傻瓜化后续打磨（候选）
@@ -199,7 +231,8 @@ USAGE §1.3）：
   CRC 口径与 LCTA 交叉验证 10/10 一致）。
 - 重要事实：记录区 CRC/大小字段在 catalog 格式版本间整体平移
   （2026-08-22 +0x44/+0x48 → 2026-09-03 +0x3C/+0x40），解析器双布局自校准。
-- 导入 bundle 自动判定，资源列表「vanilla 基线」列展示。
+- 导入 bundle 自动判定，写入资源元数据 `catalogBaseline` 并出现在导入诊断
+  （P3.10 起资源视图不再单列一列）。
 
 ### T5（P2）✅ 持续执行——文档同步
 - 每轮把结论写回 `docs/ROADMAP.md`（P3.5 新节）、`docs/REVIEW.md`（自审表）、
@@ -231,13 +264,16 @@ USAGE §1.3）：
   resS/ReplaceTextureFromPng/SurveyBundle/字段树/PPtr 依赖）、`UnityObjectSummary*`、
   `UnityClassId`（Mesh=43/AnimationClip=74）
 - `src/LimbusModEditor.Application/` — `Projects/`（ModProject.Sources 多来源）、
+  `Assets/`（`AssetDisplay` 容器显示层 / `AssetSearchService` 搜索排序过滤 /
+  `AssetTreeBuilder` 目录树）、`Scanning/`（`UnityCacheScanService` +
+  `UnityCacheSqliteIndexStore`）、
   `Build/`（ModExportService.ExportAllAsync/缓存对齐、NewModTemplateService）、
   `Debugging/`（GameDirectoryLocator/UnityCacheLocator/ModDirectoryLocator/
   ModInstallService/ProjectAutoConfigureService）
 - `src/LimbusModEditor.App/` — `MainWindow`（活动栏 + 工作台标签页：资源/文本/
-  静态/模组管理；资源列表与目录树切换）、`LangTextModControl`、`StaticModControl`、
-  `ModManagerControl`（均作为工作台 UserControl 嵌入）、`ProjectSettingsWindow`、
-  `ExportReportWindow`、`MultiExportReportWindow`
+  静态；资源视图默认 m_Container 目录树，可切列表）、`AssetRow`（列表显示层）、
+  `LangTextModControl`、`StaticModControl`（工作台 UserControl）、
+  `ProjectSettingsWindow`、`ExportReportWindow`、`MultiExportReportWindow`
 - `tests/LimbusModEditor.Format.Tests/` — 真实样本：`RealSamples`（缓存/模组定位）、
   `RealSampleTests`（bundle 扫描/纹理 resS/摘要/类型树勘察/格式分布）、`RealBankTests`
 - `tests/LimbusModEditor.Domain.Tests/` — `RealLocatorTests`、`MultiFormatExportTests`、

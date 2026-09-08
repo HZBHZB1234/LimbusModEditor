@@ -100,4 +100,85 @@ public class AssetSearchServiceTests : IDisposable
         var fromSnapshot = service.Search(project.Assets.ToArray(), new AssetSearchQuery(Text: "ui", Type: AssetType.Texture));
         Assert.Equal(fromProject.Select(x => x.AssetId), fromSnapshot.Select(x => x.AssetId));
     }
+
+    // ── 显示层：排序策略与「仅显示容器内资源」 ────────────────────────────
+
+    /// <summary>扫描索引形态：容器内资源带 m_Container 条目，支撑对象没有。</summary>
+    private static ModProject ContainerProject()
+    {
+        var project = new ModProject();
+        project.Assets.Add(new AssetRecord
+        {
+            LogicalPath = "outerA/innerA/CAB-a/10.28", Type = AssetType.Texture, Size = 4096, ContainerPath = "CAB-a",
+            Metadata = { ["reference"] = "true", ["containerEntry"] = "assets/ui/logo.png" },
+        });
+        project.Assets.Add(new AssetRecord
+        {
+            LogicalPath = "outerA/innerA/CAB-a/11.28", Type = AssetType.Sprite, Size = 512, ContainerPath = "CAB-a",
+            Metadata = { ["reference"] = "true", ["containerEntry"] = "assets/ui/icon.png" },
+        });
+        project.Assets.Add(new AssetRecord
+        {
+            LogicalPath = "outerA/innerA/CAB-a/12.114", Type = AssetType.MonoBehaviour, Size = 2048, ContainerPath = "CAB-a",
+            UnityPathId = 12,
+            Metadata = { ["reference"] = "true" }, // 容器外的支撑对象
+        });
+        project.Assets.Add(new AssetRecord
+        {
+            LogicalPath = "imports/manual.png", Type = AssetType.Texture, Size = 128, EditState = AssetEditState.Modified,
+        });
+        return project;
+    }
+
+    [Fact]
+    public void Sort_by_size_moves_biggest_or_smallest_first()
+    {
+        var service = new AssetSearchService();
+        var descending = service.Search(ContainerProject(), new AssetSearchQuery(Sort: AssetSortKind.SizeDescending));
+        Assert.Equal([4096L, 2048L, 512L, 128L], descending.Select(x => x.Size).ToArray());
+        var ascending = service.Search(ContainerProject(), new AssetSearchQuery(Sort: AssetSortKind.SizeAscending));
+        Assert.Equal([128L, 512L, 2048L, 4096L], ascending.Select(x => x.Size).ToArray());
+    }
+
+    [Fact]
+    public void Sort_by_name_is_natural_and_default()
+    {
+        var project = ContainerProject();
+        var service = new AssetSearchService();
+        var byName = service.Search(project, new AssetSearchQuery());
+        Assert.Equal(
+            service.Search(project, new AssetSearchQuery(Sort: AssetSortKind.Name)).Select(x => x.AssetId),
+            byName.Select(x => x.AssetId));
+        // 显示路径逐段自然排序：assets/ui/* 在 imports/* 之前，容器外对象进「未命名资源」。
+        Assert.Equal(
+            ["assets/ui/icon.png", "assets/ui/logo.png", "imports/manual.png", $"{AssetDisplay.UnnamedFolder}/脚本数据 #12"],
+            byName.Select(x => AssetDisplay.DisplayPath(x)).ToArray());
+    }
+
+    [Fact]
+    public void Sort_modified_first_puts_edited_assets_on_top()
+    {
+        var results = new AssetSearchService().Search(ContainerProject(), new AssetSearchQuery(Sort: AssetSortKind.ModifiedFirst));
+        Assert.Equal("imports/manual.png", AssetDisplay.DisplayPath(results[0]));
+        Assert.Equal(4, results.Count);
+    }
+
+    [Fact]
+    public void Sort_by_type_groups_the_same_label_together()
+    {
+        var results = new AssetSearchService().Search(ContainerProject(), new AssetSearchQuery(Sort: AssetSortKind.Type));
+        var labels = results.Select(x => AssetDisplay.TypeLabel(x.Type)).ToArray();
+        Assert.Equal(labels.OrderBy(x => x, StringComparer.CurrentCulture), labels);
+    }
+
+    [Fact]
+    public void Container_entry_filter_hides_support_objects_but_keeps_imports()
+    {
+        var service = new AssetSearchService();
+        var visible = service.Search(ContainerProject(), new AssetSearchQuery(HasContainerEntry: true));
+        Assert.Equal(3, visible.Count); // 两个容器内资源 + 一个导入资源
+        Assert.DoesNotContain(visible, x => x.Type == AssetType.MonoBehaviour);
+        var hidden = service.Search(ContainerProject(), new AssetSearchQuery(HasContainerEntry: false));
+        Assert.Equal(AssetType.MonoBehaviour, Assert.Single(hidden).Type);
+    }
 }

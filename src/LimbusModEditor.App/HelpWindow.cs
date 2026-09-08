@@ -95,8 +95,9 @@ public sealed class HelpWindow : Window
 
         panel.Children.Add(MakeTitle("资源筛选"));
         panel.Children.Add(MakeBody(
-            "• 资源列表上方筛选行支持：文本搜索、类型、编辑状态、Path ID、Type ID、\n" +
-            "  大小区间（KB）与「仅已替换」开关；\n" +
+            "• 资源视图默认按游戏容器目录（类文件夹）浏览，可切到扁平列表；\n" +
+            "• 筛选行支持：文本搜索、类型、编辑状态、排序方式与「仅显示容器内资源」；\n" +
+            "• 「高级筛选」里还有大小区间（KB）与「仅已替换」开关；\n" +
             "• 「清除筛选」一键还原；筛选生效时右上角计数显示 “筛选后 / 总数”。"));
 
         panel.Children.Add(MakeTitle("自动定位与预览"));
@@ -106,8 +107,6 @@ public sealed class HelpWindow : Window
             "  真实缓存根为 LocalLow/Unity/ProjectMoon_LimbusCompany（可能是 junction），\n" +
             "  按缓存条目（外层键/内层键/__data）验证并显示数量，由你确认；\n" +
             "• 「自动建议模组目录」：真实加载器默认使用 %APPDATA%/LimbusCompanyMods；\n" +
-            "• 「管理已安装模组」：按加载器自身的 _disable 后缀约定切换启用/禁用\n" +
-            "  （只重命名，不改文件内容）；\n" +
             "• 「十六进制预览」：查看任意资源前 4 KiB 的 HEX 转储与 ASCII 边栏，\n" +
             "  并显示文件大小与原始/当前哈希，便于判断未知数据再决定是否替换。"));
 

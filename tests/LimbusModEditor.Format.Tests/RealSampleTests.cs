@@ -185,4 +185,36 @@ public class RealSampleTests
         }
         Console.WriteLine($"真实 bundle 类型树勘察: 内嵌类型树 {withTrees}, 剥离 {withoutTrees}; 版本: {string.Join("; ", versions.Take(6))}");
     }
+
+    [Fact]
+    public void Real_bundles_expose_m_container_asset_paths()
+    {
+        // m_Container（AssetBundle 主对象的容器表）是「类文件管理器」资源视图
+        // 的数据源：对象 → assets/... 游戏内真实路径。真实 bundle 必须能读出
+        // 足量的容器条目；完全没有则说明解析退化（fail soft 掩盖了真实缺陷）。
+        var root = RealSamples.UnityCacheRoot;
+        if (root is null) return;
+
+        var service = new UnityAssetService();
+        var totalObjects = 0;
+        var withEntry = 0;
+        var sampleEntries = new List<string>();
+        foreach (var bundle in RealSamples.BundleDataFiles(limit: 12))
+        {
+            foreach (var descriptor in service.ScanBundle(bundle))
+            {
+                totalObjects++;
+                if (descriptor.Metadata.TryGetValue("containerEntry", out var entry))
+                {
+                    withEntry++;
+                    if (sampleEntries.Count < 8 && entry.StartsWith("assets/", StringComparison.OrdinalIgnoreCase))
+                        sampleEntries.Add(entry);
+                }
+            }
+        }
+        Console.WriteLine($"m_Container 覆盖: {withEntry}/{totalObjects} 对象有容器条目; 样例:\n  " + string.Join("\n  ", sampleEntries));
+        Assert.True(totalObjects > 0, "真实 bundle 扫描不到对象");
+        Assert.True(withEntry > 0, "真实 bundle 读不出任何 m_Container 容器条目");
+        Assert.Contains(sampleEntries, e => e.StartsWith("assets/", StringComparison.OrdinalIgnoreCase));
+    }
 }

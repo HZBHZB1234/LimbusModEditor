@@ -340,7 +340,7 @@ public sealed class UnityAssetService
         {
             cancellationToken.ThrowIfCancellationRequested();
             var logicalPath = $"{bundleName}/{descriptor.ContainerPath}/{descriptor.PathId}.{descriptor.TypeId}";
-            return new AssetRecord
+            var record = new AssetRecord
             {
                 LogicalPath = logicalPath,
                 SourcePath = bundlePath,
@@ -357,6 +357,11 @@ public sealed class UnityAssetService
                     ["unityBundle"] = "true"
                 }
             };
+            // m_Container 条目（assets/... 游戏内资源路径）：文件管理器式视图的
+            // 显示数据源。为空（对象未被容器表引用）时不写。
+            if (!string.IsNullOrWhiteSpace(descriptor.ContainerEntryPath))
+                record.Metadata["containerEntry"] = descriptor.ContainerEntryPath;
+            return record;
         }).ToArray();
     }
 }

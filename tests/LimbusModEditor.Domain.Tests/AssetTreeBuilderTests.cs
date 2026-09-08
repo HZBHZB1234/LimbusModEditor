@@ -2,92 +2,147 @@ using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Domain.Projects;
 using LimbusModEditor.Application.Scanning;
-using LimbusModEditor.Formats.Unity;
 
 namespace LimbusModEditor.Domain.Tests;
 
-/// <summary>VS Code 式目录树（P3.8）：把扁平 LogicalPath 按路径段分组，
-/// 像文件夹一样浏览。真实缓存样本缺失时真实样本测试自动跳过。</summary>
+/// <summary>文件管理器式资源目录树（P3.8 改版）：树完全建立在
+/// Unity m_Container 的容器条目（<c>metadata["containerEntry"]</c>）之上，
+/// 用户看到的是游戏内真实资源路径的逐段展开，而不是缓存键 / Path ID。
+/// 真实缓存样本缺失时真实样本测试自动跳过。</summary>
 public class AssetTreeBuilderTests
 {
-    private static AssetRecord Asset(string logicalPath, AssetType type = AssetType.Texture, long size = 100)
+    /// <summary>扫描索引形态的资源：LogicalPath 是缓存键路径，容器条目才是
+    /// 用户可见路径（与 UnityCacheScanService 写入的元数据一致）。</summary>
+    private static AssetRecord ContainerAsset(
+        string containerEntry,
+        string cacheKey = "outerA/innerA/CAB-aaa",
+        AssetType type = AssetType.Texture,
+        long size = 100,
+        long? pathId = null)
+        => new()
+        {
+            LogicalPath = $"{cacheKey}/{pathId ?? 1}.28",
+            ContainerPath = "CAB-aaa",
+            UnityPathId = pathId ?? 1,
+            Type = type,
+            Size = size,
+            Metadata =
+            {
+                ["reference"] = "true",
+                ["containerEntry"] = containerEntry,
+            },
+        };
+
+    /// <summary>导入的旧式资源：没有容器条目，显示路径就是 LogicalPath。</summary>
+    private static AssetRecord ImportedAsset(string logicalPath, AssetType type = AssetType.Text, long size = 100)
         => new() { LogicalPath = logicalPath, Type = type, Size = size };
 
     [Fact]
-    public void Roots_group_by_first_segment_directories_before_leaves()
+    public void Roots_group_by_container_first_segment_directories_before_leaves()
     {
         var roots = AssetTreeBuilder.BuildRoots(
         [
-            Asset("zzz-file"),
-            Asset("outerB/inner1/1.28"),
-            Asset("outerA/inner1/2.28"),
+            ContainerAsset("ui/logo.png"),
+            ContainerAsset("assets/assetbundle/icon.png"),
+            ContainerAsset("assets/assetbundle/text.json", type: AssetType.Json),
         ]);
-        Assert.Equal(3, roots.Count);
-        Assert.Equal(["outerA", "outerB", "zzz-file"], roots.Select(x => x.Name).ToArray());
-        Assert.False(roots[0].IsLeaf);
-        Assert.Equal(1, roots[0].Count);
-        Assert.True(roots[2].IsLeaf);
-        Assert.Equal("zzz-file", roots[2].Asset!.LogicalPath);
+        Assert.Equal(2, roots.Count);
+        Assert.Equal(["assets", "ui"], roots.Select(x => x.Name).ToArray());
+        Assert.All(roots, x => Assert.False(x.IsLeaf));
+        Assert.Equal(2, roots[0].Count);
+        Assert.Equal(1, roots[1].Count);
     }
 
     [Fact]
-    public void Expand_splits_by_depth_and_ends_in_leaves()
+    public void Root_level_container_entry_becomes_a_leaf_at_root()
     {
-        var root = AssetTreeBuilder.BuildRoots([Asset("outer/inner1/10.28"), Asset("outer/inner2/20.129")]).Single();
-        var inners = root.Expand();
-        Assert.Equal(["inner1", "inner2"], inners.Select(x => x.Name).ToArray());
-        Assert.All(inners, x => Assert.False(x.IsLeaf));
-
-        var leaves = inners[0].Expand();
-        var leaf = Assert.Single(leaves);
-        Assert.True(leaf.IsLeaf);
-        Assert.Equal("10.28", leaf.Name);
-        Assert.Same(inners[0].Assets[0], leaf.Asset);
-        Assert.Equal(2, leaf.Depth);
-        // 叶子不再展开出子节点。
-        Assert.Empty(leaf.Expand());
+        var root = Assert.Single(AssetTreeBuilder.BuildRoots([ContainerAsset("bundle_root.png")]));
+        Assert.True(root.IsLeaf);
+        Assert.Equal("bundle_root.png", root.Name);
+        Assert.Equal("bundle_root.png", AssetDisplay.DisplayPath(root.Asset!));
     }
 
     [Fact]
-    public void Deep_container_paths_group_segment_by_segment()
+    public void Expand_walks_container_segments_and_ends_in_named_leaves()
     {
-        var root = AssetTreeBuilder.BuildRoots(
+        var root = Assert.Single(AssetTreeBuilder.BuildRoots(
         [
-            Asset("outer/inner/assets/ui/logo/11.28"),
-            Asset("outer/inner/assets/ui/icon/12.28"),
-            Asset("outer/inner/31.82"), // 容器为空：直接挂在 inner 下
-        ]).Single();
-        var inner = Assert.Single(root.Expand());
-        var second = inner.Expand();
-        var container = Assert.Single(second, x => x.Name == "assets");
-        Assert.Equal(2, container.Count); // 两个深层资产，容器为空的叶子不进目录
+            ContainerAsset("assets/assetbundle/ui/logo.png"),
+            ContainerAsset("assets/assetbundle/ui/icon.png"),
+        ]));
+        var second = Assert.Single(root.Expand());
+        Assert.Equal("assetbundle", second.Name);
+        Assert.False(second.IsLeaf);
 
-        var ui = Assert.Single(container.Expand());
-        var icon = Assert.Single(ui.Expand(), x => x.Name == "icon");
-        var logo = Assert.Single(ui.Expand(), x => x.Name == "logo");
-        Assert.Equal("12.28", Assert.Single(icon.Expand()).Name);
-        var leaf = Assert.Single(logo.Expand());
+        var ui = Assert.Single(second.Expand());
+        Assert.Equal("ui", ui.Name);
+        var leaves = ui.Expand();
+        Assert.Equal(["icon.png", "logo.png"], leaves.Select(x => x.Name).ToArray());
+        Assert.All(leaves, x => Assert.True(x.IsLeaf));
+        Assert.Equal(3, leaves[0].Depth);
+        // 叶子不再展开出子节点。
+        Assert.Empty(leaves[0].Expand());
+    }
+
+    [Fact]
+    public void Assets_without_container_entry_fall_into_unnamed_folder()
+    {
+        // 容器外的支撑对象（没有 m_Container 条目）→ 统一归入「未命名资源」，
+        // 叶子名退化为「类型中文 #编号」，保证仍能互相区分。
+        var support = new AssetRecord
+        {
+            LogicalPath = "outerA/innerA/CAB-aaa/777.114",
+            ContainerPath = "CAB-aaa",
+            UnityPathId = 777,
+            Type = AssetType.MonoBehaviour,
+            Metadata = { ["reference"] = "true" },
+        };
+        var root = Assert.Single(AssetTreeBuilder.BuildRoots([support]));
+        Assert.Equal(AssetDisplay.UnnamedFolder, root.Name);
+        var leaf = Assert.Single(root.Expand());
         Assert.True(leaf.IsLeaf);
-        Assert.Equal("11.28", leaf.Name);
-        Assert.Equal(5, leaf.Depth);
+        Assert.Equal("脚本数据 #777", leaf.Name);
+    }
 
-        var direct = Assert.Single(second, x => x.Name == "31.82");
-        Assert.True(direct.IsLeaf);
+    [Fact]
+    public void Imported_assets_keep_their_logical_path_but_strip_internal_leaf()
+    {
+        var roots = AssetTreeBuilder.BuildRoots(
+        [
+            ImportedAsset("lang/cn/strings.json", AssetType.Json),
+            ImportedAsset("fsb/bgm.10.83", AssetType.Audio),
+        ]);
+        Assert.Equal(["fsb", "lang"], roots.Select(x => x.Name).ToArray());
+        Assert.Equal("bgm.10.83", Assert.Single(roots[0].Expand()).Name);
+        Assert.Equal("strings.json", Assert.Single(Assert.Single(roots[1].Expand()).Expand()).Name);
     }
 
     [Fact]
     public void Directory_header_count_matches_subtree_assets()
     {
-        var root = AssetTreeBuilder.BuildRoots(
+        var root = Assert.Single(AssetTreeBuilder.BuildRoots(
         [
-            Asset("outer/inner1/1.28"),
-            Asset("outer/inner2/2.28"),
-            Asset("outer/inner2/3.28"),
-        ]).Single();
+            ContainerAsset("assets/ui/logo.png"),
+            ContainerAsset("assets/icon/1.png"),
+            ContainerAsset("assets/icon/2.png"),
+        ]));
         Assert.Equal(3, root.Count);
-        var inners = root.Expand();
-        Assert.Equal(1, inners[0].Count);
-        Assert.Equal(2, inners[1].Count);
+        var children = root.Expand();
+        Assert.Equal(1, Assert.Single(children, x => x.Name == "ui").Count);
+        Assert.Equal(2, Assert.Single(children, x => x.Name == "icon").Count);
+    }
+
+    [Fact]
+    public void Sibling_names_sort_naturally_and_directories_come_first()
+    {
+        var root = Assert.Single(AssetTreeBuilder.BuildRoots(
+        [
+            ContainerAsset("assets/icon10.png"),
+            ContainerAsset("assets/icon2.png"),
+            ContainerAsset("assets/sub/1.png"),
+        ]));
+        var children = root.Expand();
+        Assert.Equal(["sub", "icon2.png", "icon10.png"], children.Select(x => x.Name).ToArray());
     }
 
     [Fact]

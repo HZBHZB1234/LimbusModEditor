@@ -6,7 +6,20 @@ using LimbusModEditor.Editing.Images;
 
 namespace LimbusModEditor.Formats.Unity;
 
-public sealed record UnityAssetDescriptor(string ContainerPath, long PathId, int TypeId, uint ByteSize, AssetType AssetType);
+/// <summary>bundle 内单个对象的勘察结果。</summary>
+/// <remarks>
+/// <see cref="ContainerPath"/> 是对象所在的 SerializedFile 名（CAB-xxx，
+/// 字段编辑 / 重打包 / Carra2 键的技术键，勿用于显示）；
+/// <see cref="ContainerEntryPath"/> 是 AssetBundle 主对象 m_Container 表里
+/// 该对象的「assets/...」游戏内资源路径（可能为空：对象未被容器表引用），
+/// 供文件管理器式资源视图显示使用。</remarks>
+public sealed record UnityAssetDescriptor(
+    string ContainerPath,
+    string ContainerEntryPath,
+    long PathId,
+    int TypeId,
+    uint ByteSize,
+    AssetType AssetType);
 public sealed record UnitySerializedObject(long PathId, int TypeId, byte[] Data);
 /// <summary>Raw serialized payload of one object inside a bundle, with the
 /// SerializedFile's TYPE TABLE facts. <paramref name="TypeTableIndex"/> is the
@@ -469,10 +482,62 @@ public sealed class AssetsToolsBackend : IDisposable
             if (!bundle.file.IsAssetsFile(bundle.file.GetFileIndex(fileName))) continue;
             var file = _manager.LoadAssetsFileFromBundle(bundle, fileName, loadDeps: false);
             if (file is null) continue;
+            // 先读 AssetBundle 主对象的 m_Container 表（容器路径 → 同文件 PathId），
+            // 再逐对象填充 ContainerEntryPath = 游戏内真实资源路径（assets/...）。
+            var containerMap = ReadContainerMap(file);
             foreach (var info in file.file.AssetInfos)
-                assets.Add(new UnityAssetDescriptor(fileName, info.PathId, info.GetTypeId(file.file), info.ByteSize, MapType(info.GetTypeId(file.file))));
+                assets.Add(new UnityAssetDescriptor(
+                    fileName,
+                    containerMap.TryGetValue(info.PathId, out var entryPath) ? entryPath : string.Empty,
+                    info.PathId, info.GetTypeId(file.file), info.ByteSize, MapType(info.GetTypeId(file.file))));
         }
         return assets;
+    }
+
+    /// <summary>读取 AssetBundle 主对象（class 142）的 m_Container 表：
+    /// 「Assets/...」容器路径 → 同一个 SerializedFile 内对象的 PathId。
+    /// 这是 Unity 官方记录「资源名 → 对象」的映射，也是文件管理器式资源视图的
+    /// 数据来源。没有类型树 / 对象损坏时 fail soft 返回空表（该 bundle 的资源
+    /// 退回「未命名资源」分组，不阻塞扫描）。
+    /// 真实样本（Unity 6000.3）实测结构：m_Container(map) → "Array" 子节点 →
+    /// 逐对 first(string 路径) + second(AssetInfo{ preloadIndex, preloadSize,
+    /// asset: PPtr{ m_FileID, m_PathID } })；旧版 Unity 的 second 直接是 PPtr。</summary>
+    private Dictionary<long, string> ReadContainerMap(AssetsFileInstance file)
+    {
+        var map = new Dictionary<long, string>();
+        foreach (var info in file.file.AssetInfos)
+        {
+            if (info.GetTypeId(file.file) != UnityClassId.AssetBundle) continue;
+            AssetTypeValueField fields;
+            try { fields = _manager.GetBaseField(file, info, AssetReadFlags.None); }
+            catch (Exception) { continue; }
+            var container = FindField(fields, "m_Container", "container");
+            if (container is null) continue;
+            // 真实样本：条目挂在嵌套的 "Array"/"data" 子节点下；旧版直接是条目。
+            var items = container.Children.FirstOrDefault(c =>
+                    c.FieldName.Equals("Array", StringComparison.OrdinalIgnoreCase) ||
+                    c.FieldName.Equals("data", StringComparison.OrdinalIgnoreCase))
+                ?? container;
+            foreach (var pair in items.Children)
+            {
+                // 新旧 Unity 的键值对字段名不同：key/first + value/second 都认。
+                var key = pair.Children.FirstOrDefault(c => c.FieldName is "key" or "first");
+                var value = pair.Children.FirstOrDefault(c => c.FieldName is "value" or "second");
+                if (key is null || value is null) continue;
+                var path = key.Value?.ValueType == AssetValueType.String ? key.AsString : null;
+                if (string.IsNullOrWhiteSpace(path)) continue;
+                // Unity 6 的 value 是 AssetInfo（PPtr 在 asset 子字段）；旧版直接是 PPtr。
+                var pptr = FindField(value, "asset") ?? value;
+                // 只索引 m_FileID=0（指向本 SerializedFile）的条目；跨文件引用
+                // 由外部依赖表达，不属于本 bundle 的容器路径。
+                var fileId = ReadInt(pptr, "m_FileID", "fileID");
+                if (fileId is not (0 or -1)) continue;
+                var pathId = ReadPPtrPathId(pptr);
+                if (pathId is not { } id) continue;
+                map[id] = path;
+            }
+        }
+        return map;
     }
 
     /// <summary>Read-only diagnostic probe (used by real-sample verification):

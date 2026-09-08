@@ -3,9 +3,13 @@ using LimbusModEditor.Domain.Assets;
 
 namespace LimbusModEditor.Application.Scanning;
 
-/// <summary>一条索引资产的行数据（与 bundle 内对象一一对应）。</summary>
+/// <summary>一条索引资产的行数据（与 bundle 内对象一一对应）。
+/// <see cref="Container"/> 是对象所在 SerializedFile 名（技术键）；
+/// <see cref="ContainerEntry"/> 是 m_Container 的「assets/...」游戏内资源路径
+/// （可空），供文件管理器式资源视图显示。</summary>
 public sealed record UnityCacheIndexRow(
-    int BundleIndex, string Container, long PathId, int TypeId, AssetType Type, long Size, string? Baseline);
+    int BundleIndex, string Container, long PathId, int TypeId, AssetType Type, long Size, string? Baseline,
+    string? ContainerEntry = null);
 
 /// <summary>一个 bundle 的索引快照（新鲜度检查 + 资产行）。</summary>
 public sealed record UnityCacheIndexBundle(
@@ -68,6 +72,22 @@ public sealed class UnityCacheSqliteIndexStore
             CREATE INDEX IF NOT EXISTS ix_assets_bundle ON assets(data_path, bundle_index);
             """;
         command.ExecuteNonQuery();
+        EnsureContainerEntryColumn(connection);
+    }
+
+    /// <summary>轻量迁移：container_entry 列（m_Container 路径）是后加的。
+    /// 已存在的旧库 ALTER 补列；列已存在 / 无写权限时静默跳过（旧行读出
+    /// null → 显示退回「未命名资源」，重建索引即可补全）。</summary>
+    private static void EnsureContainerEntryColumn(SqliteConnection connection)
+    {
+        using var probe = connection.CreateCommand();
+        probe.CommandText = "SELECT container_entry FROM assets LIMIT 0";
+        try { probe.ExecuteNonQuery(); return; }
+        catch (SqliteException) { }
+        using var alter = connection.CreateCommand();
+        alter.CommandText = "ALTER TABLE assets ADD COLUMN container_entry TEXT";
+        try { alter.ExecuteNonQuery(); }
+        catch (SqliteException) { }
     }
 
     /// <summary>一次性持久化：prune（收缩到本次枚举的条目）+ 全部变化 bundle
@@ -108,8 +128,8 @@ public sealed class UnityCacheSqliteIndexStore
             using var insert = connection.CreateCommand();
             insert.Transaction = transaction;
             insert.CommandText = """
-                INSERT INTO assets (data_path, bundle_index, container, path_id, type_id, type, size, baseline)
-                VALUES ($p, $i, $c, $pid, $tid, $t, $s, $b)
+                INSERT INTO assets (data_path, bundle_index, container, path_id, type_id, type, size, baseline, container_entry)
+                VALUES ($p, $i, $c, $pid, $tid, $t, $s, $b, $ce)
                 """;
             var p = insert.Parameters.Add("$p", SqliteType.Text);
             var i = insert.Parameters.Add("$i", SqliteType.Integer);
@@ -119,6 +139,7 @@ public sealed class UnityCacheSqliteIndexStore
             var t = insert.Parameters.Add("$t", SqliteType.Integer);
             var s = insert.Parameters.Add("$s", SqliteType.Integer);
             var b = insert.Parameters.Add("$b", SqliteType.Text);
+            var ce = insert.Parameters.Add("$ce", SqliteType.Text);
 
             using var upsert = connection.CreateCommand();
             upsert.Transaction = transaction;
@@ -153,6 +174,7 @@ public sealed class UnityCacheSqliteIndexStore
                     t.Value = (int)row.Type;
                     s.Value = row.Size;
                     b.Value = (object?)row.Baseline ?? DBNull.Value;
+                    ce.Value = (object?)row.ContainerEntry ?? DBNull.Value;
                     insert.ExecuteNonQuery();
                 }
                 up.Value = bundle.DataPath;
@@ -197,9 +219,10 @@ public sealed class UnityCacheSqliteIndexStore
     {
         var grouped = new Dictionary<string, List<UnityCacheIndexRow>>(comparer);
         using var connection = Open();
+        EnsureContainerEntryColumn(connection);
         using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT data_path, bundle_index, container, path_id, type_id, type, size, baseline
+            SELECT data_path, bundle_index, container, path_id, type_id, type, size, baseline, container_entry
             FROM assets
             """;
         using var reader = command.ExecuteReader();
@@ -215,7 +238,8 @@ public sealed class UnityCacheSqliteIndexStore
                 reader.GetInt32(4),
                 (AssetType)reader.GetInt32(5),
                 reader.GetInt64(6),
-                reader.IsDBNull(7) ? null : reader.GetString(7)));
+                reader.IsDBNull(7) ? null : reader.GetString(7),
+                reader.IsDBNull(8) ? null : reader.GetString(8)));
         }
         return grouped;
     }

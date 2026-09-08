@@ -26,16 +26,19 @@ not as a launcher replacement.
    (reference-mode) assets live in the index, not in the project file —
    opening a project rehydrates them from the index in the background.
 4. **Edit** — the workspace uses a VS Code-style layout: an activity bar opens
-   tabbed workbenches (assets / lang text / static data / mod management,
-   Ctrl+Tab to cycle, fixed assets tab + closable tool tabs). Search the merged
-   asset index (debounced, background-filtered) as a flat list or as a lazy
-   folder-like tree grouped by container path; replace textures, edit Sprite
-   metadata / serialized fields; drag & drop is supported (packages/folders to
-   import, an image onto a selected texture to replace it), plus a right-click
-   menu, double-click actions, Ctrl+F and per-asset undo. Editing a scanned
-   bundle copies it into the project once
-   (`sources/cache/<outer>_<inner>.bundle`) so game cache changes cannot
-   corrupt work in progress.
+   tabbed workbenches (assets / lang text / static data, Ctrl+Tab to cycle,
+   fixed assets tab + closable tool tabs). The asset view defaults to a lazy
+   folder-like tree built from Unity `m_Container` entries (real in-game asset
+   paths), with a flat list one click away; both share one right-click menu.
+   Search the merged asset index (debounced, background-filtered) with type /
+   state / sort filters plus a default-on "container assets only" filter that
+   hides technical support objects. Rows show friendly name, type, state and
+   size — never cache keys or Path IDs. Replace textures, edit Sprite metadata /
+   serialized fields; drag & drop is supported (packages/folders to import, an
+   image onto a selected texture to replace it), plus double-click actions,
+   Ctrl+F and per-asset undo. Editing a scanned bundle copies it into the
+   project once (`sources/cache/<outer>_<inner>.bundle`) so game cache changes
+   cannot corrupt work in progress.
 5. **Export** — one click builds a real-loader Carra2 package
    (`<缓存外层键>/<内层键>/<pathId>.<类型表索引>`, per-entry XZ) from all
    edits, defaulting to the mods directory (`%APPDATA%\LimbusCompanyMods`).
@@ -100,8 +103,9 @@ dotnet test LimbusModEditor.slnx --no-restore
 
 The tests cover shared-config persistence/migration, FMOD discovery, cache
 scan (reference mode + incremental index + per-entry fault tolerance),
-cache-bundle materialization, one-click Carra2 export round-trips (real-sample
-gated), project persistence, source materialization, directory and package
-import, Carra/Lunartique/Rebank round trips, XZ compression round trips, bank
-probing, image/atlas operations, overlay backup/restore, and game launch path
-validation.
+cache-bundle materialization, `m_Container` container-path extraction and
+display/tree/sort/filter behavior, one-click Carra2 export round-trips
+(real-sample gated), project persistence, source materialization, directory and
+package import, Carra/Lunartique/Rebank round trips, XZ compression round trips,
+bank probing, image/atlas operations, overlay backup/restore, and game launch
+path validation.

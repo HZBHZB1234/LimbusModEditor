@@ -42,6 +42,9 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _searchTimer;
     private int _searchGeneration;
     private int _previewGeneration;
+    // 音频试听：解码出的 WAV 临时文件 + WPF MediaPlayer（切换选中/关窗即停）。
+    private System.Windows.Media.MediaPlayer? _previewPlayer;
+    private string? _previewAudioFile;
     // 当前选中资源：列表与目录树两个视图共用（右键菜单/双击/按钮都以此为准）。
     private AssetRecord? _selectedAsset;
     // 最近一次搜索结果快照：目录树视图按它重建根层。
@@ -834,6 +837,7 @@ public partial class MainWindow : Window
 
     private async void Window_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
+        StopAudioPreview(); // 关窗即停止试听并删除临时 WAV
         if (_project is not null && !_project.RestoreDebugFilesOnClose) return;
         if (_debugSession is null || !_debugSession.IsApplied) return;
         try
@@ -940,6 +944,7 @@ public partial class MainWindow : Window
     private void RefreshSelectionButtons(AssetRecord? asset)
     {
         ReplaceAssetButton.IsEnabled = asset is not null && _projectFile is not null;
+        EditTextButton.IsEnabled = asset?.Type is AssetType.Text or AssetType.Json && _projectFile is not null;
         HexPreviewButton.IsEnabled = asset is not null;
         ClearEditsButton.IsEnabled = asset is not null && AssetEditService.HasEdits(asset);
         SpriteMetadataButton.IsEnabled = asset?.Type == AssetType.Sprite &&
@@ -970,13 +975,19 @@ public partial class MainWindow : Window
     private void UpdatePreview(AssetRecord? asset) => _ = UpdatePreviewAsync(asset);
 
     /// <summary>异步预览：纹理解码（可能是 DXT 压缩的大图）放在后台线程，
-    /// 代际守卫保证快速切换选中项时旧结果不会覆盖新选中项的预览。</summary>
+    /// 代际守卫保证快速切换选中项时旧结果不会覆盖新选中项的预览。
+    /// 三种形态：图像（Texture/Sprite）、文本（Text/JSON）、音频（可试听）。</summary>
     private async Task UpdatePreviewAsync(AssetRecord? asset)
     {
         var generation = ++_previewGeneration;
-        PreviewImage.Source = null;
-        PreviewInfoText.Text = "无图像预览";
-        if (asset is null || asset.Type is not (AssetType.Texture or AssetType.Sprite)) return;
+        ResetPreview();
+        if (asset is null) return;
+        if (asset.Type is not (AssetType.Texture or AssetType.Sprite))
+        {
+            if (TextPreviewService.LooksTextual(asset)) { await ShowTextPreviewAsync(asset, generation); return; }
+            if (asset.Type == AssetType.Audio) { ShowAudioPreview(asset); return; }
+            return;
+        }
         if (asset.UnityPathId.HasValue && asset.Metadata.TryGetValue("unityBundle", out var isBundle) && isBundle == "true" &&
             !(asset.Metadata.TryGetValue("replacementPath", out var existingReplacement) && File.Exists(existingReplacement)) &&
             !string.IsNullOrWhiteSpace(asset.SourcePath) && File.Exists(asset.SourcePath))
@@ -1031,12 +1042,154 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>文本 / JSON 预览：右栏直接显示可读正文（不是十六进制转储）。
+    /// 非 UTF-8/UTF-16 或二进制负载明确说明原因，并指向十六进制预览。</summary>
+    private async Task ShowTextPreviewAsync(AssetRecord asset, int generation)
+    {
+        TextPreview? preview;
+        try { preview = await Task.Run(() => TextPreviewService.TryPreview(asset)); }
+        catch (Exception ex)
+        {
+            if (generation != _previewGeneration) return;
+            PreviewInfoText.Text = $"文本预览失败：{ex.Message}";
+            return;
+        }
+        if (generation != _previewGeneration) return;
+        if (preview is null)
+        {
+            PreviewInfoText.Text = "这个文件不是可读文本（非 UTF-8 / UTF-16，或含二进制内容）；可用「十六进制预览」查看原始字节。";
+            return;
+        }
+        PreviewTextBox.Text = preview.Text;
+        PreviewTextPanel.Visibility = Visibility.Visible;
+        var size = new HumanSizeConverter().Convert(preview.TotalBytes, typeof(string), null, System.Globalization.CultureInfo.CurrentCulture) as string;
+        PreviewInfoText.Text = $"{preview.EncodingName} · {size}" + (preview.Truncated ? " · 仅显示开头部分" : string.Empty);
+    }
+
+    /// <summary>音频预览面板：能解码的（Bank FSB + 本机 FMOD DLL）给「试听」按钮，
+    /// 不能解码的说明缺什么，不装作能播。</summary>
+    private void ShowAudioPreview(AssetRecord asset)
+    {
+        PreviewAudioPanel.Visibility = Visibility.Visible;
+        var isBankFsb = asset.LogicalPath.StartsWith("fsb/", StringComparison.OrdinalIgnoreCase);
+        var fmodDirectory = _env.EffectiveFmodLibraryDirectory(_project);
+        var canDecode = isBankFsb && !string.IsNullOrWhiteSpace(fmodDirectory) && Directory.Exists(fmodDirectory);
+        PreviewAudioButton.IsEnabled = canDecode;
+        PreviewAudioText.Text = canDecode
+            ? "解码成 WAV 在本机播放（不会写入项目）"
+            : isBankFsb
+                ? "需要 FMOD DLL 才能解码试听：把 fmod64.dll / fsbank64.dll 放进程序目录的 fmod\\ 后重试。"
+                : "Unity 音频对象暂不支持解码试听；Bank 音频可在「高级操作」里导出 WAV。";
+        PreviewInfoText.Text = "音频预览";
+    }
+
+    /// <summary>清空右栏预览区（切换选中项 / 无选中时调用），并停止正在播放的试听。</summary>
+    private void ResetPreview()
+    {
+        PreviewImage.Source = null;
+        PreviewImagePanel.Visibility = Visibility.Collapsed;
+        PreviewTextPanel.Visibility = Visibility.Collapsed;
+        PreviewTextBox.Text = string.Empty;
+        PreviewAudioPanel.Visibility = Visibility.Collapsed;
+        PreviewAudioButton.IsEnabled = false;
+        PreviewAudioButton.Content = "▶ 试听";
+        PreviewAudioText.Text = string.Empty;
+        PreviewInfoText.Text = "无预览";
+        StopAudioPreview();
+    }
+
+    /// <summary>试听 Bank 音频：FSB → WAV（临时文件）→ WPF MediaPlayer 播放。
+    /// 再点一次停止；切换选中项或关闭窗口时自动停止并删除临时文件。</summary>
+    private async void PreviewAudio_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedAsset is not AssetRecord asset || asset.Type != AssetType.Audio) return;
+        if (_previewPlayer is not null)
+        {
+            StopAudioPreview();
+            PreviewAudioButton.Content = "▶ 试听";
+            PreviewAudioText.Text = "已停止";
+            return;
+        }
+        var fmodDirectory = _env.EffectiveFmodLibraryDirectory(_project);
+        if (string.IsNullOrWhiteSpace(fmodDirectory) || !Directory.Exists(fmodDirectory))
+        {
+            PreviewAudioText.Text = "需要 FMOD DLL 才能解码试听：把 fmod64.dll / fsbank64.dll 放进程序目录的 fmod\\ 后重试。";
+            return;
+        }
+        var generation = _previewGeneration;
+        PreviewAudioButton.IsEnabled = false;
+        PreviewAudioText.Text = "正在解码…";
+        try
+        {
+            var wav = await Task.Run(async () =>
+            {
+                using var codec = new NativeFmodAudioCodec(fmodDirectory);
+                return await new BankAudioService().DecodeToWaveAsync(asset, codec);
+            });
+            if (generation != _previewGeneration) return;
+            var file = Path.Combine(Path.GetTempPath(), $"lme-preview-{Guid.NewGuid():N}.wav");
+            await File.WriteAllBytesAsync(file, wav);
+            if (generation != _previewGeneration) { TryDelete(file); return; }
+            var player = new System.Windows.Media.MediaPlayer();
+            player.MediaEnded += (_, _) => EndAudioPreview(player);
+            player.MediaFailed += (_, args) =>
+            {
+                EndAudioPreview(player);
+                PreviewAudioText.Text = $"播放失败：{args.ErrorException?.Message ?? "未知原因"}";
+            };
+            player.Open(new Uri(file));
+            _previewPlayer = player;
+            _previewAudioFile = file;
+            player.Play();
+            PreviewAudioButton.Content = "■ 停止";
+            PreviewAudioText.Text = $"WAV {wav.Length / 1024} KB · 正在播放";
+        }
+        catch (Exception ex)
+        {
+            StopAudioPreview();
+            PreviewAudioText.Text = $"试听失败：{ex.Message}";
+        }
+        finally
+        {
+            PreviewAudioButton.IsEnabled = _selectedAsset?.Type == AssetType.Audio;
+        }
+    }
+
+    private void EndAudioPreview(System.Windows.Media.MediaPlayer player)
+    {
+        if (!ReferenceEquals(_previewPlayer, player)) return; // 已经停止 / 换成另一个资源了
+        StopAudioPreview();
+        PreviewAudioButton.Content = "▶ 试听";
+        PreviewAudioText.Text = "播放结束";
+    }
+
+    private void StopAudioPreview()
+    {
+        var player = _previewPlayer;
+        _previewPlayer = null;
+        if (player is not null)
+        {
+            try { player.Stop(); player.Close(); }
+            catch (Exception) { /* 播放器已释放 */ }
+        }
+        var file = _previewAudioFile;
+        _previewAudioFile = null;
+        TryDelete(file);
+    }
+
+    private static void TryDelete(string? file)
+    {
+        if (file is null) return;
+        try { File.Delete(file); } catch (Exception) { /* 临时文件留给系统清理 */ }
+    }
+
     private void SetPreviewBitmap(byte[] png)
     {
         var bitmap = new BitmapImage();
         using var stream = new MemoryStream(png);
         bitmap.BeginInit(); bitmap.CacheOption = BitmapCacheOption.OnLoad; bitmap.StreamSource = stream; bitmap.EndInit(); bitmap.Freeze();
         PreviewImage.Source = bitmap;
+        PreviewImagePanel.Visibility = Visibility.Visible;
     }
 
     private async void SplitAtlas_Click(object sender, RoutedEventArgs e)
@@ -1128,8 +1281,8 @@ public partial class MainWindow : Window
         ActivateDefaultAction(asset);
     }
 
-    /// <summary>按类型做最常用的事：图像 → 替换；其余 → Unity 字段编辑
-    /// （可用时），否则十六进制预览。</summary>
+    /// <summary>按类型做最常用的事：图像 → 替换；文本/JSON → 内置文本编辑器；
+    /// 其余 → Unity 字段编辑（可用时），否则十六进制预览。</summary>
     private void ActivateDefaultAction(AssetRecord asset)
     {
         if (asset.Type is AssetType.Texture or AssetType.Sprite && ReplaceAssetButton.IsEnabled)
@@ -1137,8 +1290,38 @@ public partial class MainWindow : Window
             ReplaceAsset_Click(this, new RoutedEventArgs());
             return;
         }
+        if (asset.Type is AssetType.Text or AssetType.Json && EditTextButton.IsEnabled)
+        {
+            EditTextAsset_Click(this, new RoutedEventArgs());
+            return;
+        }
         if (UnityFieldsButton.IsEnabled) { EditUnityFields_Click(this, new RoutedEventArgs()); return; }
         if (HexPreviewButton.IsEnabled) HexPreview_Click(this, new RoutedEventArgs());
+    }
+
+    /// <summary>文本 / JSON 资源的内置编辑器（P3.10）：改完保存即登记为替换，
+    /// 走与替换文件同一条可撤销 / 可导出管道；JSON 保存前校验并格式化。</summary>
+    private async void EditTextAsset_Click(object sender, RoutedEventArgs e)
+    {
+        if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }
+        if (_selectedAsset is not AssetRecord asset) return;
+        if (asset.Type is not (AssetType.Text or AssetType.Json))
+        {
+            StatusText.Text = "当前资源不是文本 / JSON 资源；可以用「替换…」换掉整个文件。";
+            return;
+        }
+        try
+        {
+            var service = new TextAssetEditService(_assetEdits);
+            var document = await service.OpenAsync(_project, asset.AssetId);
+            var window = new TextAssetEditorWindow(document, AssetDisplay.DisplayPath(asset)) { Owner = this };
+            if (window.ShowDialog() != true || window.Result is not { } edited) return;
+            await service.SaveAsync(_project, edited, Path.GetDirectoryName(_projectFile)!);
+            await _projects.SaveAsync(_project, _projectFile);
+            RefreshProjectState("文本修改已记录");
+            RestoreListSelection(asset);
+        }
+        catch (Exception ex) { ShowError("编辑文本失败", ex); }
     }
 
     /// <summary>右键菜单跟随光标：右键落在某行上时先选中该行。</summary>

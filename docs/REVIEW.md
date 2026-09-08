@@ -126,12 +126,16 @@
    实际修改构成给出出口清单（推荐项排最前、缺前置条件给中文原因），
    `ExportAdvisorWindow` 一键路由到既有通道；「一键导出」在多种出口并存时
    先给清单，纯 Unity 修改不打扰。
+12. ~~预览与文本编辑补全~~（P3.10 已实现，2026-09-10）：右栏预览在
+   图像 / 文本（`TextPreviewService`）/ 音频试听（FSB→WAV + `MediaPlayer`）
+   之间随选中项切换，二进制与非 UTF 文本明确拒绝而非乱码；文本资源双击即用
+   内置 `TextAssetEditorWindow` 编辑（保存登记为替换，JSON 校验 + 格式化）。
 
 ## 5. 基线状态
 
 ```text
 dotnet build LimbusModEditor.slnx --no-restore   ✓ 0 错误
-dotnet test LimbusModEditor.slnx --no-build      ✓ 263 通过（62 Format + 201 Domain，含 1 个 LME_BENCH 门控基准）
+dotnet test LimbusModEditor.slnx --no-build      ✓ 274 通过（62 Format + 212 Domain，含 1 个 LME_BENCH 门控基准）
 dotnet publish ... -o artifacts/publish-win-x64  ✓ LimbusModEditor.App.exe（UI 冒烟启动通过）
 ```
 

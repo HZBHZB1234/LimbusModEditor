@@ -473,6 +473,13 @@ Lunartique→对象级 Carra/目录来源支持，其余禁用并给出原因）
   中文原因），UI 侧新增 `ExportAdvisorWindow` 与左栏「导出思路（自动分析）…」
   入口；点「一键导出模组」时若存在多种可行出口会先弹出该清单，纯 Unity
   修改则直接导出。新增 `ExportAdvisorTests` 7 个，基线 256 → 263。
+- **三种预览与文本编辑**：新增 `TextPreviewService`（只读 UTF-8/UTF-16 文本
+  预览，二进制与非 UTF 编码明确拒绝、超长截断），右栏「预览」区按选中项
+  在 图像缩略图 / 文本正文 / 音频试听 之间切换；音频试听用 FSB→WAV（临时
+  文件）+ WPF `MediaPlayer`，缺 FMOD DLL 或 Unity 音频对象时说明原因；
+  新增 `TextAssetEditorWindow` 把既有 `TextAssetEditService`（原本「留给未来
+  代码编辑器」）接到 UI：双击文本资源即改，保存登记为替换，JSON 保存前
+  校验并格式化。新增 `TextPreviewServiceTests` 9 个、`TextAssetEditTests` +2。
 
 ## P4：工程质量和交付
 

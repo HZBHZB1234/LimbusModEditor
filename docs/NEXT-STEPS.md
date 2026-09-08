@@ -15,7 +15,7 @@ Carra2/Rebank/Lunartique/Bank 四格式导入导出、真实 Texture2D `.resS` �
 **官方 catalog 只读解析 + vanilla 基线判定（T3，CRC 口径与 LCTA 交叉验证一致）**、
 **.staticmod 静态数据模组通道（读取/预览应用/生成，两个真实样本导入验证通过）**。
 
-**当前基线：263 个测试全绿**（62 Format + 201 Domain，含 1 个 LME_BENCH 门控基准）。最近提交见 git log。
+**当前基线：274 个测试全绿**（62 Format + 212 Domain，含 1 个 LME_BENCH 门控基准）。最近提交见 git log。
 
 基线命令（每轮开始和结束都必须跑）：
 
@@ -205,6 +205,13 @@ Type ID、vanilla 基线等技术字段，还有「模组管理」这类与「�
   `App/ExportAdvisorWindow.cs` 呈现并路由到既有通道；点「一键导出模组」时
   多种出口并存会先给清单。`ExportAdvisorTests` 7 个，基线 256 → **263**
   （62 Format + 201 Domain）。
+- **三种预览 + 文本编辑**：`Application/Assets/TextPreviewService.cs` 只读
+  文本预览（UTF-8/UTF-16 自动识别、二进制与非 UTF 拒绝、超长截断），右栏
+  「预览」区按选中项切换 图像 / 文本 / 音频；音频试听走 FSB→WAV（临时文件）
+  + WPF `MediaPlayer`（缺 FMOD DLL 或 Unity 音频对象时说明原因）；
+  `App/TextAssetEditorWindow.cs` 把既有 `TextAssetEditService` 接到 UI
+  （双击文本资源即改，JSON 保存前校验并格式化）。基线 263 → **274**
+  （62 Format + 212 Domain）。
 
 ## 4. 下一轮明确任务（按优先级，每项含验收标准）
 

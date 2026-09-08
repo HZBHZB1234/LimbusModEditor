@@ -11,6 +11,7 @@
         <!-- 资源右键菜单：列表与目录树共用（内容以「用户能做的操作」为主，不暴露技术字段） -->
         <ContextMenu x:Key="AssetContextMenu">
             <MenuItem Header="替换…（图像双击同效）" Click="ReplaceAsset_Click"/>
+            <MenuItem Header="编辑文本内容…" Click="EditTextAsset_Click"/>
             <MenuItem Header="Unity 字段编辑" Click="EditUnityFields_Click"/>
             <MenuItem Header="十六进制预览" Click="HexPreview_Click"/>
             <Separator/>
@@ -267,10 +268,21 @@
                                     <TextBlock Text="（按「已修改资源」数统计，同一资源重复替换只算一次）" Foreground="#5F7285" FontSize="10.5" TextWrapping="Wrap" Margin="0,0,0,12"/>
                                     <Separator Margin="0,4,0,12"/>
                                     <TextBlock Text="预览" FontWeight="SemiBold" Margin="0,0,0,6"/>
-                                    <Border Background="#11151A" BorderBrush="#2A3540" BorderThickness="1" Height="150" Margin="0,0,0,8">
+                                    <Border x:Name="PreviewImagePanel" Background="#11151A" BorderBrush="#2A3540" BorderThickness="1" Height="150" Margin="0,0,0,8" Visibility="Collapsed">
                                         <Image x:Name="PreviewImage" Stretch="Uniform" Margin="6"/>
                                     </Border>
-                                    <TextBlock x:Name="PreviewInfoText" Text="无图像预览" Foreground="#7F93A4" TextWrapping="Wrap" Margin="0,0,0,10"/>
+                                    <Border x:Name="PreviewTextPanel" Background="#11151A" BorderBrush="#2A3540" BorderThickness="1" Height="150" Margin="0,0,0,8" Visibility="Collapsed">
+                                        <TextBox x:Name="PreviewTextBox" IsReadOnly="True" BorderThickness="0" Background="Transparent" Foreground="#D8E2EA"
+                                                 FontFamily="Consolas" FontSize="11.5" TextWrapping="Wrap" AcceptsReturn="True"
+                                                 VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="6"/>
+                                    </Border>
+                                    <StackPanel x:Name="PreviewAudioPanel" Visibility="Collapsed" Margin="0,0,0,8">
+                                        <StackPanel Orientation="Horizontal">
+                                            <Button x:Name="PreviewAudioButton" Content="▶ 试听" Click="PreviewAudio_Click" Padding="12,5" IsEnabled="False"/>
+                                            <TextBlock x:Name="PreviewAudioText" Text="" Foreground="#7F93A4" VerticalAlignment="Center" Margin="8,0,0,0" TextWrapping="Wrap"/>
+                                        </StackPanel>
+                                    </StackPanel>
+                                    <TextBlock x:Name="PreviewInfoText" Text="无预览" Foreground="#7F93A4" TextWrapping="Wrap" Margin="0,0,0,10"/>
                                     <Separator Margin="0,0,0,12"/>
                                     <TextBlock Text="选中资源" FontWeight="SemiBold" Margin="0,0,0,8"/>
                                     <Grid>
@@ -284,6 +296,8 @@
                                     </Grid>
                                     <TextBlock Text="常用" Foreground="#7F93A4" Margin="0,14,0,6"/>
                                     <Button x:Name="ReplaceAssetButton" Content="替换选中资源…（可直接拖图进来）" Click="ReplaceAsset_Click" IsEnabled="False" Padding="8,6"/>
+                                    <Button x:Name="EditTextButton" Content="编辑文本内容…" Click="EditTextAsset_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"
+                                            ToolTip="文本 / JSON 资源的内置编辑器：改完保存即登记为替换（可撤销，导出时写入模组）。"/>
                                     <Button x:Name="ClearEditsButton" Content="撤销此资源的修改" Click="ClearEdits_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"
                                             ToolTip="清除替换文件 / Unity 字段 / Sprite 元数据三类编辑标记；导出将不再包含此资源的修改。"/>
                                     <Expander Header="高级操作" Foreground="#7F93A4" Margin="0,14,0,0">

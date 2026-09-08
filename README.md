@@ -33,12 +33,17 @@ not as a launcher replacement.
    Search the merged asset index (debounced, background-filtered) with type /
    state / sort filters plus a default-on "container assets only" filter that
    hides technical support objects. Rows show friendly name, type, state and
-   size — never cache keys or Path IDs. Replace textures, edit Sprite metadata /
-   serialized fields; drag & drop is supported (packages/folders to import, an
-   image onto a selected texture to replace it), plus double-click actions,
-   Ctrl+F and per-asset undo. Editing a scanned bundle copies it into the
-   project once (`sources/cache/<outer>_<inner>.bundle`) so game cache changes
-   cannot corrupt work in progress.
+   size — never cache keys or Path IDs. The right-hand preview follows the
+   selection: decoded texture thumbnails, readable text/JSON content, or audio
+   audition (FSB → WAV through the FMOD DLLs, played locally, temp file
+   removed afterwards); text/JSON assets open in a built-in editor whose saves
+   are registered as ordinary reversible replacements. Replace textures, edit
+   Sprite metadata / serialized fields; drag & drop is supported (packages/
+   folders to import, an image onto a selected texture to replace it), plus
+   double-click actions, Ctrl+F and per-asset undo. Editing a scanned bundle
+   copies it into the project once
+   (`sources/cache/<outer>_<inner>.bundle`) so game cache changes cannot
+   corrupt work in progress.
 5. **Export** — one click builds a real-loader Carra2 package
    (`<缓存外层键>/<内层键>/<pathId>.<类型表索引>`, per-entry XZ) from all
    edits, defaulting to the mods directory (`%APPDATA%\LimbusCompanyMods`).
@@ -109,8 +114,9 @@ dotnet test LimbusModEditor.slnx --no-restore
 The tests cover shared-config persistence/migration, FMOD discovery, cache
 scan (reference mode + incremental index + per-entry fault tolerance),
 cache-bundle materialization, `m_Container` container-path extraction and
-display/tree/sort/filter behavior, export-outlet advising, one-click Carra2
-export round-trips (real-sample gated), project persistence, source
-materialization, directory and package import, Carra/Lunartique/Rebank round
-trips, XZ compression round trips, bank probing, image/atlas operations, overlay
-backup/restore, and game launch path validation.
+display/tree/sort/filter behavior, export-outlet advising, text preview
+(encoding detection / binary rejection / truncation) and text-asset editing,
+one-click Carra2 export round-trips (real-sample gated), project persistence,
+source materialization, directory and package import, Carra/Lunartique/Rebank
+round trips, XZ compression round trips, bank probing, image/atlas operations,
+overlay backup/restore, and game launch path validation.

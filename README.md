@@ -42,7 +42,12 @@ not as a launcher replacement.
 5. **Export** — one click builds a real-loader Carra2 package
    (`<缓存外层键>/<内层键>/<pathId>.<类型表索引>`, per-entry XZ) from all
    edits, defaulting to the mods directory (`%APPDATA%\LimbusCompanyMods`).
-   The classic export wizard, multi-format export, debug overlay and lang /
+   Before exporting, an advisor inspects what the project actually changed and
+   lists the applicable outlets (one-click Carra2, Bank/Rebank audio, lang text
+   patch, export wizard, multi-format, debug overlay) with a plain-language
+   rationale and prerequisite for each; it appears automatically when several
+   outlets apply and stays out of the way for pure Unity asset edits. The
+   classic export wizard, multi-format export, debug overlay and lang /
    staticmod channels remain available.
 
 Legacy flow (importing existing mod packages as project sources) is unchanged:
@@ -104,8 +109,8 @@ dotnet test LimbusModEditor.slnx --no-restore
 The tests cover shared-config persistence/migration, FMOD discovery, cache
 scan (reference mode + incremental index + per-entry fault tolerance),
 cache-bundle materialization, `m_Container` container-path extraction and
-display/tree/sort/filter behavior, one-click Carra2 export round-trips
-(real-sample gated), project persistence, source materialization, directory and
-package import, Carra/Lunartique/Rebank round trips, XZ compression round trips,
-bank probing, image/atlas operations, overlay backup/restore, and game launch
-path validation.
+display/tree/sort/filter behavior, export-outlet advising, one-click Carra2
+export round-trips (real-sample gated), project persistence, source
+materialization, directory and package import, Carra/Lunartique/Rebank round
+trips, XZ compression round trips, bank probing, image/atlas operations, overlay
+backup/restore, and game launch path validation.

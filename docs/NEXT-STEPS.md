@@ -15,7 +15,7 @@ Carra2/Rebank/Lunartique/Bank 四格式导入导出、真实 Texture2D `.resS` �
 **官方 catalog 只读解析 + vanilla 基线判定（T3，CRC 口径与 LCTA 交叉验证一致）**、
 **.staticmod 静态数据模组通道（读取/预览应用/生成，两个真实样本导入验证通过）**。
 
-**当前基线：256 个测试全绿**（62 Format + 194 Domain，含 1 个 LME_BENCH 门控基准）。最近提交见 git log。
+**当前基线：263 个测试全绿**（62 Format + 201 Domain，含 1 个 LME_BENCH 门控基准）。最近提交见 git log。
 
 基线命令（每轮开始和结束都必须跑）：
 
@@ -199,6 +199,12 @@ Type ID、vanilla 基线等技术字段，还有「模组管理」这类与「�
 - 测试：新增 `AssetDisplayTests` 12 个，`AssetTreeBuilderTests` 改写为容器语义
   7 个 + 真实缓存遍历，`AssetSearchServiceTests` +5。基线 231 → **256**
   （62 Format + 194 Domain）。
+- **导出思路（自动分析）**：`Application/Build/ExportAdvisor.cs` 按项目里实际
+  修改的构成产出出口清单（Unity 资源 → 一键 Carra2；音频 → Bank/Rebank；
+  已登记源 → 向导/多格式；无修改 → 先改；缺游戏目录/FMOD 时给中文原因），
+  `App/ExportAdvisorWindow.cs` 呈现并路由到既有通道；点「一键导出模组」时
+  多种出口并存会先给清单。`ExportAdvisorTests` 7 个，基线 256 → **263**
+  （62 Format + 201 Domain）。
 
 ## 4. 下一轮明确任务（按优先级，每项含验收标准）
 

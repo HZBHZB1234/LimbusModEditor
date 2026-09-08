@@ -479,9 +479,72 @@ public partial class MainWindow : Window
     }
 
     /// <summary>傻瓜化一键导出：扫描资源上的全部修改 → Carra2 → 模组目录。</summary>
+    /// <summary>导出思路（P3.10）：不要求用户先搞清 Carra2 / Bank / lang 补丁 /
+    /// 多格式导出的区别——先分析项目里改了什么，再让用户挑出口。</summary>
+    private void ExportIdeas_Click(object sender, RoutedEventArgs e)
+    {
+        if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }
+        if (PickExportIdea() is not { } idea) return;
+        RunExportIdea(idea.Kind);
+    }
+
+    private ExportIdea? PickExportIdea()
+        => _project is null ? null : ShowExportIdeas(new ExportAdvisor().Analyze(_project, BuildAdvisorContext()));
+
+    private ExportIdea? ShowExportIdeas(IReadOnlyList<ExportIdea> ideas)
+    {
+        var window = new ExportAdvisorWindow(ideas) { Owner = this };
+        return window.ShowDialog() == true ? window.Result : null;
+    }
+
+    private ExportAdvisorContext BuildAdvisorContext()
+    {
+        var fmodDirectory = _env.EffectiveFmodLibraryDirectory(_project);
+        return new ExportAdvisorContext(
+            _env.EffectiveGameDirectory(_project),
+            _env.EffectiveModDirectory(_project),
+            !string.IsNullOrWhiteSpace(fmodDirectory) && Directory.Exists(fmodDirectory));
+    }
+
+    /// <summary>把选中的导出思路路由到既有通道（不新增导出实现）。</summary>
+    private void RunExportIdea(ExportIdeaKind kind)
+    {
+        switch (kind)
+        {
+            case ExportIdeaKind.ScanFirst: Scan_Click(this, new RoutedEventArgs()); break;
+            case ExportIdeaKind.EditFirst:
+                SearchBox.Focus();
+                StatusText.Text = "在资源视图里选中资源后替换或编辑，改完再来导出";
+                break;
+            case ExportIdeaKind.OneClickCarra2: OneClickExport_Click(this, new RoutedEventArgs()); break;
+            case ExportIdeaKind.ExportWizard: Export_Click(this, new RoutedEventArgs()); break;
+            case ExportIdeaKind.MultiFormat or ExportIdeaKind.AudioBank: ExportAll_Click(this, new RoutedEventArgs()); break;
+            case ExportIdeaKind.LangText: LangTextMod_Click(this, new RoutedEventArgs()); break;
+            case ExportIdeaKind.DebugOverlay: DebugApply_Click(this, new RoutedEventArgs()); break;
+        }
+    }
+
+    /// <summary>一键导出前自动给出导出思路：只有一条可行通道（纯 Unity 资源修改）
+    /// 时不打扰用户，直接导出；同时存在音频 / 已登记源模组等多种出口时先让用户挑。</summary>
+    private bool ShouldOfferExportIdeas(out IReadOnlyList<ExportIdea> ideas)
+    {
+        ideas = [];
+        if (_project is null) return false;
+        ideas = new ExportAdvisor().Analyze(_project, BuildAdvisorContext());
+        var channels = ideas.Count(x => x.Enabled &&
+            x.Kind is not (ExportIdeaKind.ScanFirst or ExportIdeaKind.EditFirst
+                or ExportIdeaKind.LangText or ExportIdeaKind.DebugOverlay));
+        return channels > 1;
+    }
+
     private async void OneClickExport_Click(object sender, RoutedEventArgs e)
     {
         if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }
+        if (ShouldOfferExportIdeas(out var ideas))
+        {
+            if (ShowExportIdeas(ideas) is not { } idea) return;
+            if (idea.Kind != ExportIdeaKind.OneClickCarra2) { RunExportIdea(idea.Kind); return; }
+        }
         await AutoConfigureAsync();
         var modDirectory = _env.EffectiveModDirectory(_project);
         var defaultDirectory = !string.IsNullOrWhiteSpace(modDirectory) && Directory.Exists(modDirectory)
@@ -567,7 +630,7 @@ public partial class MainWindow : Window
             HintText.Text = $"已索引 {_project.Assets.Count} 个游戏资源。下一步：在中间的资源视图里按容器目录浏览或直接搜索（可切换排序与筛选），选中后用右侧按钮替换图片 / 编辑字段。";
             return;
         }
-        HintText.Text = $"已有 {edits} 处修改。下一步：点击左栏「一键导出模组」生成 .carra2 到模组目录（或继续编辑）。";
+        HintText.Text = $"已有 {edits} 处修改。下一步：点击左栏「一键导出模组」生成 .carra2 到模组目录（有多种出口时先给导出思路，也可点「导出思路（自动分析）…」主动查看）。";
     }
 
     private async Task SaveProjectQuietlyAsync()

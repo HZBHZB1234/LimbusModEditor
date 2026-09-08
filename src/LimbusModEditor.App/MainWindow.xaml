@@ -156,8 +156,10 @@
                                             ToolTip="把整个文件夹里的资源按原路径登记进来，适合批量替换素材。"/>
                                     <Separator Margin="0,14"/>
                                     <TextBlock Text="② 产出模组" Style="{StaticResource SectionLabel}"/>
+                                    <Button Content="导出思路（自动分析）…" Click="ExportIdeas_Click" Padding="8,6" Margin="0,0,0,8"
+                                            ToolTip="按当前项目里改了什么，自动列出可选出口（Carra2 / Bank / lang 补丁 / 多格式…）并说明区别。"/>
                                     <Button x:Name="OneClickExportButton" Content="一键导出模组（推荐）" Click="OneClickExport_Click" Padding="8,6"
-                                            ToolTip="把资源上的全部修改按真实加载器的 Carra2 布局打包，输出到模组目录即可生效。"/>
+                                            ToolTip="把资源上的全部修改按真实加载器的 Carra2 布局打包，输出到模组目录即可生效。项目里同时存在音频或包体修改时会先给出导出思路。"/>
                                     <Button Content="导出模组（向导）…" Click="Export_Click" Margin="0,8,0,0" Padding="8,6"
                                             ToolTip="需要挑选导出范围或格式时使用。"/>
                                     <Button Content="导出全部（多格式）" Click="ExportAll_Click" Margin="0,8,0,0" Padding="8,6"/>

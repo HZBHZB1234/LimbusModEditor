@@ -122,12 +122,16 @@
    一并移除）；新增排序（名称/大小双向/类型/修改在前）与默认开启的
    「仅显示容器内资源」；左栏按「① 获取资源 / ② 产出模组 / 更多」重排，
    右栏按 预览 / 选中资源 / 常用 / 高级操作 / 调试 重排。
+11. ~~导出思路自动分析~~（P3.10 已实现，2026-09-10）：`ExportAdvisor` 按项目
+   实际修改构成给出出口清单（推荐项排最前、缺前置条件给中文原因），
+   `ExportAdvisorWindow` 一键路由到既有通道；「一键导出」在多种出口并存时
+   先给清单，纯 Unity 修改不打扰。
 
 ## 5. 基线状态
 
 ```text
 dotnet build LimbusModEditor.slnx --no-restore   ✓ 0 错误
-dotnet test LimbusModEditor.slnx --no-build      ✓ 256 通过（62 Format + 194 Domain，含 1 个 LME_BENCH 门控基准）
+dotnet test LimbusModEditor.slnx --no-build      ✓ 263 通过（62 Format + 201 Domain，含 1 个 LME_BENCH 门控基准）
 dotnet publish ... -o artifacts/publish-win-x64  ✓ LimbusModEditor.App.exe（UI 冒烟启动通过）
 ```
 

@@ -467,6 +467,12 @@ Lunartique→对象级 Carra/目录来源支持，其余禁用并给出原因）
   容器语义 7 个 + 真实缓存遍历、`AssetSearchServiceTests` +5（排序 ×3、
   容器过滤、名称排序期望）。基线 231 → 256（61 → 62 Format + 170 → 194
   Domain）。
+- **导出思路（自动分析）**：新增 `ExportAdvisor`（Application/Build）——
+  按项目里实际修改的构成（Unity 资源 / 音频 / 已登记源 / 无修改）产出
+  `ExportIdea` 清单（标题、一句话结论、展开说明、是否推荐、是否可用与
+  中文原因），UI 侧新增 `ExportAdvisorWindow` 与左栏「导出思路（自动分析）…」
+  入口；点「一键导出模组」时若存在多种可行出口会先弹出该清单，纯 Unity
+  修改则直接导出。新增 `ExportAdvisorTests` 7 个，基线 256 → 263。
 
 ## P4：工程质量和交付
 

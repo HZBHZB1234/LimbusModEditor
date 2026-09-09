@@ -130,16 +130,47 @@
    图像 / 文本（`TextPreviewService`）/ 音频试听（FSB→WAV + `MediaPlayer`）
    之间随选中项切换，二进制与非 UTF 文本明确拒绝而非乱码；文本资源双击即用
    内置 `TextAssetEditorWindow` 编辑（保存登记为替换，JSON 校验 + 格式化）。
+13. ~~页面架构重构 + 多格式预览管线 + 三个专用工作台~~（P3.11 已实现，2026-09）：
+    见 §5 自审表。
 
-## 5. 基线状态
+## 5. 重构自审表（P3.11，plan-01 ~ plan-08）
+
+| 计划 | 审查门 | 结论与证据 |
+|---|---|---|
+| plan-02 页面架构 | 无顶部标签头；活动栏 6 入口；侧边栏常驻；多标签机制代码 0 处 | ✅ `TabControl WorkbenchTabs` / `OpenWorkbench` 系列删除，grep 全仓 0 处；`ShowPage` 注册 6 个常驻 key；启动冒烟 6 页面构造无异常 |
+| plan-02 | 无项目时设置页可用、引导覆盖层正常 | ✅ `NoProjectOverlay` 只覆盖页面宿主（计划原文覆盖侧边栏+宿主会让设置页不可达，已在提交说明记录偏差）；`SettingsPage` 无项目时共享目录段可用、元数据段置灰 |
+| plan-03 自动加载 | 无手动加载入口；拖放收窄；ModImportService 保留 | ✅ `Import_Click` / `ImportDirectory_Click` grep 0 处；拖放仅「图片→选中图像资源」；`ModImportService` 与格式 handler 未动（CLI / 导出向导仍用） |
+| plan-04 可拖拽 | 拖动流畅、重启保持、双击复位、越界不破 | ✅ `GridSplitter` + `UiStateService`（`<程序目录>/config/ui-state.json`，损坏/缺失回退 + 钳制，6 个单测）；预览列默认 360 / 最小 260，浏览列最小 280 |
+| plan-01 属性与预览 | 真实数据：TextAsset 正文、Sprite 裁剪、AudioClip 试听、属性区正确 | ✅ 前后矩阵见 `docs/plans/REALDATA-VERIFY.md`：Sprite FAIL→622×182、TextAsset FAIL→UTF-8 正文、Texture2D 基线不回退；属性区对真实 Texture/Sprite/TextAsset 产出具体行；AudioClip 本机缓存无样本（音频在 FMOD bank），已实现三种负载形态 + fail fast + 合成单测 |
+| plan-05 预览管线 | 多形态、未知类型不空白、快速切换无过期覆盖 | ✅ 七形态 + Hex 兜底；真实缓存 Kind 矩阵（`AssetPreviewRegistryTests`）；代际守卫保留；大表截断 20 万字符 |
+| plan-06 音频工作台 | 1531 bank 判定、样本表、试听、导出、不写游戏目录 | ✅ 真实 bank 目录测试（既有 3 个）+ 新 `RealWorkbenchGateTests` 实测「切片→FMOD 2.2.26 解码→WAV→波形」；`.rebank` 结构与加载器解析规则一致；写盘点审查仅模组/项目/临时目录 |
+| plan-07 文本工作台 | 活动语言、920 文件索引、补丁回放一致、不默认写游戏目录 | ✅ 真实 lang 目录测试（既有）+ 新真实门：改 `AbDlg_Faust.json` → 导出补丁 → 回放 == 修改后；「直接应用」有显著警告 |
+| plan-08 静态工作台 | catalog 动态定位、TextAsset 枚举、默认过滤、不写 catalog | ✅ 真实 catalog 定位成功（外层键/内层键）；本机缓存未命中 → 明确提示而非报错；扫描打标记 + 回灌保持 + 默认隐藏（3 个单测 + 集成测试）；静态页编辑/导出 `.staticmod`（container 精确寻址） |
+| 全部 | build + test + publish 全绿 | ✅ 0 警告 0 错误；334 测试全绿；publish 冒烟启动通过 |
+
+**本轮发现并修复的实质缺陷**：
+
+1. **FMOD 2.x 无法解码**（游戏自带 `fmodstudio.dll` 2.2.26）：`FMOD_System_Create`
+   需要 `headerversion` 参数，单参数调用返回 `FMOD_ERR_HEADER_MISMATCH(20)`，
+   表现为「本机有 DLL 却试听不了」。修复：按导出符号所属 DLL 的文件版本推导
+   `FMOD_VERSION`，失败再退回 1.x 单参数调用。
+2. **class 49（TextAsset）未映射**：真实缓存文本资源一律 `Unknown`，文本预览
+   无法分派。修复：映射为 `AssetType.Text` 并纳入回归。
+3. **Sprite 裁剪语义与计划书不符**：计划写「按 m_Rect 裁剪」，实测 `m_Rect`
+   是 Sprite 逻辑尺寸（含留白），`m_RD.textureRect` 才是图集内像素区域；
+   以实测为准并记录偏差。
+4. **静态标记在回灌后丢失**（若只在扫描时打内存标记）：索引 SQLite 新增
+   `static_bundle` 列，热扫描与回灌都恢复标记（旧库轻量 ALTER 迁移）。
+
+## 6. 基线状态
 
 ```text
-dotnet build LimbusModEditor.slnx --no-restore   ✓ 0 错误
-dotnet test LimbusModEditor.slnx --no-build      ✓ 274 通过（62 Format + 212 Domain，含 1 个 LME_BENCH 门控基准）
-dotnet publish ... -o artifacts/publish-win-x64  ✓ LimbusModEditor.App.exe（UI 冒烟启动通过）
+dotnet build LimbusModEditor.slnx --no-restore   ✓ 0 警告 0 错误
+dotnet test LimbusModEditor.slnx --no-build      ✓ 334 通过（74 Format + 260 Domain，真实数据门控测试本机全部真跑）
+dotnet publish ... -o artifacts/publish-win-x64  ✓ LimbusModEditor.App.exe（37 文件 / 6.8MB，UI 冒烟启动通过）
 ```
 
-### 5.1 性能量化基线（P3.9，真实缓存 1459 bundle / 1,194,061 资产）
+### 6.1 性能量化基线（P3.9，真实缓存 1459 bundle / 1,194,061 资产）
 
 | 路径 | 优化前（JSON 索引时代） | 优化后（SQLite + 项目瘦身） |
 |---|---|---|

@@ -15,7 +15,7 @@ Carra2/Rebank/Lunartique/Bank 四格式导入导出、真实 Texture2D `.resS` �
 **官方 catalog 只读解析 + vanilla 基线判定（T3，CRC 口径与 LCTA 交叉验证一致）**、
 **.staticmod 静态数据模组通道（读取/预览应用/生成，两个真实样本导入验证通过）**。
 
-**当前基线：274 个测试全绿**（62 Format + 212 Domain，含 1 个 LME_BENCH 门控基准）。最近提交见 git log。
+**当前基线：334 个测试全绿**（74 Format + 260 Domain，真实数据门控测试在本机全部真跑）。最近提交见 git log。
 
 基线命令（每轮开始和结束都必须跑）：
 
@@ -213,6 +213,33 @@ Type ID、vanilla 基线等技术字段，还有「模组管理」这类与「�
   （双击文本资源即改，JSON 保存前校验并格式化）。基线 263 → **274**
   （62 Format + 212 Domain）。
 
+## 3.10 本轮七（2026-09）：页面架构重构 + 四个工作台（P3.11，plan-01~08）
+
+用户提出 10 项修改（移除顶部标签页、活动栏直切页面、共享侧边栏、资源只允许
+自动加载、预览可拖拽、强化预览、修复 Unity bundle 属性/预览、新增音频/文本/
+静态三个工作台）。按 `docs/plans/` 的 8 份任务书分四波次执行，每波次独立提交：
+
+- **波次 A（plan-02/03/04，提交 86f3fec）**：三列布局（48 活动栏 / 220 共享
+  侧边栏 / `*` 页面宿主）；删除多标签机制（`WorkbenchTabs`/`OpenWorkbench`
+  系列，全仓 0 处）；`IWorkbenchHost` + `ShowPage` 6 个常驻 key；设置/教程
+  页面化（`SettingsPage`/`HelpPage`，无项目可用）；资源页删手动导入入口、
+  拖放收窄、`GridSplitter` + `UiStateService` 占比持久化。
+- **波次 B（plan-01 第 0-2 步 + plan-08 第 1-2 步，提交 7a9a7d1）**：class 49
+  映射；`ReadBundleTextAsset` / `ReadBundleSpriteComposite`（按 `m_RD.textureRect`
+  裁剪）/ `ReadBundleAudioClipData`；`AssetPropertyService`；`StaticBundleLocator`
+  + 扫描打 `staticBundle` 标记（索引持久化）+ `ShowStaticTables` 默认过滤。
+- **波次 C（plan-01 第 3 步 + plan-05/06/07/08，提交 ea447a0）**：
+  `AssetPreviewRegistry` 七形态预览管线 + 属性折叠区 + 静态表开关；
+  `BankWorkbenchPage` / `TextWorkbenchPage` / `StaticWorkbenchPage` 三个真实
+  工作台；FMOD 2.x `headerversion` 兼容修复 + 子样本索引解码；删除过渡控件
+  `LangTextModControl` / `StaticModControl`。
+- **波次 D**：`dotnet publish` 冒烟 + 文档四件（ROADMAP P3.11 / USAGE 界面章节 /
+  本文件 / REVIEW 自审表）。
+
+**接手注意**：主窗口不再有标签页，新增页面只需在 `MainWindow.CreatePage` 注册
+key 并在活动栏加按钮；资源页预览/属性走 Application 层管线（WPF 无关，可单测）；
+真实数据前后对照矩阵见 `docs/plans/REALDATA-VERIFY.md`。
+
 ## 4. 下一轮明确任务（按优先级，每项含验收标准）
 
 ### T6（P1）傻瓜化后续打磨（候选）
@@ -278,15 +305,19 @@ Type ID、vanilla 基线等技术字段，还有「模组管理」这类与「�
   `UnityClassId`（Mesh=43/AnimationClip=74）
 - `src/LimbusModEditor.Application/` — `Projects/`（ModProject.Sources 多来源）、
   `Assets/`（`AssetDisplay` 容器显示层 / `AssetSearchService` 搜索排序过滤 /
-  `AssetTreeBuilder` 目录树）、`Scanning/`（`UnityCacheScanService` +
-  `UnityCacheSqliteIndexStore`）、
+  `AssetTreeBuilder` 目录树 / `AssetPropertyService` 属性汇总 /
+  `Preview/` 预览提供者管线 + 十六进制与波形工具）、`Scanning/`
+  （`UnityCacheScanService` + `UnityCacheSqliteIndexStore`）、
+  `StaticMods/`（`StaticModService` + `StaticBundleLocator`）、
+  `Texts/`（`LangTextPatchService` + `LangTextWorkbenchService`）、
   `Build/`（ModExportService.ExportAllAsync/缓存对齐、NewModTemplateService）、
   `Debugging/`（GameDirectoryLocator/UnityCacheLocator/ModDirectoryLocator/
   ModInstallService/ProjectAutoConfigureService）
-- `src/LimbusModEditor.App/` — `MainWindow`（活动栏 + 工作台标签页：资源/文本/
-  静态；资源视图默认 m_Container 目录树，可切列表）、`AssetRow`（列表显示层）、
-  `LangTextModControl`、`StaticModControl`（工作台 UserControl）、
-  `ProjectSettingsWindow`、`ExportReportWindow`、`MultiExportReportWindow`
+- `src/LimbusModEditor.App/` — `MainWindow`（三列：活动栏 + 共享侧边栏 + 页面宿主；
+  `ShowPage` 注册表）、`WorkbenchPages/`（`AssetsWorkbenchPage` 资源工作台 +
+  `BankWorkbenchPage` / `TextWorkbenchPage` / `StaticWorkbenchPage` /
+  `SettingsPage` / `HelpPage` + `IWorkbenchHost`）、`UiStateService`（App 层仅
+  引用，实现在 Application.AppConfig）、`ExportReportWindow` 等模态对话框
 - `tests/LimbusModEditor.Format.Tests/` — 真实样本：`RealSamples`（缓存/模组定位）、
   `RealSampleTests`（bundle 扫描/纹理 resS/摘要/类型树勘察/格式分布）、`RealBankTests`
 - `tests/LimbusModEditor.Domain.Tests/` — `RealLocatorTests`、`MultiFormatExportTests`、
@@ -294,11 +325,14 @@ Type ID、vanilla 基线等技术字段，还有「模组管理」这类与「�
 
 ## 7. 交接给其他 agent 时的建议起点
 
-1. 先跑基线三命令确认全绿；确认 `git log --oneline` 最近提交为 `3c04b08` 或更新。
+1. 先跑基线三命令确认全绿；`git log --oneline` 最近提交应为 `ea447a0`
+   （波次 C）或更新（波次 D 文档提交）。
 2. 优先跟进「下一轮候选任务」（§4 末尾）：T1-T4 与 .staticmod 通道已完成，
-   唯一待办的用户动作是启动游戏确认 T1 写回模组的效果（见 `docs/REALDATA-VERIFY.md` §5）。
-3. 建议从「catalog 依赖图与诊断合并报告」开始（T3 的解析器已就绪可复用）。
-4. 每完成一个任务：build + test 全绿 → 独立中文提交 → 更新 ROADMAP/USAGE/REVIEW。
-5. 若遇到「某个行为与 LCTA 不一致」，先去 `E:/desktop/work/LCTA-Limbus-company-transfer-auto`
+   唯一待办的用户动作是启动游戏确认 T1 写回模组的效果（见 `docs/REALDATA-VERIFY.md`）。
+3. 本轮（P3.11）已完成页面架构重构与四个工作台；如需继续扩展页面，按
+   `MainWindow.CreatePage` + `IWorkbenchHost` 模式新增，不要把逻辑塞回 MainWindow。
+4. 建议从「catalog 依赖图与诊断合并报告」开始（T3 的解析器已就绪可复用）。
+5. 每完成一个任务：build + test 全绿 → 独立中文提交 → 更新 ROADMAP/USAGE/REVIEW。
+6. 若遇到「某个行为与 LCTA 不一致」，先去 `E:/desktop/work/LCTA-Limbus-company-transfer-auto`
    读对应源码（引用路径+行号），再决定是修我们这边还是记录为 LCTA 的偏差。
    注意：catalog 记录布局会随游戏版本整体平移（T3 的双布局自校准就是为此）。

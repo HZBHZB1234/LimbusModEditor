@@ -481,6 +481,52 @@ Lunartique→对象级 Carra/目录来源支持，其余禁用并给出原因）
   代码编辑器」）接到 UI：双击文本资源即改，保存登记为替换，JSON 保存前
   校验并格式化。新增 `TextPreviewServiceTests` 9 个、`TextAssetEditTests` +2。
 
+### P3.11 页面架构重构与工作台扩展（2026-09，完成）
+
+目标（用户提出的 10 项修改）：移除顶部标签页、活动栏直切页面、共享侧边栏、
+资源只允许自动加载、预览可拖拽调整、强化多格式预览、修复 Unity bundle 资源
+属性/预览、并新增音频 / 文本 / 静态数据三个专用工作台。执行按
+`docs/plans/` 的 8 份任务书分四波次完成（每波次独立提交）。
+
+- **页面架构（plan-02/03/04）**：主窗口改三列 `[48 活动栏][220 共享侧边栏]
+  [* 页面宿主]`；删除 `TabControl WorkbenchTabs` 与 `WorkbenchTabItem`、
+  `OpenWorkbench` 系列与 `BuildClosableHeader`（全仓 0 处）；新增
+  `IWorkbenchHost` + `ShowPage` 注册表（6 个 key 常驻不销毁）；设置/教程
+  从模态窗口改为页面（`SettingsPage` / `HelpPage`，无项目也可用）；
+  `ProjectSettingsWindow.cs` / `HelpWindow.cs` 删除。资源页移除手动导入入口
+  （中栏按钮 + 侧边栏两项），「扫描游戏资源」更名「自动加载游戏资源」，
+  拖放收窄为「单张图片拖到选中图像资源上替换」；新增 `GridSplitter`
+  （预览列默认 360 / 最小 260，浏览列最小 280）+ `UiStateService`
+  持久化到 `config/ui-state.json`（双击把手复位）。
+- **后端修复（plan-01 第 0-2 步 + plan-08 第 1-2 步）**：`UnityClassId` 补
+  class 49（TextAsset → Text）；`AssetsToolsBackend` 新增
+  `ReadBundleTextAsset` / `ReadBundleSpriteComposite`（`m_RD.textureRect`
+  裁剪，实测 `m_Rect` 只是逻辑尺寸）/ `ReadBundleAudioClipData`
+  （`m_Resource` 流式 / 旧版 `m_Source` / 内联三种形态，全部走类型树）；
+  新增 `UnitySpriteCrop`（Unity 左下原点 → 图像左上原点）与
+  `UnityTextureCodec.ToPngCropped`；新增 `AssetPropertyService`（中文属性行，
+  单项失败降级）；新增 `StaticBundleLocator`（catalog 动态解析静态 bundle，
+  扫描按内层键 O(1) 打 `staticBundle` 标记并持久化到索引，`AssetSearchQuery`
+  新增 `ShowStaticTables` 默认过滤）。前后对照矩阵见
+  `docs/plans/REALDATA-VERIFY.md`。
+- **预览管线（plan-05）**：`IAssetPreviewProvider` + `AssetPreviewRegistry`
+  （Texture → Sprite → Audio → Text → Script → Summary → Hex 兜底），七种形态
+  （图像缩放/平移/棋盘格/原图↔替换图、文本行号 + JSON 树、音频波形 + 试听、
+  摘要卡、只读字段树、内嵌十六进制、说明）；未知类型不空白。
+- **三个工作台（plan-06/07/08）**：`BankWorkbenchPage`（bank 扫描 / 样本表 /
+  逐样本试听与 WAV 替换 / 导出整包 .bank 或 .rebank）、`TextWorkbenchPage`
+  （活动语言目录浏览 / 键值编辑 / 导出 lang 补丁）、`StaticWorkbenchPage`
+  （静态 bundle 定位 / 静态表编辑 / 导出 .staticmod）。三个页面复用资源页
+  骨架与 splitter；旧过渡控件 `LangTextModControl` / `StaticModControl` 删除。
+- **FMOD 2.x 兼容修复**：游戏自带 `fmodstudio.dll`（2.2.26）的
+  `FMOD_System_Create` 需要 `headerversion`，此前单参数调用返回
+  `FMOD_ERR_HEADER_MISMATCH(20)`；现按导出符号所属 DLL 的文件版本推导
+  `FMOD_VERSION`，并支持按子样本索引解码（Bank 逐样本试听）。
+- 测试：基线 296 → 334（74 Format + 260 Domain），新增真实数据门控
+  `RealPreviewCoverageTests` / `RealWorkbenchGateTests` / `AssetPreviewRegistryTests`
+  / `AssetPropertyServiceTests` / `StaticBundleLocatorTests` / `UiStateServiceTests`，
+  本机全部真跑（真实缓存 / 真实 bank / 真实 lang / 真实 catalog）。
+
 ## P4：工程质量和交付
 
 - 把当前代码后置 UI 逐步迁移到 MVVM，但不牺牲现有 Windows-only 可运行性。

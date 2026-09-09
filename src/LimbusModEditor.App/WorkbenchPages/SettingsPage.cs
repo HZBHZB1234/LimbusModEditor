@@ -1,6 +1,7 @@
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media;
 using LimbusModEditor.Application.AppConfig;
 using LimbusModEditor.Application.Debugging;
 using LimbusModEditor.Formats.Bank;
@@ -8,16 +9,16 @@ using LimbusModEditor.Formats.Bank;
 namespace LimbusModEditor.App;
 
 /// <summary>
-/// 设置（二级窗口）：目录部分是<b>全局共享设置</b>（保存在程序目录
-/// config/shared-config.json，所有项目共用，自动获取 + 手动微调都在这里）；
-/// 模组元数据与调试行为属于当前项目。FMOD DLL 目录留空时自动使用随包
-/// DLL（程序目录 fmod/）或游戏自带运行库，手动指定永远优先。
+/// 设置页面（plan-02 第 3 步页面化）：目录部分是<b>全局共享设置</b>（保存在程序
+/// 目录 config/shared-config.json，所有项目共用，自动获取 + 手动微调都在这里）；
+/// 模组元数据与调试行为属于当前项目。<b>无项目时页面仍可用</b>：共享目录段正常
+/// 编辑，项目元数据段置灰并说明原因。FMOD DLL 目录留空时自动使用随包 DLL
+/// （程序目录 fmod/）或游戏自带运行库，手动指定永远优先。
 /// </summary>
-public sealed class ProjectSettingsWindow : Window
+public sealed class SettingsPage : UserControl
 {
-    private readonly MainWindow _ownerMain;
+    private readonly IWorkbenchHost _host;
     private readonly AppEnvironment _env;
-    private readonly Func<string?, Task<bool>> _saveProject;
     private readonly TextBox _gameBox;
     private readonly TextBox _cacheBox;
     private readonly TextBox _modsBox;
@@ -27,19 +28,14 @@ public sealed class ProjectSettingsWindow : Window
     private readonly TextBox _authorBox;
     private readonly TextBox _descriptionBox;
     private readonly CheckBox _restoreCheck;
+    private readonly TextBlock _projectHint;
     private readonly TextBlock _status;
+    private readonly StackPanel _projectPanel;
 
-    public ProjectSettingsWindow(MainWindow owner, Func<string?, Task<bool>> saveProject)
+    public SettingsPage(IWorkbenchHost host)
     {
-        _ownerMain = owner;
-        _saveProject = saveProject;
+        _host = host;
         _env = AppEnvironment.Current;
-        Title = "设置 — 共享目录与项目元数据";
-        Width = 660;
-        Height = 640;
-        MinWidth = 560;
-        WindowStartupLocation = WindowStartupLocation.CenterOwner;
-        Owner = owner;
 
         var panel = new StackPanel { Margin = new Thickness(16) };
         panel.Children.Add(MakeSectionTitle(
@@ -59,10 +55,21 @@ public sealed class ProjectSettingsWindow : Window
         panel.Children.Add(openBase);
 
         panel.Children.Add(MakeSectionTitle("当前项目元数据"));
-        (_nameBox, panel) = AddTextBoxRow(panel, "名称");
-        (_versionBox, panel) = AddTextBoxRow(panel, "版本");
-        (_authorBox, panel) = AddTextBoxRow(panel, "作者");
-        (_descriptionBox, panel) = AddTextBoxRow(panel, "描述");
+        _projectHint = new TextBlock
+        {
+            Text = string.Empty,
+            Foreground = Brushes.Gray,
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 0, 0, 6),
+            Visibility = Visibility.Collapsed
+        };
+        panel.Children.Add(_projectHint);
+        var projectPanel = new StackPanel();
+        (_nameBox, projectPanel) = AddTextBoxRow(projectPanel, "名称");
+        (_versionBox, projectPanel) = AddTextBoxRow(projectPanel, "版本");
+        (_authorBox, projectPanel) = AddTextBoxRow(projectPanel, "作者");
+        (_descriptionBox, projectPanel) = AddTextBoxRow(projectPanel, "描述");
+        panel.Children.Add(projectPanel);
 
         panel.Children.Add(MakeSectionTitle("调试行为（当前项目）"));
         _restoreCheck = new CheckBox { Content = "关闭编辑器时恢复被覆盖的游戏文件", Margin = new Thickness(0, 6, 0, 6) };
@@ -71,16 +78,24 @@ public sealed class ProjectSettingsWindow : Window
         var save = new Button { Content = "保存设置", Padding = new Thickness(16, 8, 16, 8), HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 14, 0, 0) };
         save.Click += async (_, _) => await SaveAsync(save);
         panel.Children.Add(save);
-        _status = new TextBlock { Margin = new Thickness(0, 10, 0, 0), Foreground = System.Windows.Media.Brushes.Gray, TextWrapping = TextWrapping.Wrap };
+        _status = new TextBlock { Margin = new Thickness(0, 10, 0, 0), Foreground = Brushes.Gray, TextWrapping = TextWrapping.Wrap };
         panel.Children.Add(_status);
-        Content = new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
 
+        Content = new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        _projectPanel = projectPanel;
         LoadValues();
+    }
+
+    /// <summary>页面每次显示/项目切换后由宿主调用：重载字段并刷新「无项目」置灰状态。</summary>
+    public void Reload()
+    {
+        LoadValues();
+        _host.SetStatus("就绪");
     }
 
     private void LoadValues()
     {
-        var project = _ownerMain.Project;
+        var project = _host.Project;
         // 显示生效值：共享配置优先，回退旧项目字段（保存时会写入共享配置）。
         _gameBox.Text = _env.EffectiveGameDirectory(project) ?? string.Empty;
         _cacheBox.Text = _env.EffectiveUnityCacheDirectory(project) ?? string.Empty;
@@ -91,11 +106,19 @@ public sealed class ProjectSettingsWindow : Window
         _authorBox.Text = project?.Author ?? string.Empty;
         _descriptionBox.Text = project?.Description ?? string.Empty;
         _restoreCheck.IsChecked = project?.RestoreDebugFilesOnClose ?? true;
+        // 无项目：共享目录段照常可用，项目元数据段置灰并说明原因。
+        var hasProject = project is not null;
+        _projectPanel.IsEnabled = hasProject;
+        _restoreCheck.IsEnabled = hasProject;
+        _projectHint.Visibility = hasProject ? Visibility.Collapsed : Visibility.Visible;
+        _projectHint.Text = hasProject
+            ? string.Empty
+            : "尚未打开项目：以上元数据与调试行为属于某个项目，先「新建模组项目」或「打开项目」后即可编辑。共享目录不受影响，随时可改。";
     }
 
     private async Task SaveAsync(Button saveButton)
     {
-        var project = _ownerMain.Project;
+        var project = _host.Project;
         // 共享目录写进共享配置（程序目录），所有项目立即生效。
         _env.Config.GameDirectory = _gameBox.Text.Trim();
         _env.Config.UnityCacheDirectory = _cacheBox.Text.Trim();
@@ -113,13 +136,15 @@ public sealed class ProjectSettingsWindow : Window
         // 项目可能很大（全缓存扫描后数十万资产），保存在后台线程执行，
         // 期间禁用按钮避免重复提交。
         saveButton.IsEnabled = false;
-        _status.Text = "正在保存项目…";
-        var ok = await _saveProject(null);
+        _status.Text = project is null ? "正在保存共享目录设置…" : "正在保存项目…";
+        var ok = project is null || await _host.SaveProjectAsync();
         saveButton.IsEnabled = true;
-        _status.Text = ok
-            ? "设置已保存（共享目录 → 程序目录；元数据 → 项目）。"
-            : "共享目录已保存；项目元数据保存失败，请重试。";
-        _ownerMain.RefreshDirectoryLabels();
+        _status.Text = project is null
+            ? "共享目录已保存到程序目录（所有项目共用）。"
+            : ok
+                ? "设置已保存（共享目录 → 程序目录；元数据 → 项目）。"
+                : "共享目录已保存；项目元数据保存失败，请重试。";
+        _host.RefreshDirectorySettings();
     }
 
     private void AutoGame()
@@ -140,7 +165,7 @@ public sealed class ProjectSettingsWindow : Window
             return;
         }
         // 多个候选时弹出选择器（与无感自动化同一套已验证候选列表）。
-        var picker = new UnityCachePickerWindow(candidates) { Owner = this };
+        var picker = new UnityCachePickerWindow(candidates) { Owner = OwnerWindow };
         if (picker.ShowDialog() == true && picker.Selected is not null)
         {
             _cacheBox.Text = picker.Selected.Path;
@@ -165,7 +190,7 @@ public sealed class ProjectSettingsWindow : Window
             CheckFileExists = false,
             ValidateNames = false
         };
-        if (dialog.ShowDialog() != true) return;
+        if (dialog.ShowDialog(OwnerWindow) != true) return;
         var dir = Path.GetDirectoryName(dialog.FileName);
         if (!string.IsNullOrWhiteSpace(dir)) _fmodBox.Text = dir;
     }
@@ -191,14 +216,17 @@ public sealed class ProjectSettingsWindow : Window
             Directory.CreateDirectory(_env.CacheDirectory);
             var cacheFile = Path.Combine(_env.CacheDirectory, "fmod-probe.json");
             var cache = new FmodCompatibilityService().Probe(dir, cacheFile);
-            new FmodReportWindow(dir, cache) { Owner = this }.ShowDialog();
+            new FmodReportWindow(dir, cache) { Owner = OwnerWindow }.ShowDialog();
         }
         catch (Exception ex) { _status.Text = $"FMOD 检测失败：{ex.Message}"; }
     }
 
+    /// <summary>对话框/消息框的宿主窗口（页面本身不是 Window）。</summary>
+    private Window OwnerWindow => Window.GetWindow(this) ?? System.Windows.Application.Current.MainWindow;
+
     private static (TextBox, StackPanel) AddDirectoryRow(StackPanel panel, string label, params (string Text, Action Click)[] buttons)
     {
-        panel.Children.Add(new TextBlock { Text = label, Foreground = System.Windows.Media.Brushes.Gray });
+        panel.Children.Add(new TextBlock { Text = label, Foreground = Brushes.Gray });
         var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 10) };
         var box = new TextBox { Width = 380, VerticalContentAlignment = VerticalAlignment.Center };
         row.Children.Add(box);
@@ -214,7 +242,7 @@ public sealed class ProjectSettingsWindow : Window
 
     private static (TextBox, StackPanel) AddTextBoxRow(StackPanel panel, string label)
     {
-        panel.Children.Add(new TextBlock { Text = label, Foreground = System.Windows.Media.Brushes.Gray });
+        panel.Children.Add(new TextBlock { Text = label, Foreground = Brushes.Gray });
         var box = new TextBox { Margin = new Thickness(0, 4, 0, 10) };
         panel.Children.Add(box);
         return (box, panel);
@@ -225,7 +253,7 @@ public sealed class ProjectSettingsWindow : Window
         Text = text,
         FontWeight = FontWeights.Bold,
         Margin = new Thickness(0, 12, 0, 4),
-        Foreground = System.Windows.Media.Brushes.LightSteelBlue,
+        Foreground = Brushes.LightSteelBlue,
         TextWrapping = TextWrapping.Wrap
     };
 }

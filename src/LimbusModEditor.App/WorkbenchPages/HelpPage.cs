@@ -4,20 +4,14 @@ using System.Windows.Media;
 
 namespace LimbusModEditor.App;
 
-/// <summary>In-app tutorial: the same guidance as docs/USAGE.md condensed into
-/// scrollable sections so new users can follow the workflow without leaving the
-/// editor.</summary>
-public sealed class HelpWindow : Window
+/// <summary>
+/// 使用教程页面（plan-02：原模态窗口 HelpWindow 页面化）。内容与
+/// docs/USAGE.md 一致的精简版，新用户不用离开编辑器就能照流程走。
+/// </summary>
+public sealed class HelpPage : UserControl
 {
-    public HelpWindow()
+    public HelpPage()
     {
-        Title = "使用教程";
-        Width = 720;
-        Height = 640;
-        MinWidth = 560;
-        MinHeight = 420;
-        WindowStartupLocation = WindowStartupLocation.CenterOwner;
-
         var scroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Padding = new Thickness(16) };
         var panel = new StackPanel();
 
@@ -25,13 +19,21 @@ public sealed class HelpWindow : Window
         panel.Children.Add(MakeBody(
             "1. 启动即引导：新建（或打开）模组项目 —— 只需填模组名，\n" +
             "   游戏目录 / Unity 缓存 / 模组目录自动配置（共享设置保存在程序目录）；\n" +
-            "2. 自动扫描游戏资源：引用模式，不复制文件，只建索引；扫描完成后\n" +
+            "2. 自动加载游戏资源：引用模式，不复制文件，只建索引；加载完成后\n" +
             "   在列表中搜索，选中即可替换图片 / 编辑字段；\n" +
             "3. 一键导出模组：把全部修改按真实加载器的 Carra2 布局打包，\n" +
             "   输出到模组目录（%APPDATA%\\LimbusCompanyMods）即可被游戏加载。\n\n" +
-            "顶部的提示条会随时告诉你「下一步该做什么」；也可导入现有模组\n" +
-            "（.carra/.carra2/.rebank/.bank/Lunartique ZIP/Unity .bundle/.assets）；\n" +
-            "调试覆盖层 → 应用并启动调试（自动备份，可恢复）仍可用于本地验证。"));
+            "顶部的提示条会随时告诉你「下一步该做什么」；调试覆盖层 → 应用并启动\n" +
+            "调试（自动备份，可恢复）仍可用于本地验证。"));
+
+        panel.Children.Add(MakeTitle("页面与侧边栏"));
+        panel.Children.Add(MakeBody(
+            "• 左侧活动栏切换页面：📦 资源工作台 / 🏦 音频工作台 / 📝 文本工作台 /\n" +
+            "  🧩 静态数据工作台 / 📖 使用教程 / ⚙ 设置；Ctrl+Tab 顺序循环切页；\n" +
+            "• 第二列「项目工作区」侧边栏所有页面共用、不消失：目录状态、自动加载\n" +
+            "  游戏资源、导出入口、打开模组/项目目录都在这里；\n" +
+            "• 设置页无项目时也可用：共享目录随时可改，项目元数据段会置灰并说明原因。\n" +
+            "• 资源页的浏览列与预览列之间可拖拽调整宽度（双击把手复位默认占比）。"));
 
         panel.Children.Add(MakeTitle("Unity 字段编辑"));
         panel.Children.Add(MakeBody(
@@ -57,7 +59,7 @@ public sealed class HelpWindow : Window
             "• Sprite 支持 rect/pivot/border 元数据编辑；图集可拆分与恢复；\n" +
             "• Bank 音频解码/编码使用随包提供的 fmod64.dll / fsbank64.dll\n" +
             "  （发布包 fmod/ 目录，启动时自动发现，无需配置）；未随包提供时\n" +
-            "  可在「设置…」指定自己合法获得的 DLL 目录，或使用游戏自带运行库。"));
+            "  可在「设置」页指定自己合法获得的 DLL 目录，或使用游戏自带运行库。"));
 
         panel.Children.Add(MakeTitle("对象摘要（Mesh / 动画 / 字体）"));
         panel.Children.Add(MakeBody(
@@ -69,7 +71,7 @@ public sealed class HelpWindow : Window
 
         panel.Children.Add(MakeTitle("FMOD DLL 检测"));
         panel.Children.Add(MakeBody(
-            "• 配置 FMOD DLL 目录后，点击「检测 FMOD DLL」查看每个 DLL 的：\n" +
+            "• 在「设置」页配置 FMOD DLL 目录后，点击「检测兼容性」查看每个 DLL 的：\n" +
             "  位数（x64/x86）、文件版本、导出符号数量，以及解码/FSB 编码接口是否齐全；\n" +
             "• 检测只读取文件头与导出表，不会加载或执行任何 DLL 代码；\n" +
             "• 结果按 DLL 大小/时间戳/内容指纹缓存，目录变化后自动重新检测；\n" +
@@ -82,7 +84,7 @@ public sealed class HelpWindow : Window
             "（事务写，失败不落盘）；\n" +
             "• Rebank 与 Lunartique 没有空白模板（真实加载器会把 wav 数为 0 的\n" +
             "  Rebank 判错并回滚安装；Lunartique 需要现有模组作基底），向导中置灰并说明原因；\n" +
-            "• 空白模板不含资源 —— 创建后请继续「导入模组」登记源包并替换资源。"));
+            "• 空白模板不含资源 —— 创建后请继续自动加载游戏资源并替换素材。"));
 
         panel.Children.Add(MakeTitle("导出向导与导出报告"));
         panel.Children.Add(MakeBody(
@@ -102,11 +104,10 @@ public sealed class HelpWindow : Window
 
         panel.Children.Add(MakeTitle("自动定位与预览"));
         panel.Children.Add(MakeBody(
-            "• 「自动定位游戏目录」：扫描已知 Steam 库，找到含 LimbusCompany.exe 的安装目录；\n" +
-            "• 「自动建议 Unity 缓存目录」：从游戏目录与 LocalLow 推导候选，\n" +
-            "  真实缓存根为 LocalLow/Unity/ProjectMoon_LimbusCompany（可能是 junction），\n" +
-            "  按缓存条目（外层键/内层键/__data）验证并显示数量，由你确认；\n" +
-            "• 「自动建议模组目录」：真实加载器默认使用 %APPDATA%/LimbusCompanyMods；\n" +
+            "• 目录定位与自动加载：侧边栏「重新自动获取目录」扫描已知 Steam 库与\n" +
+            "  LocalLow 缓存候选；「自动加载游戏资源」一键索引全部缓存（引用模式）；\n" +
+            "• 真实缓存根为 LocalLow/Unity/ProjectMoon_LimbusCompany（可能是 junction），\n" +
+            "  按缓存条目（外层键/内层键/__data）验证并显示数量；\n" +
             "• 「十六进制预览」：查看任意资源前 4 KiB 的 HEX 转储与 ASCII 边栏，\n" +
             "  并显示文件大小与原始/当前哈希，便于判断未知数据再决定是否替换。"));
 
@@ -121,6 +122,7 @@ public sealed class HelpWindow : Window
         panel.Children.Add(MakeBody(
             "• 原始资源永远保留在 sources/ 中，所有修改先记录、构建时才应用；\n" +
             "• 应用调试覆盖层前会自动备份游戏文件，编辑器关闭时可恢复；\n" +
+            "• 编辑器只产出模组包，绝不直接写游戏目录 / catalog / Unity 缓存；\n" +
             "• 不支持的格式会明确报告，不会静默丢弃或盲目复制；\n" +
             "• 未经真实游戏样本验证的兼容性不会被宣称。"));
 

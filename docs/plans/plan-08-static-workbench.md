@@ -10,10 +10,13 @@
   算 CRC32 并与 catalog 记录比对，失配即清缓存重下。因此 static mod 不能只改缓存 `__data`，
   必须「重打包 bundle + 算新 CRC/size + 双写 catalog + 重建缓存条目」——这些全部由**加载器**完成
   （`staticmod.py:601-680`），编辑器只产出 `.staticmod` 包。
-- catalog 定位（`staticmod.py:108-156`）：catalog_S1.bin（`LimbusCompany_Data/StreamingAssets/aa/`）
-  中搜 bundle 名 → 取尾段 32hex 作为 content hash（= 缓存内层键）→ 其 Hash128 记录后紧跟外层键
-  → crc/size 字段（带 +0x44/+0x48 或 +0x3C/+0x40 双布局自校准，编辑器 `CatalogFileService`
-  已实现同名解析）。
+- catalog 定位（`staticmod.py:108-156,466-469`）：**运行时** catalog
+  `LocalLow/ProjectMoon/LimbusCompany/com.unity.addressables/catalog_S1.bin`（游戏实际读取、
+  加载器双写目标）中搜 bundle 名 → 取尾段 32hex 作为 content hash（= 缓存内层键）→ 其 Hash128
+  记录后紧跟外层键 → crc/size 字段（带 +0x44/+0x48 或 +0x3C/+0x40 双布局自校准，编辑器
+  `CatalogFileService` 已实现同名解析）。游戏安装目录 `StreamingAssets/aa/catalog.bin` 只作兜底
+  ——2026-09 实测两份 catalog 可能指向不同内容哈希（安装目录 `edb72aec…` / 运行时 `62d6e466…`，
+  缓存里只有后者），因此定位按候选列表逐个尝试并优先取「缓存真正命中」的那份。
 - `.staticmod` 格式：zip = `manifest.json`（format=staticmod/v1, patches[], fullFiles[],
   每条可选 `container` 字段精确寻址）+ `patches/<dc>.json`（opType=jsonpatch|pathset）+
   `full/<dc>/<file>.json`。bundle 内目标是 **TextAsset**，按 `container` 精确匹配或
@@ -63,12 +66,13 @@
 
 ## 4. 验收标准（审查门）
 
-- [ ] 真实环境冒烟：catalog 定位成功（bundle 名 + 外层键 + 缓存 `__data` 命中）；TextAsset 枚举数
-      > 0 且 `m_Name`/JSON 可读。
-- [ ] 修改一张表（如 personality 类）→ 导出 `.staticmod` → `StaticModService.Read` 回读一致；
+- [x] 真实环境冒烟：catalog 定位成功（bundle 名 + 外层键 + 缓存 `__data` 命中）；TextAsset 枚举数
+      > 0 且 `m_Name`/JSON 可读。（2026-09 修复 catalog 来源后实测：运行时 catalog
+      `62d6e466…` + 外层键 `64bd0105…` + `__data` 命中，枚举 1392 张表）
+- [x] 修改一张表（如 personality 类）→ 导出 `.staticmod` → `StaticModService.Read` 回读一致；
       manifest 含 container；jsonpatch ops 与 diff 视图一致。
-- [ ] 把导出包交给真实加载器语义（或对齐 `staticmod.py` 的单测夹具）验证：container 精确匹配、
-      旧式名字兜底两种路径都能定位目标 TextAsset。
+- [x] 把导出包交给真实加载器语义（或对齐 `staticmod.py` 的单测夹具）验证：container 精确匹配、
+      旧式名字兜底两种路径都能定位目标 TextAsset。（真实样本：container 精确匹配 1 命中、名字兜底 1 命中）
 - [ ] 资源工作台默认视图不再出现 static bundle 的资产；开关打开后可见（新旧项目都验证）。
 - [ ] 编辑器全程不写 catalog/缓存/游戏目录（代码审查 + grep）。
 - [ ] build + test 全绿；USAGE 新节 + 风险提示。

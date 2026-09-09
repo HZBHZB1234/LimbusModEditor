@@ -26,6 +26,7 @@
 | `Probe_cache` 测试名字串写到游标终点而非起点 | RVAs 指向全零区 | 记录 `stringsStart` 并从该处写入 |
 | T1 真实写回验证发现所有 bundle 写回的修改被静默丢弃（重打包成功但内容不变） | AssetsTools.NET v3 的 `Pack` 只重压缩原始 `DataReader`，不处理 `SetNewData` 登记的 Replacer；旧 `WritePackedBundle` 直接 Pack | 先未压缩 `Write`（应用 Replacer）再重载并按 `originalCompression` 重打包；以真实流纹理端到端闭环覆盖（`docs/REALDATA-VERIFY.md`），此前 bundle 写回路径无任何测试 |
 | T3 首版按 staticmod.py 文档以 +0x44/+0x48 读 catalog 记录，全部 bundle 判为「与基线不符」 | CRC/大小字段位置在 catalog 格式版本间整体平移（staticmod 2026-08-22 实证为 +0x44/+0x48；2026-09-03 实测 catalog 为 +0x3C/+0x40），首版把共享常量误读为逐 bundle 记录 | 以真实数据对照确证通用布局（6 个 bundle 的实际文件大小与解压块 CRC 精确命中 +0x3C/+0x40），解析器按「大小值合理占比」双布局自校准；与 LCTA 交叉核对：名字数 1461=1461，未补丁 bundle CRC 10/10 一致 |
+| 静态数据工作台「定位成功但缓存永远未命中」（2026-09 报障） | `StaticBundleLocator` 只读游戏安装目录 `<游戏>/LimbusCompany_Data/StreamingAssets/aa/catalog.bin`，而游戏运行时读的是 `LocalLow/ProjectMoon/LimbusCompany/com.unity.addressables/catalog_S1.bin`（LCTA `staticmod.py:466-469` 的 `_catalog_path()`，也是加载器双写目标）。本机实测两份 catalog 指向**不同内容哈希**：安装目录 `edb72aec…`、运行时 `62d6e466…`，缓存里只有后者 → 内层键错 → 永远「启动一次游戏生成缓存」 | 定位改为「运行时 catalog（由缓存根推导 LocalLow）→ 安装目录 catalog」候选列表，**逐个尝试并优先返回缓存真正命中**的那一个；`StaticBundleLocation.CatalogPath` 记录来源并在 UI 显示；缓存根候选追加 LCTA 事实中的 `D:\Unity\ProjectMoon_LimbusCompany`（`staticmod.py:418-425`）。真实环境验证：1392 张静态表枚举成功，`container` 精确寻址 1 命中；新增 5 个单测（含分叉 catalog 回归与真实端到端） |
 
 ### 2.2 复查要点与结论
 

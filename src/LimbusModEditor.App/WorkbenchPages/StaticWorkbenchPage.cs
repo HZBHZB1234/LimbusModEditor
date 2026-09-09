@@ -17,6 +17,10 @@ namespace LimbusModEditor.App;
 /// 浏览/搜索其中的 TextAsset 静态表，编辑后用 StaticModService 导出
 /// <c>.staticmod</c> 补丁包到<b>模组目录</b>。编辑器绝不写 catalog / 缓存 /
 /// 游戏目录——重打包与 catalog 双写由加载器完成。
+///
+/// <para>catalog 以**运行时**那份为准（<c>LocalLow/ProjectMoon/LimbusCompany/com.unity.addressables/catalog_S1.bin</c>，
+/// 游戏实际读取、加载器双写的目标），游戏安装目录的 <c>StreamingAssets/aa/catalog.bin</c>
+/// 只作兜底；热修后两份可能指向不同内容哈希，详见 <see cref="StaticBundleLocator"/>。</para>
 /// </summary>
 public sealed class StaticWorkbenchPage : UserControl
 {
@@ -207,7 +211,10 @@ public sealed class StaticWorkbenchPage : UserControl
     private async Task RefreshAsync()
     {
         var gameDirectory = _host.Env.EffectiveGameDirectory(_host.Project);
-        var cacheRoots = new[] { _host.Env.EffectiveUnityCacheDirectory(_host.Project) };
+        // 缓存根候选：共享配置里的 Unity 缓存目录 + LCTA 事实中的迁移盘缓存
+        // （D:\Unity\…；加载器会同时读写两份，游戏更新后可能只有其中一份）。
+        var cacheRoots = StaticBundleLocator.WithMigratedCacheRoot(
+            [_host.Env.EffectiveUnityCacheDirectory(_host.Project)]);
         _status.Text = "正在从 catalog 定位静态数据 bundle…";
         try
         {
@@ -215,9 +222,12 @@ public sealed class StaticWorkbenchPage : UserControl
             _location = location;
             if (location is null)
             {
-                _locationInfo.Text = gameDirectory is null
-                    ? "没有配置游戏目录：请在「设置」页填写游戏目录后再试。"
-                    : "catalog 里没有找到 static_s1_0_assets_all_*.bundle 条目（catalog 缺失或版本不符）。";
+                // 定位来源优先运行时 catalog（游戏实际读取 + 加载器双写的那一份），
+                // 安装目录 catalog 只作兜底：两者热修后可能不是同一份。
+                var candidates = StaticBundleLocator.FindCatalogCandidates(gameDirectory, cacheRoots);
+                _locationInfo.Text = candidates.Count == 0
+                    ? "没有找到 catalog：请确认「设置」页的 Unity 缓存目录（运行时 catalog 所在）或游戏目录。"
+                    : $"已找到 catalog（{string.Join("；", candidates)}）但没有 static_s1_0_assets_all_*.bundle 条目（catalog 版本不符？）。";
                 _tables = [];
                 _tableList.ItemsSource = null;
                 _status.Text = "—";
@@ -228,7 +238,8 @@ public sealed class StaticWorkbenchPage : UserControl
             {
                 _tables = [];
                 _tableList.ItemsSource = null;
-                _status.Text = "缓存里还没有这个 bundle —— 启动一次游戏让它生成缓存后点「重新定位」。";
+                _status.Text = "缓存里还没有这个 bundle —— 启动一次游戏让它生成缓存后点「重新定位」。" +
+                               "\n若刚热修过：运行时 catalog 与游戏安装目录 catalog 可能指向不同内容哈希，请以运行时 catalog 为准（见上方 catalog 路径）。";
                 return;
             }
             _status.Text = "正在枚举静态表…";

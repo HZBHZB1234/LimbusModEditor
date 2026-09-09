@@ -176,6 +176,11 @@ public static class StaticBundleLocator
         /// <summary>UTF-8 正文（非 UTF-8 返回 null，不猜编码）。</summary>
         public string? TryDecodeUtf8()
             => new UnityTextAsset(SerializedFile, PathId, Name, Data).TryDecodeUtf8();
+
+        /// <summary>表格大小（列表显示用）。</summary>
+        public string SizeLabel => Data.Length >= 1024 * 1024
+            ? $"{Data.Length / 1024.0 / 1024.0:0.0} MB"
+            : Data.Length >= 1024 ? $"{Data.Length / 1024.0:0.0} KB" : $"{Data.Length} B";
     }
 
     /// <summary>枚举静态 bundle 内的 TextAsset 及其容器路径/分组（静态数据工作台用）。

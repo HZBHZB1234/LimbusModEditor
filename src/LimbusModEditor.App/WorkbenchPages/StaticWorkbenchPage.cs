@@ -72,7 +72,7 @@ public sealed class StaticWorkbenchPage : UserControl
         var grid = new GridView();
         grid.Columns.Add(new GridViewColumn { Header = "数据类", DisplayMemberBinding = new System.Windows.Data.Binding(nameof(StaticBundleLocator.StaticTextAsset.DataClass)), Width = 120 });
         grid.Columns.Add(new GridViewColumn { Header = "表", DisplayMemberBinding = new System.Windows.Data.Binding(nameof(StaticBundleLocator.StaticTextAsset.FileName)), Width = 240 });
-        grid.Columns.Add(new GridViewColumn { Header = "大小", DisplayMemberBinding = new System.Windows.Data.Binding(nameof(StaticBundleLocator.StaticTextAsset.Data)), Width = 90 });
+        grid.Columns.Add(new GridViewColumn { Header = "大小", DisplayMemberBinding = new System.Windows.Data.Binding(nameof(StaticBundleLocator.StaticTextAsset.SizeLabel)), Width = 90 });
         _tableList.View = grid;
         _tableList.SelectionChanged += async (_, _) => await LoadSelectedTableAsync();
 

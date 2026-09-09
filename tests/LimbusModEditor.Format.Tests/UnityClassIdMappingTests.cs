@@ -19,6 +19,7 @@ public class UnityClassIdMappingTests
         // Canonical ids from AssetsTools.NET's AssetClassID table.
         Assert.Equal(1, IdOf(nameof(AssetClassID.GameObject)));
         Assert.Equal(28, IdOf(nameof(AssetClassID.Texture2D)));
+        Assert.Equal(49, IdOf(nameof(AssetClassID.TextAsset)));
         Assert.Equal(83, IdOf(nameof(AssetClassID.AudioClip)));
         Assert.Equal(114, IdOf(nameof(AssetClassID.MonoBehaviour)));
         Assert.Equal(115, IdOf(nameof(AssetClassID.MonoScript)));
@@ -30,6 +31,9 @@ public class UnityClassIdMappingTests
     [Theory]
     [InlineData(1, AssetType.GameObject)]
     [InlineData(28, AssetType.Texture)]
+    // plan-01：TextAsset（49）此前未映射，导致真实缓存里的文本资源一律 Unknown、
+    // 文本预览无法分派；这里固定为 Text 并纳入回归。
+    [InlineData(49, AssetType.Text)]
     [InlineData(83, AssetType.Audio)]
     [InlineData(114, AssetType.MonoBehaviour)]
     [InlineData(115, AssetType.MonoScript)]

@@ -1,3 +1,4 @@
+using LimbusModEditor.Application.Scanning;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Domain.Projects;
 
@@ -14,7 +15,11 @@ public sealed record AssetSearchQuery(
     long? MaxSize = null,
     bool? HasReplacement = null,
     AssetSortKind Sort = AssetSortKind.Name,
-    bool? HasContainerEntry = null);
+    bool? HasContainerEntry = null,
+    /// <summary>plan-08：是否显示静态数据 bundle（static_s1_0_assets_all_*）里的
+    /// 资源。默认 false —— 资源工作台默认视图不出现这些资源，由静态数据工作台
+    /// 专门编辑；旧调用不传该参数即保持「默认隐藏」。</summary>
+    bool ShowStaticTables = false);
 
 public sealed class AssetSearchService
 {
@@ -41,9 +46,18 @@ public sealed class AssetSearchService
             (query.MinSize is null || asset.Size >= query.MinSize) &&
             (query.MaxSize is null || asset.Size <= query.MaxSize) &&
             (query.HasReplacement is null || HasUsableReplacement(asset) == query.HasReplacement) &&
-            (query.HasContainerEntry is null || HasContainerEntry(asset) == query.HasContainerEntry))
+            (query.HasContainerEntry is null || HasContainerEntry(asset) == query.HasContainerEntry) &&
+            // plan-08：静态数据 bundle 的资源默认不出现在资源工作台（由静态数据
+            // 工作台专门编辑）；勾选「显示静态数据表」后照常出现。
+            (query.ShowStaticTables || !IsStaticBundleAsset(asset)))
             .OrderBy(x => x, CreateComparer(query.Sort)).ToArray();
     }
+
+    /// <summary>是否为静态数据 bundle（static_s1_0_assets_all_*）内的资源：
+    /// 扫描时按 catalog 一次性判定并写入元数据（plan-08）。</summary>
+    private static bool IsStaticBundleAsset(AssetRecord asset)
+        => asset.Metadata.TryGetValue(UnityCacheScanService.StaticBundleMetadataKey, out var flag) &&
+           string.Equals(flag, "true", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>对象是否在 m_Container 表里有游戏内资源路径（文件管理器视图
     /// 的「看得见的文件」；容器外的支撑对象默认隐藏以减少技术噪音）。

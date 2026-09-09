@@ -1,4 +1,5 @@
 using LimbusModEditor.Application.Assets;
+using LimbusModEditor.Application.Scanning;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Domain.Projects;
 
@@ -180,5 +181,22 @@ public class AssetSearchServiceTests : IDisposable
         Assert.DoesNotContain(visible, x => x.Type == AssetType.MonoBehaviour);
         var hidden = service.Search(ContainerProject(), new AssetSearchQuery(HasContainerEntry: false));
         Assert.Equal(AssetType.MonoBehaviour, Assert.Single(hidden).Type);
+    }
+
+    [Fact]
+    public void Static_bundle_assets_are_hidden_by_default_and_shown_on_request()
+    {
+        var project = ContainerProject();
+        var staticAsset = project.Assets.First();
+        staticAsset.Metadata[UnityCacheScanService.StaticBundleMetadataKey] = "true";
+        var service = new AssetSearchService();
+
+        var defaultView = service.Search(project.Assets.ToArray(), new AssetSearchQuery());
+        Assert.DoesNotContain(defaultView, x => x.AssetId == staticAsset.AssetId);
+        Assert.Equal(project.Assets.Count - 1, defaultView.Count);
+
+        var withStatic = service.Search(project.Assets.ToArray(), new AssetSearchQuery(ShowStaticTables: true));
+        Assert.Contains(withStatic, x => x.AssetId == staticAsset.AssetId);
+        Assert.Equal(project.Assets.Count, withStatic.Count);
     }
 }

@@ -43,6 +43,53 @@ public sealed record UnitySpriteObject(
     long? TexturePathId,
     long? AlphaTexturePathId);
 
+/// <summary>TextAsset（class 49）正文：<c>m_Name</c> + <c>m_Script</c>。
+/// 真实样本（Unity 6000.3）的 m_Script 在类型树里是 string；老版本可能是
+/// byteArray，两种都已覆盖，其他形态 fail fast。</summary>
+public sealed record UnityTextAsset(string ContainerPath, long PathId, string Name, byte[] Data)
+{
+    /// <summary>按 UTF-8 解码正文（失败返回 null，不猜编码）。</summary>
+    public string? TryDecodeUtf8()
+    {
+        try
+        {
+            var text = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true).GetString(Data);
+            return text;
+        }
+        catch (DecoderFallbackException) { return null; }
+    }
+}
+
+/// <summary>Unity AudioClip（class 83）数据：字段全部来自类型树，
+/// <paramref name="Data"/> 是 FSB/压缩音频负载（可能来自 .resS 外流）。</summary>
+public sealed record UnityAudioClipObject(
+    string ContainerPath,
+    long PathId,
+    string Name,
+    int Format,
+    int Channels,
+    int Frequency,
+    float Length,
+    byte[] Data);
+
+/// <summary>Sprite 合成预览：被引用 Texture2D 解码后按 <see cref="CropRect"/>
+/// 裁剪出的 PNG，附完整元数据供属性面板显示。</summary>
+public sealed record UnitySpriteComposite(
+    string ContainerPath,
+    long PathId,
+    string Name,
+    UnitySpriteRect SpriteRect,
+    UnitySpriteRect CropRect,
+    UnitySpriteVector2 Pivot,
+    UnitySpriteBorder Border,
+    float PixelsToUnits,
+    long TexturePathId,
+    string TextureName,
+    int TextureWidth,
+    int TextureHeight,
+    int TextureFormat,
+    byte[] Png);
+
 /// <summary>
 /// Thin adapter over AssetsTools.NET. UnityFS/SerializedFile parsing and writing
 /// remain delegated to the upstream library; this class only maps results into
@@ -685,10 +732,17 @@ public sealed class AssetsToolsBackend : IDisposable
         var offset = FindField(streamData, "offset")?.Value?.AsLong ?? 0;
         var size = FindField(streamData, "size")?.Value?.AsLong ?? 0;
         if (offset < 0 || size <= 0) return null;
+        return ReadStreamData(bundle, resPath, offset, size, pathId, "纹理流数据");
+    }
 
-        // Unity's virtual archive:/ paths point at container files inside the
-        // bundle; the block directory gives each file's byte range in the
-        // (already unpacked) data stream.
+    /// <summary>Reads a byte range out of a resource stream. Unity's virtual
+    /// <c>archive:/</c> paths point at container files inside the bundle (the
+    /// block directory gives each file's byte range in the already unpacked
+    /// data stream); any other path is a file next to the bundle. Shared by
+    /// Texture2D pixels and AudioClip payloads (same mechanism).</summary>
+    private static byte[]? ReadStreamData(BundleFileInstance bundle, string resPath, long offset, long size,
+        long ownerPathId, string label)
+    {
         if (resPath.StartsWith("archive:/", StringComparison.OrdinalIgnoreCase))
         {
             var inner = resPath["archive:/".Length..];
@@ -698,7 +752,7 @@ public sealed class AssetsToolsBackend : IDisposable
                 if (resIndex < 0) continue;
                 bundle.file.GetFileRange(resIndex, out var rangeOffset, out var rangeSize);
                 if (offset + size > rangeSize)
-                    throw new InvalidDataException($"纹理流数据越界（Path {pathId}）: {resPath} 范围 {offset}+{size} 超过块大小 {rangeSize}");
+                    throw new InvalidDataException($"{label}越界（Path {ownerPathId}）: {resPath} 范围 {offset}+{size} 超过块大小 {rangeSize}");
                 var data = new byte[size];
                 lock (bundle.DataStream)
                 {
@@ -707,7 +761,7 @@ public sealed class AssetsToolsBackend : IDisposable
                     while (read < data.Length)
                     {
                         var count = bundle.DataStream.Read(data, read, data.Length - read);
-                        if (count == 0) throw new EndOfStreamException($"纹理流数据不完整（Path {pathId}）: {resPath}");
+                        if (count == 0) throw new EndOfStreamException($"{label}不完整（Path {ownerPathId}）: {resPath}");
                         read += count;
                     }
                 }
@@ -720,14 +774,14 @@ public sealed class AssetsToolsBackend : IDisposable
         if (!File.Exists(external)) return null;
         using var source = File.OpenRead(external);
         if (offset + size > source.Length)
-            throw new InvalidDataException($"纹理流数据越界（Path {pathId}）: {resPath} 范围 {offset}+{size} 超过文件大小 {source.Length}");
+            throw new InvalidDataException($"{label}越界（Path {ownerPathId}）: {resPath} 范围 {offset}+{size} 超过文件大小 {source.Length}");
         source.Position = offset;
         var externalData = new byte[size];
         var total = 0;
         while (total < externalData.Length)
         {
             var count = source.Read(externalData, total, externalData.Length - total);
-            if (count == 0) throw new EndOfStreamException($"纹理流数据不完整（Path {pathId}）: {resPath}");
+            if (count == 0) throw new EndOfStreamException($"{label}不完整（Path {ownerPathId}）: {resPath}");
             total += count;
         }
         return externalData;
@@ -770,6 +824,153 @@ public sealed class AssetsToolsBackend : IDisposable
             return ReadSpriteFields(fileName, pathId, fields);
         }
         return null;
+    }
+
+    // ── plan-01：bundle 资源读取（TextAsset / Sprite 合成 / AudioClip）─────
+    //    全部走类型树（不手写解析）；定位失败与未知形态一律 fail fast 中文报错。
+
+    /// <summary>在 bundle 内定位指定类型的对象（serializedFileName 为空时
+    /// 遍历 bundle 内的全部 SerializedFile）。</summary>
+    private (BundleFileInstance Bundle, AssetsFileInstance File, AssetFileInfo Info) LoadBundleObject(
+        string bundlePath, string? serializedFileName, long pathId, int expectedTypeId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(bundlePath);
+        var bundle = _manager.LoadBundleFile(bundlePath, unpackIfPacked: true)
+            ?? throw new InvalidDataException($"无法读取 Unity Bundle: {bundlePath}");
+        _bundles.Add(bundle);
+        var names = string.IsNullOrWhiteSpace(serializedFileName)
+            ? bundle.file.GetAllFileNames()
+            : [serializedFileName];
+        foreach (var fileName in names)
+        {
+            var index = bundle.file.GetFileIndex(fileName);
+            if (index < 0 || !bundle.file.IsAssetsFile(index)) continue;
+            var file = _manager.LoadAssetsFileFromBundle(bundle, fileName, loadDeps: false);
+            if (file is null) continue;
+            var info = file.file.GetAssetInfo(pathId);
+            if (info is null || info.GetTypeId(file.file) != expectedTypeId) continue;
+            return (bundle, file, info);
+        }
+        throw new KeyNotFoundException(
+            $"Bundle 中未找到 class {expectedTypeId} 的对象 Path {pathId}" +
+            $"（SerializedFile：{serializedFileName ?? "任意"}）：{bundlePath}");
+    }
+
+    /// <summary>读取 TextAsset（class 49）的 m_Name 与 m_Script 正文。
+    /// 未知的 m_Script 序列化形态直接报错，不做猜测性解码。</summary>
+    public UnityTextAsset ReadBundleTextAsset(string bundlePath, string serializedFileName, long pathId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var (_, file, info) = LoadBundleObject(bundlePath, serializedFileName, pathId, UnityClassId.TextAsset);
+        var fields = _manager.GetBaseField(file, info, AssetReadFlags.None);
+        var name = FindField(fields, "m_Name", "name")?.AsString ?? string.Empty;
+        var script = FindField(fields, "m_Script", "script")
+            ?? throw new InvalidDataException($"TextAsset 缺少 m_Script 字段（Path {pathId}），拒绝猜测内容。");
+        var data = script.Value.ValueType switch
+        {
+            AssetValueType.ByteArray => script.AsByteArray,
+            AssetValueType.String => Encoding.UTF8.GetBytes(script.AsString),
+            _ => throw new InvalidDataException(
+                $"TextAsset.m_Script 的序列化类型 {script.Value.ValueType} 不在已验证范围（string / byteArray）内（Path {pathId}）。")
+        };
+        if (data.Length == 0) throw new InvalidDataException($"TextAsset 正文为空（Path {pathId}，名称 {name}）。");
+        return new UnityTextAsset(serializedFileName, pathId, name, data);
+    }
+
+    /// <summary>Sprite 合成预览（plan-01）：读 Sprite 的 m_Rect /
+    /// m_RD.textureRect 与 m_RD.texture PPtr → 同文件定位 Texture2D →
+    /// 解码像素 → 按裁剪区域输出 PNG。
+    /// 真实样本实测：m_Rect 是 Sprite 逻辑尺寸，m_RD.textureRect 才是图集内
+    /// 实际像素区域，因此优先 textureRect、缺失时回退 m_Rect。</summary>
+    public UnitySpriteComposite ReadBundleSpriteComposite(string bundlePath, string serializedFileName, long pathId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var (bundle, file, info) = LoadBundleObject(bundlePath, serializedFileName, pathId, UnityClassId.Sprite);
+        var fields = _manager.GetBaseField(file, info, AssetReadFlags.None);
+        var sprite = ReadSpriteFields(serializedFileName, pathId, fields);
+        var name = FindField(fields, "m_Name", "name")?.AsString ?? string.Empty;
+
+        var renderData = FindField(fields, "m_RD", "m_RenderData", "renderData");
+        var textureRect = ReadRect(renderData is null ? null : FindField(renderData, "textureRect"));
+        var cropRect = textureRect is { Width: > 0, Height: > 0 } ? textureRect : sprite.Rect;
+
+        if (sprite.TexturePathId is not { } texturePathId || texturePathId == 0)
+            throw new InvalidDataException($"Sprite 未引用 Texture2D（Path {pathId}），无法合成预览。");
+        var textureInfo = file.file.GetAssetInfo(texturePathId)
+            ?? throw new InvalidDataException(
+                $"Sprite 引用的 Texture2D Path {texturePathId} 不在同一个 SerializedFile（{serializedFileName}）中，暂不支持跨文件合成。");
+        var textureTypeId = textureInfo.GetTypeId(file.file);
+        if (textureTypeId != UnityClassId.Texture2D)
+            throw new InvalidDataException($"Sprite 引用的 Path {texturePathId} 不是 Texture2D（class {textureTypeId}）。");
+
+        var textureFields = _manager.GetBaseField(file, textureInfo, AssetReadFlags.None);
+        var width = ReadInt(textureFields, "m_Width", "width");
+        var height = ReadInt(textureFields, "m_Height", "height");
+        var format = ReadInt(textureFields, "m_TextureFormat", "textureFormat");
+        if (!Enum.IsDefined(typeof(UnityTexturePixelFormat), format))
+            throw new InvalidDataException($"Texture2D 格式 {format} 暂不支持解码（Path {texturePathId}），无法合成 Sprite 预览。");
+        var pixels = ReadTexturePixelData(bundle, textureFields, texturePathId)
+            ?? throw new InvalidDataException($"Texture2D Path {texturePathId} 没有可读取的像素数据（内联与 .resS 流都未命中）。");
+
+        var crop = UnitySpriteCrop.Resolve(cropRect, width, height);
+        var png = new UnityTextureCodec().ToPngCropped(
+            new UnityTextureInfo(width, height, (UnityTexturePixelFormat)format, pixels),
+            crop.X, crop.Y, crop.Width, crop.Height);
+        var textureName = FindField(textureFields, "m_Name", "name")?.AsString ?? string.Empty;
+        return new UnitySpriteComposite(serializedFileName, pathId, name, sprite.Rect, cropRect,
+            sprite.Pivot, sprite.Border, sprite.PixelsToUnits, texturePathId, textureName,
+            width, height, format, png);
+    }
+
+    /// <summary>读取 AudioClip（class 83）的元数据与压缩音频负载。
+    /// 负载来源与纹理同机制：m_Resource（StreamingInfo）或旧版
+    /// m_Source/m_Offset/m_Size 的 .resS 外流，其次内联字节数组；
+    /// 三种形态都未命中时 fail fast（不猜数据位置）。</summary>
+    public UnityAudioClipObject ReadBundleAudioClipData(string bundlePath, string serializedFileName, long pathId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var (bundle, file, info) = LoadBundleObject(bundlePath, serializedFileName, pathId, UnityClassId.AudioClip);
+        var fields = _manager.GetBaseField(file, info, AssetReadFlags.None);
+        var name = FindField(fields, "m_Name", "name")?.AsString ?? string.Empty;
+        var format = ReadInt(fields, "m_CompressionFormat", "m_Format", "compressionFormat", "format");
+        var channels = ReadInt(fields, "m_Channels", "channels");
+        var frequency = ReadInt(fields, "m_Frequency", "frequency");
+        var length = ReadFloat(fields, "m_Length", "length");
+
+        byte[]? data = null;
+        var resource = FindField(fields, "m_Resource", "m_ResourceData", "resource");
+        if (resource is not null)
+        {
+            var inline = FindField(resource, "m_Data", "data")?.AsByteArray;
+            if (inline is { Length: > 0 }) data = inline;
+            else data = TryReadStreamingInfo(bundle, resource, pathId);
+        }
+        data ??= TryReadStreamingInfo(bundle, fields, pathId);
+        if (data is null)
+        {
+            var inlineFallback = FindField(fields, "m_AudioData", "m_Data", "data")?.AsByteArray;
+            if (inlineFallback is { Length: > 0 }) data = inlineFallback;
+        }
+        if (data is null)
+            throw new InvalidDataException(
+                $"AudioClip Path {pathId}（{name}）没有找到音频负载：m_Resource / m_Source+m_Offset+m_Size / 内联字节数组" +
+                "三种已验证形态都未命中，拒绝猜测数据位置。");
+        return new UnityAudioClipObject(serializedFileName, pathId, name, format, channels, frequency, length, data);
+    }
+
+    /// <summary>从 StreamingInfo 形态（path/offset/size）读取负载；无路径或
+    /// 尺寸非法时返回 null（交调用方尝试下一种形态）。</summary>
+    private static byte[]? TryReadStreamingInfo(BundleFileInstance bundle, AssetTypeValueField owner, long pathId)
+    {
+        var resPath = FindField(owner, "path", "m_Source", "source")?.Value?.AsString;
+        if (string.IsNullOrEmpty(resPath)) return null;
+        var offset = FindField(owner, "offset", "m_Offset")?.Value?.AsLong ?? 0;
+        var size = FindField(owner, "size", "m_Size")?.Value?.AsLong ?? 0;
+        if (offset < 0 || size <= 0) return null;
+        return ReadStreamData(bundle, resPath, offset, size, pathId, "音频流数据");
     }
 
     /// <summary>Updates Sprite rect, pivot, border and pixels-per-unit while

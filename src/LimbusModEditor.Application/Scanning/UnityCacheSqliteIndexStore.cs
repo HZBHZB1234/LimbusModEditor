@@ -11,9 +11,12 @@ public sealed record UnityCacheIndexRow(
     int BundleIndex, string Container, long PathId, int TypeId, AssetType Type, long Size, string? Baseline,
     string? ContainerEntry = null);
 
-/// <summary>一个 bundle 的索引快照（新鲜度检查 + 资产行）。</summary>
+/// <summary>一个 bundle 的索引快照（新鲜度检查 + 资产行）。
+/// <paramref name="StaticBundle"/> = 该 bundle 是静态数据 bundle
+/// （plan-08：static_s1_0_assets_all_*.bundle），随扫描写入索引，
+/// 回灌/热扫描时无需再解析 catalog 即可恢复标记。</summary>
 public sealed record UnityCacheIndexBundle(
-    string DataPath, long Size, long MTimeUtcTicks, string Outer, string Inner);
+    string DataPath, long Size, long MTimeUtcTicks, string Outer, string Inner, bool StaticBundle = false);
 
 /// <summary>
 /// 扫描索引的 SQLite 存储（阶段 C 性能改造）：替代原「一个 164MB JSON 全文件
@@ -73,6 +76,7 @@ public sealed class UnityCacheSqliteIndexStore
             """;
         command.ExecuteNonQuery();
         EnsureContainerEntryColumn(connection);
+        EnsureStaticBundleColumn(connection);
     }
 
     /// <summary>轻量迁移：container_entry 列（m_Container 路径）是后加的。
@@ -86,6 +90,20 @@ public sealed class UnityCacheSqliteIndexStore
         catch (SqliteException) { }
         using var alter = connection.CreateCommand();
         alter.CommandText = "ALTER TABLE assets ADD COLUMN container_entry TEXT";
+        try { alter.ExecuteNonQuery(); }
+        catch (SqliteException) { }
+    }
+
+    /// <summary>轻量迁移：static_bundle 列（plan-08 静态数据 bundle 标记）是
+    /// 后加的。旧库 ALTER 补列并默认 0；读不到时视为「非静态」。</summary>
+    private static void EnsureStaticBundleColumn(SqliteConnection connection)
+    {
+        using var probe = connection.CreateCommand();
+        probe.CommandText = "SELECT static_bundle FROM bundles LIMIT 0";
+        try { probe.ExecuteNonQuery(); return; }
+        catch (SqliteException) { }
+        using var alter = connection.CreateCommand();
+        alter.CommandText = "ALTER TABLE bundles ADD COLUMN static_bundle INTEGER NOT NULL DEFAULT 0";
         try { alter.ExecuteNonQuery(); }
         catch (SqliteException) { }
     }
@@ -144,16 +162,17 @@ public sealed class UnityCacheSqliteIndexStore
             using var upsert = connection.CreateCommand();
             upsert.Transaction = transaction;
             upsert.CommandText = """
-                INSERT INTO bundles (data_path, size, mtime_ticks, outer_key, inner_key)
-                VALUES ($p, $s, $m, $o, $in)
+                INSERT INTO bundles (data_path, size, mtime_ticks, outer_key, inner_key, static_bundle)
+                VALUES ($p, $s, $m, $o, $in, $sb)
                 ON CONFLICT(data_path) DO UPDATE SET
-                    size = $s, mtime_ticks = $m, outer_key = $o, inner_key = $in
+                    size = $s, mtime_ticks = $m, outer_key = $o, inner_key = $in, static_bundle = $sb
                 """;
             var up = upsert.Parameters.Add("$p", SqliteType.Text);
             var us = upsert.Parameters.Add("$s", SqliteType.Integer);
             var um = upsert.Parameters.Add("$m", SqliteType.Integer);
             var uo = upsert.Parameters.Add("$o", SqliteType.Text);
             var uin = upsert.Parameters.Add("$in", SqliteType.Text);
+            var usb = upsert.Parameters.Add("$sb", SqliteType.Integer);
 
             foreach (var path in stale)
             {
@@ -182,6 +201,7 @@ public sealed class UnityCacheSqliteIndexStore
                 um.Value = bundle.MTimeUtcTicks;
                 uo.Value = bundle.Outer;
                 uin.Value = bundle.Inner;
+                usb.Value = bundle.StaticBundle ? 1 : 0;
                 upsert.ExecuteNonQuery();
             }
             transaction.Commit();
@@ -200,12 +220,14 @@ public sealed class UnityCacheSqliteIndexStore
     {
         var index = new Dictionary<string, UnityCacheIndexBundle>(comparer);
         using var connection = Open();
+        EnsureStaticBundleColumn(connection);
         using var command = connection.CreateCommand();
-        command.CommandText = "SELECT data_path, size, mtime_ticks, outer_key, inner_key FROM bundles";
+        command.CommandText = "SELECT data_path, size, mtime_ticks, outer_key, inner_key, static_bundle FROM bundles";
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
-            var bundle = new UnityCacheIndexBundle(reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetString(3), reader.GetString(4));
+            var bundle = new UnityCacheIndexBundle(reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2),
+                reader.GetString(3), reader.GetString(4), !reader.IsDBNull(5) && reader.GetInt64(5) != 0);
             index[bundle.DataPath] = bundle;
         }
         return index;
@@ -251,12 +273,14 @@ public sealed class UnityCacheSqliteIndexStore
     {
         using var connection = Open();
         var bundles = new List<UnityCacheIndexBundle>();
+        EnsureStaticBundleColumn(connection);
         using (var command = connection.CreateCommand())
         {
-            command.CommandText = "SELECT data_path, size, mtime_ticks, outer_key, inner_key FROM bundles";
+            command.CommandText = "SELECT data_path, size, mtime_ticks, outer_key, inner_key, static_bundle FROM bundles";
             using var reader = command.ExecuteReader();
             while (reader.Read())
-                bundles.Add(new UnityCacheIndexBundle(reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetString(3), reader.GetString(4)));
+                bundles.Add(new UnityCacheIndexBundle(reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2),
+                    reader.GetString(3), reader.GetString(4), !reader.IsDBNull(5) && reader.GetInt64(5) != 0));
         }
         var grouped = ReadAllRowsGrouped(StringComparer.OrdinalIgnoreCase);
         foreach (var bundle in bundles)

@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Processing;
 
 namespace LimbusModEditor.Editing.Images;
 
@@ -46,6 +47,22 @@ public sealed class UnityTextureCodec
     public byte[] ToPng(UnityTextureInfo texture)
     {
         using var image = ToImage(texture); using var output = new MemoryStream(); image.SaveAsPng(output); return output.ToArray();
+    }
+
+    /// <summary>解码后按矩形裁剪再输出 PNG（Sprite 子图预览用）。坐标以图像
+    /// 左上角为原点、已由调用方完成 Unity 左下原点换算与边界校验。</summary>
+    public byte[] ToPngCropped(UnityTextureInfo texture, int x, int y, int width, int height)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(width);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(height);
+        using var image = ToImage(texture);
+        if (x < 0 || y < 0 || x + width > image.Width || y + height > image.Height)
+            throw new ArgumentOutOfRangeException(nameof(x),
+                $"裁剪区域 {x},{y} {width}×{height} 超出图像 {image.Width}×{image.Height}。");
+        using var crop = image.Clone(ctx => ctx.Crop(new Rectangle(x, y, width, height)));
+        using var output = new MemoryStream();
+        crop.SaveAsPng(output);
+        return output.ToArray();
     }
 
     public Image<Rgba32> ToImage(UnityTextureInfo texture)

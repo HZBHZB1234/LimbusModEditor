@@ -324,6 +324,32 @@ public sealed class UnityAssetService
         return backend.ReadSprite(bundlePath, pathId, cancellationToken);
     }
 
+    // ── plan-01：bundle 资源读取（文本 / Sprite 合成 / 音频负载）────────────
+
+    /// <summary>TextAsset（class 49）正文：m_Name + m_Script。</summary>
+    public UnityTextAsset ReadBundleTextAsset(string bundlePath, string serializedFileName, long pathId,
+        CancellationToken cancellationToken = default)
+    {
+        using var backend = new AssetsToolsBackend();
+        return backend.ReadBundleTextAsset(bundlePath, serializedFileName, pathId, cancellationToken);
+    }
+
+    /// <summary>Sprite 合成预览：被引用 Texture2D 解码后按裁剪区域输出 PNG。</summary>
+    public UnitySpriteComposite ReadBundleSpriteComposite(string bundlePath, string serializedFileName, long pathId,
+        CancellationToken cancellationToken = default)
+    {
+        using var backend = new AssetsToolsBackend();
+        return backend.ReadBundleSpriteComposite(bundlePath, serializedFileName, pathId, cancellationToken);
+    }
+
+    /// <summary>AudioClip（class 83）元数据 + 压缩音频负载。</summary>
+    public UnityAudioClipObject ReadBundleAudioClipData(string bundlePath, string serializedFileName, long pathId,
+        CancellationToken cancellationToken = default)
+    {
+        using var backend = new AssetsToolsBackend();
+        return backend.ReadBundleAudioClipData(bundlePath, serializedFileName, pathId, cancellationToken);
+    }
+
     public IReadOnlyList<AssetRecord> ScanBundle(
         string bundlePath,
         string? account = null,

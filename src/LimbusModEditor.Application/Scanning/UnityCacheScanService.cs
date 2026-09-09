@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.IO;
 using LimbusModEditor.Application.Catalog;
+using LimbusModEditor.Application.StaticMods;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Domain.Projects;
 using LimbusModEditor.Formats.Unity;
@@ -102,6 +103,9 @@ public sealed class UnityCacheScanService
             ? store.ReadBundleIndex(StringComparer.OrdinalIgnoreCase)
             : new Dictionary<string, UnityCacheIndexBundle>(StringComparer.OrdinalIgnoreCase);
         var catalog = LoadCatalog(gameDirectory);
+        // plan-08：静态数据 bundle 的内层键集合（catalog 一次性解析，之后按
+        // 内层键 O(1) 判定；官方热修会换 hash，所以每次扫描都重新解析）。
+        var staticInnerHashes = StaticBundleLocator.StaticInnerHashes(catalog);
         var diagnostics = new List<string>();
         if (catalog is null && !string.IsNullOrWhiteSpace(gameDirectory))
             diagnostics.Add("官方 catalog 缺失或无法解析，本次扫描不做 vanilla 基线判定。");
@@ -137,7 +141,7 @@ public sealed class UnityCacheScanService
                     }
                     else
                     {
-                        var (records, bundle, rows) = ParseEntry(entry, catalog);
+                        var (records, bundle, rows) = ParseEntry(entry, catalog, staticInnerHashes);
                         results.Add((entry, false, bundle, records, rows));
                         Interlocked.Increment(ref scanned);
                     }
@@ -168,10 +172,12 @@ public sealed class UnityCacheScanService
         var rowsByBundle = store is not null && results.Any(x => x.FromCache)
             ? store.ReadAllRowsGrouped(StringComparer.OrdinalIgnoreCase)
             : null;
-        foreach (var (entry, fromCache, _, records, _) in results.OrderBy(x => x.Entry.OuterKey, StringComparer.Ordinal)
+        foreach (var (entry, fromCache, cachedBundle, records, _) in results.OrderBy(x => x.Entry.OuterKey, StringComparer.Ordinal)
                      .ThenBy(x => x.Entry.InnerKey, StringComparer.Ordinal))
         {
             cancellationToken.ThrowIfCancellationRequested();
+            // 静态标记：索引里记录的标记 + 本次 catalog 判定（任一命中即视为静态）。
+            var isStaticBundle = cachedBundle.StaticBundle || staticInnerHashes.Contains(entry.InnerKey);
             if (fromCache)
             {
                 // bundle 未变化：数据与索引完全同源（含 vanilla 基线），已有记录
@@ -183,8 +189,15 @@ public sealed class UnityCacheScanService
                 foreach (var row in cachedRows)
                 {
                     var logicalPath = $"{entry.OuterKey}/{entry.InnerKey}/{row.Container}/{row.PathId}.{row.TypeId}";
-                    if (existingByPath.ContainsKey(logicalPath)) { updated++; continue; }
-                    var asset = BuildRecord(entry.DataPath, entry.OuterKey, entry.InnerKey, row);
+                    if (existingByPath.TryGetValue(logicalPath, out var existingAsset))
+                    {
+                        // 已存在：只补/清静态标记（旧项目没有该标记时也能对齐）。
+                        if (isStaticBundle) existingAsset.Metadata[StaticBundleMetadataKey] = "true";
+                        else existingAsset.Metadata.Remove(StaticBundleMetadataKey);
+                        updated++;
+                        continue;
+                    }
+                    var asset = BuildRecord(entry.DataPath, entry.OuterKey, entry.InnerKey, row, isStaticBundle);
                     project.Assets.Add(asset);
                     existingByPath.Add(logicalPath, asset);
                     added++;
@@ -223,6 +236,9 @@ public sealed class UnityCacheScanService
                         if (asset.Metadata.TryGetValue("catalogBaseline", out var baseline))
                             existing.Metadata["catalogBaseline"] = baseline;
                     }
+                    // 静态标记随本次 catalog 判定刷新（旧项目也据此补上/清除）。
+                    if (isStaticBundle) existing.Metadata[StaticBundleMetadataKey] = "true";
+                    else existing.Metadata.Remove(StaticBundleMetadataKey);
                     updated++;
                 }
             }
@@ -270,7 +286,7 @@ public sealed class UnityCacheScanService
             foreach (var (bundle, rows) in store.ReadAll())
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                foreach (var record in RebuildRecords(bundle.DataPath, bundle.Outer, bundle.Inner, rows))
+                foreach (var record in RebuildRecords(bundle.DataPath, bundle.Outer, bundle.Inner, rows, bundle.StaticBundle))
                 {
                     if (byPath.TryAdd(record.LogicalPath, record)) merged.Add(record);
                 }
@@ -286,10 +302,12 @@ public sealed class UnityCacheScanService
 
     private (IReadOnlyList<AssetRecord> Records, UnityCacheIndexBundle Bundle, IReadOnlyList<UnityCacheIndexRow> Rows) ParseEntry(
         UnityCacheScanEntry entry,
-        CatalogFileService? catalog)
+        CatalogFileService? catalog,
+        IReadOnlySet<string>? staticInnerHashes = null)
     {
         var info = new FileInfo(entry.DataPath);
-        var bundle = new UnityCacheIndexBundle(entry.DataPath, info.Length, info.LastWriteTimeUtc.Ticks, entry.OuterKey, entry.InnerKey);
+        var isStaticBundle = staticInnerHashes?.Contains(entry.InnerKey) == true;
+        var bundle = new UnityCacheIndexBundle(entry.DataPath, info.Length, info.LastWriteTimeUtc.Ticks, entry.OuterKey, entry.InnerKey, isStaticBundle);
 
         var descriptors = new UnityAssetService().ScanBundle(entry.DataPath);
         var records = new List<AssetRecord>(descriptors.Count);
@@ -337,12 +355,17 @@ public sealed class UnityCacheScanService
             if (descriptor.Metadata.TryGetValue("containerEntry", out var containerEntry))
                 records[^1].Metadata["containerEntry"] = containerEntry;
             if (baselineSummary is { Length: > 0 }) records[^1].Metadata["catalogBaseline"] = baselineSummary;
+            // plan-08：静态数据 bundle 的资源打标记，资源工作台默认视图据此过滤。
+            if (isStaticBundle) records[^1].Metadata[StaticBundleMetadataKey] = "true";
         }
         return (records, bundle, rows);
     }
 
+    /// <summary>静态数据 bundle 标记的元数据键（plan-08）。</summary>
+    public const string StaticBundleMetadataKey = "staticBundle";
+
     private static AssetRecord BuildRecord(
-        string dataPath, string outerKey, string innerKey, UnityCacheIndexRow item)
+        string dataPath, string outerKey, string innerKey, UnityCacheIndexRow item, bool staticBundle = false)
     {
         var record = new AssetRecord
         {
@@ -368,14 +391,15 @@ public sealed class UnityCacheScanService
         };
         if (!string.IsNullOrEmpty(item.Baseline)) record.Metadata["catalogBaseline"] = item.Baseline!;
         if (!string.IsNullOrEmpty(item.ContainerEntry)) record.Metadata["containerEntry"] = item.ContainerEntry!;
+        if (staticBundle) record.Metadata[StaticBundleMetadataKey] = "true";
         return record;
     }
 
     private static IReadOnlyList<AssetRecord> RebuildRecords(
-        string dataPath, string outerKey, string innerKey, IReadOnlyList<UnityCacheIndexRow> rows)
+        string dataPath, string outerKey, string innerKey, IReadOnlyList<UnityCacheIndexRow> rows, bool staticBundle = false)
     {
         var records = new List<AssetRecord>(rows.Count);
-        foreach (var item in rows) records.Add(BuildRecord(dataPath, outerKey, innerKey, item));
+        foreach (var item in rows) records.Add(BuildRecord(dataPath, outerKey, innerKey, item, staticBundle));
         return records;
     }
 

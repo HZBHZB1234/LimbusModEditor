@@ -12,6 +12,9 @@ public static class UnityClassId
 {
     public const int GameObject = 1;
     public const int Texture2D = 28;
+    /// <summary>Unity TextAsset（m_Name + m_Script）。真实缓存里存在（如 spine
+    /// 骨架 JSON），此前未映射导致文本预览无法分派。</summary>
+    public const int TextAsset = 49;
     public const int Mesh = 43;
     public const int AnimationClip = 74;
     public const int AudioClip = 83;
@@ -31,6 +34,7 @@ public static class UnityClassId
     {
         GameObject => AssetType.GameObject,
         Texture2D => AssetType.Texture,
+        TextAsset => AssetType.Text,
         Mesh => AssetType.Mesh,
         AnimationClip => AssetType.Animation,
         AudioClip => AssetType.Audio,

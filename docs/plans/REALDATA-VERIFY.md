@@ -57,6 +57,22 @@
 dotnet test LimbusModEditor.slnx --nologo --filter "FullyQualifiedName~RealPreviewCoverageTests"
 dotnet test LimbusModEditor.slnx --nologo --filter "FullyQualifiedName~AssetPropertyServiceTests"
 dotnet test LimbusModEditor.slnx --nologo --filter "FullyQualifiedName~StaticBundleLocatorTests"
+dotnet test LimbusModEditor.slnx --nologo --filter "FullyQualifiedName~AssetPreviewRegistryTests"
+dotnet test LimbusModEditor.slnx --nologo --filter "FullyQualifiedName~RealWorkbenchGateTests"
 ```
 
 矩阵文件：`%TEMP%/lme-preview-coverage.txt`。
+
+## plan-05 / 06 / 07 / 08 审查门实测（波次 C）
+
+| 门 | 实测结果 |
+|---|---|
+| 预览 Kind 矩阵（真实缓存 12 bundle） | Texture→Image、Sprite→Image、TextAsset→Text/Json、MonoBehaviour→Rows；未知二进制→Hex（`AssetPreviewRegistryTests.Real_cache_samples_map_to_expected_preview_kinds`） |
+| 波形与十六进制 | 合成 16-bit PCM → 包络峰值/时长正确；非 WAV 明确给原因；十六进制 4 KiB 截断 + ASCII 边栏（`AssetPreviewRegistryTests`） |
+| 音频 bank 样本试听 | 真实 bank 目录 → 音频 bank → SNDH 切片 → FSB5 → **FMOD 2.2.26 解码成功**（WAV RIFF/WAVE 头、包络非空、时长 > 0）；越界子样本索引明确报错（`RealWorkbenchGateTests`） |
+| FMOD 2.x 兼容修复 | 游戏自带 `fmodstudio.dll`（2.2.26）要求 `FMOD_System_Create(system, headerversion)`；此前单参数调用返回 `FMOD_ERR_HEADER_MISMATCH(20)`。现按 DLL 文件版本推导 `FMOD_VERSION`，失败再退回 1.x 单参数调用 |
+| .rebank 结构 | `rebank.json` + `{整数索引}/{*.wav}`，`base_bank` 为纯文件名（无路径分隔符），wav 数 > 0，回读往返一致（与 LCTA `webutils/bank/rebank.py` 的 `iter_rebank_wavs` 解析规则一致） |
+| lang 真实表回放 | 真实 `LLC_zh-CN`（config.json 活动语言）：修改 `AbDlg_Faust.json` 一个值 → 导出补丁（键为相对路径、ops 合法 RFC6902）→ `TextDiffService.Apply` 回放到 vanilla == 修改后文档；还原后编辑集为空 |
+| 静态 bundle 默认过滤 | 资源工作台默认视图隐藏 `staticBundle=true` 资产，勾选「显示静态数据表」后可见；索引持久化后回灌仍保持标记（`StaticBundleLocatorTests`） |
+| 不写游戏目录 | 工作台页面写盘点全部为：临时文件、用户选择的对话框路径、项目目录（sources/banks、banks/）、程序 cache/、模组目录（对话框默认值）；`catalog`/Unity 缓存/游戏目录无任何写入（唯一例外是文本工作台显式警告后的「直接应用到 lang 目录」） |
+

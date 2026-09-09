@@ -24,7 +24,17 @@ public sealed record BankFileEntry(
     long FileSizeBytes,
     BankKind Kind,
     int FsbCount,
-    string? Detail = null);
+    string? Detail = null)
+{
+    /// <summary>中文类型标签（UI 显示用）。</summary>
+    public string KindLabel => Kind switch
+    {
+        BankKind.Event => "事件 bank",
+        BankKind.Audio => "音频 bank",
+        BankKind.Encrypted => "加密 bank",
+        _ => "无法识别",
+    };
+}
 
 /// <summary>事件 bank 的一个 RIFF 顶层块（LIST/SNDH/DEL 等，不做嵌套展开）。</summary>
 public sealed record RiffChunkInfo(int Index, string FourCc, long HeaderOffset, uint PayloadSize);

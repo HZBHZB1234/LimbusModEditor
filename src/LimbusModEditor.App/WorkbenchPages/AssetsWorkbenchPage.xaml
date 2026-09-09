@@ -14,6 +14,15 @@
             <Separator/>
             <MenuItem Header="复制资源路径" Click="CopyAssetPath_Click"/>
         </ContextMenu>
+        <!-- 棋盘格透明底（plan-05：图像预览的透明区域可见） -->
+        <DrawingBrush x:Key="Checkerboard" TileMode="Tile" Viewport="0,0,16,16" ViewportUnits="Absolute">
+            <DrawingBrush.Drawing>
+                <DrawingGroup>
+                    <GeometryDrawing Brush="#1B222B" Geometry="M0,0 H16 V16 H0 Z"/>
+                    <GeometryDrawing Brush="#232C36" Geometry="M0,0 H8 V8 H0 Z M8,8 H16 V16 H8 Z"/>
+                </DrawingGroup>
+            </DrawingBrush.Drawing>
+        </DrawingBrush>
     </UserControl.Resources>
     <Grid Margin="12">
         <!-- plan-04：浏览列与预览列之间加 GridSplitter；预览列默认 360、
@@ -45,6 +54,9 @@
                     <CheckBox x:Name="ContainerOnlyFilter" Content="仅显示容器内资源" VerticalAlignment="Center" Margin="10,0,0,0"
                               IsChecked="True" Checked="Filter_Changed" Unchecked="Filter_Changed"
                               ToolTip="只列出能在游戏容器（m_Container）里找到的资源，即游戏真正加载的那些。"/>
+                    <CheckBox x:Name="ShowStaticFilter" Content="显示静态数据表" VerticalAlignment="Center" Margin="10,0,0,0"
+                              Checked="Filter_Changed" Unchecked="Filter_Changed"
+                              ToolTip="静态数据 bundle（static_s1_0_assets_all_*）里的表默认不在资源工作台显示，请到「🧩 静态数据工作台」编辑；勾选后此处也可见。"/>
                     <Button Content="清除筛选" Click="ClearFilters_Click" Margin="10,0,0,0" Padding="10,3"/>
                 </StackPanel>
                 <Expander DockPanel.Dock="Top" Header="高级筛选" Foreground="#7F93A4" Margin="0,0,0,8">
@@ -130,21 +142,29 @@
                     <TextBlock Text="（按「已修改资源」数统计，同一资源重复替换只算一次）" Foreground="#5F7285" FontSize="10.5" TextWrapping="Wrap" Margin="0,0,0,12"/>
                     <Separator Margin="0,4,0,12"/>
                     <TextBlock Text="预览" FontWeight="SemiBold" Margin="0,0,0,6"/>
-                    <Border x:Name="PreviewImagePanel" Background="#11151A" BorderBrush="#2A3540" BorderThickness="1" Height="150" Margin="0,0,0,8" Visibility="Collapsed">
-                        <Image x:Name="PreviewImage" Stretch="Uniform" Margin="6"/>
-                    </Border>
-                    <Border x:Name="PreviewTextPanel" Background="#11151A" BorderBrush="#2A3540" BorderThickness="1" Height="150" Margin="0,0,0,8" Visibility="Collapsed">
-                        <TextBox x:Name="PreviewTextBox" IsReadOnly="True" BorderThickness="0" Background="Transparent" Foreground="#D8E2EA"
-                                 FontFamily="Consolas" FontSize="11.5" TextWrapping="Wrap" AcceptsReturn="True"
-                                 VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="6"/>
-                    </Border>
-                    <StackPanel x:Name="PreviewAudioPanel" Visibility="Collapsed" Margin="0,0,0,8">
-                        <StackPanel Orientation="Horizontal">
-                            <Button x:Name="PreviewAudioButton" Content="▶ 试听" Click="PreviewAudio_Click" Padding="12,5" IsEnabled="False"/>
-                            <TextBlock x:Name="PreviewAudioText" Text="" Foreground="#7F93A4" VerticalAlignment="Center" Margin="8,0,0,0" TextWrapping="Wrap"/>
+                    <!-- plan-05：预览区按 Kind 切换（图像/文本/JSON/音频/行/十六进制/说明） -->
+                    <ContentControl x:Name="PreviewHost" MinHeight="150"/>
+                    <TextBlock x:Name="PreviewInfoText" Text="无预览" Foreground="#7F93A4" TextWrapping="Wrap" Margin="0,6,0,10"/>
+                    <!-- plan-01 第 3 步：选中资源属性（异步加载，代际守卫） -->
+                    <Expander x:Name="PropertyExpander" Header="属性" Foreground="#7F93A4" Margin="0,0,0,10">
+                        <StackPanel>
+                            <TextBlock x:Name="PropertyInfoText" Text="—" Foreground="#5F7285" FontSize="10.5" TextWrapping="Wrap" Margin="0,4,0,6"/>
+                            <ItemsControl x:Name="PropertyList">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Margin="0,1,0,1">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="96"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="{Binding Label}" Foreground="#7F93A4" TextWrapping="Wrap"/>
+                                            <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" Foreground="#D8E2EA"/>
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
                         </StackPanel>
-                    </StackPanel>
-                    <TextBlock x:Name="PreviewInfoText" Text="无预览" Foreground="#7F93A4" TextWrapping="Wrap" Margin="0,0,0,10"/>
+                    </Expander>
                     <Separator Margin="0,0,0,12"/>
                     <TextBlock Text="选中资源" FontWeight="SemiBold" Margin="0,0,0,8"/>
                     <Grid>

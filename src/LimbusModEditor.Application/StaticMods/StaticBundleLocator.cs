@@ -160,6 +160,52 @@ public static class StaticBundleLocator
         return textAssets;
     }
 
+    /// <summary>一条静态数据表（bundle 内 TextAsset）的完整定位信息。</summary>
+    /// <param name="ContainerEntry">m_Container 里的游戏内资源路径（.staticmod 的 container 字段）。</param>
+    /// <param name="DataClass">m_Name 里 '/' 之前的部分；没有 '/' 时为「未分组」。</param>
+    /// <param name="FileName">m_Name 里 '/' 之后的部分；没有 '/' 时为整个 m_Name。</param>
+    public sealed record StaticTextAsset(
+        string ContainerEntry,
+        string SerializedFile,
+        long PathId,
+        string DataClass,
+        string FileName,
+        string Name,
+        byte[] Data)
+    {
+        /// <summary>UTF-8 正文（非 UTF-8 返回 null，不猜编码）。</summary>
+        public string? TryDecodeUtf8()
+            => new UnityTextAsset(SerializedFile, PathId, Name, Data).TryDecodeUtf8();
+    }
+
+    /// <summary>枚举静态 bundle 内的 TextAsset 及其容器路径/分组（静态数据工作台用）。
+    /// 复用 ScanBundle（含 m_Container 解析）+ ReadBundleTextAsset（类型树读取）。</summary>
+    public static IReadOnlyList<StaticTextAsset> ReadTextAssetEntries(StaticBundleLocation location,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(location);
+        if (!location.IsCached)
+            throw new FileNotFoundException(
+                $"静态数据 bundle 的缓存条目不存在（{location.BundleName}）：请启动一次游戏生成缓存后重试。",
+                location.DataPath ?? string.Empty);
+        var service = new UnityAssetService();
+        var entries = new List<StaticTextAsset>();
+        foreach (var descriptor in service.ScanBundle(location.DataPath!, cancellationToken: cancellationToken))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (descriptor.Type != Domain.Assets.AssetType.Text || descriptor.UnityPathId is not { } pathId) continue;
+            var asset = service.ReadBundleTextAsset(location.DataPath!, descriptor.ContainerPath!, pathId, cancellationToken);
+            var name = asset.Name;
+            var separator = name.IndexOf('/');
+            var dataClass = separator > 0 ? name[..separator] : "未分组";
+            var fileName = separator > 0 ? name[(separator + 1)..] : name;
+            var container = descriptor.Metadata.TryGetValue("containerEntry", out var entry) ? entry : string.Empty;
+            entries.Add(new StaticTextAsset(container, descriptor.ContainerPath ?? string.Empty, pathId,
+                dataClass, fileName, name, asset.Data));
+        }
+        return entries;
+    }
+
     private static IEnumerable<string> EnumerateDirectoriesSafe(string directory)
     {
         try { return Directory.EnumerateDirectories(directory); }

@@ -1,10 +1,15 @@
 using System.IO;
+using System.Text;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using LimbusModEditor.Application.AppConfig;
 using LimbusModEditor.Application.Assets;
+using LimbusModEditor.Application.Assets.Preview;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Editing.Images;
 using LimbusModEditor.Formats.Bank;
@@ -22,18 +27,19 @@ public partial class AssetsWorkbenchPage : UserControl
     private readonly IWorkbenchHost _host;
     private readonly AssetSearchService _search = new();
     private readonly AssetEditService _assetEdits = new();
-    private readonly ImagePreviewService _imagePreview = new();
     private readonly ImageAtlasEditService _atlasEdits = new();
     private readonly SpriteMetadataEditService _spriteEdits = new();
     private readonly UnityFieldEditService _unityFieldEdits = new();
+    private readonly AssetPreviewRegistry _previewRegistry;
     private readonly DispatcherTimer _searchTimer;
     private readonly UiStateService _uiState;
     private readonly string _uiStateFile;
     private int _searchGeneration;
     private int _previewGeneration;
-    // 音频试听：解码出的 WAV 临时文件 + WPF MediaPlayer（切换选中/关窗即停）。
+    // 音频试听：预览管线给出的已解码 WAV + WPF MediaPlayer（切换选中/关窗即停）。
     private System.Windows.Media.MediaPlayer? _previewPlayer;
     private string? _previewAudioFile;
+    private AssetPreviewAudio? _currentAudio;
     // 当前选中资源：列表与目录树两个视图共用（右键菜单/双击/按钮都以此为准）。
     private AssetRecord? _selectedAsset;
     // 最近一次搜索结果快照：目录树视图按它重建根层。
@@ -58,6 +64,9 @@ public partial class AssetsWorkbenchPage : UserControl
         _uiStateFile = Path.Combine(host.Env.ConfigDirectory, "ui-state.json");
         _uiState = UiStateService.Load(_uiStateFile);
         PreviewColumn.Width = new GridLength(_uiState.AssetsPreviewColumnWidth);
+        // plan-05：预览提供者管线（FMOD 目录每次现取，设置改动后立即生效）。
+        _previewRegistry = AssetPreviewRegistry.CreateDefault(
+            () => host.Env.EffectiveFmodLibraryDirectory(host.Project));
     }
 
     /// <summary>当前选中的资源（宿主拖放判定用）。</summary>
@@ -183,6 +192,7 @@ public partial class AssetsWorkbenchPage : UserControl
         MinSizeFilter.Text = string.Empty;
         MaxSizeFilter.Text = string.Empty;
         ReplacedOnlyFilter.IsChecked = false;
+        ShowStaticFilter.IsChecked = false;
         _searchTimer.Stop();
         _ = RunSearchAsync();
     }
@@ -233,7 +243,9 @@ public partial class AssetsWorkbenchPage : UserControl
             maxKb,
             ReplacedOnlyFilter.IsChecked,
             sort,
-            ContainerOnlyFilter?.IsChecked == true ? true : null);
+            ContainerOnlyFilter?.IsChecked == true ? true : null,
+            // plan-08：静态数据 bundle 的资源默认隐藏（勾选「显示静态数据表」后可见）。
+            ShowStaticTables: ShowStaticFilter?.IsChecked == true);
     }
 
     /// <summary>后台线程过滤 + 排序（快照先在 UI 线程取好，避免与集合修改
@@ -341,184 +353,480 @@ public partial class AssetsWorkbenchPage : UserControl
 
     private void UpdatePreview(AssetRecord? asset) => _ = UpdatePreviewAsync(asset);
 
-    /// <summary>异步预览：纹理解码（可能是 DXT 压缩的大图）放在后台线程，
-    /// 代际守卫保证快速切换选中项时旧结果不会覆盖新选中项的预览。
-    /// 三种形态：图像（Texture/Sprite）、文本（Text/JSON）、音频（可试听）。</summary>
+    /// <summary>异步预览（plan-05 提供者管线）：注册表按类型分派预览形态，代际守卫
+    /// 保证快速切换选中项时旧结果不覆盖新选中项；属性区并行异步加载。</summary>
     private async Task UpdatePreviewAsync(AssetRecord? asset)
     {
         var generation = ++_previewGeneration;
         ResetPreview();
         if (asset is null) return;
-        if (asset.Type is not (AssetType.Texture or AssetType.Sprite))
-        {
-            if (TextPreviewService.LooksTextual(asset)) { await ShowTextPreviewAsync(asset, generation); return; }
-            if (asset.Type == AssetType.Audio) { ShowAudioPreview(asset); return; }
-            return;
-        }
-        if (asset.UnityPathId.HasValue && asset.Metadata.TryGetValue("unityBundle", out var isBundle) && isBundle == "true" &&
-            !(asset.Metadata.TryGetValue("replacementPath", out var existingReplacement) && File.Exists(existingReplacement)) &&
-            !string.IsNullOrWhiteSpace(asset.SourcePath) && File.Exists(asset.SourcePath))
-        {
-            var source = asset.SourcePath;
-            var pathId = asset.UnityPathId.Value;
-            try
-            {
-                var (png, summary) = await Task.Run(() =>
-                {
-                    var unityService = new LimbusModEditor.Formats.Unity.UnityAssetService();
-                    var decoded = unityService.ReadTexturePng(source, pathId);
-                    string? described = null;
-                    if (decoded is not null)
-                    {
-                        try { described = unityService.ReadTextureSummary(source, pathId)?.Describe(); }
-                        catch (Exception) { described = null; }
-                    }
-                    return (decoded, described);
-                });
-                if (generation != _previewGeneration) return;
-                if (png is not null)
-                {
-                    SetPreviewBitmap(png);
-                    PreviewInfoText.Text = summary ?? "Unity Texture2D PNG preview";
-                    return;
-                }
-            }
-            catch (Exception ex)
-            {
-                if (generation != _previewGeneration) return;
-                PreviewInfoText.Text = $"Unity texture preview failed: {ex.Message}";
-                return;
-            }
-            if (generation != _previewGeneration) return;
-        }
-        var replacement = asset.Metadata.TryGetValue("replacementPath", out var path) ? path : null;
-        if (string.IsNullOrWhiteSpace(replacement) || !File.Exists(replacement))
-            replacement = asset.SourcePath;
-        if (string.IsNullOrWhiteSpace(replacement) || !File.Exists(replacement) || !ImagePreviewService.IsSupportedExtension(Path.GetExtension(replacement))) return;
+        AssetPreview preview;
         try
         {
-            var preview = await Task.Run(() => _imagePreview.CreatePreviewFromFile(replacement));
-            if (generation != _previewGeneration) return;
-            SetPreviewBitmap(preview.ThumbnailPng);
-            PreviewInfoText.Text = $"{preview.Width} × {preview.Height} · {preview.Format}" + (preview.HasAlpha ? " · Alpha" : string.Empty);
+            preview = await Task.Run(() => _previewRegistry.PreviewAsync(asset, null, CancellationToken.None)).ConfigureAwait(true);
         }
         catch (Exception ex)
         {
             if (generation != _previewGeneration) return;
             PreviewInfoText.Text = $"预览失败：{ex.Message}";
-        }
-    }
-
-    /// <summary>文本 / JSON 预览：右栏直接显示可读正文（不是十六进制转储）。
-    /// 非 UTF-8/UTF-16 或二进制负载明确说明原因，并指向十六进制预览。</summary>
-    private async Task ShowTextPreviewAsync(AssetRecord asset, int generation)
-    {
-        TextPreview? preview;
-        try { preview = await Task.Run(() => TextPreviewService.TryPreview(asset)); }
-        catch (Exception ex)
-        {
-            if (generation != _previewGeneration) return;
-            PreviewInfoText.Text = $"文本预览失败：{ex.Message}";
             return;
         }
         if (generation != _previewGeneration) return;
-        if (preview is null)
-        {
-            PreviewInfoText.Text = "这个文件不是可读文本（非 UTF-8 / UTF-16，或含二进制内容）；可用「十六进制预览」查看原始字节。";
-            return;
-        }
-        PreviewTextBox.Text = preview.Text;
-        PreviewTextPanel.Visibility = Visibility.Visible;
-        var size = new HumanSizeConverter().Convert(preview.TotalBytes, typeof(string), null, System.Globalization.CultureInfo.CurrentCulture) as string;
-        PreviewInfoText.Text = $"{preview.EncodingName} · {size}" + (preview.Truncated ? " · 仅显示开头部分" : string.Empty);
+        _currentAudio = preview.Audio;
+        PreviewInfoText.Text = preview.InfoLine;
+        PreviewHost.Content = BuildPreviewView(preview);
+        _ = UpdatePropertiesAsync(asset, generation);
     }
 
-    /// <summary>音频预览面板：能解码的（Bank FSB + 本机 FMOD DLL）给「试听」按钮，
-    /// 不能解码的说明缺什么，不装作能播。</summary>
-    private void ShowAudioPreview(AssetRecord asset)
+    /// <summary>属性区（plan-01 第 3 步）：后台读取 + 代际守卫；失败只影响本区。</summary>
+    private async Task UpdatePropertiesAsync(AssetRecord asset, int generation)
     {
-        PreviewAudioPanel.Visibility = Visibility.Visible;
-        var isBankFsb = asset.LogicalPath.StartsWith("fsb/", StringComparison.OrdinalIgnoreCase);
-        var fmodDirectory = _host.Env.EffectiveFmodLibraryDirectory(_host.Project);
-        var canDecode = isBankFsb && !string.IsNullOrWhiteSpace(fmodDirectory) && Directory.Exists(fmodDirectory);
-        PreviewAudioButton.IsEnabled = canDecode;
-        PreviewAudioText.Text = canDecode
-            ? "解码成 WAV 在本机播放（不会写入项目）"
-            : isBankFsb
-                ? "需要 FMOD DLL 才能解码试听：把 fmod64.dll / fsbank64.dll 放进程序目录的 fmod\\ 后重试。"
-                : "Unity 音频对象暂不支持解码试听；Bank 音频可在「高级操作」里导出 WAV。";
-        PreviewInfoText.Text = "音频预览";
+        PropertyInfoText.Text = "正在读取属性…";
+        PropertyList.ItemsSource = null;
+        try
+        {
+            var rows = await Task.Run(() => new AssetPropertyService().Describe(asset));
+            if (generation != _previewGeneration) return;
+            PropertyList.ItemsSource = rows;
+            PropertyInfoText.Text = rows.Count == 0
+                ? "（没有可显示的属性）"
+                : $"{rows.Count} 项 · {AssetDisplay.DisplayPath(asset)}";
+        }
+        catch (Exception ex)
+        {
+            if (generation == _previewGeneration) PropertyInfoText.Text = $"属性读取失败：{ex.Message}";
+        }
     }
 
-    /// <summary>清空右栏预览区（切换选中项 / 无选中时调用），并停止正在播放的试听。</summary>
+    // ── 预览视图构建（按 Kind 切换；全部只读，plan-05）──────────────────
+
+    private UIElement? BuildPreviewView(AssetPreview preview) => preview.Kind switch
+    {
+        AssetPreviewKind.Image => BuildImageView(preview),
+        AssetPreviewKind.Text => BuildTextView(preview.Text, jsonTree: false),
+        AssetPreviewKind.Json => BuildTextView(preview.Text, jsonTree: true),
+        AssetPreviewKind.Audio => BuildAudioView(preview.Audio),
+        AssetPreviewKind.Rows => BuildRowsView(preview.Rows),
+        AssetPreviewKind.Hex => BuildHexView(preview.Text),
+        AssetPreviewKind.Message => BuildMessageView(preview.Text),
+        _ => null,
+    };
+
+    /// <summary>图像预览：棋盘格透明底 + 滚轮缩放 + 拖拽平移 + 双击复位；
+    /// 有替换时可在「替换图 ↔ 原图」之间切换。</summary>
+    private UIElement BuildImageView(AssetPreview preview)
+    {
+        var container = new DockPanel { LastChildFill = true };
+        var image = new Image { Stretch = Stretch.Uniform, RenderTransformOrigin = new Point(0.5, 0.5) };
+        var scale = new ScaleTransform(1, 1);
+        var transforms = new TransformGroup();
+        transforms.Children.Add(scale);
+        image.RenderTransform = transforms;
+        if (preview.ImagePng is not null) image.Source = LoadBitmap(preview.ImagePng);
+
+        var scroll = new ScrollViewer
+        {
+            Background = TryFindResource("Checkerboard") as Brush ?? new SolidColorBrush(Color.FromRgb(0x11, 0x15, 0x1A)),
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            Height = 180,
+            Content = image,
+        };
+        Point? dragOrigin = null;
+        double originHorizontal = 0, originVertical = 0;
+        image.MouseLeftButtonDown += (_, e) =>
+        {
+            dragOrigin = e.GetPosition(scroll);
+            originHorizontal = scroll.HorizontalOffset;
+            originVertical = scroll.VerticalOffset;
+            image.CaptureMouse();
+            e.Handled = true;
+        };
+        image.MouseMove += (_, e) =>
+        {
+            if (dragOrigin is not { } origin) return;
+            var current = e.GetPosition(scroll);
+            scroll.ScrollToHorizontalOffset(originHorizontal - (current.X - origin.X));
+            scroll.ScrollToVerticalOffset(originVertical - (current.Y - origin.Y));
+        };
+        image.MouseLeftButtonUp += (_, _) => { dragOrigin = null; image.ReleaseMouseCapture(); };
+        scroll.MouseDoubleClick += (_, _) => { scale.ScaleX = scale.ScaleY = 1; };
+        scroll.PreviewMouseWheel += (_, e) =>
+        {
+            var factor = e.Delta > 0 ? 1.15 : 1 / 1.15;
+            scale.ScaleX = Math.Clamp(scale.ScaleX * factor, 0.1, 16);
+            scale.ScaleY = scale.ScaleX;
+            e.Handled = true;
+        };
+
+        if (preview.AlternateImagePng is not null)
+        {
+            var toggle = new ToggleButton
+            {
+                Content = $"{preview.AlternateLabel ?? "原图"}（勾选切换）",
+                Padding = new Thickness(8, 3, 8, 3),
+                Margin = new Thickness(0, 0, 0, 4),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                ToolTip = "在替换后的图与缓存原图之间切换显示。",
+            };
+            var primary = preview.ImagePng;
+            var alternate = preview.AlternateImagePng;
+            toggle.Checked += (_, _) => image.Source = LoadBitmap(alternate);
+            toggle.Unchecked += (_, _) => image.Source = primary is null ? null : LoadBitmap(primary);
+            DockPanel.SetDock(toggle, Dock.Top);
+            container.Children.Add(toggle);
+        }
+        container.Children.Add(scroll);
+        return container;
+    }
+
+    /// <summary>文本预览：行号 + 等宽正文；JSON 可解析时提供「文本 / JSON 树」切换。</summary>
+    private UIElement BuildTextView(string? text, bool jsonTree)
+    {
+        text ??= string.Empty;
+        var textView = BuildNumberedText(text);
+        if (!jsonTree || TryBuildJsonTree(text) is not { } tree) return textView;
+
+        var panel = new DockPanel { LastChildFill = true };
+        var host = new ContentControl { Content = textView };
+        var textToggle = new ToggleButton { Content = "文本", IsChecked = true, Padding = new Thickness(8, 2, 8, 2), Margin = new Thickness(0, 0, 6, 4) };
+        var treeToggle = new ToggleButton { Content = "JSON 树", Padding = new Thickness(8, 2, 8, 2), Margin = new Thickness(0, 0, 0, 4) };
+        textToggle.Click += (_, _) => { textToggle.IsChecked = true; treeToggle.IsChecked = false; host.Content = textView; };
+        treeToggle.Click += (_, _) => { treeToggle.IsChecked = true; textToggle.IsChecked = false; host.Content = tree; };
+        var bar = new StackPanel { Orientation = Orientation.Horizontal };
+        bar.Children.Add(textToggle);
+        bar.Children.Add(treeToggle);
+        DockPanel.SetDock(bar, Dock.Top);
+        panel.Children.Add(bar);
+        panel.Children.Add(host);
+        return panel;
+    }
+
+    /// <summary>行号 + 正文：两列都用同一字体/字号的只读 TextBox（行高天然一致），
+    /// 由外层 ScrollViewer 统一滚动。</summary>
+    private static UIElement BuildNumberedText(string text)
+    {
+        var lineCount = 1;
+        foreach (var character in text) if (character == '\n') lineCount++;
+        var numbers = new StringBuilder();
+        for (var i = 1; i <= lineCount; i++) numbers.Append(i).Append('\n');
+
+        var grid = new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        var numberBox = new TextBox
+        {
+            Text = numbers.ToString(),
+            IsReadOnly = true,
+            BorderThickness = new Thickness(0),
+            Background = Brushes.Transparent,
+            Foreground = new SolidColorBrush(Color.FromRgb(0x5F, 0x72, 0x85)),
+            FontFamily = MonoFont,
+            FontSize = 11,
+            TextAlignment = TextAlignment.Right,
+            TextWrapping = TextWrapping.NoWrap,
+            AcceptsReturn = true,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden,
+            Padding = new Thickness(2, 6, 8, 6),
+        };
+        var box = new TextBox
+        {
+            Text = text,
+            IsReadOnly = true,
+            BorderThickness = new Thickness(0),
+            Background = Brushes.Transparent,
+            Foreground = new SolidColorBrush(Color.FromRgb(0xD8, 0xE2, 0xEA)),
+            FontFamily = MonoFont,
+            FontSize = 11,
+            TextWrapping = TextWrapping.NoWrap,
+            AcceptsReturn = true,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden,
+            Padding = new Thickness(0, 6, 6, 6),
+        };
+        Grid.SetColumn(box, 1);
+        grid.Children.Add(numberBox);
+        grid.Children.Add(box);
+        return new Border
+        {
+            Background = new SolidColorBrush(Color.FromRgb(0x11, 0x15, 0x1A)),
+            BorderBrush = new SolidColorBrush(Color.FromRgb(0x2A, 0x35, 0x40)),
+            BorderThickness = new Thickness(1),
+            Height = 220,
+            Child = new ScrollViewer
+            {
+                Content = grid,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+            },
+        };
+    }
+
+    /// <summary>JSON 树（惰性上限 2000 节点；解析失败返回 null，回退纯文本）。</summary>
+    private static UIElement? TryBuildJsonTree(string text)
+    {
+        JsonDocument document;
+        try { document = JsonDocument.Parse(text); }
+        catch (JsonException) { return null; }
+
+        const int maxNodes = 2000;
+        var budget = maxNodes;
+        TreeViewItem BuildNode(string label, JsonElement element, int depth)
+        {
+            var (typeLabel, valueLabel) = element.ValueKind switch
+            {
+                JsonValueKind.Object => ($"对象 · {element.EnumerateObject().Count()} 键", string.Empty),
+                JsonValueKind.Array => ($"数组 · {element.GetArrayLength()} 项", string.Empty),
+                JsonValueKind.String => ("字符串", Truncate(element.GetString() ?? string.Empty, 120)),
+                JsonValueKind.Number => ("数字", element.GetRawText()),
+                JsonValueKind.True or JsonValueKind.False => ("布尔", element.GetRawText()),
+                JsonValueKind.Null => ("空", "null"),
+                _ => (element.ValueKind.ToString(), element.GetRawText()),
+            };
+            var item = new TreeViewItem
+            {
+                Header = string.IsNullOrEmpty(valueLabel) ? $"{label}  ({typeLabel})" : $"{label}  ({typeLabel})  {valueLabel}",
+                IsExpanded = depth < 2,
+                Tag = label,
+            };
+            if (budget-- <= 0) return item;
+            if (element.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var property in element.EnumerateObject())
+                {
+                    if (budget <= 0) break;
+                    item.Items.Add(BuildNode(property.Name, property.Value, depth + 1));
+                }
+            }
+            else if (element.ValueKind == JsonValueKind.Array)
+            {
+                var index = 0;
+                foreach (var child in element.EnumerateArray())
+                {
+                    if (budget <= 0) break;
+                    item.Items.Add(BuildNode($"[{index++}]", child, depth + 1));
+                }
+            }
+            return item;
+        }
+
+        var root = BuildNode("$", document.RootElement, 0);
+        document.Dispose();
+        if (budget <= 0) root.Items.Add(new TreeViewItem { Header = $"… 节点过多，只显示前 {maxNodes} 个" });
+        var tree = new TreeView
+        {
+            Background = Brushes.Transparent,
+            BorderThickness = new Thickness(0),
+            Foreground = new SolidColorBrush(Color.FromRgb(0xD8, 0xE2, 0xEA)),
+        };
+        tree.Items.Add(root);
+        return new Border
+        {
+            Background = new SolidColorBrush(Color.FromRgb(0x11, 0x15, 0x1A)),
+            BorderBrush = new SolidColorBrush(Color.FromRgb(0x2A, 0x35, 0x40)),
+            BorderThickness = new Thickness(1),
+            Height = 220,
+            Child = new ScrollViewer { Content = tree, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, Padding = new Thickness(4) },
+        };
+    }
+
+    /// <summary>音频预览：试听按钮 + 波形包络（解码 WAV 的 PCM 峰值）。</summary>
+    private UIElement BuildAudioView(AssetPreviewAudio? audio)
+    {
+        var panel = new StackPanel();
+        if (audio is null)
+        {
+            panel.Children.Add(new TextBlock { Text = "（没有音频数据）", Foreground = Brushes.Gray });
+            return panel;
+        }
+        var bar = new StackPanel { Orientation = Orientation.Horizontal };
+        var play = new Button
+        {
+            Content = _previewPlayer is null ? "▶ 试听" : "■ 停止",
+            Padding = new Thickness(12, 5, 12, 5),
+            IsEnabled = audio.CanPlay,
+            ToolTip = audio.CanPlay ? "解码成 WAV 在本机播放（不写入项目，切选/关窗即停并删除临时文件）。" : audio.UnavailableReason,
+        };
+        play.Click += async (_, _) => await PlayCurrentAudioAsync();
+        bar.Children.Add(play);
+        bar.Children.Add(new TextBlock
+        {
+            Text = audio.CanPlay
+                ? $"约 {audio.DurationSeconds:0.##} 秒 · {audio.SampleRate} Hz · {audio.Channels} 声道"
+                : audio.UnavailableReason ?? "无法试听",
+            Foreground = new SolidColorBrush(Color.FromRgb(0x7F, 0x93, 0xA4)),
+            VerticalAlignment = VerticalAlignment.Center,
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(8, 0, 0, 0),
+        });
+        panel.Children.Add(bar);
+        if (audio.Envelope.Count > 0) panel.Children.Add(BuildWaveform(audio.Envelope));
+        return panel;
+    }
+
+    /// <summary>波形：每个桶画一条垂直峰线（Polyline，随宽度重算）。</summary>
+    private static UIElement BuildWaveform(IReadOnlyList<float> envelope)
+    {
+        var canvas = new Canvas
+        {
+            Height = 72,
+            Margin = new Thickness(0, 6, 0, 0),
+            Background = new SolidColorBrush(Color.FromRgb(0x11, 0x15, 0x1A)),
+            ClipToBounds = true,
+        };
+        var polyline = new System.Windows.Shapes.Polyline
+        {
+            Stroke = new SolidColorBrush(Color.FromRgb(0x4C, 0x8D, 0xDA)),
+            StrokeThickness = 1,
+        };
+        canvas.Children.Add(polyline);
+        canvas.SizeChanged += (_, _) =>
+        {
+            var width = canvas.ActualWidth;
+            var height = canvas.ActualHeight;
+            if (width <= 1 || height <= 1) return;
+            var middle = height / 2;
+            var points = new PointCollection();
+            for (var i = 0; i < envelope.Count; i++)
+            {
+                var x = envelope.Count == 1 ? 0 : i * width / (envelope.Count - 1);
+                var amplitude = envelope[i] * (middle - 1);
+                points.Add(new Point(x, middle - amplitude));
+                points.Add(new Point(x, middle + amplitude));
+            }
+            polyline.Points = points;
+        };
+        return canvas;
+    }
+
+    /// <summary>键值行预览（摘要卡 / 只读字段树）。</summary>
+    private static UIElement BuildRowsView(IReadOnlyList<AssetPreviewRow>? rows)
+    {
+        var panel = new StackPanel();
+        if (rows is null || rows.Count == 0)
+        {
+            panel.Children.Add(new TextBlock { Text = "（无内容）", Foreground = Brushes.Gray });
+            return panel;
+        }
+        foreach (var row in rows)
+        {
+            var grid = new Grid { Margin = new Thickness(row.Depth * 12, 1, 0, 1) };
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            var label = new TextBlock
+            {
+                Text = row.Label,
+                Foreground = new SolidColorBrush(Color.FromRgb(0x7F, 0x93, 0xA4)),
+                TextTrimming = TextTrimming.CharacterEllipsis,
+            };
+            var value = new TextBlock
+            {
+                Text = row.Value,
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = row.Highlight
+                    ? new SolidColorBrush(Color.FromRgb(0xFF, 0xD3, 0x7A))
+                    : new SolidColorBrush(Color.FromRgb(0xD8, 0xE2, 0xEA)),
+            };
+            Grid.SetColumn(value, 1);
+            grid.Children.Add(label);
+            grid.Children.Add(value);
+            panel.Children.Add(grid);
+        }
+        return new ScrollViewer
+        {
+            Content = panel,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            MaxHeight = 260,
+            Padding = new Thickness(0, 2, 0, 2),
+        };
+    }
+
+    private static UIElement BuildHexView(string? text) => new Border
+    {
+        Background = new SolidColorBrush(Color.FromRgb(0x11, 0x15, 0x1A)),
+        BorderBrush = new SolidColorBrush(Color.FromRgb(0x2A, 0x35, 0x40)),
+        BorderThickness = new Thickness(1),
+        Height = 200,
+        Child = new TextBox
+        {
+            Text = text ?? string.Empty,
+            IsReadOnly = true,
+            BorderThickness = new Thickness(0),
+            Background = Brushes.Transparent,
+            Foreground = new SolidColorBrush(Color.FromRgb(0xD8, 0xE2, 0xEA)),
+            FontFamily = MonoFont,
+            FontSize = 11,
+            TextWrapping = TextWrapping.NoWrap,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+            Padding = new Thickness(6),
+        },
+    };
+
+    private static UIElement BuildMessageView(string? text) => new TextBlock
+    {
+        Text = text ?? string.Empty,
+        TextWrapping = TextWrapping.Wrap,
+        Foreground = new SolidColorBrush(Color.FromRgb(0x9F, 0xB0, 0xBF)),
+        LineHeight = 18,
+    };
+
+    private static string Truncate(string value, int max)
+        => value.Length <= max ? value : value[..max] + "…";
+
+    private static readonly FontFamily MonoFont = new("Consolas");
+
+    /// <summary>清空预览区（切换选中项 / 无选中时调用），并停止正在播放的试听。</summary>
     private void ResetPreview()
     {
-        PreviewImage.Source = null;
-        PreviewImagePanel.Visibility = Visibility.Collapsed;
-        PreviewTextPanel.Visibility = Visibility.Collapsed;
-        PreviewTextBox.Text = string.Empty;
-        PreviewAudioPanel.Visibility = Visibility.Collapsed;
-        PreviewAudioButton.IsEnabled = false;
-        PreviewAudioButton.Content = "▶ 试听";
-        PreviewAudioText.Text = string.Empty;
+        PreviewHost.Content = null;
         PreviewInfoText.Text = "无预览";
+        PropertyList.ItemsSource = null;
+        PropertyInfoText.Text = "—";
+        _currentAudio = null;
         StopAudioPreview();
     }
 
-    /// <summary>试听 Bank 音频：FSB → WAV（临时文件）→ WPF MediaPlayer 播放。
+    /// <summary>试听当前预览的音频：把已解码的 WAV 写成临时文件交给 MediaPlayer；
     /// 再点一次停止；切换选中项或关闭窗口时自动停止并删除临时文件。</summary>
-    private async void PreviewAudio_Click(object sender, RoutedEventArgs e)
+    private async Task PlayCurrentAudioAsync()
     {
-        if (_selectedAsset is not AssetRecord asset || asset.Type != AssetType.Audio) return;
+        var audio = _currentAudio;
+        if (audio?.Wave is not { Length: > 0 })
+        {
+            _host.SetStatus(audio?.UnavailableReason ?? "当前资源没有可播放的音频数据");
+            return;
+        }
         if (_previewPlayer is not null)
         {
             StopAudioPreview();
-            PreviewAudioButton.Content = "▶ 试听";
-            PreviewAudioText.Text = "已停止";
-            return;
-        }
-        var fmodDirectory = _host.Env.EffectiveFmodLibraryDirectory(_host.Project);
-        if (string.IsNullOrWhiteSpace(fmodDirectory) || !Directory.Exists(fmodDirectory))
-        {
-            PreviewAudioText.Text = "需要 FMOD DLL 才能解码试听：把 fmod64.dll / fsbank64.dll 放进程序目录的 fmod\\ 后重试。";
+            _host.SetStatus("已停止试听");
             return;
         }
         var generation = _previewGeneration;
-        PreviewAudioButton.IsEnabled = false;
-        PreviewAudioText.Text = "正在解码…";
         try
         {
-            var wav = await Task.Run(async () =>
-            {
-                using var codec = new NativeFmodAudioCodec(fmodDirectory);
-                return await new BankAudioService().DecodeToWaveAsync(asset, codec);
-            });
-            if (generation != _previewGeneration) return;
             var file = Path.Combine(Path.GetTempPath(), $"lme-preview-{Guid.NewGuid():N}.wav");
-            await File.WriteAllBytesAsync(file, wav);
+            await File.WriteAllBytesAsync(file, audio.Wave);
             if (generation != _previewGeneration) { TryDelete(file); return; }
             var player = new System.Windows.Media.MediaPlayer();
             player.MediaEnded += (_, _) => EndAudioPreview(player);
             player.MediaFailed += (_, args) =>
             {
                 EndAudioPreview(player);
-                PreviewAudioText.Text = $"播放失败：{args.ErrorException?.Message ?? "未知原因"}";
+                _host.SetStatus($"播放失败：{args.ErrorException?.Message ?? "未知原因"}");
             };
             player.Open(new Uri(file));
             _previewPlayer = player;
             _previewAudioFile = file;
             player.Play();
-            PreviewAudioButton.Content = "■ 停止";
-            PreviewAudioText.Text = $"WAV {wav.Length / 1024} KB · 正在播放";
+            _host.SetStatus($"正在播放（WAV {audio.Wave.Length / 1024} KB）");
         }
         catch (Exception ex)
         {
             StopAudioPreview();
-            PreviewAudioText.Text = $"试听失败：{ex.Message}";
-        }
-        finally
-        {
-            PreviewAudioButton.IsEnabled = _selectedAsset?.Type == AssetType.Audio;
+            _host.SetStatus($"试听失败：{ex.Message}");
         }
     }
 
@@ -526,8 +834,7 @@ public partial class AssetsWorkbenchPage : UserControl
     {
         if (!ReferenceEquals(_previewPlayer, player)) return; // 已经停止 / 换成另一个资源了
         StopAudioPreview();
-        PreviewAudioButton.Content = "▶ 试听";
-        PreviewAudioText.Text = "播放结束";
+        _host.SetStatus("播放结束");
     }
 
     private void StopAudioPreview()
@@ -550,13 +857,12 @@ public partial class AssetsWorkbenchPage : UserControl
         try { File.Delete(file); } catch (Exception) { /* 临时文件留给系统清理 */ }
     }
 
-    private void SetPreviewBitmap(byte[] png)
+    private static BitmapImage LoadBitmap(byte[] png)
     {
         var bitmap = new BitmapImage();
         using var stream = new MemoryStream(png);
         bitmap.BeginInit(); bitmap.CacheOption = BitmapCacheOption.OnLoad; bitmap.StreamSource = stream; bitmap.EndInit(); bitmap.Freeze();
-        PreviewImage.Source = bitmap;
-        PreviewImagePanel.Visibility = Visibility.Visible;
+        return bitmap;
     }
 
     // ── 编辑操作 ─────────────────────────────────────────────────────

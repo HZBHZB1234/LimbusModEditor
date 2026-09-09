@@ -72,6 +72,22 @@ public sealed class FmodCodecLibrary : IDisposable
 
     public bool HasExport(string name) => TryGetExport(name, out _);
 
+    /// <summary>找到导出指定符号的 DLL 路径（版本探测用：FMOD 2.x 的
+    /// FMOD_System_Create 需要 headerversion 参数，值取自该 DLL 的文件版本）。</summary>
+    public bool TryGetExportOwner(string name, out nint address, out string? path)
+    {
+        address = 0;
+        path = null;
+        if (_handles.Count == 0 || string.IsNullOrWhiteSpace(name)) return false;
+        foreach (var item in _handles)
+        {
+            if (!NativeLibrary.TryGetExport(item.Handle, name, out address)) continue;
+            path = item.Path;
+            return true;
+        }
+        return false;
+    }
+
     public T? Bind<T>(string name) where T : Delegate
         => TryGetExport(name, out var address) ? Marshal.GetDelegateForFunctionPointer<T>(address) : null;
 
@@ -86,6 +102,14 @@ public interface IFmodAudioCodec
 {
     bool IsAvailable { get; }
     Task<byte[]> DecodeFsbToWaveAsync(ReadOnlyMemory<byte> fsb, CancellationToken cancellationToken = default);
+
+    /// <summary>解码 FSB 中指定子样本（plan-06：Bank 样本表试听）。默认实现只支持
+    /// 索引 0（等价于无参重载）；解码器可以覆写以支持任意子样本。</summary>
+    Task<byte[]> DecodeFsbToWaveAsync(ReadOnlyMemory<byte> fsb, int subsoundIndex, CancellationToken cancellationToken = default)
+        => subsoundIndex == 0
+            ? DecodeFsbToWaveAsync(fsb, cancellationToken)
+            : Task.FromException<byte[]>(new NotSupportedException("当前 FMOD 解码器不支持指定子样本索引。"));
+
     Task<byte[]> EncodeWaveToFsbAsync(ReadOnlyMemory<byte> wave, CancellationToken cancellationToken = default);
 }
 

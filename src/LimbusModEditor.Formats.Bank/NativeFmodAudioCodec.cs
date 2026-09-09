@@ -21,13 +21,17 @@ public sealed class NativeFmodAudioCodec : IFmodAudioCodec, IDisposable
 
     public bool IsAvailable => _decode is not null || _encode is not null;
 
-    public async Task<byte[]> DecodeFsbToWaveAsync(ReadOnlyMemory<byte> fsb, CancellationToken cancellationToken = default)
+    public Task<byte[]> DecodeFsbToWaveAsync(ReadOnlyMemory<byte> fsb, CancellationToken cancellationToken = default)
+        => DecodeFsbToWaveAsync(fsb, 0, cancellationToken);
+
+    /// <summary>解码指定子样本（plan-06：Bank 样本表逐样本试听）。</summary>
+    public async Task<byte[]> DecodeFsbToWaveAsync(ReadOnlyMemory<byte> fsb, int subsoundIndex, CancellationToken cancellationToken = default)
     {
         if (_decode is null) throw new NotSupportedException("FMOD DLL 未提供完整解码接口。");
         cancellationToken.ThrowIfCancellationRequested();
         var root = Path.Combine(Path.GetTempPath(), "lme-fmod-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
         var input = Path.Combine(root, "input.fsb");
-        try { await File.WriteAllBytesAsync(input, fsb.ToArray(), cancellationToken); return await Task.Run(() => _decode.Decode(input, cancellationToken), cancellationToken); }
+        try { await File.WriteAllBytesAsync(input, fsb.ToArray(), cancellationToken); return await Task.Run(() => _decode.Decode(input, subsoundIndex, cancellationToken), cancellationToken); }
         finally { try { Directory.Delete(root, true); } catch { } }
     }
 
@@ -45,7 +49,8 @@ public sealed class NativeFmodAudioCodec : IFmodAudioCodec, IDisposable
 
     private sealed class FmodDecodeApi
     {
-        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int CreateSystem(out nint value);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int CreateSystemV1(out nint value);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int CreateSystemV2(out nint value, uint headerVersion);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int InitSystem(nint value, int channels, uint flags, nint extra);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int ReleaseSystem(nint value);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int CreateSound(nint system, [MarshalAs(UnmanagedType.LPStr)] string path, uint mode, nint exInfo, out nint sound);
@@ -57,12 +62,50 @@ public sealed class NativeFmodAudioCodec : IFmodAudioCodec, IDisposable
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int GetFormat(nint sound, out int type, out int format, out int channels, out int bits);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int GetLength(nint sound, out uint length, uint unit);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int ReadData(nint sound, nint buffer, uint length, out uint read);
-        private readonly CreateSystem _create; private readonly InitSystem _init; private readonly ReleaseSystem _release; private readonly CreateSound _createSound; private readonly ReleaseSound _releaseSound; private readonly GetNumSubSounds _num; private readonly GetSubSound _sub; private readonly SeekData _seek; private readonly GetDefaults _defaults; private readonly GetFormat _format; private readonly GetLength _length; private readonly ReadData _read;
-        private FmodDecodeApi(FmodCodecLibrary l) { _create = l.Bind<CreateSystem>("FMOD_System_Create")!; _init = l.Bind<InitSystem>("FMOD_System_Init")!; _release = l.Bind<ReleaseSystem>("FMOD_System_Release")!; _createSound = l.Bind<CreateSound>("FMOD_System_CreateSound")!; _releaseSound = l.Bind<ReleaseSound>("FMOD_Sound_Release")!; _num = l.Bind<GetNumSubSounds>("FMOD_Sound_GetNumSubSounds")!; _sub = l.Bind<GetSubSound>("FMOD_Sound_GetSubSound")!; _seek = l.Bind<SeekData>("FMOD_Sound_SeekData")!; _defaults = l.Bind<GetDefaults>("FMOD_Sound_GetDefaults")!; _format = l.Bind<GetFormat>("FMOD_Sound_GetFormat")!; _length = l.Bind<GetLength>("FMOD_Sound_GetLength")!; _read = l.Bind<ReadData>("FMOD_Sound_ReadData")!; }
+        private readonly CreateSystemV2 _create; private readonly InitSystem _init; private readonly ReleaseSystem _release; private readonly CreateSound _createSound; private readonly ReleaseSound _releaseSound; private readonly GetNumSubSounds _num; private readonly GetSubSound _sub; private readonly SeekData _seek; private readonly GetDefaults _defaults; private readonly GetFormat _format; private readonly GetLength _length; private readonly ReadData _read;
+        private readonly CreateSystemV1? _createV1;
+        private readonly uint _headerVersion;
+        private FmodDecodeApi(FmodCodecLibrary l)
+        {
+            _create = l.Bind<CreateSystemV2>("FMOD_System_Create")!;
+            _createV1 = l.Bind<CreateSystemV1>("FMOD_System_Create");
+            // FMOD 2.x 的 FMOD_System_Create 需要 headerversion（= DLL 自身版本），
+            // 否则返回 FMOD_ERR_HEADER_MISMATCH(20)。版本取自导出该符号的 DLL 文件版本。
+            _headerVersion = l.TryGetExportOwner("FMOD_System_Create", out _, out var owner) ? ReadHeaderVersion(owner) : 0x00020200u;
+            _init = l.Bind<InitSystem>("FMOD_System_Init")!; _release = l.Bind<ReleaseSystem>("FMOD_System_Release")!; _createSound = l.Bind<CreateSound>("FMOD_System_CreateSound")!; _releaseSound = l.Bind<ReleaseSound>("FMOD_Sound_Release")!; _num = l.Bind<GetNumSubSounds>("FMOD_Sound_GetNumSubSounds")!; _sub = l.Bind<GetSubSound>("FMOD_Sound_GetSubSound")!; _seek = l.Bind<SeekData>("FMOD_Sound_SeekData")!; _defaults = l.Bind<GetDefaults>("FMOD_Sound_GetDefaults")!; _format = l.Bind<GetFormat>("FMOD_Sound_GetFormat")!; _length = l.Bind<GetLength>("FMOD_Sound_GetLength")!; _read = l.Bind<ReadData>("FMOD_Sound_ReadData")!;
+        }
+
+        /// <summary>FMOD_VERSION 编码 major&lt;&lt;16 | minor&lt;&lt;8 | patch（取自 DLL 文件版本）。</summary>
+        private static uint ReadHeaderVersion(string? dllPath)
+        {
+            if (string.IsNullOrWhiteSpace(dllPath)) return 0x00020200u;
+            try
+            {
+                var version = System.Diagnostics.FileVersionInfo.GetVersionInfo(dllPath).FileVersion ?? string.Empty;
+                var parts = version.Split([' ', '.', ','], StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length >= 3 && int.TryParse(parts[0], out var major) &&
+                    int.TryParse(parts[1], out var minor) && int.TryParse(parts[2], out var patch))
+                    return (uint)((major << 16) | (minor << 8) | patch);
+            }
+            catch (Exception) { /* 版本读不到时用兜底值 */ }
+            return 0x00020200u;
+        }
+
+        /// <summary>FMOD 2.x 用 headerversion 调用；老版 DLL（1.x ABI）退回单参数调用。</summary>
+        private void CreateSystem(out nint system)
+        {
+            var code = _create(out system, _headerVersion);
+            if (code == 0) return;
+            if (_createV1 is null) Check(code, "FMOD_System_Create");
+            Check(_createV1!(out system), "FMOD_System_Create");
+        }
         public static FmodDecodeApi? Create(FmodCodecLibrary l) => new[] { "FMOD_System_Create", "FMOD_System_Init", "FMOD_System_CreateSound", "FMOD_Sound_ReadData" }.All(l.HasExport) ? new FmodDecodeApi(l) : null;
         public byte[] Decode(string path, CancellationToken token)
+            => Decode(path, 0, token);
+
+        public byte[] Decode(string path, int subsoundIndex, CancellationToken token)
         {
-            Check(_create(out var system), "FMOD_System_Create"); try { Check(_init(system, 1, 0, 0), "FMOD_System_Init"); Check(_createSound(system, path, 0x2000, 0, out var sound), "FMOD_System_CreateSound"); try { Check(_num(sound, out var count), "FMOD_Sound_GetNumSubSounds"); if (count < 1) count = 1; Check(_sub(sound, 0, out var sub), "FMOD_Sound_GetSubSound"); try { Check(_seek(sub, 0), "FMOD_Sound_SeekData"); Check(_defaults(sub, out var frequency, out _), "FMOD_Sound_GetDefaults"); Check(_format(sub, out _, out _, out var channels, out var bits), "FMOD_Sound_GetFormat"); Check(_length(sub, out var length, 4), "FMOD_Sound_GetLength"); var pcm = new byte[length]; var used = 0; while (used < pcm.Length) { token.ThrowIfCancellationRequested(); var chunk = Math.Min(262144, pcm.Length - used); var pin = GCHandle.Alloc(pcm, GCHandleType.Pinned); try { Check(_read(sub, pin.AddrOfPinnedObject() + used, (uint)chunk, out var got), "FMOD_Sound_ReadData"); if (got == 0) break; used += checked((int)got); } finally { pin.Free(); } } using var output = new MemoryStream(); WriteWaveHeader(output, (int)frequency, bits, channels, used); output.Write(pcm, 0, used); return output.ToArray(); } finally { _releaseSound(sub); } } finally { _releaseSound(sound); } } finally { _release(system); }
+            CreateSystem(out var system); try { Check(_init(system, 1, 0, 0), "FMOD_System_Init"); Check(_createSound(system, path, 0x2000, 0, out var sound), "FMOD_System_CreateSound"); try { Check(_num(sound, out var count), "FMOD_Sound_GetNumSubSounds"); if (count < 1) count = 1; if (subsoundIndex < 0 || subsoundIndex >= count) throw new InvalidDataException($"子样本索引 {subsoundIndex} 超出范围（该 FSB 有 {count} 个子样本）。"); Check(_sub(sound, subsoundIndex, out var sub), "FMOD_Sound_GetSubSound"); try { Check(_seek(sub, 0), "FMOD_Sound_SeekData"); Check(_defaults(sub, out var frequency, out _), "FMOD_Sound_GetDefaults"); Check(_format(sub, out _, out _, out var channels, out var bits), "FMOD_Sound_GetFormat"); Check(_length(sub, out var length, 4), "FMOD_Sound_GetLength"); var pcm = new byte[length]; var used = 0; while (used < pcm.Length) { token.ThrowIfCancellationRequested(); var chunk = Math.Min(262144, pcm.Length - used); var pin = GCHandle.Alloc(pcm, GCHandleType.Pinned); try { Check(_read(sub, pin.AddrOfPinnedObject() + used, (uint)chunk, out var got), "FMOD_Sound_ReadData"); if (got == 0) break; used += checked((int)got); } finally { pin.Free(); } } using var output = new MemoryStream(); WriteWaveHeader(output, (int)frequency, bits, channels, used); output.Write(pcm, 0, used); return output.ToArray(); } finally { _releaseSound(sub); } } finally { _releaseSound(sound); } } finally { _release(system); }
         }
     }
 

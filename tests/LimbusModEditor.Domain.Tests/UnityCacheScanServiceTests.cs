@@ -1,5 +1,6 @@
 using System.IO;
 using LimbusModEditor.Application.Scanning;
+using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Domain.Projects;
 using LimbusModEditor.Formats.Unity;
 
@@ -133,6 +134,68 @@ public class UnityCacheScanServiceTests : IDisposable
         var again = await UnityCacheMaterializationService.MaterializeForEditingAsync(project, seed, projectRoot);
         Assert.Equal(local, again);
     }
+
+    [Fact]
+    public async Task Stale_index_types_remap_from_type_id_on_rehydrate()
+    {
+        // 映射表扩容前的旧索引会把真实类存成 Unknown（type 列 = 0）。TypeId 始终
+        // 在索引里，回灌（RehydrateFromIndexAsync）应按 TypeId 重映射，免重扫自愈。
+        var (realCache, _) = FindRealEnvironment();
+        if (realCache is null) return;
+        var service = new UnityAssetService();
+        var picked = EnumerateRealEntries(realCache)
+            .Where(x => new FileInfo(x.DataPath).Length is > 0 and < 8 * 1024 * 1024)
+            .Select(x => x.DataPath)
+            .FirstOrDefault(path =>
+            {
+                try
+                {
+                    return service.ScanBundle(path).Any(a => NewlyMappedTypeIds.Contains(a.UnityTypeId ?? -1));
+                }
+                catch (Exception) { return false; }
+            });
+        if (picked is null) return; // 该缓存没有包含新映射类的 bundle
+
+        var tempCache = Path.Combine(_root, "cache");
+        var entryDir = Path.Combine(tempCache, Path.GetFileName(Path.GetDirectoryName(Path.GetDirectoryName(picked))!)!, Path.GetFileName(Path.GetDirectoryName(picked))!);
+        Directory.CreateDirectory(entryDir);
+        File.Copy(picked, Path.Combine(entryDir, "__data"));
+        var indexFile = Path.Combine(_root, "index", "unity-cache-index.json");
+        var store = new UnityCacheScanService(indexFile);
+        var project = new ModProject { Name = "StaleIndex" };
+        await store.ScanIntoProjectAsync(project, tempCache, gameDirectory: null);
+
+        // 模拟旧索引：把所有新映射类的 type 列打回 Unknown。
+        using (var connection = new Microsoft.Data.Sqlite.SqliteConnection(
+                   $"Data Source={Path.ChangeExtension(indexFile, ".db")}"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE assets SET type = 0 WHERE type_id IN (" +
+                string.Join(",", NewlyMappedTypeIds) + ")";
+            command.ExecuteNonQuery();
+        }
+
+        // 回灌：类型必须从 TypeId 重映射回来，不依赖索引里的旧 type 值。
+        var project2 = new ModProject { Name = "Rehydrated" };
+        var added = await store.RehydrateFromIndexAsync(project2);
+        Assert.True(added > 0, "回灌应重建出资源");
+        var newlyMapped = project2.Assets.Where(a => NewlyMappedTypeIds.Contains(a.UnityTypeId ?? -1)).ToList();
+        Assert.NotEmpty(newlyMapped);
+        Assert.All(newlyMapped, asset => Assert.NotEqual(AssetType.Unknown, asset.Type));
+        // 与首次扫描的类型一致（同一个 bundle 同一条对象）。
+        var original = project.Assets.Where(a => NewlyMappedTypeIds.Contains(a.UnityTypeId ?? -1))
+            .ToDictionary(a => a.LogicalPath, a => a.Type);
+        Assert.All(newlyMapped, asset => Assert.Equal(original[asset.LogicalPath], asset.Type));
+    }
+
+    /// <summary>映射表本轮新覆盖的 class id（旧索引里会被存成 Unknown 的那批）。</summary>
+    private static readonly int[] NewlyMappedTypeIds =
+    [
+        4, 20, 21, 23, 33, 48, 50, 54, 64, 65, 81, 84, 86, 89, 91, 95, 96, 108, 111,
+        120, 135, 137, 198, 199, 210, 212, 215, 221, 222, 223, 224, 225, 233, 320,
+        328, 329, 331, 687078895, 850595691, 1183024399,
+    ];
 
     private static IEnumerable<UnityCacheScanEntry> EnumerateRealEntries(string realCache)
     {

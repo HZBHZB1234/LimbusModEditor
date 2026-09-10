@@ -403,7 +403,9 @@ public sealed class UnityCacheScanService
             Bundle = innerKey,
             UnityPathId = item.PathId,
             UnityTypeId = item.TypeId,
-            Type = item.Type,
+            // 按 TypeId 重映射而不是信任索引里持久化的 Type：老索引（映射表扩容前）
+            // 可能把真实类存成 Unknown，TypeId 始终在，打开项目即可自愈无需重扫。
+            Type = UnityClassId.Map(item.TypeId),
             Size = item.Size,
             Metadata =
             {

@@ -19,7 +19,19 @@ public enum AssetType
     Animation,
     Font,
     Binary,
-    GameObject
+    GameObject,
+    /// <summary>场景图组件（Transform / Renderer / Collider / Light / Camera /
+    /// ParticleSystem / Animator / Canvas 等，class id 见 <c>UnityClassId</c>）。
+    /// 真实缓存里这些对象占全体对象的四成，此前全部落到 Unknown。</summary>
+    Component,
+    /// <summary>Unity Material（class 21）：m_Shader PPtr + m_SavedProperties。</summary>
+    Material,
+    /// <summary>Unity Shader（class 48），含 .shadergraph 等。</summary>
+    Shader,
+    /// <summary>Unity VideoClip（class 329）：内嵌 H.264 等编码视频流。</summary>
+    Video,
+    /// <summary>Unity SpriteAtlas（Unity 2022+ ref-type，class id 687078895）。</summary>
+    SpriteAtlas
 }
 
 public enum AssetEditState

@@ -178,8 +178,7 @@ public partial class AssetsWorkbenchPage : UserControl
     private void Filter_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (!_filtersInitialized || _searchTimer is null) return;
-        _searchTimer.Stop();
-        _ = RunSearchAsync();
+        RequestSearch();
     }
 
     /// <summary>复选框类筛选（「仅显示容器内资源」/「仅已替换」）：XAML 里的
@@ -188,7 +187,16 @@ public partial class AssetsWorkbenchPage : UserControl
     private void Filter_Changed(object sender, RoutedEventArgs e)
     {
         if (_searchTimer is null || _host.Project is null) return;
-        _searchTimer.Stop();
+        RequestSearch();
+    }
+
+    /// <summary>筛选变化后的搜索请求：搜索已在跑（<see cref="_searchTimer"/> 启用）
+    /// 时不抢跑，只重置防抖时钟——连续改动折叠成一次搜索；空闲时立即重跑
+    /// （复选框 / 清除筛选的改动必须马上看到结果）。</summary>
+    private void RequestSearch()
+    {
+        if (_searchTimer is null) return;
+        if (_searchTimer.IsEnabled) { _searchTimer.Stop(); _searchTimer.Start(); return; }
         _ = RunSearchAsync();
     }
 
@@ -204,6 +212,8 @@ public partial class AssetsWorkbenchPage : UserControl
         ReplacedOnlyFilter.IsChecked = false;
         ShowStaticFilter.IsChecked = false;
         _searchTimer.Stop();
+        // 上面这些赋值会经 Filter_Changed 触发防抖搜索；这里要求「立刻」重跑，
+        // 避免用户看到清除筛选后仍然空白的旧结果。
         _ = RunSearchAsync();
     }
 
@@ -236,8 +246,8 @@ public partial class AssetsWorkbenchPage : UserControl
 
     private AssetSearchQuery BuildSearchQuery()
     {
-        var selectedType = (TypeFilter.SelectedItem as dynamic)?.Value as AssetType?;
-        var selectedState = (StateFilter.SelectedItem as dynamic)?.Value as AssetEditState?;
+        var selectedType = SelectedFilterValue<AssetType>(TypeFilter);
+        var selectedState = SelectedFilterValue<AssetEditState>(StateFilter);
         long? minKb = null, maxKb = null;
         if (long.TryParse(MinSizeFilter.Text.Trim(), out var minSize) && minSize > 0) minKb = minSize * 1024;
         if (long.TryParse(MaxSizeFilter.Text.Trim(), out var maxSize) && maxSize > 0) maxKb = maxSize * 1024;
@@ -256,6 +266,17 @@ public partial class AssetsWorkbenchPage : UserControl
             ContainerOnlyFilter?.IsChecked == true ? true : null,
             // plan-08：静态数据 bundle 的资源默认隐藏（勾选「显示静态数据表」后可见）。
             ShowStaticTables: ShowStaticFilter?.IsChecked == true);
+    }
+
+    /// <summary>下拉筛选的当前值：未选择、以及列表首项「（全部…）」一律返回
+    /// null（= 该维度不过滤）。首项承载的是枚举的 0 值（<see cref="AssetType.Unknown"/>
+    /// / <see cref="AssetEditState.Unchanged"/>），若按值下发就会变成「只要未知类型」
+    /// ——那会把全部资源过滤光（真实缓存 1275623 条 → 0 条，列表与目录树同时空白）。</summary>
+    private static TEnum? SelectedFilterValue<TEnum>(ComboBox? combo) where TEnum : struct, Enum
+    {
+        if (combo?.SelectedIndex is not > 0 || combo.SelectedItem is null) return null;
+        var value = combo.SelectedItem.GetType().GetProperty("Value")?.GetValue(combo.SelectedItem);
+        return value is TEnum typed ? typed : null;
     }
 
     /// <summary>后台线程过滤 + 排序 + 行视图模型构造（快照先在 UI 线程取好，

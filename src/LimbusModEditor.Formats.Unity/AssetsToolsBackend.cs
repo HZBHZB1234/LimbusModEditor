@@ -19,8 +19,11 @@ public sealed record UnityAssetDescriptor(
     long PathId,
     int TypeId,
     uint ByteSize,
-    AssetType AssetType);
-public sealed record UnitySerializedObject(long PathId, int TypeId, byte[] Data);
+    AssetType AssetType,
+    /// <summary>SerializedFile 类型表里该 class id 的真实类名（如 Shader /
+    /// SpriteAtlas；类型表缺失时为 <c>AssetClassID</c> 枚举名兜底，可能为空）。</summary>
+    string TypeName = "");
+public sealed record UnitySerializedObject(long PathId, int TypeId, byte[] Data, string TypeName = "");
 /// <summary>Raw serialized payload of one object inside a bundle, with the
 /// SerializedFile's TYPE TABLE facts. <paramref name="TypeTableIndex"/> is the
 /// per-object stored type index (UnityPy's obj.type_id) — the value real Carra2
@@ -531,14 +534,35 @@ public sealed class AssetsToolsBackend : IDisposable
             if (file is null) continue;
             // 先读 AssetBundle 主对象的 m_Container 表（容器路径 → 同文件 PathId），
             // 再逐对象填充 ContainerEntryPath = 游戏内真实资源路径（assets/...）。
+            // 同时收集类型表 class id → 真实类名（ref-type 伪 id 也在此列）。
             var containerMap = ReadContainerMap(file);
+            var typeNames = CollectTypeNames(file.file);
             foreach (var info in file.file.AssetInfos)
+            {
+                var typeId = info.GetTypeId(file.file);
+                var typeName = typeNames.TryGetValue(typeId, out var resolved) ? resolved : string.Empty;
                 assets.Add(new UnityAssetDescriptor(
                     fileName,
                     containerMap.TryGetValue(info.PathId, out var entryPath) ? entryPath : string.Empty,
-                    info.PathId, info.GetTypeId(file.file), info.ByteSize, MapType(info.GetTypeId(file.file))));
+                    info.PathId, typeId, info.ByteSize, MapType(typeId, typeName), typeName));
+            }
         }
         return assets;
+    }
+
+    /// <summary>收集 SerializedFile 类型表：class id → 类型表类名。ref-type
+    /// （SpriteAtlas / LightingSettings / LookAtConstraint 等）的 class id 是
+    /// 类型表给出的伪 id，类名在 <c>TypeReference.ClassName</c>。</summary>
+    private static Dictionary<int, string> CollectTypeNames(AssetsFile file)
+    {
+        var map = new Dictionary<int, string>();
+        foreach (var type in file.Metadata.TypeTreeTypes)
+        {
+            if (type is null) continue;
+            var name = type.TypeReference?.ClassName;
+            if (!string.IsNullOrWhiteSpace(name)) map[type.TypeId] = name;
+        }
+        return map;
     }
 
     /// <summary>读取 AssetBundle 主对象（class 142）的 m_Container 表：
@@ -614,6 +638,7 @@ public sealed class AssetsToolsBackend : IDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         var file = _manager.LoadAssetsFile(path, loadDeps: false)
             ?? throw new InvalidDataException($"无法读取 SerializedFile: {path}");
+        var typeNames = CollectTypeNames(file.file);
         var result = new List<UnitySerializedObject>();
         foreach (var info in file.file.AssetInfos)
         {
@@ -629,7 +654,9 @@ public sealed class AssetsToolsBackend : IDisposable
                 if (count == 0) throw new EndOfStreamException($"SerializedFile 对象数据不完整: {info.PathId}");
                 read += count;
             }
-            result.Add(new UnitySerializedObject(info.PathId, info.GetTypeId(file.file), data));
+            var typeId = info.GetTypeId(file.file);
+            var typeName = typeNames.TryGetValue(typeId, out var resolved) ? resolved : string.Empty;
+            result.Add(new UnitySerializedObject(info.PathId, typeId, data, typeName));
         }
         return result;
     }
@@ -1356,6 +1383,7 @@ public sealed class AssetsToolsBackend : IDisposable
     }
 
     private static AssetType MapType(int typeId) => UnityClassId.Map(typeId);
+    private static AssetType MapType(int typeId, string? typeName) => UnityClassId.Map(typeId, typeName);
 
     private static int ReadInt(AssetTypeValueField root, params string[] names)
     {

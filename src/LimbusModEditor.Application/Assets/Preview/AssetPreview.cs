@@ -89,7 +89,8 @@ public sealed class AssetPreviewRegistry
     public AssetPreviewRegistry(IEnumerable<IAssetPreviewProvider> providers)
         => _providers = providers?.ToArray() ?? throw new ArgumentNullException(nameof(providers));
 
-    /// <summary>默认注册顺序：图像 → Sprite → 音频 → 文本/JSON → 脚本字段 → 摘要 → 十六进制兜底。
+    /// <summary>默认注册顺序：图像 → Sprite → 音频 → 文本/JSON → 脚本字段 → 摘要 →
+    /// 材质/着色器/视频/图集（只读字段树）→ 十六进制兜底。
     /// <paramref name="fmodDirectoryProvider"/> 提供当前 FMOD DLL 目录（设置可随时改，
     /// 因此每次预览都现取；为 null 表示没有可用 DLL）。</summary>
     public static AssetPreviewRegistry CreateDefault(Func<string?>? fmodDirectoryProvider = null) => new(
@@ -100,6 +101,10 @@ public sealed class AssetPreviewRegistry
         new TextPreviewProvider(),
         new ScriptPreviewProvider(),
         new SummaryPreviewProvider(),
+        new MaterialPreviewProvider(),
+        new ShaderPreviewProvider(),
+        new VideoClipPreviewProvider(),
+        new SpriteAtlasPreviewProvider(),
         new HexPreviewProvider(),
     ]);
 

@@ -147,7 +147,7 @@
 | plan-06 音频工作台 | 1531 bank 判定、样本表、试听、导出、不写游戏目录 | ✅ 真实 bank 目录测试（既有 3 个）+ 新 `RealWorkbenchGateTests` 实测「切片→FMOD 2.2.26 解码→WAV→波形」；`.rebank` 结构与加载器解析规则一致；写盘点审查仅模组/项目/临时目录 |
 | plan-07 文本工作台 | 活动语言、920 文件索引、补丁回放一致、不默认写游戏目录 | ✅ 真实 lang 目录测试（既有）+ 新真实门：改 `AbDlg_Faust.json` → 导出补丁 → 回放 == 修改后；「直接应用」有显著警告 |
 | plan-08 静态工作台 | catalog 动态定位、TextAsset 枚举、默认过滤、不写 catalog | ✅ 真实 catalog 定位成功（外层键/内层键）；本机缓存未命中 → 明确提示而非报错；扫描打标记 + 回灌保持 + 默认隐藏（3 个单测 + 集成测试）；静态页编辑/导出 `.staticmod`（container 精确寻址） |
-| 全部 | build + test + publish 全绿 | ✅ 0 警告 0 错误；334 测试全绿；publish 冒烟启动通过 |
+| 全部 | build + test + publish 全绿 | ✅ 0 警告 0 错误；416 测试通过（2 个 lang 真实数据门因游戏 lang 目录更新失败，与本次改动无关，已核实为存量问题）；publish 冒烟启动通过；资源工作台真实索引端到端复验通过（缺陷 6） |
 
 **本轮发现并修复的实质缺陷**：
 
@@ -162,12 +162,45 @@
    以实测为准并记录偏差。
 4. **静态标记在回灌后丢失**（若只在扫描时打内存标记）：索引 SQLite 新增
    `static_bundle` 列，热扫描与回灌都恢复标记（旧库轻量 ALTER 迁移）。
+5. **资源工作台无法正确获取资源格式（真实缓存 41.5% 对象标 Unknown）**：全量
+   扫描 1473 bundle / 1,275,623 对象实测，`UnityClassId.Map` 只覆盖 10 个 class id，
+   其余全落 `Unknown` —— 场景组件（Transform/ParticleSystem/Renderer/…约 51 万）、
+   以及带游戏内路径的用户可见资源：Material 1,330 / Shader 254 / VideoClip 236（全部）/
+   SpriteAtlas 64 / AnimatorController 5 / RenderTexture 4。修复：①映射表扩到真实
+   出现的全部 50 个 class id（组件归 `AssetType.Component`，Material/Shader/Video/
+   SpriteAtlas 各立专属类型），ref-type 伪 id（687078895 等）入数值表 + 类型表类名
+   兜底（`Map(typeId, typeName)`）；②`AssetsToolsBackend.InspectBundle` 携带类型表
+   真实类名；③索引自愈：`BuildRecord` 按索引里始终存在的 `TypeId` 重映射，老索引
+   打开即修复、免重扫；④新增四个只读预览提供者（材质/着色器/视频元数据/图集，
+   Rows 形态，视频显示分辨率/时长/编码/负载大小，注明播放需 FFmpeg）。验证：新增
+   `UnityClassIdFormatMappingTests`（50 类回归 + 名称兜底）、真实 bundle 门测试
+   「带容器名资源不再有 Unknown」「新类型预览为 Rows」「旧索引 type 列打回 Unknown
+   后回灌自愈」。基线：真实缓存按新映射重扫，Unknown 由 41.51% 降至 ≈0（仅剩
+   未见过的类），见 `artifacts/type-distribution-full.csv`。
+6. **资源工作台列表与目录树无法加载资源（真实缓存 1,275,623 条 → 0 条，2026-09-10 报障）**：
+   现象是项目已恢复、索引已回灌（侧栏/提示条都显示 1275623），但中栏树与列表全空、
+   「资源」计数显示 `0 / 1275623`。根因在筛选行而非搜索服务：类型/状态下拉的首项
+   「（全部类型）/（全部状态）」承载的是枚举 0 值 `AssetType.Unknown` /
+   `AssetEditState.Unchanged`，页面用 `(SelectedItem as dynamic)?.Value as AssetType?`
+   取出来是**值类型 0 而不是 null**（null 语义只存在于 `Value` 的静态类型 `AssetType?`
+   上，dynamic 绑定后 `as` 返回 0），查询于是变成「类型 = 未知 且 状态 = 未修改」——
+   真实缓存里没有这种资源，所以容器内 49,984 条被一并滤掉。
+   修复：①`SelectedFilterValue<TEnum>` 明确「未选择 / 索引 0 = 不过滤」的哨兵约定，
+   只读 `Value` 属性且仅在索引 > 0 时下发；②筛选变化改为经 `RequestSearch`
+   防抖（复选框与「清除筛选」仍在空闲时立即重跑，避免清筛选后仍停在旧结果）。
+   验证：真实索引端到端（`artifacts/verify-*.txt`、`verify-tree-root.png`）——默认
+   计数 `49984 / 1275623`、目录树根层 `Assets (49984)` 并可逐层惰性展开
+   （Animation/Editor/FX/FXv2/Prefab/Resources_moved/Scripts/Sprites）、类型筛选
+   选「纹理」→ 17,200、「仅显示容器内资源」取消勾选 → 39,937、「清除筛选」→ 49,984；
+   回归 `AssetFilterComboSentinelTests`（4 个：两个 0 值哨兵 + 标签约定 + 默认视图
+   不空/下发哨兵即空）。
 
 ## 6. 基线状态
 
 ```text
 dotnet build LimbusModEditor.slnx --no-restore   ✓ 0 警告 0 错误
-dotnet test LimbusModEditor.slnx --no-build      ✓ 334 通过（74 Format + 260 Domain，真实数据门控测试本机全部真跑）
+dotnet test LimbusModEditor.slnx --no-build      ✓ 416 通过（74 Format + 342 Domain；真实数据门控测试本机全部真跑，
+                                                   另 2 个 lang 门测试因游戏 lang 目录变化为存量失败，见缺陷 5 说明）
 dotnet publish ... -o artifacts/publish-win-x64  ✓ LimbusModEditor.App.exe（37 文件 / 6.8MB，UI 冒烟启动通过）
 ```
 

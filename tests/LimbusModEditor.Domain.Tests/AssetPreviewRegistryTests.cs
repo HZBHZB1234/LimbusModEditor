@@ -155,6 +155,82 @@ public class AssetPreviewRegistryTests : IDisposable
         Assert.Equal(AssetPreviewKind.Rows, kinds[AssetType.MonoBehaviour]);
     }
 
+    [Fact]
+    public void Default_registry_orders_new_format_providers_before_hex()
+    {
+        var names = AssetPreviewRegistry.CreateDefault().Providers.Select(p => p.GetType().Name).ToArray();
+        // 新格式提供者必须在十六进制兜底之前注册，否则永远轮不到。
+        Assert.Contains(nameof(MaterialPreviewProvider), names);
+        Assert.Contains(nameof(ShaderPreviewProvider), names);
+        Assert.Contains(nameof(VideoClipPreviewProvider), names);
+        Assert.Contains(nameof(SpriteAtlasPreviewProvider), names);
+        var hex = Array.IndexOf(names, nameof(HexPreviewProvider));
+        Assert.True(hex > Array.IndexOf(names, nameof(MaterialPreviewProvider)));
+        Assert.True(hex > Array.IndexOf(names, nameof(ShaderPreviewProvider)));
+        Assert.True(hex > Array.IndexOf(names, nameof(VideoClipPreviewProvider)));
+        Assert.True(hex > Array.IndexOf(names, nameof(SpriteAtlasPreviewProvider)));
+        Assert.Equal(names.Length - 1, hex);
+    }
+
+    [Fact]
+    public async Task Real_cache_new_format_types_preview_as_rows()
+    {
+        var cacheRoot = FindRealCacheRoot();
+        if (cacheRoot is null) return; // 无真实样本：跳过
+
+        var service = new UnityAssetService();
+        var registry = AssetPreviewRegistry.CreateDefault();
+        var seen = new Dictionary<AssetType, string>(); // 类型 → 期望的中文标签
+        foreach (var bundle in EnumerateBundles(cacheRoot, limit: 120))
+        {
+            IReadOnlyList<AssetRecord> objects;
+            try { objects = service.ScanBundle(bundle); }
+            catch (Exception) { continue; }
+            foreach (var asset in objects)
+            {
+                if (asset.Type is not (AssetType.Material or AssetType.Shader or AssetType.Video or AssetType.SpriteAtlas)) continue;
+                if (seen.ContainsKey(asset.Type)) continue;
+                var preview = await registry.PreviewAsync(asset);
+                Assert.Equal(AssetPreviewKind.Rows, preview.Kind);
+                Assert.NotNull(preview.Rows);
+                Assert.NotEmpty(preview.Rows!);
+                seen[asset.Type] = preview.InfoLine;
+                if (asset.Type == AssetType.Video)
+                    Assert.Contains(preview.Rows!, r => r.Label == "负载大小");
+            }
+            // 材质与着色器在真实缓存里极常见，必须命中；视频/图集按 bundle 运气（不强求）。
+            if (seen.ContainsKey(AssetType.Material) && seen.ContainsKey(AssetType.Shader) && seen.Count >= 4) break;
+        }
+        Assert.Contains(AssetType.Material, seen.Keys);
+        Assert.Contains(AssetType.Shader, seen.Keys);
+        Assert.Contains("材质", seen[AssetType.Material]);
+        Assert.Contains("着色器", seen[AssetType.Shader]);
+    }
+
+    [Fact]
+    public async Task Real_cache_named_assets_have_no_unknown_types()
+    {
+        // 用户默认视图（仅显示容器内资源）看到的每个资源都不该再是「未知类型」。
+        var cacheRoot = FindRealCacheRoot();
+        if (cacheRoot is null) return;
+
+        var service = new UnityAssetService();
+        var named = 0;
+        foreach (var bundle in EnumerateBundles(cacheRoot, limit: 60))
+        {
+            IReadOnlyList<AssetRecord> objects;
+            try { objects = service.ScanBundle(bundle); }
+            catch (Exception) { continue; }
+            foreach (var asset in objects)
+            {
+                if (!asset.Metadata.TryGetValue("containerEntry", out var entry) || string.IsNullOrWhiteSpace(entry)) continue;
+                named++;
+                Assert.NotEqual(AssetType.Unknown, asset.Type);
+            }
+        }
+        Assert.True(named > 0, "60 个真实 bundle 里应能扫到带容器名的资源");
+    }
+
     private static string? FindRealCacheRoot()
     {
         var overrideDir = Environment.GetEnvironmentVariable("LME_UNITY_CACHE_DIR");

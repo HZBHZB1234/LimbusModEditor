@@ -49,6 +49,28 @@ internal static class PreviewRead
         if (rows.Count >= maxRows) rows.Add(new AssetPreviewRow("…", $"字段过多，只显示前 {maxRows} 行（完整字段树见「Unity 字段编辑」）", 0));
         return rows;
     }
+
+    /// <summary>展平的尾部变体：默认深一点、行数上限低一点（专用预览的字段树尾巴）。</summary>
+    public static List<AssetPreviewRow> FlattenTail(UnityFieldNode node, int maxRows = 200)
+        => Flatten(node, maxDepth: 6, maxRows: maxRows);
+
+    /// <summary>递归查找字段节点（按名字，大小写不敏感，首个命中）。</summary>
+    public static UnityFieldNode? FindNode(UnityFieldNode node, params string[] names)
+    {
+        var wanted = names.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        UnityFieldNode? Walk(UnityFieldNode current, int depth)
+        {
+            if (depth > 24) return null;
+            if (wanted.Contains(current.Name)) return current;
+            foreach (var child in current.Children)
+            {
+                var found = Walk(child, depth + 1);
+                if (found is not null) return found;
+            }
+            return null;
+        }
+        return Walk(node, 0);
+    }
 }
 
 /// <summary>Texture2D 预览：解码 PNG + 尺寸/格式信息；有替换时主图显示替换图、
@@ -360,6 +382,200 @@ public sealed class SummaryPreviewProvider : IAssetPreviewProvider
             return new AssetPreview(AssetPreviewKind.Rows,
                 $"{summary.TypeName}（Path {summary.PathId}）{summary.ObjectName ?? string.Empty} · 只读摘要",
                 Rows: rows);
+        }, cancellationToken);
+}
+
+/// <summary>Material（class 21）只读预览：名称、引用的 Shader、属性表统计与字段树。</summary>
+public sealed class MaterialPreviewProvider : IAssetPreviewProvider
+{
+    public string Name => "材质预览";
+
+    public bool CanPreview(AssetRecord asset) => asset.Type == AssetType.Material;
+
+    public Task<AssetPreview?> PreviewAsync(AssetRecord asset, IProgress<string>? progress, CancellationToken cancellationToken)
+        => Task.Run<AssetPreview?>(() =>
+        {
+            if (!PreviewRead.IsBundleAsset(asset)) return null;
+            var service = new UnityAssetService();
+            var pathId = asset.UnityPathId!.Value;
+            var fields = service.ReadBundleObjectFields(asset.SourcePath!, asset.ContainerPath!, pathId, cancellationToken);
+            if (fields.Count == 0) return null;
+            var root = fields[0];
+            var rows = new List<AssetPreviewRow>();
+            var name = PreviewRead.FindNode(root, "m_Name", "name")?.Value;
+            if (!string.IsNullOrWhiteSpace(name)) rows.Add(new AssetPreviewRow("名称", name, 0, Highlight: true));
+            rows.Add(new AssetPreviewRow("着色器", DescribeShader(service, asset, root, cancellationToken), 0));
+            var properties = PreviewRead.FindNode(root, "m_SavedProperties", "m_Properties", "properties");
+            if (properties is not null)
+            {
+                foreach (var (label, childName) in new[] { ("颜色", "m_Colors"), ("浮点", "m_Floats"), ("纹理", "m_TexEnvs"), ("向量", "m_Vectors") })
+                {
+                    var child = PreviewRead.FindNode(properties, childName);
+                    if (child is { IsArray: true }) rows.Add(new AssetPreviewRow(label, $"{child.ArraySize:N0} 项", 0));
+                }
+            }
+            rows.AddRange(PreviewRead.Flatten(root, maxDepth: 3, maxRows: 200));
+            return new AssetPreview(AssetPreviewKind.Rows,
+                $"材质（Material）· Path {pathId}（只读字段树）", Rows: rows);
+        }, cancellationToken);
+
+    /// <summary>材质引用的 Shader：同文件 PPtr 解析出着色器对象名，其余给出引用坐标。</summary>
+    private static string DescribeShader(UnityAssetService service, AssetRecord asset,
+        UnityFieldNode root, CancellationToken cancellationToken)
+    {
+        var shader = PreviewRead.FindNode(root, "m_Shader", "shader");
+        if (shader is null) return "（字段树未包含 m_Shader）";
+        if (!shader.IsPPtr) return shader.Value ?? "—";
+        if (shader.PPtrFileId != 0)
+            return $"外部文件 {shader.PPtrFileId} / Path {shader.PPtrPathId}";
+        if (shader.PPtrPathId == 0) return "空引用";
+        try
+        {
+            var shaderFields = service.ReadBundleObjectFields(
+                asset.SourcePath!, asset.ContainerPath!, shader.PPtrPathId, cancellationToken);
+            if (shaderFields.Count > 0)
+            {
+                var shaderName = PreviewRead.FindNode(shaderFields[0], "m_Name", "name")?.Value;
+                if (!string.IsNullOrWhiteSpace(shaderName)) return $"{shaderName}（Path {shader.PPtrPathId}）";
+            }
+        }
+        catch (Exception) { /* 着色器对象不可读时退回坐标显示 */ }
+        return $"Path {shader.PPtrPathId}";
+    }
+}
+
+/// <summary>Shader（class 48）只读预览：名称 + 字段树（.shadergraph 等）。</summary>
+public sealed class ShaderPreviewProvider : IAssetPreviewProvider
+{
+    public string Name => "着色器预览";
+
+    public bool CanPreview(AssetRecord asset) => asset.Type == AssetType.Shader;
+
+    public Task<AssetPreview?> PreviewAsync(AssetRecord asset, IProgress<string>? progress, CancellationToken cancellationToken)
+        => Task.Run<AssetPreview?>(() =>
+        {
+            if (!PreviewRead.IsBundleAsset(asset)) return null;
+            var service = new UnityAssetService();
+            var pathId = asset.UnityPathId!.Value;
+            var fields = service.ReadBundleObjectFields(asset.SourcePath!, asset.ContainerPath!, pathId, cancellationToken);
+            if (fields.Count == 0) return null;
+            var rows = new List<AssetPreviewRow>();
+            var name = PreviewRead.FindNode(fields[0], "m_Name", "name")?.Value;
+            if (!string.IsNullOrWhiteSpace(name)) rows.Add(new AssetPreviewRow("名称", name, 0, Highlight: true));
+            rows.AddRange(PreviewRead.FlattenTail(fields[0], 200));
+            return new AssetPreview(AssetPreviewKind.Rows,
+                $"着色器（Shader）· Path {pathId}（只读字段树）", Rows: rows);
+        }, cancellationToken);
+}
+
+/// <summary>VideoClip（class 329）只读预览：分辨率 / 时长 / 帧数 / 编码与负载大小。
+/// 视频字节可能位于内联数组或 .resS 流；本提供者只读元数据，不尝试解码播放。</summary>
+public sealed class VideoClipPreviewProvider : IAssetPreviewProvider
+{
+    public string Name => "视频元数据预览";
+
+    public bool CanPreview(AssetRecord asset) => asset.Type == AssetType.Video;
+
+    public Task<AssetPreview?> PreviewAsync(AssetRecord asset, IProgress<string>? progress, CancellationToken cancellationToken)
+        => Task.Run<AssetPreview?>(() =>
+        {
+            if (!PreviewRead.IsBundleAsset(asset)) return null;
+            var service = new UnityAssetService();
+            var pathId = asset.UnityPathId!.Value;
+            var fields = service.ReadBundleObjectFields(asset.SourcePath!, asset.ContainerPath!, pathId, cancellationToken);
+            if (fields.Count == 0) return null;
+            var root = fields[0];
+            var rows = new List<AssetPreviewRow>();
+            var name = PreviewRead.FindNode(root, "m_Name", "name")?.Value;
+            if (!string.IsNullOrWhiteSpace(name)) rows.Add(new AssetPreviewRow("名称", name, 0, Highlight: true));
+            AddIfFound(rows, root, "分辨率", "m_OriginalWidth", "m_Width", "width");
+            var height = PreviewRead.FindNode(root, "m_OriginalHeight", "m_Height", "height");
+            if (height is not null)
+            {
+                var last = rows[^1];
+                rows[^1] = new AssetPreviewRow(last.Label, $"{last.Value}×{height.Value}", last.Depth, last.Highlight);
+            }
+            AddIfFound(rows, root, "时长", "m_Length", "length");
+            AddIfFound(rows, root, "帧数", "m_Frames", "frames");
+            AddIfFound(rows, root, "帧率", "m_FrameRate", "frameRate");
+            var format = PreviewRead.FindNode(root, "m_Format", "format", "m_EncodeTarget");
+            if (format?.Value is { Length: > 0 })
+                rows.Add(new AssetPreviewRow("编码", VideoCodecName(format.Value), 0));
+            AddIfFound(rows, root, "质量", "m_Quality", "quality");
+            rows.Add(new AssetPreviewRow("负载大小", DescribePayload(root), 0));
+            rows.Add(new AssetPreviewRow("提示", "只读元数据预览；播放/导出需要视频解码器（可后续引入 FFmpeg）。", 0, Highlight: true));
+            rows.AddRange(PreviewRead.FlattenTail(root, 150));
+            return new AssetPreview(AssetPreviewKind.Rows,
+                $"视频（VideoClip）· Path {pathId} · 只读元数据", Rows: rows);
+        }, cancellationToken);
+
+    private static void AddIfFound(List<AssetPreviewRow> rows, UnityFieldNode root, string label, params string[] names)
+    {
+        var node = PreviewRead.FindNode(root, names);
+        if (node?.Value is { Length: > 0 } value) rows.Add(new AssetPreviewRow(label, value, 0));
+    }
+
+    /// <summary>Unity VideoClip.m_Format / m_EncodeTarget 的常见取值 → 编码名。</summary>
+    private static string VideoCodecName(string raw)
+    {
+        return raw.Trim() switch
+        {
+            "0" => "VP8",
+            "1" => "VP9",
+            "2" => "H.264",
+            "3" => "H.265/HEVC",
+            "4" => "AV1",
+            _ => $"格式 {raw}"
+        };
+    }
+
+    /// <summary>视频负载字节：内联 m_ClipData / m_VideoData，或 StreamingInfo 形态
+    /// （path/offset/size）的流大小；定位失败给出明确说明。</summary>
+    private static string DescribePayload(UnityFieldNode root)
+    {
+        foreach (var dataName in new[] { "m_ClipData", "m_VideoData", "m_Data", "data" })
+        {
+            var node = PreviewRead.FindNode(root, dataName);
+            if (node?.ByteArrayLength > 0) return $"{node.ByteArrayLength:N0} 字节（内联）";
+        }
+        var stream = PreviewRead.FindNode(root, "m_ExternalResources", "m_Resource", "m_ResourceData", "m_StreamData");
+        if (stream is not null)
+        {
+            var path = PreviewRead.FindNode(stream, "path", "m_Source", "source");
+            var bytes = PreviewRead.FindNode(stream, "m_Size", "size");
+            if (bytes?.Value is { Length: > 0 })
+                return $"{bytes.Value:N0} 字节（流 {path?.Value ?? "未知路径"}）";
+        }
+        return "（未定位到视频负载字段）";
+    }
+}
+
+/// <summary>SpriteAtlas（ref-type 687078895）只读预览：名称、打包精灵数、字段树。</summary>
+public sealed class SpriteAtlasPreviewProvider : IAssetPreviewProvider
+{
+    public string Name => "图集预览";
+
+    public bool CanPreview(AssetRecord asset) => asset.Type == AssetType.SpriteAtlas;
+
+    public Task<AssetPreview?> PreviewAsync(AssetRecord asset, IProgress<string>? progress, CancellationToken cancellationToken)
+        => Task.Run<AssetPreview?>(() =>
+        {
+            if (!PreviewRead.IsBundleAsset(asset)) return null;
+            var service = new UnityAssetService();
+            var pathId = asset.UnityPathId!.Value;
+            var fields = service.ReadBundleObjectFields(asset.SourcePath!, asset.ContainerPath!, pathId, cancellationToken);
+            if (fields.Count == 0) return null;
+            var root = fields[0];
+            var rows = new List<AssetPreviewRow>();
+            var name = PreviewRead.FindNode(root, "m_Name", "name")?.Value;
+            if (!string.IsNullOrWhiteSpace(name)) rows.Add(new AssetPreviewRow("名称", name, 0, Highlight: true));
+            var packed = PreviewRead.FindNode(root, "m_PackedSprites", "m_PackedSpritesData");
+            if (packed is { IsArray: true }) rows.Add(new AssetPreviewRow("打包精灵", $"{packed.ArraySize:N0} 个", 0));
+            var packables = PreviewRead.FindNode(root, "m_Packables", "m_PackablesData");
+            if (packables is { IsArray: true }) rows.Add(new AssetPreviewRow("可打包对象", $"{packables.ArraySize:N0} 个", 0));
+            rows.AddRange(PreviewRead.FlattenTail(root, 200));
+            return new AssetPreview(AssetPreviewKind.Rows,
+                $"图集（SpriteAtlas）· Path {pathId} · 只读字段树", Rows: rows);
         }, cancellationToken);
 }
 

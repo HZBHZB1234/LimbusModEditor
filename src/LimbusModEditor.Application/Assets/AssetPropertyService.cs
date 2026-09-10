@@ -55,6 +55,9 @@ public sealed class AssetPropertyService
             case AssetType.Mesh or AssetType.Animation or AssetType.Font:
                 AddSummaryRows(rows, asset, cancellationToken);
                 break;
+            case AssetType.Material or AssetType.Shader or AssetType.Video or AssetType.SpriteAtlas:
+                AddFieldTreeRows(rows, asset, cancellationToken);
+                break;
         }
         return rows;
     }
@@ -247,6 +250,21 @@ public sealed class AssetPropertyService
             var external = info.ExternalGuid is null ? string.Empty : $" · 外部 GUID {info.ExternalGuid}";
             var reason = info.TypeTreeMissingReason is null ? string.Empty : $" · {info.TypeTreeMissingReason}";
             return $"{name ?? "（类名不可解析）"}{assembly}{external}{reason}";
+        });
+        Add(rows, "字段数", () =>
+        {
+            if (!TryReadFields(asset, cancellationToken, out var root)) return "（字段树不可读）";
+            return $"{CountNodes(root) - 1:N0}（含嵌套）";
+        });
+    }
+
+    /// <summary>材质 / 着色器 / 视频 / 图集：对象名称 + 字段规模（与预览面板互补）。</summary>
+    private static void AddFieldTreeRows(List<AssetPropertyRow> rows, AssetRecord asset, CancellationToken cancellationToken)
+    {
+        Add(rows, "对象名称", () =>
+        {
+            if (!TryReadFields(asset, cancellationToken, out var root)) return "（字段树不可读）";
+            return FieldValue(root, "m_Name") ?? "（无 m_Name）";
         });
         Add(rows, "字段数", () =>
         {

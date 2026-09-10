@@ -264,7 +264,7 @@ public sealed class UnityAssetService
             .Select((obj, index) =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var type = UnityClassId.Map(obj.TypeId);
+                var type = UnityClassId.Map(obj.TypeId, obj.TypeName);
                 return new AssetRecord
                 {
                     LogicalPath = $"{fileName}/{obj.PathId}.{obj.TypeId}",

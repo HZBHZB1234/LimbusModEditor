@@ -141,6 +141,11 @@ public static class AssetDisplay
         AssetType.Font => "字体",
         AssetType.Binary => "二进制",
         AssetType.GameObject => "游戏对象",
+        AssetType.Component => "组件",
+        AssetType.Material => "材质",
+        AssetType.Shader => "着色器",
+        AssetType.Video => "视频",
+        AssetType.SpriteAtlas => "图集",
         _ => "未知类型",
     };
 

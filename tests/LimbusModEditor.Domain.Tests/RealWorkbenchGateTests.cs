@@ -146,7 +146,10 @@ public class RealWorkbenchGateTests
         var service = new LangTextWorkbenchService();
         var files = service.EnumerateFiles(langRoot);
         Assert.NotEmpty(files);
-        Assert.Equal("LLC_zh-CN", service.ReadActiveLanguage(langRoot));
+        // 活动语言跟随 config.json（玩家可能启用汉化组目录，不能写死 LLC_zh-CN）。
+        var expectedLanguage = System.Text.Json.Nodes.JsonNode
+            .Parse(File.ReadAllText(Path.Combine(langRoot, "config.json")))!["lang"]!.GetValue<string>();
+        Assert.Equal(expectedLanguage, service.ReadActiveLanguage(langRoot));
 
         // 挑一个根级 AbDlg_*.json（存在则用，不存在退回第一个可解析文件）。
         var target = files.FirstOrDefault(x => x.RelativePath.EndsWith("AbDlg_Faust.json", StringComparison.OrdinalIgnoreCase))

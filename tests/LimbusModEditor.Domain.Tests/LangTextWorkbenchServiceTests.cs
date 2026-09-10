@@ -280,10 +280,15 @@ public class LangTextWorkbenchServiceTests : IDisposable
         if (RealLangDir is null) return;
         var service = new LangTextWorkbenchService();
 
-        // 定位与活动语言（本机 config.json 指向 LLC_zh-CN）
+        // 定位与活动语言。活动语言**不能写死**：config.json 的 lang 由玩家决定
+        // （本机实测可能是官方 LLC_zh-CN，也可能被汉化组改成 LLc-CN-LCTA 之类）。
+        // 这里断言的是「实现确实按 config.json 解析」，而不是「玩家的配置等于某个常量」。
         var gameDir = Path.GetFullPath(Path.Combine(RealLangDir, "..", ".."));
         Assert.Equal(Path.GetFullPath(RealLangDir), service.ResolveLangRoot(gameDir));
-        Assert.Equal("LLC_zh-CN", service.ReadActiveLanguage(RealLangDir));
+        var expectedLanguage = JsonNode.Parse(File.ReadAllText(Path.Combine(RealLangDir, "config.json")))!["lang"]!
+            .GetValue<string>();
+        Assert.False(string.IsNullOrWhiteSpace(expectedLanguage), "config.json 的 lang 字段不应为空。");
+        Assert.Equal(expectedLanguage, service.ReadActiveLanguage(RealLangDir));
 
         var stopwatch = Stopwatch.StartNew();
         var files = service.EnumerateFiles(RealLangDir);
@@ -294,17 +299,19 @@ public class LangTextWorkbenchServiceTests : IDisposable
         Assert.All(relatives, x => Assert.DoesNotContain('\\', x));
         Assert.All(files, x => Assert.True(File.Exists(x.FullPath), $"枚举条目应真实存在: {x.RelativePath}"));
 
+        var languagePrefix = expectedLanguage + "/";
+
         // StoryData 子目录逐层展开（实测约 920 文件，留充足余量防游戏版本波动）
-        var storyData = relatives.Where(x => x.StartsWith("LLC_zh-CN/StoryData/", StringComparison.Ordinal)).ToList();
+        var storyData = relatives.Where(x => x.StartsWith(languagePrefix + "StoryData/", StringComparison.Ordinal)).ToList();
         Assert.True(storyData.Count >= 100, $"StoryData 应包含大量文件，实际 {storyData.Count}");
 
         // 根级文件与子目录文件并存
-        Assert.Contains(relatives, x => x.StartsWith("LLC_zh-CN/", StringComparison.Ordinal) && x.Count(c => c == '/') == 1);
+        Assert.Contains(relatives, x => x.StartsWith(languagePrefix, StringComparison.Ordinal) && x.Count(c => c == '/') == 1);
         Assert.Contains(relatives, x => x.Count(c => c == '/') >= 2);
 
         // 抽样验证键数与大小（只读这一个文件的内容，不全量读）
-        var sampleRel = relatives.FirstOrDefault(x => x == "LLC_zh-CN/AbDlg_Faust.json")
-                        ?? relatives.First(x => x.StartsWith("LLC_zh-CN/", StringComparison.Ordinal) && x.Count(c => c == '/') == 1);
+        var sampleRel = relatives.FirstOrDefault(x => x == languagePrefix + "AbDlg_Faust.json")
+                        ?? relatives.First(x => x.StartsWith(languagePrefix, StringComparison.Ordinal) && x.Count(c => c == '/') == 1);
         var sample = files.Single(x => x.RelativePath == sampleRel);
         Assert.True(sample.IsUtf8, $"抽样文件应为 UTF-8: {sampleRel}");
         var sampleNode = JsonNode.Parse(File.ReadAllText(sample.FullPath));

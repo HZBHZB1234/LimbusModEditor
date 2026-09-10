@@ -1,0 +1,72 @@
+<UserControl x:Class="LimbusModEditor.App.JsonTreeEditor"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!--
+
+        plan-09：共享 JSON 编辑器（plan-10 文本工作台 / plan-12 静态工作台共用）。
+
+        形态：Tab「键值树」（惰性展开的 JSON 树 + 值编辑 + 删除键）
+              Tab「原文 JSON」（整份文本编辑，非法 JSON 拒绝且不改编辑集）
+        行为来源：TextWorkbenchPage 与 StaticWorkbenchPage 的既有实现
+        （Flatten / SetNodeValue / RefreshValueEditor / 删除确认 / 非法 JSON 拒绝），
+        纯逻辑在 Application/Documents/JsonDocumentEditor.cs（可被单元测试覆盖）。
+
+        本控件不写任何文件、不管导出：一切变更通过 DocumentChanged 事件把
+        「当前 JSON 文本 + 是否有修改 + RFC6902 差异 op 数」交给宿主页面。
+
+        颜色/字体只引用 Themes/WorkbenchStyles.xaml 的具名样式（无字面量）。
+    -->
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TabControl x:Name="Tabs" Grid.Row="0" SelectionChanged="Tabs_SelectionChanged">
+            <!-- ── Tab 1：键值树 ─────────────────────────────────────── -->
+            <TabItem Header="🗂 键值树">
+                <DockPanel Margin="0,6,0,0">
+                    <TextBlock x:Name="ValueLabel" DockPanel.Dock="Top" Text="选中键的值"
+                               Style="{StaticResource WorkbenchSectionLabel}" Margin="0,0,0,4"/>
+                    <WrapPanel x:Name="ActionButtons" DockPanel.Dock="Bottom" Margin="0,6,0,0">
+                        <Button x:Name="ApplyValueButton" Content="应用修改" Click="ApplyValue_Click"
+                                Style="{StaticResource WorkbenchToolButton}" IsEnabled="False"
+                                ToolTip="按原值类型写回（字符串/整数/浮点/布尔/null）；类型不匹配会给出中文提示，不改文档。"/>
+                        <Button x:Name="DeleteKeyButton" Content="删除此键…" Click="DeleteKey_Click"
+                                Style="{StaticResource WorkbenchToolButton}" IsEnabled="False"
+                                ToolTip="从文档中删除选中的键（确认后生效；导出时会成为 RFC6902 remove 操作）。"/>
+                        <Button x:Name="ExpandAllButton" Content="展开一层" Click="ExpandRoot_Click"
+                                Style="{StaticResource WorkbenchToolButton}" IsEnabled="False"
+                                ToolTip="仅展开根的一层；树按层惰性生成，大表不会一次物化。"/>
+                    </WrapPanel>
+                    <TextBox x:Name="ValueBox" DockPanel.Dock="Bottom" Height="70"
+                             Style="{StaticResource WorkbenchValueBox}" Margin="0,6,0,0"
+                             ToolTip="选中键的完整值；修改后点「应用修改」（数组/对象节点不可直接编辑）。"/>
+                    <TreeView x:Name="Tree" Style="{StaticResource WorkbenchTree}"
+                              SelectedItemChanged="Tree_SelectedItemChanged"
+                              ToolTip="JSON 层级；展开节点时即时生成下一层（惰性展开，不截断）。"/>
+                </DockPanel>
+            </TabItem>
+
+            <!-- ── Tab 2：原文 JSON ──────────────────────────────────── -->
+            <TabItem Header="📄 原文 JSON">
+                <DockPanel Margin="0,6,0,0">
+                    <WrapPanel DockPanel.Dock="Bottom" Margin="0,6,0,0">
+                        <Button x:Name="SaveRawButton" Content="保存原始 JSON 修改" Click="SaveRaw_Click"
+                                Style="{StaticResource WorkbenchToolButton}" IsEnabled="False"
+                                ToolTip="校验通过后进入宿主编辑集；非法 JSON 一律拒绝且不改动当前文档。"/>
+                    </WrapPanel>
+                    <TextBlock DockPanel.Dock="Bottom" Style="{StaticResource WorkbenchSectionLabel}" Margin="0,6,0,0"
+                               Text="UTF-8 无 BOM。保存前会校验合法性；失败时当前文档与宿主编辑集都不变。"/>
+                    <TextBox x:Name="RawBox" Style="{StaticResource WorkbenchCodeBox}"/>
+                </DockPanel>
+            </TabItem>
+        </TabControl>
+
+        <!-- 底部：差异摘要 + 状态（宿主可另接 StatusMessage 事件写自己的状态条） -->
+        <StackPanel Grid.Row="1">
+            <TextBlock x:Name="DiffInfo" Text="—" Style="{StaticResource WorkbenchStatusText}"/>
+            <TextBlock x:Name="StatusInfo" Text="—" Style="{StaticResource WorkbenchStatusText}"/>
+        </StackPanel>
+    </Grid>
+</UserControl>

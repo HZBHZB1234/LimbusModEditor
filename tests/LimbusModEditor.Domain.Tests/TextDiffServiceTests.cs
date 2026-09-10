@@ -169,4 +169,48 @@ public class TextDiffServiceTests
         var patched = service.Apply(before.DeepClone()!, reparsed);
         Assert.True(JsonNode.DeepEquals(patched, after));
     }
+
+    // ── plan-09 修复：JSON null 值的生成语义 ─────────────────────────
+
+    [Fact]
+    public void Identical_documents_with_null_values_produce_empty_patch()
+    {
+        // 修复前：null 值会被当成「before 为 null → add」，未修改的文档也产出
+        // 一条缺 value 的非法 add（既误报差异，又让补丁回放直接失败）。
+        var before = Parse("""{"a":null,"nested":{"b":null},"arr":[null,1]}""")!;
+        var patch = NewService().Generate(before, before.DeepClone());
+        Assert.Empty(patch);
+
+        // 真实 lang 表常见的 null 值也走同一路径
+        var lang = Parse("""{"dataList":[{"dialog":"台词","speaker":null}]}""")!;
+        Assert.Empty(NewService().Generate(lang, lang.DeepClone()));
+    }
+
+    [Fact]
+    public void Null_valued_keys_add_replace_and_round_trip()
+    {
+        var service = NewService();
+
+        // 新增一个值为 null 的键 → 必须产出**带 value 的**合法 add
+        var before = Parse("""{"a":1}""")!;
+        var after = Parse("""{"a":1,"b":null}""")!;
+        var patch = service.Generate(before, after);
+        Assert.Single(patch);
+        Assert.Equal("add", patch[0]!["op"]!.GetValue<string>());
+        Assert.True(patch[0]!.AsObject().ContainsKey("value"), "add 必须显式带 value（JSON null 也要带）");
+        Assert.True(JsonNode.DeepEquals(service.Apply(before.DeepClone()!, patch), after));
+
+        // 把有值改成 null → replace，且回放一致
+        var replaced = service.Generate(Parse("""{"a":1}"""), Parse("""{"a":null}"""));
+        Assert.Single(replaced);
+        Assert.Equal("replace", replaced[0]!["op"]!.GetValue<string>());
+        Assert.True(JsonNode.DeepEquals(
+            service.Apply(Parse("""{"a":1}""")!, replaced), Parse("""{"a":null}""")));
+
+        // 数组里插入 null / 删除 null
+        var arrayBefore = Parse("""[1,null,2]""")!;
+        var arrayAfter = Parse("""[1,null,2,null]""")!;
+        var arrayPatch = service.Generate(arrayBefore, arrayAfter);
+        Assert.True(JsonNode.DeepEquals(service.Apply(arrayBefore.DeepClone()!, arrayPatch), arrayAfter));
+    }
 }

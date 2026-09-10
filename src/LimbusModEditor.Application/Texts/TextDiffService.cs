@@ -46,12 +46,22 @@ public sealed class TextDiffService
 
         switch (kind)
         {
-            case "add": return ApplyAdd(root, ParsePointer(path, ordinal, kind), RequireValue(op, ordinal, kind), path);
-            case "replace": return ApplyReplace(root, ParsePointer(path, ordinal, kind), RequireValue(op, ordinal, kind));
+            case "add":
+                var addTokens = ParsePointer(path, ordinal, kind);
+                var addValue = RequireValue(op, ordinal, kind);
+                RequireReachableRoot(ordinal, kind, addTokens, addValue);
+                return ApplyAdd(root, addTokens, addValue, path);
+            case "replace":
+                var replaceTokens = ParsePointer(path, ordinal, kind);
+                var replaceValue = RequireValue(op, ordinal, kind);
+                RequireReachableRoot(ordinal, kind, replaceTokens, replaceValue);
+                return ApplyReplace(root, replaceTokens, replaceValue);
             case "remove": return ApplyRemove(root, ParsePointer(path, ordinal, kind));
             case "test":
-                var tested = ResolveExisting(root, ParsePointer(path, ordinal, kind), path);
-                if (tested is null || !JsonNode.DeepEquals(tested, RequireValue(op, ordinal, kind)))
+                // null 是合法值：必须区分「路径不存在」与「值就是 null」
+                var testTokens = ParsePointer(path, ordinal, kind);
+                var expected = RequireValue(op, ordinal, kind);
+                if (!TryResolveExisting(root, testTokens, out var tested) || !JsonNode.DeepEquals(tested, expected))
                     throw new InvalidDataException($"补丁第 {ordinal} 条 test 失败：{path} 的当前值与期望值不一致。");
                 return root;
             case "copy":
@@ -62,51 +72,60 @@ public sealed class TextDiffService
                 var pathTokens = ParsePointer(path, ordinal, kind);
                 if (kind == "move" && IsDescendant(fromTokens, pathTokens))
                     throw new InvalidDataException($"补丁第 {ordinal} 条 move 的目标 {path} 位于来源 {from} 内部。");
-                var source = ResolveExisting(root, fromTokens, from)
-                    ?? throw new InvalidDataException($"补丁第 {ordinal} 条（{kind}）的来源不存在: {from}");
+                if (!TryResolveExisting(root, fromTokens, out var source))
+                    throw new InvalidDataException($"补丁第 {ordinal} 条（{kind}）的来源不存在: {from}");
+                RequireReachableRoot(ordinal, kind, pathTokens, source);
                 if (kind == "move") root = ApplyRemove(root, fromTokens);
-                return ApplyAdd(root, pathTokens, source.DeepClone(), path);
+                return ApplyAdd(root, pathTokens, source, path);
             default:
                 throw new InvalidDataException($"补丁第 {ordinal} 条使用了不支持的 op: {kind}（支持 add/remove/replace/move/copy/test）。");
         }
     }
 
-    private static JsonNode ApplyAdd(JsonNode root, string[] tokens, JsonNode value, string path)
+    /// <summary>根路径的 add/replace 不能把整份文档置为 null：Apply 返回的是文档根，
+    /// 不能是 null（补丁文档本身永远有根）。提前 fail fast 给中文原因。</summary>
+    private static void RequireReachableRoot(int ordinal, string kind, string[] tokens, JsonNode? value)
     {
-        if (tokens.Length == 0) return value.DeepClone();
+        if (tokens.Length == 0 && value is null)
+            throw new InvalidDataException($"补丁第 {ordinal} 条（{kind}）不能把根文档整体置为 null。");
+    }
+
+    private static JsonNode ApplyAdd(JsonNode root, string[] tokens, JsonNode? value, string path)
+    {
+        if (tokens.Length == 0) return value?.DeepClone()!;
         var (parent, last) = ResolveParent(root, tokens, path);
         switch (parent)
         {
             case JsonArray array when last.Index is { } index:
                 if (index < 0 || index > array.Count)
                     throw new InvalidDataException($"add 目标数组下标越界: {path}（长度 {array.Count}）");
-                if (index == array.Count) array.Add(value.DeepClone());
-                else array.Insert(index, value.DeepClone());
+                if (index == array.Count) array.Add(value?.DeepClone());
+                else array.Insert(index, value?.DeepClone());
                 return root;
             case JsonObject obj when last.Key is { } key:
-                obj[key] = value.DeepClone();
+                obj[key] = value?.DeepClone();
                 return root;
             default:
                 throw new InvalidDataException($"add 的父容器类型不支持: {path}");
         }
     }
 
-    private static JsonNode ApplyReplace(JsonNode root, string[] tokens, JsonNode value)
+    private static JsonNode ApplyReplace(JsonNode root, string[] tokens, JsonNode? value)
     {
-        if (tokens.Length == 0) return value.DeepClone();
+        if (tokens.Length == 0) return value?.DeepClone()!;
         var (parent, last) = ResolveParent(root, tokens, PathOf(tokens));
         if (parent is JsonArray array && last.Index is { } index)
         {
             if (index < 0 || index >= array.Count)
                 throw new InvalidDataException($"replace 目标数组下标越界: {PathOf(tokens)}（长度 {array.Count}）");
-            array[index] = value.DeepClone();
+            array[index] = value?.DeepClone();
             return root;
         }
         if (parent is JsonObject obj && last.Key is { } key)
         {
             if (!obj.ContainsKey(key))
                 throw new InvalidDataException($"replace 目标不存在: {PathOf(tokens)}（replace 不创建新键，请用 add）");
-            obj[key] = value.DeepClone();
+            obj[key] = value?.DeepClone();
             return root;
         }
         throw new InvalidDataException($"replace 的父容器类型不支持: {PathOf(tokens)}");
@@ -161,27 +180,41 @@ public sealed class TextDiffService
     }
 
     private static JsonNode? ResolveExisting(JsonNode current, string[] tokens, string path)
+        => TryResolveExisting(current, tokens, out var node) ? node : null;
+
+    /// <summary>解析路径；返回是否**存在**（JSON null 值算存在：节点为 null 但路径有效）。
+    /// plan-09 修复：此前用「返回 null」同时表示「不存在」与「值是 null」，导致
+    /// test/copy/move 对 null 值误判。</summary>
+    private static bool TryResolveExisting(JsonNode current, string[] tokens, out JsonNode? node)
     {
+        node = current;
         foreach (var token in tokens)
         {
-            switch (current)
+            switch (node)
             {
-                case JsonObject obj when token != "-" && obj.TryGetPropertyValue(token, out var child) && child is not null:
-                    current = child;
+                case JsonObject obj when token != "-" && obj.TryGetPropertyValue(token, out var child):
+                    node = child;
                     break;
-                case JsonArray array when int.TryParse(token, out var index) && index >= 0 && index < array.Count && array[index] is not null:
-                    current = array[index]!;
+                case JsonArray array when int.TryParse(token, out var index) && index >= 0 && index < array.Count:
+                    node = array[index];
                     break;
                 default:
-                    return null;
+                    node = null;
+                    return false;
             }
         }
-        return current;
+        return true;
     }
 
-    private static JsonNode RequireValue(JsonObject op, int ordinal, string kind)
-        => op["value"]?.DeepClone()
-           ?? throw new InvalidDataException($"补丁第 {ordinal} 条（{kind}）缺少 value 字段。");
+    /// <summary>取 op 的 value。返回 null 有两种含义：JSON null 值（合法，op 里**存在**
+    /// value 键）与「缺 value 字段」（非法）。plan-09 修复：此前用「null = 缺字段」，
+    /// 于是显式 <c>"value": null</c> 的 add/replace 被误判为非法补丁。</summary>
+    private static JsonNode? RequireValue(JsonObject op, int ordinal, string kind)
+    {
+        if (!op.TryGetPropertyValue("value", out var value))
+            throw new InvalidDataException($"补丁第 {ordinal} 条（{kind}）缺少 value 字段。");
+        return value?.DeepClone();
+    }
 
     private static string[] ParsePointer(string pointer, int ordinal, string kind)
     {
@@ -196,8 +229,20 @@ public sealed class TextDiffService
 
     private static void GenerateInto(JsonNode? before, JsonNode? after, string pointer, JsonArray ops)
     {
-        if (before is null) { ops.Add(MakeOp("add", pointer, after)); return; }
-        if (after is null) { ops.Add(MakeOp("remove", pointer)); return; }
+        // 两边都是 JSON null（System.Text.Json 里 null 值就是 null 节点）：无差异。
+        // plan-09 修复：此前会走到下面的 `before is null` 分支，产出**缺 value 字段的
+        // 非法 add**（`{"op":"add","path":"/n"}`）——既让「未修改」的文档报出 1 个差异，
+        // 又让补丁回放直接失败（RequireValue 抛「缺少 value 字段」）。
+        if (before is null && after is null) return;
+        if (before is null) { ops.Add(MakeOp("add", pointer, after, hasValue: true)); return; }
+        if (after is null)
+        {
+            // 目标值是 JSON null（键仍然存在、值就是 null）→ 用带显式 null 的 replace。
+            // plan-09 修复：旧的 `remove` 会把键整个删掉，回放结果与目标文档不一致
+            // （`{"a":null}` 变 `{}`）。真正「删掉键」的路径在对象分支里单独产出 remove。
+            ops.Add(MakeOp("replace", pointer, null, hasValue: true));
+            return;
+        }
         if (before is JsonObject beforeObject && after is JsonObject afterObject)
         {
             foreach (var (key, value) in beforeObject)
@@ -211,7 +256,7 @@ public sealed class TextDiffService
             foreach (var (key, value) in afterObject)
             {
                 if (!beforeObject.TryGetPropertyValue(key, out _))
-                    ops.Add(MakeOp("add", $"{pointer}/{EscapeToken(key)}", value));
+                    ops.Add(MakeOp("add", $"{pointer}/{EscapeToken(key)}", value, hasValue: true));
             }
             return;
         }
@@ -221,7 +266,7 @@ public sealed class TextDiffService
             return;
         }
         if (!JsonNode.DeepEquals(before, after))
-            ops.Add(MakeOp("replace", pointer, after));
+            ops.Add(MakeOp("replace", pointer, after, hasValue: true));
     }
 
     private static void GenerateArrayDiff(JsonArray before, JsonArray after, string pointer, JsonArray ops)
@@ -247,13 +292,15 @@ public sealed class TextDiffService
         for (var i = beforeMiddle - 1; i >= 0; i--)
             ops.Add(MakeOp("remove", $"{pointer}/{prefix + i}"));
         for (var i = 0; i < afterMiddle; i++)
-            ops.Add(MakeOp("add", $"{pointer}/{prefix + i}", after[prefix + i]));
+            ops.Add(MakeOp("add", $"{pointer}/{prefix + i}", after[prefix + i], hasValue: true));
     }
 
-    private static JsonObject MakeOp(string op, string path, JsonNode? value = null)
+    /// <summary>组装一条 op。<paramref name="hasValue"/> 必须显式说明「这条 op 带 value」——
+    /// 只有当 value 本身是 JSON null 时才需要区分（缺 value 的 add/replace 是非法补丁）。</summary>
+    private static JsonObject MakeOp(string op, string path, JsonNode? value = null, bool hasValue = false)
     {
         var result = new JsonObject { ["op"] = op, ["path"] = path };
-        if (value is not null) result["value"] = value.DeepClone();
+        if (hasValue) result["value"] = value?.DeepClone();
         return result;
     }
 

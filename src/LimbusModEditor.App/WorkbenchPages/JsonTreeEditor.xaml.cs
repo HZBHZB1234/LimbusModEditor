@@ -31,6 +31,10 @@ public partial class JsonTreeEditor : UserControl
     /// <summary>惰性展开占位项（Tag 为 null 的 TreeViewItem 即占位；真实行的 Tag 恒为 JsonEditRow）。</summary>
     private const string PlaceholderHeader = "载入中…";
 
+    /// <summary>自动计算差异摘要的文档体量上限（两侧文本字符数之和）。超过就改成按需计算，
+    /// 避免 MB 级静态表在每次编辑时全量走一遍 <c>TextDiffService</c> 冻住 UI。</summary>
+    private const int DiffAutoComputeMaxChars = 1_000_000;
+
     private JsonNode? _document;
     private JsonEditRow? _selected;
     private string _loadedText = string.Empty;
@@ -88,7 +92,9 @@ public partial class JsonTreeEditor : UserControl
         Tabs.SelectedIndex = 0;
         RebuildTree();
         UpdateDiffSummary();
-        SetStatus($"已载入文档（{JsonDocumentEditor.FlattenLeaves(document).Count} 个键值行；树按需展开）。");
+        var nodes = JsonDocumentEditor.CountNodes(document);
+        var suffix = nodes >= 20000 ? "（至少这么多）" : string.Empty;
+        SetStatus($"已载入文档（{nodes}{suffix} 个节点；树按需展开，不做全量物化）。");
         RaiseDocumentChanged();
     }
 
@@ -211,7 +217,8 @@ public partial class JsonTreeEditor : UserControl
     private void Tree_SelectedItemChanged(object sender, RoutedPropertyChangedEventArgs<object> e)
     {
         _selected = (e.NewValue as TreeViewItem)?.Tag as JsonEditRow;
-        ValueBox.Text = _selected is null ? string.Empty : JsonDocumentEditor.LeafText(_selected.Node);
+        // 容器行只显示短预览（InitialEditorText），绝不把整棵子树塞进文本框。
+        ValueBox.Text = _selected is null ? string.Empty : JsonDocumentEditor.InitialEditorText(_selected);
         ValueLabel.Text = _selected is null
             ? "选中键的值"
             : $"选中键的值（{_selected.Path}·{KindLabel(_selected.Kind)}）";
@@ -328,13 +335,21 @@ public partial class JsonTreeEditor : UserControl
         RaiseDocumentChanged();
     }
 
-    private void UpdateDiffSummary()
+    private void UpdateDiffSummary(bool force = false)
     {
         var baseline = _vanillaText ?? _loadedText;
         if (string.IsNullOrWhiteSpace(baseline) || string.IsNullOrWhiteSpace(CurrentJsonText))
         {
             DiffOperationCount = 0;
             DiffInfo.Text = "—";
+            return;
+        }
+        // 超大文档不在每次编辑时全量算差异（TextDiffService 会走完整棵树，MB 级表会明显掉帧）：
+        // 只有小文档自动算，大文档由宿主/页面按需调用 RefreshDiffSummary(force: true)。
+        if (!force && (long)baseline.Length + CurrentJsonText.Length > DiffAutoComputeMaxChars)
+        {
+            DiffOperationCount = 0;
+            DiffInfo.Text = $"（文档较大：差异摘要按需计算，可点「计算差异」或在本页 diff 视图查看）";
             return;
         }
         try
@@ -351,6 +366,9 @@ public partial class JsonTreeEditor : UserControl
             ? DiffOperationCount == 0 ? "与载入时无差异。" : $"本次修改：{DiffOperationCount} 个 RFC6902 操作。"
             : JsonDocumentEditor.DescribeDiff(baseline, CurrentJsonText);
     }
+
+    /// <summary>按需（重新）计算差异摘要：超大文档由页面/宿主显式触发（plan-12 的 diff Tab）。</summary>
+    public void RefreshDiffSummary(bool force = true) => UpdateDiffSummary(force);
 
     private void RefreshButtons()
     {

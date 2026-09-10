@@ -166,9 +166,53 @@ public static class JsonDocumentEditor
         }
     }
 
+    /// <summary>值编辑框的初始文本：字符串取原文，其它类型取 JSON 字面量（旧实现同口径）；
+    /// <b>容器行只给短预览</b>——绝不把整棵子树序列化进文本框（MB 级表会直接冻住 UI）。</summary>
+    public static string InitialEditorText(JsonEditRow row)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+        return row.IsContainer ? row.Preview : LeafText(row.Node);
+    }
+
     /// <summary>值编辑框的初始文本：字符串取原文，其它类型取 JSON 字面量（旧实现同口径）。</summary>
     public static string LeafText(JsonNode? node)
         => node is JsonValue value && value.TryGetValue<string>(out var str) ? str : node?.ToJsonString() ?? "null";
+
+    /// <summary>数一数文档里有多少个节点（容器 + 叶子），**最多数到 <paramref name="limit"/> 个**
+    /// 就停——用于「已载入 N 个节点」这类状态文案，避免为了显示一个数字把 MB 级文档全量物化。
+    /// 返回值等于 <paramref name="limit"/> 时表示「至少这么多（可能更多）」。</summary>
+    public static int CountNodes(JsonNode? document, int limit = 20000)
+    {
+        if (document is null) return 0;
+        var count = 0;
+        CountInto(document, ref count, Math.Max(1, limit));
+        return count;
+    }
+
+    private static void CountInto(JsonNode node, ref int count, int limit)
+    {
+        count++;
+        if (count >= limit) return;
+        switch (node)
+        {
+            case JsonObject obj:
+                foreach (var (_, child) in obj)
+                {
+                    if (count >= limit) return;
+                    if (child is not null) CountInto(child, ref count, limit);
+                    else count++; // JSON null 也是一个节点
+                }
+                break;
+            case JsonArray array:
+                foreach (var child in array)
+                {
+                    if (count >= limit) return;
+                    if (child is not null) CountInto(child, ref count, limit);
+                    else count++;
+                }
+                break;
+        }
+    }
 
     /// <summary>截断超长文本（加省略号）。</summary>
     public static string Truncate(string value, int maxLength)

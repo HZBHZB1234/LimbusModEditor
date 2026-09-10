@@ -132,6 +132,35 @@ public class JsonDocumentEditorTests
         Assert.Equal("null", JsonDocumentEditor.Preview(null));
     }
 
+    [Fact]
+    public void Initial_editor_text_never_dumps_a_whole_subtree()
+    {
+        var document = Doc("{\"obj\":{\"a\":1},\"s\":\"文本\",\"n\":null}");
+
+        // 叶子：字符串取原文、null 取 "null"
+        Assert.Equal("文本", JsonDocumentEditor.InitialEditorText(Leaf(document, "s")));
+        Assert.Equal("null", JsonDocumentEditor.InitialEditorText(Leaf(document, "n")));
+
+        // 容器：只给短预览（旧实现把整棵子树 ToJsonString 塞进文本框，MB 级表会冻住 UI）
+        var container = JsonDocumentEditor.EnumerateChildren(JsonDocumentEditor.CreateRoot(document))
+            .Single(x => x.Name == "obj");
+        Assert.Equal("{ 1 个键 }", JsonDocumentEditor.InitialEditorText(container));
+    }
+
+    [Fact]
+    public void Count_nodes_is_bounded()
+    {
+        var array = new JsonArray();
+        for (var i = 0; i < 5000; i++) array.Add(i);
+        var document = new JsonObject { ["list"] = array, ["n"] = null };
+
+        // 5000 个元素 + 1 个 null + list + 根 = 5003
+        Assert.Equal(5003, JsonDocumentEditor.CountNodes(document));
+        // 有上限：显示「至少 N 个」时不必把 MB 级文档全量走一遍
+        Assert.Equal(10, JsonDocumentEditor.CountNodes(document, limit: 10));
+        Assert.Equal(0, JsonDocumentEditor.CountNodes(null));
+    }
+
     // ── 值编辑：按原值类型写回 ───────────────────────────────────────
 
     [Fact]

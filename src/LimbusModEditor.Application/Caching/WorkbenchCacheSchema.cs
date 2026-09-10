@@ -62,9 +62,9 @@ public static class WorkbenchCacheSchema
 
     /// <summary><c>cache/static-tables.db</c>（plan-12 §2）：
     /// <c>tables</c> = 索引与搜索用的元数据（dataClass / 名称 / 大小）；
-    /// <c>documents</c> = <b>按需</b>缓存的 JSON 原文快照（只在首次打开某表时写入，
-    /// 1392 张表全量文本可能 GB 级，绝不预缓存）。
-    /// 失效规则：source_key（外层 + 内层内容哈希）变 → 整库重建（绝不缓存 hash 常量）。</summary>
+    /// <c>documents</c> = <b>按需 + 有界</b>缓存的 JSON 原文快照（只在首次打开某表时写入，
+    /// 且总字节数受上限约束——1392 张表全量文本是 GB 级，绝不无界预缓存）。
+    /// 失效规则：source_key（内层内容哈希）变 → 整库重建（绝不缓存 hash 常量）。</summary>
     public const string StaticTablesSql = """
         CREATE TABLE IF NOT EXISTS tables (
             container_entry TEXT PRIMARY KEY,

@@ -1,0 +1,18 @@
+<UserControl x:Class="LimbusModEditor.App.StaticWorkbenchPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:LimbusModEditor.App">
+    <!--
+        plan-12：静态数据工作台（游戏的特殊静态 bundle static_s1_0_assets_all_*.bundle）。
+
+        用户要求「static mod 可以使用资源工作台类似的页面」，因此浏览列与资源工作台同款：
+        搜索行 + 筛选行 + 🗂 dataClass 树 / ☰ 表列表 + 已修改标记 + 排序。
+        编辑列 = 元数据 + 共享 JSON 编辑器（树 / 原文双 Tab）+ 与官方版本差异 + 导出 .staticmod。
+
+        与资源工作台同构：三列骨架、分隔条、设计令牌全部来自 plan-09 的 WorkbenchShell，
+        本文件只声明宿主控件。
+    -->
+    <Grid Margin="12">
+        <local:WorkbenchShell x:Name="Shell"/>
+    </Grid>
+</UserControl>

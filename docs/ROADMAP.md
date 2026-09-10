@@ -527,27 +527,38 @@ Lunartique→对象级 Carra/目录来源支持，其余禁用并给出原因）
   / `AssetPropertyServiceTests` / `StaticBundleLocatorTests` / `UiStateServiceTests`，
   本机全部真跑（真实缓存 / 真实 bank / 真实 lang / 真实 catalog）。
 
-## P3.12 工作台 UI 一致化 + 表缓存（2026-09，进行中）
+## P3.12 工作台 UI 一致化 + 表缓存（2026-09，完成）
 
 用户反馈：「资源工作台的交互页面设计非常好（树形编辑 + 方便预览），但其他三种模组的编辑器
 有很大问题——文本编辑器页面不美观、没有树形查看；bank 页面没有所有音频的视图；
 static mod 可以使用资源工作台类似的页面。事实上我们也可以使用表来缓存这些数据。」
 执行按 `docs/plans/plan-09 ~ plan-12` 四份任务书：plan-09 为串行前置，10/11/12 依赖它。
+**四份计划均已实施并入库**（测试 476 → **528**，74 Format + 454 Domain）。
 
 - **plan-09（前置）**：`WorkbenchShell`（三列骨架 + 每页列宽持久化 + 列表↔树切换）
   与 `JsonTreeEditor`（树/原文双 Tab、按原类型写回、RFC6902 差异摘要）公共件，
   设计令牌集中到 `Themes/WorkbenchStyles.xaml`（页面代码禁止硬编码设计色）；
   `Application/Caching/` 表缓存底座（SQLite，照抄 `UnityCacheSqliteIndexStore` 的事务/WAL/
   轻量迁移策略），建好 `cache/` 下 `bank-index.db` / `static-tables.db` / `text-index.db` 表结构。
-- **plan-10 文本**：🗂 目录→文件→JSON 键层级树 + ☰ 列表，独立搜索结果视图，
+  附带修复 `TextDiffService` 的 JSON null 语义（相同文档不再产出非法 `add`、显式 `null` 可回放）。
+- **plan-10 文本**：🗂 目录→文件树 + ☰ 列表，独立搜索结果视图（点击命中跳转并定位键），
   键值树惰性展开（去掉 5000 行截断），`cache/text-index.db` 缓存文件索引与搜索命中。
-- **plan-11 音频**：**跨 bank 样本总表**（bank/FSB/样本名/codec/采样率/声道/时长/大小/状态，
-  虚拟化 + 筛选排序）+ bank→FSB→样本 树 + 现有 bank 列表，`cache/bank-index.db`
-  按 `(size,mtime)` 增量重建；冷建索引带进度且可取消。
-- **plan-12 静态**：与资源工作台同款页面（dataClass 树 + 列表 + 筛选/排序 + 修改标记），
-  搜索改走 `cache/static-tables.db`（不再同步逐张解码 1392 张表），编辑器复用 `JsonTreeEditor` + diff Tab。
+  **实测**：冷建索引 9.6s → 二次进页面 608ms；搜索 105ms vs 逐文件现读 1962ms（同为 178 条）。
+- **plan-11 音频**：**跨 bank 样本总表**（DataGrid 行虚拟化，52826 行）+ bank→FSB→样本 树
+  + bank 列表三视图，筛选/排序全在内存行集上做；`cache/bank-index.db` 按
+  `(size,mtime)` 逐文件增量重建、行集对账、并行度 ≤4、进度 + 可取消。
+  **实测**：冷建 19.3s（1531 文件）→ 二次进页面 **917ms 且解析 0 个文件**；读库 679ms。
+- **plan-12 静态**：与资源工作台同款页面（dataClass 树 159 组 / 表列表 + 筛选/排序/修改标记），
+  编辑器换共享 `JsonTreeEditor` + RFC6902 差异显示 + diff 摘要；`cache/static-tables.db`
+  缓存元数据，**正文按需 + 有界（默认 64 MB，LRU 淘汰）**。
+  **实测**：1392 张表 / 正文合计 43.6 MB，冷建 6.5s → 热读 **11ms**（直接枚举 bundle 需 4.3s）。
 
-约束：缓存只存 vanilla 事实、编辑集不落缓存；失效规则只有「源签名变化」一条；绝不写游戏目录。
+约束：缓存只存 vanilla 事实、编辑集不落缓存；失效规则只有「源签名变化」一条
+（文本：目录签名 + config.json 内容哈希；音频：逐文件 `(size,mtime)`；静态：内层内容哈希）；
+绝不写游戏目录 / Unity 缓存 / catalog。
+
+**遗留一项（未闭合）**：资源工作台自身尚未迁移到公共骨架（plan-09 §6 那条
+「资源页不再出现硬编码设计色」的门），需一次单独的收口小改。
 
 ## P4：工程质量和交付
 

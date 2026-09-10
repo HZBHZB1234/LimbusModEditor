@@ -20,6 +20,18 @@
 | [plan-11](plan-11-bank-workbench-all-audio-view.md) | 第二批需求 | 音频工作台重做：跨 bank 样本总表 + bank 树 + `cache/bank-index.db` | plan-09 |
 | [plan-12](plan-12-static-workbench-shell-ui.md) | 第二批需求 | 静态数据工作台重做：资源工作台同款页面 + `cache/static-tables.db` | plan-09 |
 
+**第二批执行状态（2026-09）**：plan-09 ✅ / plan-10 ✅ / plan-11 ✅ / plan-12 ✅ 均已实施并入库。
+公共骨架与表缓存底座已就位（`WorkbenchShell`、`JsonTreeEditor`、`Application/Caching/`、
+`Themes/WorkbenchStyles.xaml`）；三页均改为 XAML + 共享骨架。
+**仍未闭合的一项**：资源工作台自身尚未迁移到公共骨架（plan-09 §6 那条「资源页不再出现
+硬编码设计色」的门），需一次单独的收口小改（色值/splitter 换成公共件），
+排在三页改造之后以免干扰唯一好用的页面。
+
+**实测收益（本机真实数据）**：
+`text-index.db` 二次进页面 608ms、搜索 105ms（vs 逐文件现读 1962ms）；
+`bank-index.db` 1531 文件 / 52826 样本，冷建 19.3s → 热读 917ms（0 解析）；
+`static-tables.db` 1392 张表 / 43.6 MB 正文，冷建 6.5s → 热读 11ms（枚举 bundle 需 4.3s）。
+
 建议执行顺序：**plan-02 →（plan-01 并行）→ plan-03、plan-04 → plan-05 → plan-06/07/08（三者可并行）**。
 plan-01 不依赖布局改造，可随时开工；plan-03/04 很小，也可在 plan-02 前先在现有 TabItem 内完成再随布局迁移。
 
@@ -39,8 +51,8 @@ plan-01 不依赖布局改造，可随时开工；plan-03/04 很小，也可在 
    dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r win-x64 --self-contained false -o artifacts/publish-win-x64 --no-restore
    ```
 
-   当前基线（2026-09，plan-09 完成后实测）：**476 个测试全绿（74 Format + 402 Domain）**。
-   历史：plan-02 期为 274（62+212），plan-08 期为 334（74+260）。
+   当前基线（2026-09，plan-09~12 全部完成后实测）：**528 个测试全绿（74 Format + 454 Domain）**。
+   历史：plan-02 期为 274（62+212），plan-08 期为 334（74+260），plan-09 期为 476（74+402）。
    注：2026-09 本机曾出现 2 个真实 lang 门控测试失败，根因是测试把活动语言写死为 `LLC_zh-CN`，
    而本机 `config.json` 指向汉化组目录 `LLc-CN-LCTA`——已改为**跟随 config.json**，不得再写死。
 2. **仓库文本文件只通过 read/edit/write 工具修改**（历史上有中文乱码事故）；pwsh 只用于 build/test/git/publish。

@@ -65,14 +65,14 @@ public class BankDirectoryServiceTests : IDisposable
     [Fact]
     public void ScanDirectory_classifies_synthetic_and_corrupted_banks()
     {
-        var fsb = BuildMinimalFsb5();
-        var encrypted = BuildSyntheticBank(fsb);
+        var fsb = SyntheticBank.MinimalFsb5();
+        var encrypted = SyntheticBank.Create(fsb);
         encrypted[0x48] = (byte)'X'; // 破坏首个 FSB 的 FSB5 魔数 → 加密
-        File.WriteAllBytes(Path.Combine(_workDir, "01-event.bank"), BuildSyntheticBank(null));
-        File.WriteAllBytes(Path.Combine(_workDir, "02-audio.bank"), BuildSyntheticBank(fsb));
+        File.WriteAllBytes(Path.Combine(_workDir, "01-event.bank"), SyntheticBank.Create(null));
+        File.WriteAllBytes(Path.Combine(_workDir, "02-audio.bank"), SyntheticBank.Create(fsb));
         File.WriteAllBytes(Path.Combine(_workDir, "03-encrypted.bank"), encrypted);
         File.WriteAllBytes(Path.Combine(_workDir, "04-corrupt.bank"), [0xDE, 0xAD, 0xBE, 0xEF, .. new byte[96]]);
-        File.WriteAllBytes(Path.Combine(_workDir, "05-truncated.bank"), BuildSyntheticBank(null)[..20]);
+        File.WriteAllBytes(Path.Combine(_workDir, "05-truncated.bank"), SyntheticBank.Create(null)[..20]);
         File.WriteAllText(Path.Combine(_workDir, "readme.txt"), "not a bank");
 
         var entries = _service.ScanDirectory(_workDir);
@@ -97,7 +97,7 @@ public class BankDirectoryServiceTests : IDisposable
     public void ReadSampleTable_event_bank_lists_riff_chunks()
     {
         var path = Path.Combine(_workDir, "event.bank");
-        File.WriteAllBytes(path, BuildSyntheticBank(null));
+        File.WriteAllBytes(path, SyntheticBank.Create(null));
 
         var table = _service.ReadSampleTable(path);
 
@@ -111,7 +111,7 @@ public class BankDirectoryServiceTests : IDisposable
     public void ReadSampleTable_audio_bank_parses_fsb5_samples()
     {
         var path = Path.Combine(_workDir, "audio.bank");
-        File.WriteAllBytes(path, BuildSyntheticBank(BuildMinimalFsb5(codec: 16)));
+        File.WriteAllBytes(path, SyntheticBank.Create(SyntheticBank.MinimalFsb5(codec: 16)));
 
         var table = _service.ReadSampleTable(path);
 
@@ -129,8 +129,8 @@ public class BankDirectoryServiceTests : IDisposable
     [Fact]
     public void ReadSampleTable_encrypted_bank_throws_chinese_error()
     {
-        var fsb = BuildMinimalFsb5();
-        var encrypted = BuildSyntheticBank(fsb);
+        var fsb = SyntheticBank.MinimalFsb5();
+        var encrypted = SyntheticBank.Create(fsb);
         encrypted[0x48] = (byte)'X';
         var path = Path.Combine(_workDir, "enc.bank");
         File.WriteAllBytes(path, encrypted);
@@ -155,50 +155,7 @@ public class BankDirectoryServiceTests : IDisposable
         Assert.Throws<FileNotFoundException>(() => _service.ReadSampleTable(Path.Combine(_workDir, "ghost.bank")));
     }
 
-    // ---------- 合成 bank 构造 ----------
-
-    /// <summary>最小合法 FSB5（版本 1、0 样本、可指定 codec）：
-    /// 0x3C 头 = 魔数/版本/样本数/条目区/名称区/数据区/codec + flags + hash + 8B 尾。</summary>
-    private static byte[] BuildMinimalFsb5(uint codec = 16)
-    {
-        var fsb = new byte[0x3C];
-        Encoding.ASCII.GetBytes("FSB5").CopyTo(fsb, 0);
-        BinaryPrimitives.WriteUInt32LittleEndian(fsb.AsSpan(0x04), 1);
-        BinaryPrimitives.WriteUInt32LittleEndian(fsb.AsSpan(0x18), codec);
-        return fsb;
-    }
-
-    /// <summary>合成 bank：RIFF(FEV ){ FAKE[8B] LIST(PROJ/BNKI[4B]) SNDH{...} [DEL ] [FSB] }。
-    /// fsb 为 null → 事件 bank（空 SNDH + DEL 块）；否则音频 bank，FSB 附在 0x48。</summary>
-    private static byte[] BuildSyntheticBank(byte[]? fsb)
-    {
-        using var ms = new MemoryStream();
-        using var bw = new BinaryWriter(ms);
-        bw.Write("RIFF"u8); bw.Write(0u);                              // 0x00 RIFF 尺寸稍后回填
-        bw.Write("FEV "u8);                                            // 0x08
-        bw.Write("FAKE"u8); bw.Write(8u); bw.Write(1u); bw.Write(0u);  // 0x0C chunk0（0x14 处非 0，过 BankParser 门）
-        bw.Write("LIST"u8); bw.Write(16u);                             // 0x1C
-        bw.Write("PROJ"u8); bw.Write("BNKI"u8); bw.Write(4u); bw.Write(0x6B6E6942u); // 0x24 起
-        var offsetFieldPos = 0L;
-        if (fsb is null)
-        {
-            bw.Write("SNDH"u8); bw.Write(0u);                          // 0x34 空 SNDH → 事件 bank
-            bw.Write("DEL "u8); bw.Write(0u);                          // 0x3C
-        }
-        else
-        {
-            bw.Write("SNDH"u8); bw.Write(12u);                         // 0x34
-            bw.Write(1u);                                              // 0x3C 被解析器跳过的 u32
-            offsetFieldPos = bw.Seek(0, SeekOrigin.Current);           // 0x40 FSB 偏移字段
-            bw.Write(0u); bw.Write((uint)fsb.Length);                  // (offset, size)
-            bw.Write(fsb);                                             // 0x48
-        }
-        var bytes = ms.ToArray();
-        if (fsb is not null)
-            BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan((int)offsetFieldPos), 0x48);
-        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(0x04), (uint)(bytes.Length - 8)); // RIFF 尺寸
-        return bytes;
-    }
+    // 合成 bank 构造已抽到共享夹具 SyntheticBank（plan-11 的索引测试复用同一份布局）。
 
     // ---------- 真实游戏目录门控测试 ----------
 

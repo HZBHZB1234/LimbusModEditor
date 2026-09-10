@@ -1,0 +1,23 @@
+<UserControl x:Class="LimbusModEditor.App.BankWorkbenchPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:LimbusModEditor.App">
+    <!--
+        plan-11：音频工作台（FMOD Bank）。
+
+        布局与资源工作台同一套骨架（浏览列 — 6px 分隔条 — 预览/编辑列），
+        三列骨架、列宽持久化、设计令牌全部来自 plan-09 的共享件：
+        本文件只声明 `<local:WorkbenchShell>`，浏览列与编辑列的内容由
+        BankWorkbenchPage.xaml.cs 组装（与 TextWorkbenchPage 同构）。
+
+        三个浏览器视图（互斥，右上角切换）：
+          · ☰ 全部音频：跨全部 bank 的样本总表（5 万行级，DataGrid 行虚拟化）
+          · 🗂 bank 树：bank → FSB → 样本（惰性展开）
+          · ☰ bank 列表：逐个 bank 的类型 / FSB 数 / 大小
+        编辑列保持既有语义：样本表 + 试听 / 导出 WAV / 用 WAV 替换 /
+        导出整包 .bank / 导出 .rebank。编辑器绝不写游戏目录。
+    -->
+    <Grid Margin="12">
+        <local:WorkbenchShell x:Name="Shell"/>
+    </Grid>
+</UserControl>

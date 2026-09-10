@@ -99,7 +99,20 @@ public sealed class BankDirectoryService
         var files = Directory.EnumerateFiles(bankDirectory, "*.bank", SearchOption.TopDirectoryOnly)
             .Where(f => Path.GetExtension(f).Equals(".bank", StringComparison.OrdinalIgnoreCase))
             .OrderBy(f => Path.GetFileName(f), StringComparer.OrdinalIgnoreCase);
-        return files.Select(ScanOne).ToList();
+        return files.Select(ScanFile).ToList();
+    }
+
+    /// <summary>
+    /// 单文件引用模式判定（plan-11 追加的公开入口；逻辑与目录扫描逐行相同——
+    /// <see cref="ScanDirectory"/> 内部就是逐文件调用它）。
+    /// 供索引编排（<c>BankIndexService.BuildEntry</c>）在「加密 / 无法识别」回退路径上使用，
+    /// 避免为判定一个文件而重扫整个目录（1531 个文件时是平方级浪费）。
+    /// 不抛异常：任何失败都折叠成 <see cref="BankKind.Unknown"/> + 中文原因。
+    /// </summary>
+    public BankFileEntry ScanFile(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        return ScanOne(path);
     }
 
     /// <summary>读取单个 bank 的样本表/块清单：

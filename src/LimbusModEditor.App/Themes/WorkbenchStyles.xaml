@@ -99,6 +99,77 @@
         <Setter Property="FontWeight" Value="Normal"/>
     </Style>
 
+    <!-- ── 大表（plan-11「全部音频」总表：5 万行级，必须行虚拟化）─────── -->
+
+    <Style x:Key="WorkbenchDataGridColumnHeader" TargetType="DataGridColumnHeader">
+        <Setter Property="Background" Value="{StaticResource WbPanelBrush}"/>
+        <Setter Property="Foreground" Value="{StaticResource WbTextMutedBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource WbBorderBrush}"/>
+        <Setter Property="BorderThickness" Value="0,0,0,1"/>
+        <Setter Property="Padding" Value="8,6"/>
+    </Style>
+
+    <!-- 行：绑定的行模型暴露 State="Modified" 时整行金色（与列表视图同口径） -->
+    <Style x:Key="WorkbenchDataGridRow" TargetType="DataGridRow">
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="Foreground" Value="{StaticResource WbTextPrimaryBrush}"/>
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding State}" Value="Modified">
+                <Setter Property="Foreground" Value="{StaticResource WbModifiedBrush}"/>
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+
+    <!-- 单元格：去掉选中态蓝底，仅高亮文字（与列表/树观感一致） -->
+    <Style x:Key="WorkbenchDataGridCell" TargetType="DataGridCell">
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="Foreground" Value="{StaticResource WbTextPrimaryBrush}"/>
+        <Setter Property="Padding" Value="8,4"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="DataGridCell">
+                    <Border Background="Transparent" Padding="{TemplateBinding Padding}">
+                        <ContentPresenter VerticalAlignment="Center"/>
+                    </Border>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+        <Style.Triggers>
+            <Trigger Property="IsSelected" Value="True">
+                <Setter Property="Background" Value="Transparent"/>
+                <Setter Property="Foreground" Value="{StaticResource WbAccentBrush}"/>
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+
+    <!-- 大表本体：只读、单选、行虚拟化 + 横向滚动 -->
+    <Style x:Key="WorkbenchDataGrid" TargetType="DataGrid">
+        <Setter Property="Background" Value="{StaticResource WbListBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource WbBorderBrush}"/>
+        <Setter Property="Foreground" Value="{StaticResource WbTextPrimaryBrush}"/>
+        <Setter Property="RowBackground" Value="Transparent"/>
+        <Setter Property="AlternatingRowBackground" Value="{StaticResource WbPanelBrush}"/>
+        <Setter Property="GridLinesVisibility" Value="None"/>
+        <Setter Property="HeadersVisibility" Value="Column"/>
+        <Setter Property="AutoGenerateColumns" Value="False"/>
+        <Setter Property="CanUserAddRows" Value="False"/>
+        <Setter Property="CanUserDeleteRows" Value="False"/>
+        <Setter Property="CanUserResizeRows" Value="False"/>
+        <Setter Property="CanUserSortColumns" Value="False"/>
+        <Setter Property="IsReadOnly" Value="True"/>
+        <Setter Property="SelectionMode" Value="Single"/>
+        <Setter Property="SelectionUnit" Value="FullRow"/>
+        <Setter Property="EnableRowVirtualization" Value="True"/>
+        <Setter Property="EnableColumnVirtualization" Value="True"/>
+        <Setter Property="VirtualizingPanel.IsVirtualizing" Value="True"/>
+        <Setter Property="VirtualizingPanel.VirtualizationMode" Value="Recycling"/>
+        <Setter Property="ScrollViewer.CanContentScroll" Value="True"/>
+        <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
+        <Setter Property="ColumnHeaderStyle" Value="{StaticResource WorkbenchDataGridColumnHeader}"/>
+        <Setter Property="RowStyle" Value="{StaticResource WorkbenchDataGridRow}"/>
+        <Setter Property="CellStyle" Value="{StaticResource WorkbenchDataGridCell}"/>
+    </Style>
+
     <!-- ── 分隔条（1px 竖线 + hover 高亮 + 双击复位由代码接线）──────── -->
     <Style x:Key="WorkbenchSplitter" TargetType="GridSplitter">
         <Setter Property="Width" Value="6"/>

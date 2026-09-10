@@ -39,7 +39,10 @@ plan-01 不依赖布局改造，可随时开工；plan-03/04 很小，也可在 
    dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r win-x64 --self-contained false -o artifacts/publish-win-x64 --no-restore
    ```
 
-   当前基线：274 个测试全绿（62 Format + 212 Domain）。
+   当前基线（2026-09，plan-09 完成后实测）：**476 个测试全绿（74 Format + 402 Domain）**。
+   历史：plan-02 期为 274（62+212），plan-08 期为 334（74+260）。
+   注：2026-09 本机曾出现 2 个真实 lang 门控测试失败，根因是测试把活动语言写死为 `LLC_zh-CN`，
+   而本机 `config.json` 指向汉化组目录 `LLc-CN-LCTA`——已改为**跟随 config.json**，不得再写死。
 2. **仓库文本文件只通过 read/edit/write 工具修改**（历史上有中文乱码事故）；pwsh 只用于 build/test/git/publish。
 3. **提交纪律**：提交信息用中文；每个里程碑独立提交；提交前必须 build+test 全绿；完成后更新 `docs/ROADMAP.md`（新节）、`docs/USAGE.md`（界面变化）、必要时 `docs/REVIEW.md`。
 4. **不猜测原则**：未知负载/未知压缩/未知字段一律 fail fast 并给中文错误；没有真实样本验证不宣称兼容。真实样本门控测试（`Real*` 前缀）在无样本机器上自动跳过。

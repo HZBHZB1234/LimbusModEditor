@@ -20,6 +20,7 @@ public sealed class ObjectSummaryWindow : Window
         MinWidth = 460;
         MinHeight = 340;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
+        Background = AppTheme.WindowBackground;
 
         var panel = new DockPanel { Margin = new Thickness(12) };
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0) };

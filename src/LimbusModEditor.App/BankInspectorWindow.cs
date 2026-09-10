@@ -34,6 +34,7 @@ public sealed class BankInspectorWindow : Window
         MinWidth = 560;
         MinHeight = 380;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
+        Background = AppTheme.WindowBackground;
 
         var panel = new DockPanel { Margin = new Thickness(12) };
 
@@ -95,7 +96,7 @@ public sealed class BankInspectorWindow : Window
         var note = new TextBlock
         {
             Text = "此视图为只读结构检查；解码/替换音频仍需配置合法的 FMOD/FSBANK DLL。",
-            Foreground = Brushes.Gray,
+            Foreground = Brushes.Silver,
             Margin = new Thickness(0, 8, 0, 0)
         };
         DockPanel.SetDock(note, Dock.Bottom);
@@ -115,7 +116,7 @@ public sealed class BankInspectorWindow : Window
                 : Environment.NewLine + "⚠ " + (fsb.Diagnostics.FirstOrDefault(d => d.Contains("长度不一致")) ?? "头/条目/名称/数据四区长度之和与文件大小不符。");
             summary.Text = $"FSB5 版本 {fsb.Version}（基头 0x{fsb.BaseHeaderSize:X}）｜ 样本 {fsb.SampleCount} ｜ 条目区 0x{fsb.SampleHeaderSize:X} 字节 ｜ " +
                            $"名称 {names}/{fsb.Samples.Count} ｜ 编码 {fsb.CodecName} ｜ 数据区 0x{fsb.DataStartOffset:X} 起共 0x{fsb.DataSize:X} 字节" + sizeWarning;
-            summary.Foreground = Brushes.DimGray;
+            summary.Foreground = Brushes.Gainsboro;
         }
 
         Content = panel;

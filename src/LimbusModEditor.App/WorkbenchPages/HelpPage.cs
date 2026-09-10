@@ -150,6 +150,6 @@ public sealed class HelpPage : UserControl
         Text = text,
         TextWrapping = TextWrapping.Wrap,
         LineHeight = 20,
-        Foreground = Brushes.DimGray
+        Foreground = Brushes.Gainsboro
     };
 }

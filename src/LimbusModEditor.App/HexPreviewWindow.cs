@@ -22,6 +22,7 @@ public sealed class HexPreviewWindow : Window
         MinWidth = 560;
         MinHeight = 360;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
+        Background = AppTheme.WindowBackground;
 
         var panel = new DockPanel { Margin = new Thickness(12) };
         var source = ResolveSource(asset);
@@ -29,7 +30,7 @@ public sealed class HexPreviewWindow : Window
         {
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 0, 0, 10),
-            Foreground = Brushes.DimGray,
+            Foreground = Brushes.Gainsboro,
             Text = source is null
                 ? $"资源没有可用的源文件（LogicalPath={asset.LogicalPath}）。"
                 : $"文件：{source}\n大小 {new FileInfo(source).Length:N0} 字节（预览前 {MaxBytes} 字节）" +

@@ -33,6 +33,7 @@ public sealed class ExportWizardWindow : Window
         MinWidth = 560;
         MinHeight = 460;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
+        Background = AppTheme.WindowBackground;
         _source = sourcePath is null ? ModFormatKind.Unknown : ExportMatrix.GuessSourceKind(sourcePath);
 
         var panel = new DockPanel { Margin = new Thickness(14) };
@@ -81,7 +82,7 @@ public sealed class ExportWizardWindow : Window
                 Text = (compatibility.Supported ? "✓ " : "✗ ") + compatibility.Reason,
                 Margin = new Thickness(20, 0, 0, 8),
                 TextWrapping = TextWrapping.Wrap,
-                Foreground = compatibility.Supported ? Brushes.DimGray : new SolidColorBrush(Color.FromRgb(178, 34, 34))
+                Foreground = compatibility.Supported ? Brushes.Gainsboro : new SolidColorBrush(Color.FromRgb(178, 34, 34))
             };
             _reasonTexts[compatibility.Target] = reason;
             list.Children.Add(row);

@@ -23,6 +23,7 @@ public sealed class ExportReportWindow : Window
         MinWidth = 520;
         MinHeight = 360;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
+        Background = AppTheme.WindowBackground;
 
         var panel = new DockPanel { Margin = new Thickness(12) };
         var headerRow = new DockPanel { Margin = new Thickness(0, 0, 0, 10) };
@@ -71,12 +72,12 @@ public sealed class ExportReportWindow : Window
             list.Children.Add(new TextBlock
             {
                 Text = $"[诊断] {diagnostic}",
-                Foreground = Brushes.DimGray,
+                Foreground = Brushes.Gainsboro,
                 TextWrapping = TextWrapping.Wrap,
                 Margin = new Thickness(0, 2, 0, 2)
             });
         if (result.AssetStatuses.Count == 0 && result.Diagnostics.Count == 0)
-            list.Children.Add(new TextBlock { Text = "（本次导出没有逐资源替换记录。）", Foreground = Brushes.Gray });
+            list.Children.Add(new TextBlock { Text = "（本次导出没有逐资源替换记录。）", Foreground = Brushes.Silver });
 
         panel.Children.Add(new ScrollViewer { Content = list, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
         Content = panel;

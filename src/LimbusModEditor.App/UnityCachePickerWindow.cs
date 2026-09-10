@@ -19,6 +19,7 @@ public sealed class UnityCachePickerWindow : Window
         MinWidth = 480;
         MinHeight = 280;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
+        Background = AppTheme.WindowBackground;
 
         var panel = new DockPanel { Margin = new Thickness(14) };
         var header = new TextBlock

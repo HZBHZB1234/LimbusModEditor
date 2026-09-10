@@ -13,7 +13,8 @@ public sealed record UnityCacheScanEntry(string OuterKey, string InnerKey, strin
 
 /// <summary>Scan progress snapshot (raised from worker threads).</summary>
 public sealed record UnityCacheScanProgress(
-    int TotalEntries, int ProcessedEntries, string CurrentPath, int BundlesScanned, int BundlesFromIndex);
+    int TotalEntries, int ProcessedEntries, string CurrentPath, int BundlesScanned, int BundlesFromIndex,
+    string? Phase = null);
 
 /// <summary>Scan outcome summary.</summary>
 public sealed record UnityCacheScanResult(
@@ -84,28 +85,37 @@ public sealed class UnityCacheScanService
         if (!Directory.Exists(cacheDirectory))
             throw new DirectoryNotFoundException($"Unity 缓存目录不存在：{cacheDirectory}");
 
-        var entries = EnumerateCacheEntries(cacheDirectory);
+        // 枚举缓存目录放后台线程：缓存可能上万条目，同步枚举会让调用方
+        // （UI 线程）在「开始扫描」时卡住。
+        var entries = await Task.Run(() => EnumerateCacheEntries(cacheDirectory), cancellationToken);
         if (entries.Count == 0)
             throw new InvalidDataException($"缓存目录里没有 <外层>/<内层>/__data 缓存条目：{cacheDirectory}");
 
-        var store = _store;
-        if (store is not null)
+        // 建表 / 读索引 / 解析 catalog 也全部在后台线程完成（避免调用方 UI
+        // 线程上的同步卡顿），一次性载入内存字典与静态 bundle 键集合。
+        var (store, bundleIndex, catalog, staticInnerHashes) = await Task.Run(() =>
         {
-            // 建表必须先于并行扫描阶段；建表失败（损坏/无写权限）降级为
-            // 纯扫描不持久化，不影响扫描正确性。
-            try { store.EnsureSchema(); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or Microsoft.Data.Sqlite.SqliteException)
-            { store = null; }
-        }
-        // 新鲜度检查用一次性载入的内存字典（阶段 C3：实测逐 bundle 开连接
-        // 查询会把并行解析阶段拖慢一个数量级；bundle 元数据只有 1459 行级别）。
-        var bundleIndex = store is not null
-            ? store.ReadBundleIndex(StringComparer.OrdinalIgnoreCase)
-            : new Dictionary<string, UnityCacheIndexBundle>(StringComparer.OrdinalIgnoreCase);
-        var catalog = LoadCatalog(gameDirectory);
-        // plan-08：静态数据 bundle 的内层键集合（catalog 一次性解析，之后按
-        // 内层键 O(1) 判定；官方热修会换 hash，所以每次扫描都重新解析）。
-        var staticInnerHashes = StaticBundleLocator.StaticInnerHashes(catalog);
+            var s = _store;
+            if (s is not null)
+            {
+                // 建表必须先于并行扫描阶段；建表失败（损坏/无写权限）降级为
+                // 纯扫描不持久化，不影响扫描正确性。
+                try { s.EnsureSchema(); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or Microsoft.Data.Sqlite.SqliteException)
+                { s = null; }
+            }
+            // 新鲜度检查用一次性载入的内存字典（阶段 C3：实测逐 bundle 开连接
+            // 查询会把并行解析阶段拖慢一个数量级；bundle 元数据只有 1459 行级别）。
+            var idx = s is not null
+                ? s.ReadBundleIndex(StringComparer.OrdinalIgnoreCase)
+                : new Dictionary<string, UnityCacheIndexBundle>(StringComparer.OrdinalIgnoreCase);
+            var cat = LoadCatalog(gameDirectory);
+            // plan-08：静态数据 bundle 的内层键集合（catalog 一次性解析，之后按
+            // 内层键 O(1) 判定；官方热修会换 hash，所以每次扫描都重新解析）。
+            var staticHashes = StaticBundleLocator.StaticInnerHashes(cat);
+            return (s, idx, cat, staticHashes);
+        }, cancellationToken);
+
         var diagnostics = new List<string>();
         if (catalog is null && !string.IsNullOrWhiteSpace(gameDirectory))
             diagnostics.Add("官方 catalog 缺失或无法解析，本次扫描不做 vanilla 基线判定。");
@@ -119,6 +129,9 @@ public sealed class UnityCacheScanService
 
         var results = new ConcurrentBag<(UnityCacheScanEntry Entry, bool FromCache, UnityCacheIndexBundle Bundle, IReadOnlyList<AssetRecord>? Records, IReadOnlyList<UnityCacheIndexRow>? Rows)>();
         var failures = new ConcurrentQueue<string>();
+        // 进度节流：热扫描（索引命中）时上报可达每秒上万条，逐条 Post 到 UI
+        // 线程会把它 flood 到卡死；按 100ms 窗口聚合，扫描过程界面始终可响应。
+        var lastReportTicks = Environment.TickCount64;
         await Task.Run(() =>
         {
             Parallel.ForEach(entries, new ParallelOptions
@@ -153,10 +166,22 @@ public sealed class UnityCacheScanService
                     failures.Enqueue($"{entry.OuterKey}/{entry.InnerKey}: {ex.Message}");
                 }
                 var done = Interlocked.Increment(ref processed);
-                progress?.Report(new UnityCacheScanProgress(total, done, entry.DataPath, scanned, indexed));
+                var now = Environment.TickCount64;
+                if (now - Volatile.Read(ref lastReportTicks) >= 100)
+                {
+                    Volatile.Write(ref lastReportTicks, now);
+                    progress?.Report(new UnityCacheScanProgress(total, done, entry.DataPath, scanned, indexed));
+                }
             });
+            // 结束补报一次最终进度（最后一条可能因节流被跳过）。
+            progress?.Report(new UnityCacheScanProgress(total, processed, string.Empty, scanned, indexed));
         }, cancellationToken).ConfigureAwait(false);
         diagnostics.AddRange(failures.OrderBy(x => x, StringComparer.Ordinal));
+
+        // 收尾阶段反馈：合并百万级资产与写索引库可能持续数十秒到数分钟，
+        // 让 UI 明确展示当前阶段而不是停在最后一条解析进度上。
+        progress?.Report(new UnityCacheScanProgress(total, total, string.Empty, scanned, indexed,
+            Phase: "正在合并索引…"));
 
         // 合并（单线程；MainWindow 的列表绑定的是检索结果快照，可直接改集合）。
         // 全缓存 ≈ 119 万资产：必须用字典索引，逐条 FirstOrDefault 是 O(N²)。
@@ -256,6 +281,8 @@ public sealed class UnityCacheScanService
             }
         }
 
+        progress?.Report(new UnityCacheScanProgress(total, total, string.Empty, scanned, indexed,
+            Phase: "正在写入索引库…"));
         PersistIndex(store, entries, results, cancellationToken);
         return new UnityCacheScanResult(total, scanned, indexed, added, updated, diagnostics);
     }

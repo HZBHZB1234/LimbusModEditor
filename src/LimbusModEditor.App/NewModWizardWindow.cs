@@ -37,10 +37,11 @@ public sealed class NewModWizardWindow : Window
         MinWidth = 520;
         MinHeight = 480;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
+        Background = AppTheme.WindowBackground;
 
         var panel = new StackPanel { Margin = new Thickness(16) };
 
-        panel.Children.Add(new TextBlock { Text = "模组名称 *", Foreground = System.Windows.Media.Brushes.DimGray, Margin = new Thickness(0, 0, 0, 2) });
+        panel.Children.Add(new TextBlock { Text = "模组名称 *", Foreground = System.Windows.Media.Brushes.Gainsboro, Margin = new Thickness(0, 0, 0, 2) });
         _nameBox = new TextBox { Text = "MyMod", Height = 26 };
         panel.Children.Add(_nameBox);
 
@@ -49,11 +50,11 @@ public sealed class NewModWizardWindow : Window
         identity.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(16) });
         identity.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         var versionStack = new StackPanel();
-        versionStack.Children.Add(new TextBlock { Text = "版本", Foreground = System.Windows.Media.Brushes.DimGray, Margin = new Thickness(0, 0, 0, 2) });
+        versionStack.Children.Add(new TextBlock { Text = "版本", Foreground = System.Windows.Media.Brushes.Gainsboro, Margin = new Thickness(0, 0, 0, 2) });
         _versionBox = new TextBox { Text = "1.0.0", Height = 26 };
         versionStack.Children.Add(_versionBox);
         var authorStack = new StackPanel();
-        authorStack.Children.Add(new TextBlock { Text = "作者", Foreground = System.Windows.Media.Brushes.DimGray, Margin = new Thickness(0, 0, 0, 2) });
+        authorStack.Children.Add(new TextBlock { Text = "作者", Foreground = System.Windows.Media.Brushes.Gainsboro, Margin = new Thickness(0, 0, 0, 2) });
         _authorBox = new TextBox { Height = 26 };
         authorStack.Children.Add(_authorBox);
         Grid.SetColumn(versionStack, 0);
@@ -62,11 +63,11 @@ public sealed class NewModWizardWindow : Window
         identity.Children.Add(authorStack);
         panel.Children.Add(identity);
 
-        panel.Children.Add(new TextBlock { Text = "描述", Foreground = System.Windows.Media.Brushes.DimGray, Margin = new Thickness(0, 8, 0, 2) });
+        panel.Children.Add(new TextBlock { Text = "描述", Foreground = System.Windows.Media.Brushes.Gainsboro, Margin = new Thickness(0, 8, 0, 2) });
         _descriptionBox = new TextBox { AcceptsReturn = true, Height = 56, TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         panel.Children.Add(_descriptionBox);
 
-        panel.Children.Add(new TextBlock { Text = "模板格式", Foreground = System.Windows.Media.Brushes.DimGray, Margin = new Thickness(0, 8, 0, 2) });
+        panel.Children.Add(new TextBlock { Text = "模板格式", Foreground = System.Windows.Media.Brushes.Gainsboro, Margin = new Thickness(0, 8, 0, 2) });
         _formatBox = new ComboBox { Height = 26 };
         foreach (var (kind, displayName, extension, reason) in _templates)
         {
@@ -82,12 +83,12 @@ public sealed class NewModWizardWindow : Window
         _formatBox.SelectionChanged += (_, _) => UpdateBaseBankVisibility();
         panel.Children.Add(_formatBox);
 
-        _baseBankLabel = new TextBlock { Text = "base_bank（目标游戏 .bank 文件名，如 common.bank）*", Foreground = System.Windows.Media.Brushes.DimGray, Margin = new Thickness(0, 8, 0, 2), Visibility = Visibility.Collapsed };
+        _baseBankLabel = new TextBlock { Text = "base_bank（目标游戏 .bank 文件名，如 common.bank）*", Foreground = System.Windows.Media.Brushes.Gainsboro, Margin = new Thickness(0, 8, 0, 2), Visibility = Visibility.Collapsed };
         panel.Children.Add(_baseBankLabel);
         _baseBankBox = new TextBox { Height = 26, Visibility = Visibility.Collapsed };
         panel.Children.Add(_baseBankBox);
 
-        panel.Children.Add(new TextBlock { Text = "项目目录 *（在此目录创建 .lmeproj 与模板文件）", Foreground = System.Windows.Media.Brushes.DimGray, Margin = new Thickness(0, 8, 0, 2) });
+        panel.Children.Add(new TextBlock { Text = "项目目录 *（在此目录创建 .lmeproj 与模板文件）", Foreground = System.Windows.Media.Brushes.Gainsboro, Margin = new Thickness(0, 8, 0, 2) });
         var directoryRow = new Grid();
         directoryRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         directoryRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -113,7 +114,7 @@ public sealed class NewModWizardWindow : Window
             Text = "说明：向导会创建项目结构（sources/、builds/ 等）并生成经过格式校验的空白模板，\n" +
                    "然后在主窗口打开新项目并自动扫描游戏资源 —— 扫描完成后即可直接编辑。",
             TextWrapping = TextWrapping.Wrap,
-            Foreground = System.Windows.Media.Brushes.DimGray,
+            Foreground = System.Windows.Media.Brushes.Gainsboro,
             Margin = new Thickness(0, 12, 0, 0)
         };
         panel.Children.Add(_note);

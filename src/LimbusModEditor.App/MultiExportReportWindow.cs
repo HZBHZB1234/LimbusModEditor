@@ -14,6 +14,7 @@ public sealed class MultiExportReportWindow : Window
         Width = 680;
         Height = 460;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
+        Background = AppTheme.WindowBackground;
 
         var panel = new StackPanel { Margin = new Thickness(14) };
         panel.Children.Add(new TextBlock

@@ -82,6 +82,7 @@ public sealed class UnityFieldEditorWindow : Window
         Title = "Unity SerializedObject 字段编辑";
         Width = 1060; Height = 680; MinWidth = 760; MinHeight = 480;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
+        Background = AppTheme.WindowBackground;
 
         var panel = new DockPanel { Margin = new Thickness(12) };
 
@@ -111,7 +112,7 @@ public sealed class UnityFieldEditorWindow : Window
             }
             scriptHeader.Text = string.Join("  ｜  ", segments);
             scriptHeader.Foreground = scriptInfo.TypeTreeMissingReason is null
-                ? Brushes.DimGray
+                ? Brushes.Gainsboro
                 : new SolidColorBrush(Color.FromRgb(184, 134, 11));
             DockPanel.SetDock(scriptHeader, Dock.Top);
             panel.Children.Add(scriptHeader);
@@ -120,7 +121,7 @@ public sealed class UnityFieldEditorWindow : Window
         var hint = new TextBlock
         {
             Text = "勾选要应用的字段；仅勾选且修改过的行会保存。数组、PPtr 和字节数组只显示信息。",
-            Foreground = Brushes.Gray,
+            Foreground = Brushes.Silver,
             Margin = new Thickness(0, 0, 0, 8)
         };
         DockPanel.SetDock(hint, Dock.Top);
@@ -213,7 +214,7 @@ public sealed class UnityFieldEditorWindow : Window
                 Text = "同文件对象:",
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(0, 0, 4, 0),
-                Foreground = Brushes.Gray
+                Foreground = Brushes.Silver
             });
             buttons.Children.Add(_objectPicker);
             buttons.Children.Add(MakeButton("自动填充所选 PPtr", FillPointer_Click, width: 130));

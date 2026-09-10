@@ -1,9 +1,10 @@
-<Window x:Class="LimbusModEditor.App.MainWindow"
+<ui:FluentWindow x:Class="LimbusModEditor.App.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
         xmlns:local="clr-namespace:LimbusModEditor.App"
         Title="Limbus Mod Editor" Height="720" Width="1280" MinHeight="540" MinWidth="960"
-        Background="#11151A" Foreground="#E8EDF2" Closing="Window_Closing"
+        WindowBackdropType="None" ExtendsContentIntoTitleBar="True" Foreground="#E8EDF2" Closing="Window_Closing"
         AllowDrop="True" Drop="Window_Drop" DragOver="Window_DragOver"
         PreviewKeyDown="Window_PreviewKeyDown">
     <Window.Resources>
@@ -11,7 +12,8 @@
         <Style x:Key="ActivityButton" TargetType="RadioButton">
             <Setter Property="Width" Value="48"/>
             <Setter Property="Height" Value="44"/>
-            <Setter Property="FontSize" Value="19"/>
+            <Setter Property="FontSize" Value="18"/>
+            <Setter Property="FontFamily" Value="Segoe MDL2 Assets"/>
             <Setter Property="Background" Value="Transparent"/>
             <Setter Property="Foreground" Value="#9FB0BF"/>
             <Setter Property="BorderThickness" Value="0"/>
@@ -38,7 +40,10 @@
         </Style>
     </Window.Resources>
     <DockPanel>
-        <Border DockPanel.Dock="Top" Background="#1B222B" Padding="14,10">
+        <!-- FluentWindow 自带标题栏（Mica 背景 + 拖动区域 + 窗口按钮） -->
+        <ui:TitleBar DockPanel.Dock="Top" Title="Limbus Mod Editor"
+                     Padding="12,0" FontWeight="SemiBold"/>
+        <Border DockPanel.Dock="Top" Background="{StaticResource ElevatedBackgroundBrush}" Padding="14,10">
             <DockPanel>
                 <StackPanel Orientation="Horizontal" DockPanel.Dock="Left">
                     <TextBlock Text="LIMBUS MOD EDITOR" FontWeight="Bold" FontSize="16"/>
@@ -67,24 +72,24 @@
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
             <!-- 活动栏：VS Code 左侧图标栏，直切页面（无顶部标签页） -->
-            <Border Grid.Column="0" Background="#161B22" BorderBrush="#2A3540" BorderThickness="0,0,1,0">
+            <Border Grid.Column="0" Background="#161B22" BorderBrush="{StaticResource BorderLineBrush}" BorderThickness="0,0,1,0">
                 <StackPanel>
-                    <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivityAssets" Content="📦"
+                    <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivityAssets" Content="&#xE7B8;"
                                  ToolTip="资源工作台（搜索 / 按容器浏览资源）" Click="ActivityAssets_Click"/>
-                    <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivityBank" Content="🏦"
+                    <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivityBank" Content="&#xE15D;"
                                  ToolTip="音频工作台（Bank 样本浏览 / 试听 / 替换）" Click="ActivityBank_Click"/>
-                    <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivityText" Content="📝"
+                    <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivityText" Content="&#xE8A5;"
                                  ToolTip="文本工作台（lang 文本）" Click="ActivityText_Click"/>
-                    <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivityStatic" Content="🧩"
+                    <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivityStatic" Content="&#xE71D;"
                                  ToolTip="静态数据工作台" Click="ActivityStatic_Click"/>
-                    <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivityHelp" Content="📖"
+                    <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivityHelp" Content="&#xE897;"
                                  ToolTip="使用教程" Click="ActivityHelp_Click"/>
-                    <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivitySettings" Content="⚙"
+                    <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivitySettings" Content="&#xE713;"
                                  ToolTip="设置（共享目录 / 项目元数据）" Click="ActivitySettings_Click"/>
                 </StackPanel>
             </Border>
             <!-- 共享侧边栏：所有页面共用、切换页面时不消失（plan-02 需求 5） -->
-            <Border Grid.Column="1" Background="#171D24" BorderBrush="#2A3540" BorderThickness="0,0,1,0" Padding="12">
+            <Border Grid.Column="1" Background="{StaticResource PanelBackgroundBrush}" BorderBrush="{StaticResource BorderLineBrush}" BorderThickness="0,0,1,0" Padding="12">
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
                     <StackPanel>
                         <TextBlock Text="项目工作区" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,10"/>
@@ -105,7 +110,7 @@
                         <TextBlock Text="② 产出模组" Style="{StaticResource SectionLabel}"/>
                         <Button Content="导出思路（自动分析）…" Click="ExportIdeas_Click" Padding="8,6" Margin="0,0,0,8"
                                 ToolTip="按当前项目里改了什么，自动列出可选出口（Carra2 / Bank / lang 补丁 / 多格式…）并说明区别。"/>
-                        <Button x:Name="OneClickExportButton" Content="一键导出模组（推荐）" Click="OneClickExport_Click" Padding="8,6"
+                        <Button x:Name="OneClickExportButton" Content="一键导出模组（推荐）" Click="OneClickExport_Click" Padding="8,6" Style="{StaticResource PrimaryButton}"
                                 ToolTip="把资源上的全部修改按真实加载器的 Carra2 布局打包，输出到模组目录即可生效。项目里同时存在音频或包体修改时会先给出导出思路。"/>
                         <Button Content="导出模组（向导）…" Click="Export_Click" Margin="0,8,0,0" Padding="8,6"
                                 ToolTip="需要挑选导出范围或格式时使用。"/>
@@ -135,7 +140,7 @@
                     <TextBlock Text="新建或打开一个模组项目后，编辑器会自动配置游戏目录并要求加载游戏资源；&#x0a;加载完成即可按容器目录浏览、搜索、替换、编辑，最后一键导出到模组目录。"
                                TextAlignment="Center" Foreground="#8FA6BA" TextWrapping="Wrap" Margin="0,10,0,22"/>
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                        <Button Content="新建模组项目（推荐）" Click="NewModWizard_Click" Padding="18,9,18,9" FontSize="14" FontWeight="SemiBold" Margin="0,0,12,0"/>
+                        <Button Content="新建模组项目（推荐）" Click="NewModWizard_Click" Padding="18,9,18,9" FontSize="14" FontWeight="SemiBold" Margin="0,0,12,0" Style="{StaticResource PrimaryButton}"/>
                         <Button Content="打开项目…" Click="OpenProject_Click" Padding="18,9,18,9" FontSize="14"/>
                     </StackPanel>
                     <TextBlock Text="提示：游戏资源加载是引用模式，不会复制或修改任何游戏文件。"
@@ -144,4 +149,4 @@
             </Border>
         </Grid>
     </DockPanel>
-</Window>
+</ui:FluentWindow>

@@ -19,7 +19,7 @@ namespace LimbusModEditor.App;
 /// 顶部不再有标签页——活动栏图标与 Ctrl+Tab 直接切换常驻页面；侧边栏所有页面共用。
 /// 本类同时是 <see cref="IWorkbenchHost"/> 实现，页面经它访问项目与共享环境。
 /// </summary>
-public partial class MainWindow : Window, IWorkbenchHost
+public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
 {
     private readonly IProjectService _projects = new ProjectService();
     private readonly ProjectBuildService _builder = new();
@@ -158,8 +158,8 @@ public partial class MainWindow : Window, IWorkbenchHost
     private void ActivityHelp_Click(object sender, RoutedEventArgs e) => ShowPage("help");
     private void ActivitySettings_Click(object sender, RoutedEventArgs e) => ShowPage("settings");
 
-    /// <summary>启动引导（傻瓜化）：有上次项目就自动恢复；否则弹出欢迎窗口
-    /// 引导「新建 / 打开 / 最近项目」。</summary>
+    /// <summary>启动引导（傻瓜化）：有上次项目就自动恢复；否则主窗口的
+    /// 「无项目遮罩」引导「新建 / 打开 / 最近项目」（不再弹独立欢迎窗口）。</summary>
     private async Task OnWindowLoadedAsync()
     {
         var last = _env.Config.LastProjectFile;
@@ -172,27 +172,7 @@ public partial class MainWindow : Window, IWorkbenchHost
             }
             catch (Exception ex) { ShowError("恢复上次项目失败", ex); }
         }
-        ShowWelcomeDialog();
-    }
-
-    private void ShowWelcomeDialog()
-    {
-        var dialog = new WelcomeDialog(_env.Config.RecentProjects) { Owner = this };
-        if (dialog.ShowDialog() != true || dialog.Result is null) return;
-        switch (dialog.Result.Choice)
-        {
-            case WelcomeChoice.CreateNew: NewModWizard_Click(this, new RoutedEventArgs()); break;
-            case WelcomeChoice.OpenFile: OpenProject_Click(this, new RoutedEventArgs()); break;
-            case WelcomeChoice.Recent when dialog.Result.RecentProjectFile is not null:
-                _ = OpenRecentAsync(dialog.Result.RecentProjectFile);
-                break;
-        }
-    }
-
-    private async Task OpenRecentAsync(string projectFile)
-    {
-        try { await OpenProjectFileAsync(projectFile, "已打开最近项目"); }
-        catch (Exception ex) { ShowError("打开最近项目失败", ex); }
+        UpdateHint();
     }
 
     /// <summary>P3.1: new-mod wizard scaffolds a project plus a minimal,

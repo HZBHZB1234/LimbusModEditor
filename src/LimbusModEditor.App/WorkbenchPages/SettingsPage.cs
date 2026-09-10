@@ -58,7 +58,7 @@ public sealed class SettingsPage : UserControl
         _projectHint = new TextBlock
         {
             Text = string.Empty,
-            Foreground = Brushes.Gray,
+            Foreground = Brushes.Silver,
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 0, 0, 6),
             Visibility = Visibility.Collapsed
@@ -78,7 +78,7 @@ public sealed class SettingsPage : UserControl
         var save = new Button { Content = "保存设置", Padding = new Thickness(16, 8, 16, 8), HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 14, 0, 0) };
         save.Click += async (_, _) => await SaveAsync(save);
         panel.Children.Add(save);
-        _status = new TextBlock { Margin = new Thickness(0, 10, 0, 0), Foreground = Brushes.Gray, TextWrapping = TextWrapping.Wrap };
+        _status = new TextBlock { Margin = new Thickness(0, 10, 0, 0), Foreground = Brushes.Silver, TextWrapping = TextWrapping.Wrap };
         panel.Children.Add(_status);
 
         Content = new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
@@ -226,7 +226,7 @@ public sealed class SettingsPage : UserControl
 
     private static (TextBox, StackPanel) AddDirectoryRow(StackPanel panel, string label, params (string Text, Action Click)[] buttons)
     {
-        panel.Children.Add(new TextBlock { Text = label, Foreground = Brushes.Gray });
+        panel.Children.Add(new TextBlock { Text = label, Foreground = Brushes.Silver });
         var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 10) };
         var box = new TextBox { Width = 380, VerticalContentAlignment = VerticalAlignment.Center };
         row.Children.Add(box);
@@ -242,7 +242,7 @@ public sealed class SettingsPage : UserControl
 
     private static (TextBox, StackPanel) AddTextBoxRow(StackPanel panel, string label)
     {
-        panel.Children.Add(new TextBlock { Text = label, Foreground = Brushes.Gray });
+        panel.Children.Add(new TextBlock { Text = label, Foreground = Brushes.Silver });
         var box = new TextBox { Margin = new Thickness(0, 4, 0, 10) };
         panel.Children.Add(box);
         return (box, panel);

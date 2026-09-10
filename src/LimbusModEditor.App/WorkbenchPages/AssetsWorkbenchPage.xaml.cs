@@ -72,15 +72,25 @@ public partial class AssetsWorkbenchPage : UserControl
     /// <summary>当前选中的资源（宿主拖放判定用）。</summary>
     public AssetRecord? SelectedAsset => _selectedAsset;
 
-    /// <summary>宿主刷新项目状态时调用：重算计数并重跑搜索（选中项按 AssetId 保留）。</summary>
+    /// <summary>宿主刷新项目状态时调用：重算计数并重跑搜索（选中项按 AssetId 保留）。
+    /// 百万级资产下计数在后台线程算，避免刷新瞬间卡死 UI。</summary>
     public void OnProjectRefreshed()
     {
         var project = _host.Project;
         AssetCountText.Text = (project?.Assets.Count ?? 0).ToString();
+        EditCountText.Text = "…";
+        _ = UpdateEditCountAsync();
         // 与提示条/一键导出同一口径：按编辑标记统计「已修改资源」数，
         // 而不是 Edits 历史条数（重复替换会让历史虚增）。
-        EditCountText.Text = (project?.Assets.Count(AssetEditService.HasEdits) ?? 0).ToString();
         RefreshAssetList();
+    }
+
+    private async Task UpdateEditCountAsync()
+    {
+        var project = _host.Project;
+        if (project is null) { EditCountText.Text = "0"; return; }
+        var count = await Task.Run(() => project.Assets.Count(AssetEditService.HasEdits));
+        EditCountText.Text = count.ToString();
     }
 
     /// <summary>宿主（Ctrl+F）聚焦搜索框。</summary>
@@ -248,9 +258,10 @@ public partial class AssetsWorkbenchPage : UserControl
             ShowStaticTables: ShowStaticFilter?.IsChecked == true);
     }
 
-    /// <summary>后台线程过滤 + 排序（快照先在 UI 线程取好，避免与集合修改
-    /// 竞争），带代际守卫：过期结果直接丢弃；选中项按 AssetId 跨刷新保留。
-    /// 列表承载 <see cref="AssetRow"/>（显示层），树视图仍按底层记录构建。</summary>
+    /// <summary>后台线程过滤 + 排序 + 行视图模型构造（快照先在 UI 线程取好，
+    /// 避免与集合修改竞争），带代际守卫：过期结果直接丢弃；选中项按 AssetId
+    /// 跨刷新保留。列表承载 <see cref="AssetRow"/>（显示层），树视图仍按底层
+    /// 记录构建。</summary>
     private async Task RunSearchAsync()
     {
         var project = _host.Project;
@@ -259,15 +270,26 @@ public partial class AssetsWorkbenchPage : UserControl
         var query = BuildSearchQuery();
         var snapshot = project.Assets.ToArray();
         IReadOnlyList<AssetRecord> results;
-        try { results = await Task.Run(() => _search.Search(snapshot, query)); }
+        IReadOnlyList<AssetRow> rows;
+        try
+        {
+            // 过滤 + 排序 + 百万级 AssetRow 构造全部在后台线程完成，
+            // UI 线程只做最终的 ItemsSource 赋值（ListView 虚拟化按需实例化）。
+            (results, rows) = await Task.Run(() =>
+            {
+                var filtered = _search.Search(snapshot, query);
+                var rowList = filtered.Select(a => new AssetRow(a)).ToList();
+                return (filtered, (IReadOnlyList<AssetRow>)rowList);
+            });
+        }
         catch (ArgumentException) { return; }
         if (generation != _searchGeneration) return;
         _lastResults = results;
         var selectedId = (AssetList.SelectedItem as AssetRow)?.AssetId;
-        AssetList.ItemsSource = results.Select(a => new AssetRow(a)).ToList();
-        if (selectedId is { } id && AssetList.ItemsSource is IEnumerable<AssetRow> rows)
+        AssetList.ItemsSource = rows;
+        if (selectedId is { } id && AssetList.ItemsSource is IEnumerable<AssetRow> rows2)
         {
-            var restored = rows.FirstOrDefault(x => x.AssetId == id);
+            var restored = rows2.FirstOrDefault(x => x.AssetId == id);
             if (restored is not null) AssetList.SelectedItem = restored;
         }
         AssetCountText.Text = results.Count == project.Assets.Count
@@ -637,7 +659,7 @@ public partial class AssetsWorkbenchPage : UserControl
         var panel = new StackPanel();
         if (audio is null)
         {
-            panel.Children.Add(new TextBlock { Text = "（没有音频数据）", Foreground = Brushes.Gray });
+            panel.Children.Add(new TextBlock { Text = "（没有音频数据）", Foreground = Brushes.Silver });
             return panel;
         }
         var bar = new StackPanel { Orientation = Orientation.Horizontal };
@@ -706,7 +728,7 @@ public partial class AssetsWorkbenchPage : UserControl
         var panel = new StackPanel();
         if (rows is null || rows.Count == 0)
         {
-            panel.Children.Add(new TextBlock { Text = "（无内容）", Foreground = Brushes.Gray });
+            panel.Children.Add(new TextBlock { Text = "（无内容）", Foreground = Brushes.Silver });
             return panel;
         }
         foreach (var row in rows)

@@ -20,13 +20,14 @@ public sealed class FmodReportWindow : Window
         MinWidth = 520;
         MinHeight = 300;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
+        Background = AppTheme.WindowBackground;
 
         var panel = new DockPanel { Margin = new Thickness(12) };
         var header = new TextBlock
         {
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 0, 0, 10),
-            Foreground = Brushes.DimGray,
+            Foreground = Brushes.Gainsboro,
             Text = $"探测时间：{cache.ProbedAt:yyyy-MM-dd HH:mm:ss}（结果按 DLL 大小/时间戳缓存，目录变化后自动重新探测）\n" +
                    "本工具不附带、不加载、不修改任何 FMOD 二进制文件；此报告只读取文件头与导出表。"
         };

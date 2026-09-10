@@ -144,4 +144,48 @@ public class UiStateServiceTests : IDisposable
         Assert.Contains(WorkbenchPageKeys.Text, WorkbenchPageKeys.All);
         Assert.Contains(WorkbenchPageKeys.Static, WorkbenchPageKeys.All);
     }
+
+    // ── 四页列宽共存（plan-10 修复的「后写的覆盖先写的」）──────────────
+
+    [Fact]
+    public void Four_page_widths_survive_interleaved_writes_only_when_each_write_merges()
+    {
+        var pages = new[]
+        {
+            (WorkbenchPageKeys.Assets, 420d),
+            (WorkbenchPageKeys.Bank, 500d),
+            (WorkbenchPageKeys.Text, 380d),
+            (WorkbenchPageKeys.Static, 460d),
+        };
+
+        // ② 修复后的写法：每次落盘都「读回磁盘最新状态 → 只改自己那一项 → 写回」。
+        //    这正是 WorkbenchShell.SavePreviewWidth 现在的做法（plan-09 留下的隐患，plan-10 修）。
+        foreach (var (key, width) in pages)
+        {
+            var latest = UiStateService.Load(StateFile);
+            latest.SetPreviewWidth(key, width);
+            UiStateService.Save(latest, StateFile);
+        }
+        var merged = UiStateService.Load(StateFile);
+        foreach (var (key, width) in pages) Assert.Equal(width, merged.GetPreviewWidth(key));
+
+        // ③ 关窗时的一次性合并落盘（WorkbenchShell.PersistAllPreviewWidths 的语义）：
+        //    同一份状态里写入四个页面的值，一次写出后四页都在。
+        var all = UiStateService.Load(StateFile);
+        foreach (var (key, width) in pages) all.SetPreviewWidth(key, width + 10);
+        UiStateService.Save(all, StateFile);
+        var flushed = UiStateService.Load(StateFile);
+        foreach (var (key, width) in pages) Assert.Equal(width + 10, flushed.GetPreviewWidth(key));
+
+        // ④ 反面教材（说明为什么必须合并）：把「启动时的陈旧快照」整份写回，
+        //    只改了自己那一页 → 其它页被覆盖回默认值。修复前 SavePreviewWidth 就是这个语义。
+        var stale = new UiStateService();
+        stale.SetPreviewWidth(WorkbenchPageKeys.Text, 700);
+        UiStateService.Save(stale, StateFile);
+        var afterStale = UiStateService.Load(StateFile);
+        Assert.Equal(700, afterStale.GetPreviewWidth(WorkbenchPageKeys.Text));
+        Assert.Equal(UiStateService.DefaultPreviewColumnWidth, afterStale.GetPreviewWidth(WorkbenchPageKeys.Assets));
+        Assert.Equal(UiStateService.DefaultPreviewColumnWidth, afterStale.GetPreviewWidth(WorkbenchPageKeys.Bank));
+        Assert.Equal(UiStateService.DefaultPreviewColumnWidth, afterStale.GetPreviewWidth(WorkbenchPageKeys.Static));
+    }
 }

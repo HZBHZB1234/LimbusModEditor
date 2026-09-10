@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -10,7 +11,14 @@ namespace LimbusModEditor.Application.Texts;
 /// <param name="SizeBytes">文件大小（字节）。</param>
 /// <param name="KeyCount">JSON 顶层键数；根不是 JSON 对象或解析失败时为 0。</param>
 /// <param name="IsUtf8">内容是否为合法 UTF-8；非 UTF-8 明确标记，不做编码猜测。</param>
-public sealed record LangTextFileInfo(string RelativePath, string FullPath, long SizeBytes, int KeyCount, bool IsUtf8);
+/// <param name="MTimeUtcTicks">文件最后写入时间（UTC ticks，plan-10 缓存新鲜度判定用，读元数据即可得）。</param>
+public sealed record LangTextFileInfo(
+    string RelativePath,
+    string FullPath,
+    long SizeBytes,
+    int KeyCount,
+    bool IsUtf8,
+    long MTimeUtcTicks = 0);
 
 /// <summary>搜索命中类别。</summary>
 public enum LangTextSearchKind
@@ -37,6 +45,21 @@ public sealed record LangTextExportFileStatus(string RelativePath, int Operation
 public sealed record LangTextExportReport(string OutputPath, int EditedFileCount, int PatchedFileCount, IReadOnlyList<LangTextExportFileStatus> Files);
 
 /// <summary>
+/// plan-10：一个 lang 文件的「新鲜度观测值」= 文件系统上的 <c>(size, mtimeUtcTicks)</c>。
+/// 只读元数据、不读内容，因此「签名是否命中」的判定本身几乎不花钱。
+/// 由 <see cref="LangTextWorkbenchService.EnumerateFiles"/> 在枚举时交给调用方落盘，
+/// 下次枚举拿它和缓存条目比对：命中就复用缓存条目（不读盘、不解析），不命中才重新解析。
+/// </summary>
+/// <param name="Size">文件字节数。</param>
+/// <param name="MTimeUtcTicks">最后写入时间（UTC ticks）。</param>
+public readonly record struct CacheObservation(long Size, long MTimeUtcTicks)
+{
+    /// <summary>缓存条目（<see cref="LangTextFileInfo"/>）是否就是这份观测值描述的那个版本。</summary>
+    public static bool Matches(LangTextFileInfo cached, CacheObservation observation)
+        => cached.SizeBytes == observation.Size && cached.MTimeUtcTicks == observation.MTimeUtcTicks;
+}
+
+/// <summary>
 /// plan-07 文本工作台后端服务：枚举活动语言 JSON 文件、键值/文件名搜索、
 /// 编辑集（vanilla 快照 + 内存修改 + 还原）、导出与 LCTA changes.py 语义一致的
 /// RFC6902 lang 补丁文档。全部方法 UI 无关；UTF-8（无 BOM）读写，检测到
@@ -45,6 +68,13 @@ public sealed record LangTextExportReport(string OutputPath, int EditedFileCount
 /// </summary>
 public sealed class LangTextWorkbenchService
 {
+    /// <summary>默认的单文件命中上限（<see cref="Search"/> 的参数默认值；
+    /// plan-10 的索引缓存按它决定「哪些候选在排序上轮得到被检查」，因此必须与它同值）。</summary>
+    public const int DefaultMaxHitsPerFile = 20;
+
+    /// <summary>默认的命中总数上限（<see cref="Search"/> 的参数默认值）。</summary>
+    public const int DefaultMaxTotalHits = 500;
+
     private readonly LangTextPatchService _patch = new();
     private readonly TextDiffService _diff = new();
 
@@ -83,8 +113,18 @@ public sealed class LangTextWorkbenchService
     /// 相对路径以 '/' 分隔，先 config.json 后字典序。同时记录大小、顶层键数
     /// （JSON 对象才计）与 UTF-8 合法性。调用成功后本服务进入「已定位」状态，
     /// 编辑集方法以该 lang 根为基线。非 UTF-8 文件：IsUtf8=false、键数 0、明确标记不猜。
-    /// 单个文件读取失败不中断枚举（按不可读处理）。</summary>
-    public IReadOnlyList<LangTextFileInfo> EnumerateFiles(string langRoot)
+    /// 单个文件读取失败不中断枚举（按不可读处理）。
+    ///
+    /// <para><paramref name="cached"/> 与 <paramref name="refreshed"/> 是 plan-10 的
+    /// <b>加速旁路</b>（可选，缺省即旧行为）：目录结构仍然真实枚举（保证增删文件不会漏），
+    /// 但<b>内容</b>只对签名（大小 + mtime）变过的文件重新读取解析，签名命中的文件
+    /// 直接复用缓存条目。<b>两个路径的返回值逐字段相同</b>——删掉缓存库后功能完全不受影响，
+    /// 只是变慢（单测 <c>TextIndexStoreTests</c> 以「有缓存 vs 删库」逐字段比对钉死）。
+    /// <paramref name="refreshed"/> 会把本次真实观测到的签名交给调用方落盘。</para></summary>
+    public IReadOnlyList<LangTextFileInfo> EnumerateFiles(
+        string langRoot,
+        IReadOnlyDictionary<string, LangTextFileInfo>? cached = null,
+        Action<LangTextFileInfo, CacheObservation>? refreshed = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(langRoot);
         if (!Directory.Exists(langRoot)) throw new DirectoryNotFoundException($"lang 目录不存在: {langRoot}");
@@ -92,7 +132,7 @@ public sealed class LangTextWorkbenchService
 
         var files = new List<LangTextFileInfo>();
         var config = Path.Combine(langRoot, "config.json");
-        if (File.Exists(config)) files.Add(BuildFileInfo(_langRoot, config));
+        if (File.Exists(config)) files.Add(BuildFileInfo(_langRoot, config, cached, refreshed));
 
         var active = ReadActiveLanguage(langRoot);
         if (!string.IsNullOrWhiteSpace(active))
@@ -103,16 +143,58 @@ public sealed class LangTextWorkbenchService
                 foreach (var path in Directory.EnumerateFiles(activeDir, "*.json", SearchOption.AllDirectories)
                              .OrderBy(x => x, StringComparer.Ordinal))
                 {
-                    files.Add(BuildFileInfo(_langRoot, path));
+                    files.Add(BuildFileInfo(_langRoot, path, cached, refreshed));
                 }
             }
         }
         return files;
     }
 
+    private static LangTextFileInfo BuildFileInfo(
+        string langRoot,
+        string fullPath,
+        IReadOnlyDictionary<string, LangTextFileInfo>? cached,
+        Action<LangTextFileInfo, CacheObservation>? refreshed)
+    {
+        var relative = Path.GetRelativePath(langRoot, fullPath).Replace('\\', '/');
+        if (TryObserve(fullPath, out var observation) && cached is not null &&
+            cached.TryGetValue(relative, out var hit) &&
+            CacheObservation.Matches(hit, observation))
+        {
+            refreshed?.Invoke(hit, observation);
+            return hit; // 签名命中：不读盘、不解析（这才是「二次进页面不再全目录重读」的来源）
+        }
+
+        var info = ReadFileInfo(fullPath, relative, observation);
+        refreshed?.Invoke(info, observation);
+        return info;
+    }
+
+    /// <summary>只看文件系统的 (size, mtime)——不读内容，用于「签名是否变过」判定。</summary>
+    private static bool TryObserve(string fullPath, out CacheObservation observation)
+    {
+        try
+        {
+            var info = new FileInfo(fullPath);
+            observation = new CacheObservation(info.Length, info.LastWriteTimeUtc.Ticks);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            observation = default;
+            return false;
+        }
+    }
+
     private static LangTextFileInfo BuildFileInfo(string langRoot, string fullPath)
     {
         var relative = Path.GetRelativePath(langRoot, fullPath).Replace('\\', '/');
+        var observed = TryObserve(fullPath, out var observation) ? observation : default;
+        return ReadFileInfo(fullPath, relative, observed);
+    }
+
+    private static LangTextFileInfo ReadFileInfo(string fullPath, string relative, CacheObservation observation)
+    {
         long size = 0;
         var isUtf8 = false;
         var keyCount = 0;
@@ -127,7 +209,7 @@ public sealed class LangTextWorkbenchService
         {
             // 非 UTF-8 明确标记不猜；不可读文件保持占位条目，不中断整个枚举。
         }
-        return new LangTextFileInfo(relative, Path.GetFullPath(fullPath), size, keyCount, isUtf8);
+        return new LangTextFileInfo(relative, Path.GetFullPath(fullPath), size, keyCount, isUtf8, observation.MTimeUtcTicks);
     }
 
     // ── 搜索 ─────────────────────────────────────────────────────────
@@ -136,12 +218,19 @@ public sealed class LangTextWorkbenchService
     /// 键与值命中逐文件读取并解析（键路径展平为 <c>a/b/0/c</c> 形式，值取叶子文本）。
     /// 逐文件容错：非 UTF-8、不可读或非法 JSON 的文件不参与键值搜索，绝不让单个
     /// 坏文件中断搜索。返回数量受 <paramref name="maxTotalHits"/> 与
-    /// <paramref name="maxHitsPerFile"/> 上限保护。</summary>
+    /// <paramref name="maxHitsPerFile"/> 上限保护。
+    ///
+    /// <para><paramref name="cached"/> 是 plan-10 的加速旁路（可选，缺省即旧行为）：
+    /// 键值事实已由缓存建索引时算好，这里只做「匹配 + 按文件切片」，
+    /// <b>不再逐文件读盘 + JSON 解析</b>。切片与匹配口径都在本方法里，
+    /// 与逐文件路径共用同一套 <see cref="LangTextSearchKind"/> 顺序规则，
+    /// 因此两条路径的返回值逐条相同（单测钉死）。</para></summary>
     public IReadOnlyList<LangTextSearchHit> Search(
         string query,
         IReadOnlyList<LangTextFileInfo> files,
-        int maxTotalHits = 500,
-        int maxHitsPerFile = 20)
+        int maxTotalHits = DefaultMaxTotalHits,
+        int maxHitsPerFile = DefaultMaxHitsPerFile,
+        IReadOnlyDictionary<string, IReadOnlyList<LangTextSearchHit>>? cached = null)
     {
         if (string.IsNullOrWhiteSpace(query)) return [];
         query = query.Trim();
@@ -158,41 +247,100 @@ public sealed class LangTextWorkbenchService
             }
             if (perFile >= maxHitsPerFile || hits.Count >= maxTotalHits) continue;
 
-            string text;
-            JsonNode? root;
-            try
+            IReadOnlyList<LangTextSearchHit> candidates;
+            if (cached is not null)
             {
-                text = ReadTextStrict(file.FullPath);
-                root = JsonNode.Parse(text);
+                candidates = cached.TryGetValue(file.RelativePath, out var indexed) ? indexed : [];
             }
-            catch (Exception ex) when (ex is InvalidDataException or JsonException or IOException or UnauthorizedAccessException)
+            else
             {
-                continue; // 非 UTF-8 / 非法 JSON / 不可读：明确跳过，不猜不崩
+                candidates = ReadFileHits(file.FullPath, file.RelativePath);
             }
-            if (root is null) continue;
 
-            foreach (var (keyPath, leaf) in EnumerateLeaves(root, string.Empty))
+            foreach (var candidate in candidates)
             {
                 if (perFile >= maxHitsPerFile || hits.Count >= maxTotalHits) break;
-
-                if (keyPath.Contains(query, StringComparison.OrdinalIgnoreCase))
-                {
-                    hits.Add(new LangTextSearchHit(file.RelativePath, LangTextSearchKind.Key, keyPath, keyPath));
-                    perFile++;
-                    continue;
-                }
-
-                var valueText = LeafToText(leaf);
-                var index = valueText.IndexOf(query, StringComparison.OrdinalIgnoreCase);
-                if (index >= 0)
-                {
-                    hits.Add(new LangTextSearchHit(file.RelativePath, LangTextSearchKind.Value, keyPath, Snippet(valueText, index, query.Length)));
-                    perFile++;
-                }
+                if (!TryMatch(candidate, query, file.RelativePath, out var matched)) continue;
+                hits.Add(matched);
+                perFile++;
             }
         }
         return hits;
     }
+
+    /// <summary>单条命中是否匹配查询（与逐文件路径逐字一致：键命中先看键路径、命中即不再看值；
+    /// 值命中在<b>完整值文本</b>上找匹配位置，片段按同一窗口规则截取）。</summary>
+    private static bool TryMatch(LangTextSearchHit hit, string query, string relativePath, out LangTextSearchHit matched)
+    {
+        if (hit.Kind == LangTextSearchKind.Key)
+        {
+            if (hit.KeyPath?.Contains(query, StringComparison.OrdinalIgnoreCase) == true)
+            {
+                matched = hit;
+                return true;
+            }
+        }
+        else if (hit.Snippet is { } valueText)
+        {
+            var index = valueText.IndexOf(query, StringComparison.OrdinalIgnoreCase);
+            if (index >= 0)
+            {
+                matched = new LangTextSearchHit(relativePath, LangTextSearchKind.Value, hit.KeyPath,
+                    Snippet(valueText, index, query.Length));
+                return true;
+            }
+        }
+        matched = hit;
+        return false;
+    }
+
+    /// <summary>
+    /// 读一个文件并算出它的<b>全部可达命中候选</b>（键值事实；单文件容错：非 UTF-8 /
+    /// 非法 JSON / 不可读一律返回空集合，绝不让坏文件中断搜索）。
+    /// <b>缓存建索引时也走这里</b>，保证「索引里的事实」与「现读的事实」是同一份实现、同一个顺序。
+    ///
+    /// <para><b>「可达」的准确含义</b>（这是缓存与现读逐条一致的关键）：候选按
+    /// 键、值、键、值… 交错排列——与逐文件搜索遍历叶子节点的顺序完全一致。逐文件搜索在
+    /// <c>perFile</c> 达到上限（默认 <see cref="DefaultMaxHitsPerFile"/>）时就跳出该文件的叶子循环，
+    /// 因此第 N 个键候选之前的<b>值</b>候选在排序上永远轮不到被检查，可以安全丢弃。
+    /// 键候选则必须全部保留（键命中会让 <c>perFile</c> 涨到上限之上，这正是两条路径
+    /// 唯一容易出错的地方）。</para></summary>
+    public static IReadOnlyList<LangTextSearchHit> ReadFileHits(
+        string fullPath, string relativePath, int perFileLimit = DefaultMaxHitsPerFile)
+    {
+        var hits = new List<LangTextSearchHit>();
+        JsonNode? root;
+        try
+        {
+            root = JsonNode.Parse(ReadTextStrict(fullPath));
+        }
+        catch (Exception ex) when (ex is InvalidDataException or JsonException or IOException or UnauthorizedAccessException)
+        {
+            return hits; // 非 UTF-8 / 非法 JSON / 不可读：明确跳过，不猜不崩
+        }
+        if (root is null) return hits;
+
+        var keysSoFar = 0;
+        foreach (var (keyPath, leaf) in EnumerateLeaves(root, string.Empty))
+        {
+            hits.Add(KeyHitCandidate(relativePath, keyPath));
+            keysSoFar++;
+            // 值候选：Snippet 槽位放「完整值文本」（查询串到 Search 里才比对，
+            // 命中时按同一窗口规则重新截取片段，两条路径的产物逐字段相同）；
+            // 只有在排序上轮得到被检查的才落盘（见方法注释）。
+            if (keysSoFar < perFileLimit)
+                hits.Add(new LangTextSearchHit(relativePath, LangTextSearchKind.Value, keyPath, LeafToText(leaf)));
+        }
+        return hits;
+    }
+
+    /// <summary>键命中候选行（缓存建索引用；匹配与否由 <see cref="Search"/> 判定）。</summary>
+    public static LangTextSearchHit KeyHitCandidate(string relativePath, string keyPath)
+        => new(relativePath, LangTextSearchKind.Key, keyPath, keyPath);
+
+    /// <summary>文件名命中候选行。</summary>
+    public static LangTextSearchHit FileNameHitCandidate(string relativePath)
+        => new(relativePath, LangTextSearchKind.FileName, null, relativePath);
 
     private static IEnumerable<(string Path, JsonNode Node)> EnumerateLeaves(JsonNode node, string prefix)
     {
@@ -361,6 +509,39 @@ public sealed class LangTextWorkbenchService
             throw new InvalidDataException($"{Path.GetFileName(path)} 不是合法的 UTF-8（不做编码猜测）: {ex.Message}", ex);
         }
     }
+
+    // ── plan-10：缓存签名用的「活动语言事实」（不写文件，只读 + 算哈希）──────
+
+    /// <summary>
+    /// 配置哈希：由 <c>config.json</c> 的<b>内容</b>算出（SHA-256，十六进制小写）。
+    /// 文件不存在或不可读时为 <c>"none"</c>。
+    ///
+    /// <para><b>为什么必须有它</b>：活动语言目录是由 <c>config.json</c> 的 <c>lang</c>
+    /// 字段决定的。只比目录 mtime / 只比签名里的大小与时间，会漏掉「玩家切换了活动语言」
+    /// 这种变化（config.json 常是几十字节的小文件，改写后大小可能不变）。
+    /// 把内容哈希并进 <c>index_meta.signature</c> 后，切换语言必然使整库失效重建。</para>
+    /// </summary>
+    public static string ComputeConfigContentHash(string langRoot)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(langRoot);
+        try
+        {
+            var path = Path.Combine(langRoot, "config.json");
+            if (!File.Exists(path)) return "none";
+            var hash = SHA256.HashData(File.ReadAllBytes(path));
+            return Convert.ToHexString(hash).ToLowerInvariant();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return "unreadable";
+        }
+    }
+
+    /// <summary>活动语言目录的规范化路径；<c>config.json</c> 未指定或目录不存在时返回 null。</summary>
+    public static string? ResolveActiveLanguageDirectory(string langRoot, string? activeLanguage)
+        => string.IsNullOrWhiteSpace(activeLanguage)
+            ? null
+            : Path.Combine(langRoot, activeLanguage);
 
     /// <summary>顶层键数：根是 JSON 对象才计；数组/标量/解析失败为 0。</summary>
     private static int CountTopLevelKeys(string jsonText)

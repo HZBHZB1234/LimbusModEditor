@@ -746,6 +746,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     private async void Window_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
         _assetsPage?.PersistUiState(); // plan-04：关窗时持久化布局占比
+        WorkbenchShell.PersistAllPreviewWidths(); // plan-10：四个工作台的列宽一次性合并落盘
         if (_project is not null && !_project.RestoreDebugFilesOnClose) return;
         if (_debugSession is null || !_debugSession.IsApplied) return;
         try

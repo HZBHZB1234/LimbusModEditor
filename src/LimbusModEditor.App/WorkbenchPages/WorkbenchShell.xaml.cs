@@ -64,9 +64,11 @@ public partial class WorkbenchShell : UserControl
             SetPreviewColumnWidth(UiStateService.DefaultPreviewColumnWidth);
             return;
         }
+
         _uiStateFile = Path.Combine(host.Env.ConfigDirectory, "ui-state.json");
         _uiState = UiStateService.Load(_uiStateFile);
         SetPreviewColumnWidth(_uiState.GetPreviewWidth(PageKey));
+        RegisterLive();
     }
 
     /// <summary>本页面 key（<see cref="WorkbenchPageKeys"/>），列宽持久化以它为键。</summary>
@@ -98,7 +100,9 @@ public partial class WorkbenchShell : UserControl
     /// <summary>设置预览列宽（钳制到 [260, 2000]）；<paramref name="persist"/> 为 true 时落盘。</summary>
     public void SetPreviewColumnWidth(double width, bool persist = false)
     {
-        PreviewColumn.Width = new GridLength(UiStateService.ClampPreviewWidth(width));
+        var clamped = UiStateService.ClampPreviewWidth(width);
+        PreviewColumn.Width = new GridLength(clamped);
+        _uiState?.SetPreviewWidth(PageKey, clamped);
         if (persist) SavePreviewWidth();
     }
 
@@ -106,6 +110,7 @@ public partial class WorkbenchShell : UserControl
     public void ResetPreviewColumnWidth()
     {
         PreviewColumn.Width = new GridLength(UiStateService.DefaultPreviewColumnWidth);
+        _uiState?.SetPreviewWidth(PageKey, UiStateService.DefaultPreviewColumnWidth);
         SavePreviewWidth();
     }
 
@@ -261,10 +266,67 @@ public partial class WorkbenchShell : UserControl
 
     private void PreviewSplitter_DoubleClick(object sender, MouseButtonEventArgs e) => ResetPreviewColumnWidth();
 
+    /// <summary>
+    /// 落盘列宽。<b>先把磁盘上的最新状态读回来再合并自己那一项</b>，避免「后写的覆盖先写的」：
+    /// 四个工作台各自持有启动时读到的那份「全页列宽」快照，若直接整份写回，
+    /// 先改过宽度的页面会被后改的页面用旧值覆盖（plan-09 留下的隐患，plan-10 修复）。
+    /// 这样即便某个页面没实现 <see cref="PersistPreviewWidth"/>，也不会丢别的页面的列宽。
+    /// </summary>
     private void SavePreviewWidth()
     {
         if (_uiState is null) return;
-        _uiState.SetPreviewWidth(PageKey, PreviewColumnWidth);
+        var latest = UiStateService.Load(_uiStateFile);
+        latest.SetPreviewWidth(PageKey, PreviewColumnWidth);
+        _uiState = latest;
         UiStateService.Save(_uiState, _uiStateFile);
+    }
+
+    /// <summary>
+    /// 把当前存活的全部工作台实例的列宽一次性合并落盘（宿主关窗时调用）。
+    /// 与 <see cref="PersistPreviewWidth"/> 的区别：后者写单项并读回磁盘合并，
+    /// 本方法在内存里合并所有存活页再写一次，避免「最后一个写的赢」。
+    /// </summary>
+    public static void PersistAllPreviewWidths()
+    {
+        lock (LiveShells)
+        {
+            var byFile = new Dictionary<string, List<WorkbenchShell>>(StringComparer.OrdinalIgnoreCase);
+            for (var i = LiveShells.Count - 1; i >= 0; i--)
+            {
+                if (LiveShells[i].Target is not WorkbenchShell shell || shell._uiState is null)
+                {
+                    LiveShells.RemoveAt(i);
+                    continue;
+                }
+                if (!byFile.TryGetValue(shell._uiStateFile, out var list))
+                {
+                    list = [];
+                    byFile[shell._uiStateFile] = list;
+                }
+                list.Add(shell);
+            }
+            foreach (var (file, shells) in byFile)
+            {
+                if (string.IsNullOrWhiteSpace(file)) continue;
+                var state = UiStateService.Load(file);
+                foreach (var shell in shells) state.SetPreviewWidth(shell.PageKey, shell.PreviewColumnWidth);
+                UiStateService.Save(state, file);
+                foreach (var shell in shells) shell._uiState = state;
+            }
+        }
+    }
+
+    /// <summary>当前存活的工作台骨架实例（<see cref="PersistAllPreviewWidths"/> 用）。
+    /// 弱引用：页面常驻直到关窗，但骨架本身不该因为这张表而无法回收。</summary>
+    private static readonly List<WeakReference> LiveShells = [];
+
+    private void RegisterLive()
+    {
+        lock (LiveShells)
+        {
+            LiveShells.RemoveAll(x => !ReferenceEquals(x.Target, this) && x.Target is null);
+            if (!LiveShells.Any(x => ReferenceEquals(x.Target, this)))
+                LiveShells.Add(new WeakReference(this));
+        }
     }
 }

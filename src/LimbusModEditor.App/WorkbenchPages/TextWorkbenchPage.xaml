@@ -1,0 +1,23 @@
+<UserControl x:Class="LimbusModEditor.App.TextWorkbenchPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:LimbusModEditor.App">
+    <!--
+
+        plan-10：文本工作台（三列骨架由共享 WorkbenchShell 提供）。
+
+        版面：浏览列（搜索行 / 筛选行 / 树·列表切换 / 内容）— 分隔条 — 编辑列
+              （文件信息 + 编辑集动作 / JsonTreeEditor 树+原文双 Tab / 状态条）。
+
+        ★ 本文件刻意只有骨架这一个子元素，原因是一个必须先说清的 WPF 约束：
+          编辑列的整块面板在代码里构建、经 Shell.SetEditContent 放进骨架的
+          ContentControl。若把它同时写在 XAML 里，同一个 Visual 就有了两个父级
+          （本页 → 骨架的 ContentPresenter），布局时会抛
+          「在指定子级连接到新的父 Visual 之前必须断开与当前父 Visual 的连接」并崩进程。
+          浏览列的树 / 列表 / 搜索结果视图同理，全部在代码里构建。
+
+        设计令牌与控件样式一律走 Themes/WorkbenchStyles.xaml
+        （本文件与 TextWorkbenchPage.xaml.cs 不出现色值字面量）。
+    -->
+    <local:WorkbenchShell x:Name="Shell"/>
+</UserControl>

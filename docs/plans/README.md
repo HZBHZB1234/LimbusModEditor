@@ -15,9 +15,19 @@
 | [plan-06](plan-06-bank-workbench.md) | 需求 8 | 音频 Bank 工作台页面（新页面） | plan-02 |
 | [plan-07](plan-07-text-workbench.md) | 需求 9 | 文本（lang）工作台页面（新页面） | plan-02 |
 | [plan-08](plan-08-static-workbench.md) | 需求 10 | 静态数据工作台页面（新页面）+ 资源工作台剔除相关 bundle | plan-02 |
+| [plan-09](plan-09-workbench-shell-and-table-cache.md) | 第二批需求（工作台 UI 一致 + 表缓存） | 工作台公共骨架（WorkbenchShell / JsonTreeEditor）+ 表缓存底座 | 无（plan-10/11/12 的前置） |
+| [plan-10](plan-10-text-workbench-ui.md) | 第二批需求 | 文本工作台重做：树形浏览 + 共享编辑器 + `cache/text-index.db` | plan-09 |
+| [plan-11](plan-11-bank-workbench-all-audio-view.md) | 第二批需求 | 音频工作台重做：跨 bank 样本总表 + bank 树 + `cache/bank-index.db` | plan-09 |
+| [plan-12](plan-12-static-workbench-shell-ui.md) | 第二批需求 | 静态数据工作台重做：资源工作台同款页面 + `cache/static-tables.db` | plan-09 |
 
 建议执行顺序：**plan-02 →（plan-01 并行）→ plan-03、plan-04 → plan-05 → plan-06/07/08（三者可并行）**。
 plan-01 不依赖布局改造，可随时开工；plan-03/04 很小，也可在 plan-02 前先在现有 TabItem 内完成再随布局迁移。
+
+第二批（2026-09 用户反馈：资源工作台好用，其余三个编辑器不美观 / 无树 / 无全量视图）：
+**plan-09（串行前置）→ plan-10/11/12 三者并行**。第二批的公共约束：
+表缓存固定放**程序目录 `cache/`**（与 `unity-cache-index.db` 同处），
+缓存只存 vanilla 事实、编辑集不落缓存，失效规则只有「源签名变化」一条
+（`(size,mtime)` 或 catalog 内层内容哈希），绝不缓存游戏版本常量。
 
 ## 共同执行规则（每个计划都必须遵守）
 

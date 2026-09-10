@@ -527,6 +527,28 @@ Lunartique→对象级 Carra/目录来源支持，其余禁用并给出原因）
   / `AssetPropertyServiceTests` / `StaticBundleLocatorTests` / `UiStateServiceTests`，
   本机全部真跑（真实缓存 / 真实 bank / 真实 lang / 真实 catalog）。
 
+## P3.12 工作台 UI 一致化 + 表缓存（2026-09，进行中）
+
+用户反馈：「资源工作台的交互页面设计非常好（树形编辑 + 方便预览），但其他三种模组的编辑器
+有很大问题——文本编辑器页面不美观、没有树形查看；bank 页面没有所有音频的视图；
+static mod 可以使用资源工作台类似的页面。事实上我们也可以使用表来缓存这些数据。」
+执行按 `docs/plans/plan-09 ~ plan-12` 四份任务书：plan-09 为串行前置，10/11/12 依赖它。
+
+- **plan-09（前置）**：`WorkbenchShell`（三列骨架 + 每页列宽持久化 + 列表↔树切换）
+  与 `JsonTreeEditor`（树/原文双 Tab、按原类型写回、RFC6902 差异摘要）公共件，
+  设计令牌集中到 `Themes/WorkbenchStyles.xaml`（页面代码禁止硬编码设计色）；
+  `Application/Caching/` 表缓存底座（SQLite，照抄 `UnityCacheSqliteIndexStore` 的事务/WAL/
+  轻量迁移策略），建好 `cache/` 下 `bank-index.db` / `static-tables.db` / `text-index.db` 表结构。
+- **plan-10 文本**：🗂 目录→文件→JSON 键层级树 + ☰ 列表，独立搜索结果视图，
+  键值树惰性展开（去掉 5000 行截断），`cache/text-index.db` 缓存文件索引与搜索命中。
+- **plan-11 音频**：**跨 bank 样本总表**（bank/FSB/样本名/codec/采样率/声道/时长/大小/状态，
+  虚拟化 + 筛选排序）+ bank→FSB→样本 树 + 现有 bank 列表，`cache/bank-index.db`
+  按 `(size,mtime)` 增量重建；冷建索引带进度且可取消。
+- **plan-12 静态**：与资源工作台同款页面（dataClass 树 + 列表 + 筛选/排序 + 修改标记），
+  搜索改走 `cache/static-tables.db`（不再同步逐张解码 1392 张表），编辑器复用 `JsonTreeEditor` + diff Tab。
+
+约束：缓存只存 vanilla 事实、编辑集不落缓存；失效规则只有「源签名变化」一条；绝不写游戏目录。
+
 ## P4：工程质量和交付
 
 - 把当前代码后置 UI 逐步迁移到 MVVM，但不牺牲现有 Windows-only 可运行性。

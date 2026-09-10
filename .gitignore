@@ -50,5 +50,8 @@ $RECYCLE.BIN/
 *.bak
 *.swp
 *~
+# 索引/表缓存（运行时生成，可随时删除重建；unity-cache-index.db 等）
+cache/
+
 # FMOD 二进制不入库（许可要求）；发布脚本会把它复制进安装包
 third_party/fmod/

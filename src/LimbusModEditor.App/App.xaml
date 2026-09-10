@@ -12,6 +12,8 @@
                 <ui:ControlsDictionary/>
                 <!-- 应用级色板 / 样式：放在最后，可覆盖 WPF-UI 默认 -->
                 <ResourceDictionary Source="Themes/Theme.xaml"/>
+                <!-- plan-09：工作台公共骨架的设计令牌与控件样式（色值唯一出现点） -->
+                <ResourceDictionary Source="Themes/WorkbenchStyles.xaml"/>
             </ResourceDictionary.MergedDictionaries>
             <!-- 跨页面共用资源 -->
             <local:HumanSizeConverter x:Key="HumanSize"/>

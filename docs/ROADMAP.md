@@ -557,8 +557,11 @@ static mod 可以使用资源工作台类似的页面。事实上我们也可以
 （文本：目录签名 + config.json 内容哈希；音频：逐文件 `(size,mtime)`；静态：内层内容哈希）；
 绝不写游戏目录 / Unity 缓存 / catalog。
 
-**遗留一项（未闭合）**：资源工作台自身尚未迁移到公共骨架（plan-09 §6 那条
-「资源页不再出现硬编码设计色」的门），需一次单独的收口小改。
+**收口已完成**：资源工作台自身也已迁移到公共色板——`AssetsWorkbenchPage.xaml` 的 34 处色值
+字面量与 `.xaml.cs` 的 18 处 `Color.FromRgb` 全部换成 `WorkbenchStyles.xaml` 的具名画刷，
+`WorkbenchPages/` 下硬编码设计色为 **0**（色值只存在于 `Themes/Theme.xaml` 与
+`Themes/WorkbenchStyles.xaml`）。资源页未改结构（splitter/交互保持原样），
+用页面试装探针验证「四个工作台全部可构造渲染 + 12 个共享画刷与 7 个共享样式全部可解析」。
 
 ## P4：工程质量和交付
 

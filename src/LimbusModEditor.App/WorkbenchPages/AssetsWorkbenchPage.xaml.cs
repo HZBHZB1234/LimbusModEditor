@@ -469,7 +469,7 @@ public partial class AssetsWorkbenchPage : UserControl
 
         var scroll = new ScrollViewer
         {
-            Background = TryFindResource("Checkerboard") as Brush ?? new SolidColorBrush(Color.FromRgb(0x11, 0x15, 0x1A)),
+            Background = TryFindResource("Checkerboard") as Brush ?? WbBrush("WbListBrush"),
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             Height = 180,
@@ -563,7 +563,7 @@ public partial class AssetsWorkbenchPage : UserControl
             IsReadOnly = true,
             BorderThickness = new Thickness(0),
             Background = Brushes.Transparent,
-            Foreground = new SolidColorBrush(Color.FromRgb(0x5F, 0x72, 0x85)),
+            Foreground = WbBrush("WbTextFaintBrush"),
             FontFamily = MonoFont,
             FontSize = 11,
             TextAlignment = TextAlignment.Right,
@@ -579,7 +579,7 @@ public partial class AssetsWorkbenchPage : UserControl
             IsReadOnly = true,
             BorderThickness = new Thickness(0),
             Background = Brushes.Transparent,
-            Foreground = new SolidColorBrush(Color.FromRgb(0xD8, 0xE2, 0xEA)),
+            Foreground = WbBrush("WbCodeForegroundBrush"),
             FontFamily = MonoFont,
             FontSize = 11,
             TextWrapping = TextWrapping.NoWrap,
@@ -593,8 +593,8 @@ public partial class AssetsWorkbenchPage : UserControl
         grid.Children.Add(box);
         return new Border
         {
-            Background = new SolidColorBrush(Color.FromRgb(0x11, 0x15, 0x1A)),
-            BorderBrush = new SolidColorBrush(Color.FromRgb(0x2A, 0x35, 0x40)),
+            Background = WbBrush("WbListBrush"),
+            BorderBrush = WbBrush("WbBorderBrush"),
             BorderThickness = new Thickness(1),
             Height = 220,
             Child = new ScrollViewer
@@ -661,13 +661,13 @@ public partial class AssetsWorkbenchPage : UserControl
         {
             Background = Brushes.Transparent,
             BorderThickness = new Thickness(0),
-            Foreground = new SolidColorBrush(Color.FromRgb(0xD8, 0xE2, 0xEA)),
+            Foreground = WbBrush("WbCodeForegroundBrush"),
         };
         tree.Items.Add(root);
         return new Border
         {
-            Background = new SolidColorBrush(Color.FromRgb(0x11, 0x15, 0x1A)),
-            BorderBrush = new SolidColorBrush(Color.FromRgb(0x2A, 0x35, 0x40)),
+            Background = WbBrush("WbListBrush"),
+            BorderBrush = WbBrush("WbBorderBrush"),
             BorderThickness = new Thickness(1),
             Height = 220,
             Child = new ScrollViewer { Content = tree, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, Padding = new Thickness(4) },
@@ -698,7 +698,7 @@ public partial class AssetsWorkbenchPage : UserControl
             Text = audio.CanPlay
                 ? $"约 {audio.DurationSeconds:0.##} 秒 · {audio.SampleRate} Hz · {audio.Channels} 声道"
                 : audio.UnavailableReason ?? "无法试听",
-            Foreground = new SolidColorBrush(Color.FromRgb(0x7F, 0x93, 0xA4)),
+            Foreground = WbBrush("WbTextMutedBrush"),
             VerticalAlignment = VerticalAlignment.Center,
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(8, 0, 0, 0),
@@ -715,12 +715,12 @@ public partial class AssetsWorkbenchPage : UserControl
         {
             Height = 72,
             Margin = new Thickness(0, 6, 0, 0),
-            Background = new SolidColorBrush(Color.FromRgb(0x11, 0x15, 0x1A)),
+            Background = WbBrush("WbListBrush"),
             ClipToBounds = true,
         };
         var polyline = new System.Windows.Shapes.Polyline
         {
-            Stroke = new SolidColorBrush(Color.FromRgb(0x4C, 0x8D, 0xDA)),
+            Stroke = WbBrush("WbAccentBrush"),
             StrokeThickness = 1,
         };
         canvas.Children.Add(polyline);
@@ -760,7 +760,7 @@ public partial class AssetsWorkbenchPage : UserControl
             var label = new TextBlock
             {
                 Text = row.Label,
-                Foreground = new SolidColorBrush(Color.FromRgb(0x7F, 0x93, 0xA4)),
+                Foreground = WbBrush("WbTextMutedBrush"),
                 TextTrimming = TextTrimming.CharacterEllipsis,
             };
             var value = new TextBlock
@@ -768,8 +768,8 @@ public partial class AssetsWorkbenchPage : UserControl
                 Text = row.Value,
                 TextWrapping = TextWrapping.Wrap,
                 Foreground = row.Highlight
-                    ? new SolidColorBrush(Color.FromRgb(0xFF, 0xD3, 0x7A))
-                    : new SolidColorBrush(Color.FromRgb(0xD8, 0xE2, 0xEA)),
+                    ? WbBrush("WbModifiedBrush")
+                    : WbBrush("WbCodeForegroundBrush"),
             };
             Grid.SetColumn(value, 1);
             grid.Children.Add(label);
@@ -787,8 +787,8 @@ public partial class AssetsWorkbenchPage : UserControl
 
     private static UIElement BuildHexView(string? text) => new Border
     {
-        Background = new SolidColorBrush(Color.FromRgb(0x11, 0x15, 0x1A)),
-        BorderBrush = new SolidColorBrush(Color.FromRgb(0x2A, 0x35, 0x40)),
+        Background = WbBrush("WbListBrush"),
+        BorderBrush = WbBrush("WbBorderBrush"),
         BorderThickness = new Thickness(1),
         Height = 200,
         Child = new TextBox
@@ -797,7 +797,7 @@ public partial class AssetsWorkbenchPage : UserControl
             IsReadOnly = true,
             BorderThickness = new Thickness(0),
             Background = Brushes.Transparent,
-            Foreground = new SolidColorBrush(Color.FromRgb(0xD8, 0xE2, 0xEA)),
+            Foreground = WbBrush("WbCodeForegroundBrush"),
             FontFamily = MonoFont,
             FontSize = 11,
             TextWrapping = TextWrapping.NoWrap,
@@ -811,12 +811,20 @@ public partial class AssetsWorkbenchPage : UserControl
     {
         Text = text ?? string.Empty,
         TextWrapping = TextWrapping.Wrap,
-        Foreground = new SolidColorBrush(Color.FromRgb(0x9F, 0xB0, 0xBF)),
+        Foreground = WbBrush("WbTextSecondaryBrush"),
         LineHeight = 18,
     };
 
     private static string Truncate(string value, int max)
         => value.Length <= max ? value : value[..max] + "…";
+
+    /// <summary>
+    /// 取共享色板画笔（plan-09 收口：资源页原先在 C# 里硬编码 <c>Color.FromRgb</c> 色值，
+    /// 现统一走 <c>Themes/WorkbenchStyles.xaml</c> 的具名画刷，色值只在那一处出现）。
+    /// 取不到时退回不透明黑：宁可观感退化也不抛异常（与 <c>WorkbenchShell.TryFindStyle</c> 同策略）。
+    /// </summary>
+    private static Brush WbBrush(string key)
+        => System.Windows.Application.Current?.TryFindResource(key) as Brush ?? Brushes.Black;
 
     private static readonly FontFamily MonoFont = new("Consolas");
 

@@ -31,6 +31,11 @@
 
     <FontFamily x:Key="WbMonospaceFont">Consolas</FontFamily>
 
+    <!-- 棋盘格透明底（plan-05 图像预览）：两个色阶原先是资源页里的字面量，
+         随本次收口一并集中到色板（值不变）。 -->
+    <SolidColorBrush x:Key="WbCheckerDarkBrush" Color="#1B222B"/>
+    <SolidColorBrush x:Key="WbCheckerLightBrush" Color="#232C36"/>
+
     <!-- ── 面板容器 ────────────────────────────────────────────────── -->
 
     <!-- 浏览列面板：14px 内边距 + 右侧留 8px 给分隔条 -->

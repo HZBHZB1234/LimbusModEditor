@@ -22,10 +22,10 @@
 
 **第二批执行状态（2026-09）**：plan-09 ✅ / plan-10 ✅ / plan-11 ✅ / plan-12 ✅ 均已实施并入库。
 公共骨架与表缓存底座已就位（`WorkbenchShell`、`JsonTreeEditor`、`Application/Caching/`、
-`Themes/WorkbenchStyles.xaml`）；三页均改为 XAML + 共享骨架。
-**仍未闭合的一项**：资源工作台自身尚未迁移到公共骨架（plan-09 §6 那条「资源页不再出现
-硬编码设计色」的门），需一次单独的收口小改（色值/splitter 换成公共件），
-排在三页改造之后以免干扰唯一好用的页面。
+`Themes/WorkbenchStyles.xaml`）；四个工作台均为 XAML + 共享骨架/色板
+（资源页在收口阶段完成色值迁移，结构未动）。
+**验收门全部闭合**：`WorkbenchPages/` 下硬编码设计色为 0（`grep #RRGGBB`/`Color.FromRgb(0x` 无命中），
+色值只存在于 `Themes/Theme.xaml` 与 `Themes/WorkbenchStyles.xaml`。
 
 **实测收益（本机真实数据）**：
 `text-index.db` 二次进页面 608ms、搜索 105ms（vs 逐文件现读 1962ms）；

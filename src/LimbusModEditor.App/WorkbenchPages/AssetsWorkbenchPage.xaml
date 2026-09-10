@@ -18,8 +18,8 @@
         <DrawingBrush x:Key="Checkerboard" TileMode="Tile" Viewport="0,0,16,16" ViewportUnits="Absolute">
             <DrawingBrush.Drawing>
                 <DrawingGroup>
-                    <GeometryDrawing Brush="#1B222B" Geometry="M0,0 H16 V16 H0 Z"/>
-                    <GeometryDrawing Brush="#232C36" Geometry="M0,0 H8 V8 H0 Z M8,8 H16 V16 H8 Z"/>
+                    <GeometryDrawing Brush="{StaticResource WbCheckerDarkBrush}" Geometry="M0,0 H16 V16 H0 Z"/>
+                    <GeometryDrawing Brush="{StaticResource WbCheckerLightBrush}" Geometry="M0,0 H8 V8 H0 Z M8,8 H16 V16 H8 Z"/>
                 </DrawingGroup>
             </DrawingBrush.Drawing>
         </DrawingBrush>
@@ -33,17 +33,17 @@
             <ColumnDefinition x:Name="PreviewColumn" Width="360" MinWidth="260"/>
         </Grid.ColumnDefinitions>
         <!-- 中栏：搜索 / 筛选 / 浏览（plan-03：搜索行只留搜索框，手动导入入口全部移除） -->
-        <Border Grid.Column="0" Background="#171D24" BorderBrush="#2A3540" BorderThickness="1" Padding="14" Margin="0,0,8,0">
+        <Border Grid.Column="0" Background="{StaticResource WbPanelBrush}" BorderBrush="{StaticResource WbBorderBrush}" BorderThickness="1" Padding="14" Margin="0,0,8,0">
             <DockPanel>
                 <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,6">
                     <TextBox x:Name="SearchBox" Width="300" Height="28" VerticalContentAlignment="Center" ToolTip="搜索资源名称或路径（支持中文名 / 原路径）" TextChanged="SearchBox_TextChanged"/>
                 </StackPanel>
                 <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,8">
-                    <TextBlock Text="类型" VerticalAlignment="Center" Foreground="#7F93A4" Margin="0,0,4,0"/>
+                    <TextBlock Text="类型" VerticalAlignment="Center" Foreground="{StaticResource WbTextMutedBrush}" Margin="0,0,4,0"/>
                     <ComboBox x:Name="TypeFilter" Width="110" Height="28" SelectionChanged="Filter_Changed" ToolTip="按资源类型筛选"/>
-                    <TextBlock Text="状态" VerticalAlignment="Center" Foreground="#7F93A4" Margin="8,0,4,0"/>
+                    <TextBlock Text="状态" VerticalAlignment="Center" Foreground="{StaticResource WbTextMutedBrush}" Margin="8,0,4,0"/>
                     <ComboBox x:Name="StateFilter" Width="100" Height="28" SelectionChanged="Filter_Changed" ToolTip="按修改状态筛选"/>
-                    <TextBlock Text="排序" VerticalAlignment="Center" Foreground="#7F93A4" Margin="8,0,4,0"/>
+                    <TextBlock Text="排序" VerticalAlignment="Center" Foreground="{StaticResource WbTextMutedBrush}" Margin="8,0,4,0"/>
                     <ComboBox x:Name="SortFilter" Width="120" Height="28" SelectedIndex="0" SelectionChanged="Filter_Changed" ToolTip="结果排序方式">
                         <ComboBoxItem Content="按名称"/>
                         <ComboBoxItem Content="按大小（大→小）"/>
@@ -59,11 +59,11 @@
                               ToolTip="静态数据 bundle（static_s1_0_assets_all_*）里的表默认不在资源工作台显示，请到「🧩 静态数据工作台」编辑；勾选后此处也可见。"/>
                     <Button Content="清除筛选" Click="ClearFilters_Click" Margin="10,0,0,0" Padding="10,3"/>
                 </StackPanel>
-                <Expander DockPanel.Dock="Top" Header="高级筛选" Foreground="#7F93A4" Margin="0,0,0,8">
+                <Expander DockPanel.Dock="Top" Header="高级筛选" Foreground="{StaticResource WbTextMutedBrush}" Margin="0,0,0,8">
                     <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
-                        <TextBlock Text="最小 KB" VerticalAlignment="Center" Foreground="#7F93A4" Margin="0,0,4,0"/>
+                        <TextBlock Text="最小 KB" VerticalAlignment="Center" Foreground="{StaticResource WbTextMutedBrush}" Margin="0,0,4,0"/>
                         <TextBox x:Name="MinSizeFilter" Width="60" Height="28" VerticalContentAlignment="Center" TextChanged="SearchBox_TextChanged"/>
-                        <TextBlock Text="最大 KB" VerticalAlignment="Center" Foreground="#7F93A4" Margin="8,0,4,0"/>
+                        <TextBlock Text="最大 KB" VerticalAlignment="Center" Foreground="{StaticResource WbTextMutedBrush}" Margin="8,0,4,0"/>
                         <TextBox x:Name="MaxSizeFilter" Width="60" Height="28" VerticalContentAlignment="Center" TextChanged="SearchBox_TextChanged"/>
                         <CheckBox x:Name="ReplacedOnlyFilter" Content="仅已替换" VerticalAlignment="Center" Margin="10,0,0,0" Checked="Filter_Changed" Unchecked="Filter_Changed"/>
                     </StackPanel>
@@ -75,7 +75,7 @@
                                   IsChecked="True" Click="AssetViewMode_Click" ToolTip="按游戏容器目录浏览（类文件夹，双击展开）"/>
                 </StackPanel>
                 <Grid>
-                    <ListView x:Name="AssetList" Visibility="Collapsed" Background="#11151A" BorderBrush="#2A3540" Foreground="#E8EDF2" SelectionChanged="AssetList_SelectionChanged"
+                    <ListView x:Name="AssetList" Visibility="Collapsed" Background="{StaticResource WbListBrush}" BorderBrush="{StaticResource WbBorderBrush}" Foreground="{StaticResource WbTextPrimaryBrush}" SelectionChanged="AssetList_SelectionChanged"
                              MouseDoubleClick="AssetList_DoubleClick" PreviewMouseRightButtonDown="AssetList_PreviewMouseRightButtonDown"
                              ContextMenu="{StaticResource AssetContextMenu}">
                         <ListView.ItemContainerStyle>
@@ -84,7 +84,7 @@
                                 <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
                                 <Style.Triggers>
                                     <DataTrigger Binding="{Binding State}" Value="Modified">
-                                        <Setter Property="Foreground" Value="#FFD37A"/>
+                                        <Setter Property="Foreground" Value="{StaticResource WbModifiedBrush}"/>
                                     </DataTrigger>
                                 </Style.Triggers>
                             </Style>
@@ -99,7 +99,7 @@
                         </ListView.View>
                     </ListView>
                     <TreeView x:Name="AssetTree"
-                              Background="#11151A" BorderBrush="#2A3540" Foreground="#E8EDF2"
+                              Background="{StaticResource WbListBrush}" BorderBrush="{StaticResource WbBorderBrush}" Foreground="{StaticResource WbTextPrimaryBrush}"
                               VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
                               ScrollViewer.CanContentScroll="True"
                               ContextMenu="{StaticResource AssetContextMenu}"
@@ -121,34 +121,34 @@
                       ToolTip="拖拽调整预览区宽度；双击复位默认占比。">
             <GridSplitter.Template>
                 <ControlTemplate TargetType="GridSplitter">
-                    <Border x:Name="Handle" Width="1" HorizontalAlignment="Center" Background="#2A3540"/>
+                    <Border x:Name="Handle" Width="1" HorizontalAlignment="Center" Background="{StaticResource WbBorderBrush}"/>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="Handle" Property="Background" Value="#4C8DDA"/>
+                            <Setter TargetName="Handle" Property="Background" Value="{StaticResource WbAccentBrush}"/>
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
             </GridSplitter.Template>
         </GridSplitter>
         <!-- 右栏：预览与选中资源操作 -->
-        <Border Grid.Column="2" Background="#171D24" BorderBrush="#2A3540" BorderThickness="1" Padding="12">
+        <Border Grid.Column="2" Background="{StaticResource WbPanelBrush}" BorderBrush="{StaticResource WbBorderBrush}" BorderThickness="1" Padding="12">
             <ScrollViewer VerticalScrollBarVisibility="Auto">
                 <StackPanel>
                     <TextBlock Text="创作状态" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,14"/>
-                    <TextBlock Text="资源" Foreground="#7F93A4"/>
+                    <TextBlock Text="资源" Foreground="{StaticResource WbTextMutedBrush}"/>
                     <TextBlock x:Name="AssetCountText" Text="0" FontSize="24" Margin="0,2,0,14"/>
-                    <TextBlock Text="编辑操作" Foreground="#7F93A4"/>
+                    <TextBlock Text="编辑操作" Foreground="{StaticResource WbTextMutedBrush}"/>
                     <TextBlock x:Name="EditCountText" Text="0" FontSize="24" Margin="0,2,0,4"/>
-                    <TextBlock Text="（按「已修改资源」数统计，同一资源重复替换只算一次）" Foreground="#5F7285" FontSize="10.5" TextWrapping="Wrap" Margin="0,0,0,12"/>
+                    <TextBlock Text="（按「已修改资源」数统计，同一资源重复替换只算一次）" Foreground="{StaticResource WbTextFaintBrush}" FontSize="10.5" TextWrapping="Wrap" Margin="0,0,0,12"/>
                     <Separator Margin="0,4,0,12"/>
                     <TextBlock Text="预览" FontWeight="SemiBold" Margin="0,0,0,6"/>
                     <!-- plan-05：预览区按 Kind 切换（图像/文本/JSON/音频/行/十六进制/说明） -->
                     <ContentControl x:Name="PreviewHost" MinHeight="150"/>
-                    <TextBlock x:Name="PreviewInfoText" Text="无预览" Foreground="#7F93A4" TextWrapping="Wrap" Margin="0,6,0,10"/>
+                    <TextBlock x:Name="PreviewInfoText" Text="无预览" Foreground="{StaticResource WbTextMutedBrush}" TextWrapping="Wrap" Margin="0,6,0,10"/>
                     <!-- plan-01 第 3 步：选中资源属性（异步加载，代际守卫） -->
-                    <Expander x:Name="PropertyExpander" Header="属性" Foreground="#7F93A4" Margin="0,0,0,10">
+                    <Expander x:Name="PropertyExpander" Header="属性" Foreground="{StaticResource WbTextMutedBrush}" Margin="0,0,0,10">
                         <StackPanel>
-                            <TextBlock x:Name="PropertyInfoText" Text="—" Foreground="#5F7285" FontSize="10.5" TextWrapping="Wrap" Margin="0,4,0,6"/>
+                            <TextBlock x:Name="PropertyInfoText" Text="—" Foreground="{StaticResource WbTextFaintBrush}" FontSize="10.5" TextWrapping="Wrap" Margin="0,4,0,6"/>
                             <ItemsControl x:Name="PropertyList">
                                 <ItemsControl.ItemTemplate>
                                     <DataTemplate>
@@ -157,8 +157,8 @@
                                                 <ColumnDefinition Width="96"/>
                                                 <ColumnDefinition Width="*"/>
                                             </Grid.ColumnDefinitions>
-                                            <TextBlock Text="{Binding Label}" Foreground="#7F93A4" TextWrapping="Wrap"/>
-                                            <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" Foreground="#D8E2EA"/>
+                                            <TextBlock Text="{Binding Label}" Foreground="{StaticResource WbTextMutedBrush}" TextWrapping="Wrap"/>
+                                            <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" Foreground="{StaticResource WbCodeForegroundBrush}"/>
                                         </Grid>
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>
@@ -170,26 +170,26 @@
                     <Grid>
                         <Grid.ColumnDefinitions><ColumnDefinition Width="52"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                         <Grid.RowDefinitions><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/></Grid.RowDefinitions>
-                        <TextBlock Grid.Row="0" Text="名称" Foreground="#7F93A4"/><TextBlock Grid.Row="0" Grid.Column="1" x:Name="SelectedAssetNameText" Text="未选择" TextWrapping="Wrap"/>
-                        <TextBlock Grid.Row="1" Text="位置" Foreground="#7F93A4"/><TextBlock Grid.Row="1" Grid.Column="1" x:Name="SelectedAssetPathText" Text="—" TextWrapping="Wrap"/>
-                        <TextBlock Grid.Row="2" Text="类型" Foreground="#7F93A4"/><TextBlock Grid.Row="2" Grid.Column="1" x:Name="SelectedAssetTypeText" Text="—"/>
-                        <TextBlock Grid.Row="3" Text="大小" Foreground="#7F93A4"/><TextBlock Grid.Row="3" Grid.Column="1" x:Name="SelectedAssetSizeText" Text="—"/>
-                        <TextBlock Grid.Row="4" Text="状态" Foreground="#7F93A4"/><TextBlock Grid.Row="4" Grid.Column="1" x:Name="SelectedStateText" Text="—"/>
+                        <TextBlock Grid.Row="0" Text="名称" Foreground="{StaticResource WbTextMutedBrush}"/><TextBlock Grid.Row="0" Grid.Column="1" x:Name="SelectedAssetNameText" Text="未选择" TextWrapping="Wrap"/>
+                        <TextBlock Grid.Row="1" Text="位置" Foreground="{StaticResource WbTextMutedBrush}"/><TextBlock Grid.Row="1" Grid.Column="1" x:Name="SelectedAssetPathText" Text="—" TextWrapping="Wrap"/>
+                        <TextBlock Grid.Row="2" Text="类型" Foreground="{StaticResource WbTextMutedBrush}"/><TextBlock Grid.Row="2" Grid.Column="1" x:Name="SelectedAssetTypeText" Text="—"/>
+                        <TextBlock Grid.Row="3" Text="大小" Foreground="{StaticResource WbTextMutedBrush}"/><TextBlock Grid.Row="3" Grid.Column="1" x:Name="SelectedAssetSizeText" Text="—"/>
+                        <TextBlock Grid.Row="4" Text="状态" Foreground="{StaticResource WbTextMutedBrush}"/><TextBlock Grid.Row="4" Grid.Column="1" x:Name="SelectedStateText" Text="—"/>
                     </Grid>
-                    <TextBlock Text="常用" Foreground="#7F93A4" Margin="0,14,0,6"/>
+                    <TextBlock Text="常用" Foreground="{StaticResource WbTextMutedBrush}" Margin="0,14,0,6"/>
                     <Button x:Name="ReplaceAssetButton" Content="替换选中资源…（可直接拖图进来）" Click="ReplaceAsset_Click" IsEnabled="False" Padding="8,6"/>
                     <Button x:Name="EditTextButton" Content="编辑文本内容…" Click="EditTextAsset_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"
                             ToolTip="文本 / JSON 资源的内置编辑器：改完保存即登记为替换（可撤销，导出时写入模组）。"/>
                     <Button x:Name="ClearEditsButton" Content="撤销此资源的修改" Click="ClearEdits_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"
                             ToolTip="清除替换文件 / Unity 字段 / Sprite 元数据三类编辑标记；导出将不再包含此资源的修改。"/>
-                    <Expander Header="高级操作" Foreground="#7F93A4" Margin="0,14,0,0">
+                    <Expander Header="高级操作" Foreground="{StaticResource WbTextMutedBrush}" Margin="0,14,0,0">
                         <StackPanel Margin="0,6,0,0">
                             <StackPanel x:Name="AtlasPanel" Visibility="Collapsed">
                                 <TextBlock Text="图集工具" FontWeight="SemiBold" Margin="0,0,0,6"/>
                                 <Grid Margin="0,0,0,6">
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                    <StackPanel Margin="0,0,4,0"><TextBlock Text="列" Foreground="#7F93A4"/><TextBox x:Name="AtlasColumnsBox" Text="2" Height="24"/></StackPanel>
-                                    <StackPanel Grid.Column="1" Margin="4,0,0,0"><TextBlock Text="行" Foreground="#7F93A4"/><TextBox x:Name="AtlasRowsBox" Text="2" Height="24"/></StackPanel>
+                                    <StackPanel Margin="0,0,4,0"><TextBlock Text="列" Foreground="{StaticResource WbTextMutedBrush}"/><TextBox x:Name="AtlasColumnsBox" Text="2" Height="24"/></StackPanel>
+                                    <StackPanel Grid.Column="1" Margin="4,0,0,0"><TextBlock Text="行" Foreground="{StaticResource WbTextMutedBrush}"/><TextBox x:Name="AtlasRowsBox" Text="2" Height="24"/></StackPanel>
                                 </Grid>
                                 <StackPanel Orientation="Horizontal">
                                     <Button x:Name="SplitAtlasButton" Content="拆分图集" Click="SplitAtlas_Click" IsEnabled="False" Padding="8,4" Margin="0,0,4,0"/>
@@ -207,9 +207,9 @@
                             <Button x:Name="FsbInspectButton" Content="查看 FSB 结构" Click="InspectFsb_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"/>
                         </StackPanel>
                     </Expander>
-                    <Expander Header="调试" Foreground="#7F93A4" Margin="0,12,0,0">
+                    <Expander Header="调试" Foreground="{StaticResource WbTextMutedBrush}" Margin="0,12,0,0">
                         <StackPanel Margin="0,6,0,0">
-                            <TextBlock Text="调试状态" Foreground="#7F93A4"/>
+                            <TextBlock Text="调试状态" Foreground="{StaticResource WbTextMutedBrush}"/>
                             <TextBlock x:Name="DebugStateText" Text="未应用" TextWrapping="Wrap" Margin="0,2,0,8"/>
                             <Button Content="构建调试覆盖层" Click="BuildOverlay_Click" Padding="8,6"/>
                             <Button Content="应用并启动调试" Click="DebugApply_Click" Margin="0,8,0,0" Padding="8,6"/>

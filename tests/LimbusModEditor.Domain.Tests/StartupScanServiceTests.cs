@@ -185,4 +185,87 @@ public sealed class StartupScanServiceTests : IDisposable
         Assert.Contains("共 1 个 bundle", assetsStep.Detail);
         Assert.Equal(0, report.FailedCount);
     }
+
+    // ── plan-15：四张表（启动即全量扫描 + 模态窗口的数据源）─────────────
+
+    [Fact]
+    public async Task PrepareDatabaseAsync_creates_all_four_databases_without_a_project()
+    {
+        // 启动阶段还没有项目：四张表的库仍必须先建出来（否则模态窗口一屏都是「—」，
+        // 页面也会再撞「no such table」）。
+        var step = await _service.PrepareDatabaseAsync();
+
+        Assert.Equal(StartupScanService.CacheDatabaseStep, step.Key);
+        Assert.Equal(StartupScanStepStatus.Scanned, step.Status);
+        foreach (var path in StartupScanService.CacheDatabasePaths(_env.CacheDirectory))
+            Assert.True(File.Exists(path), $"缺少缓存库：{path}");
+    }
+
+    [Fact]
+    public async Task Report_projects_exactly_four_cache_table_rows()
+    {
+        var report = await _service.ScanAllAsync(Project());
+        var counts = _service.ProbeCacheTablesAfterScan();
+        var rows = StartupScanReport.CreateCacheTableRows(counts, report);
+
+        // 四行：资源 / 音频 / 静态表 / 文本，且状态文案来自 Application 层（UI 不另写映射）。
+        Assert.Equal(4, rows.Count);
+        Assert.Equal(StartupScanService.CacheDatabaseFileNames, rows.Select(x => x.FileName).ToArray());
+        Assert.Equal(["资源索引", "音频索引", "静态表索引", "文本索引"], rows.Select(x => x.Label).ToArray());
+        Assert.All(rows, x => Assert.False(string.IsNullOrWhiteSpace(x.StatusText)));
+
+        // 现场行数：探针必须把每张业务表的行数如实读出来（库刚建好 → 0 行，不是 null）。
+        Assert.Equal(4, counts.Count);
+        Assert.All(counts, x => Assert.Equal(0, x.PrimaryCount));
+        Assert.All(counts, x => Assert.Equal(0, x.SecondaryCount));
+        Assert.Equal(["bundles", "banks", "tables", "files"], counts.Select(x => x.PrimaryTable).ToArray());
+        Assert.Equal(["assets", "samples", "documents", "hits"], counts.Select(x => x.SecondaryTable).ToArray());
+
+        // 三张工作台表能对上自己的扫描步骤（资源索引没有 WorkbenchCacheKind 值 → 走「尚未/缓存库」步骤）。
+        Assert.Equal(StartupScanService.CacheDatabaseStep, rows[0].Step.Key);
+        Assert.Equal(StartupScanService.BankIndexStep, rows[1].Step.Key);
+        Assert.Equal(StartupScanService.StaticTablesStep, rows[2].Step.Key);
+        Assert.Equal(StartupScanService.TextIndexStep, rows[3].Step.Key);
+        Assert.Null(rows[0].Kind);
+    }
+
+    [Fact]
+    public void Report_without_a_scan_still_projects_four_rows()
+    {
+        // 模态窗口「打开即探针、再去扫」：还没有报告时也必须能出四行。
+        // 此时状态文案是「—」（尚未扫描）—— 它跟「跳过」是两件事：跳过表示扫过了但前提不成立。
+        var rows = StartupScanReport.CreateCacheTableRows(_service.ProbeCacheTables(), null);
+
+        Assert.Equal(4, rows.Count);
+        Assert.All(rows, x => Assert.Equal("等待", x.StatusText));
+        Assert.All(rows, x => Assert.Null(x.Counts!.PrimaryCount)); // 库还没建：行数是「读不到」而不是 0
+    }
+
+    [Fact]
+    public async Task ScanWorkbenchIndexesAsync_can_run_independently_of_the_asset_scan()
+    {
+        var steps = await _service.ScanWorkbenchIndexesAsync(Project());
+
+        Assert.Equal(
+            [StartupScanService.BankIndexStep, StartupScanService.StaticTablesStep, StartupScanService.TextIndexStep],
+            steps.Select(x => x.Key).ToArray());
+        Assert.Equal(
+            [WorkbenchCacheKind.BankIndex, WorkbenchCacheKind.StaticTables, WorkbenchCacheKind.TextIndex],
+            steps.Select(x => x.CacheDatabase).ToArray());
+        // 没配游戏目录：三库各自跳过并给出中文原因，绝不抛异常（失败隔离）。
+        Assert.All(steps, x => Assert.Equal(StartupScanStepStatus.Skipped, x.Status));
+        Assert.All(steps, x => Assert.False(string.IsNullOrWhiteSpace(x.Detail)));
+    }
+
+    [Fact]
+    public async Task ScanAllAsync_propagates_cancellation_so_a_closed_modal_stops_the_scan()
+    {
+        // 模态窗口关窗 = 取消（用户确认：扫描本身不可取消，只提供关窗）。取消必须真的中断扫描，
+        // 而不是「假装完成」——否则宿主会拿一份半截报告去保存项目、预热页面。
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => _service.ScanAllAsync(Project(), cancellationToken: cancellation.Token));
+    }
 }

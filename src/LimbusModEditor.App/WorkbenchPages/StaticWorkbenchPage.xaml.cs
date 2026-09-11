@@ -174,6 +174,12 @@ public partial class StaticWorkbenchPage : UserControl
 
     // ── 定位与索引 ───────────────────────────────────────────────────
 
+    /// <summary>
+    /// 宿主在启动扫描完成后调用（plan-15）：**主动**刷新本页数据到最新索引。
+    /// 不强制重建索引（扫描刚写完库，这里是热读路径：本机实测 1392 张表 11ms）。
+    /// </summary>
+    public Task ReloadFromIndexAsync() => RefreshAsync();
+
     private async Task RefreshAsync(bool forceRebuild = false)
     {
         var gameDirectory = _host.Env.EffectiveGameDirectory(_host.Project);

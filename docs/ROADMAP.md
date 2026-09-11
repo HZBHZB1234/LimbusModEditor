@@ -612,6 +612,35 @@ static mod 可以使用资源工作台类似的页面。事实上我们也可以
 测试 549 → **561**（74 Format + 487 Domain）；新增 `BankTreeRulesTests` / `LangTextDisplayTests` /
 `AttachLangRoot` 契约与真实数据断言更新。离屏渲染脚手架在 git 忽略的 `artifacts/wpf-check/`。
 
+## P3.15 启动即全量扫描四张表 + 统一模态窗口（2026-09，完成）
+
+用户要求「软件启动后无论何时自动对四张表扫描更新，随后加载到软件与前端；这一系列行为在一个模态
+窗口中进行，完成后模态自动消失；并把现有加载资源按钮与模态窗口与这个功能合并」，按
+`docs/plans/plan-15-startup-scan-modal.md` 实施：
+
+- **`StartupScanService` 拆出可独立调用的扫描原语**：`PrepareDatabaseAsync`（建库/校表的异步步骤版，
+  **没有项目也能跑**）、`ScanUnityAssetsStepAsync`、`ScanWorkbenchIndexesAsync`、`ScanTextIndexStepAsync`；
+  `ScanAllAsync` 签名与语义未变（内部改走这些原语），plan-13 的四条启动扫描断言一字未改。
+- **四张表的归属写进数据模型**：`CacheTableCatalog` 是「文件名 / WorkbenchCacheKind / 中文名」的唯一来源；
+  `StartupScanStepResult` 增加 `CacheDatabase` 与 `RowCount`；新增 `ProbeCacheTables()` /
+  `ProbeCacheTablesAfterScan()`（库文件时间 + 两张业务表行数，读不到记 null 而不抛）与
+  `StartupScanReport.CreateCacheTableRows(...)`（资源 / 音频 / 静态表 / 文本四行投影，UI 不另写映射）。
+  新增 `StartupScanStepStatus.Pending`（「打开即探针」时的「等待」，与「跳过」严格区分）。
+- **统一模态 `App/StartupScanDialog.cs`**：打开即跑、**不可取消**（用户确认），四行实时显示
+  「表 → 业务表行数 → 状态 → 库写入时间」+ 进度条 + ETA + 逐步骤明细；成功 → 800ms 后**自动关闭**，
+  有失败/跳过 → 保留窗口给「关闭」+ 中文原因；关窗 = 取消（CTS 传进扫描，取消真的中断）。
+- **合并入口**：删除 `App/ScanDialog.cs` 与两步式 `PromptScanAsync`，侧边栏
+  「① 获取资源 → 自动加载游戏资源…」与启动/打开项目走同一个 `MainWindow.RunStartupScanAsync`；
+  原来「没有 Unity 缓存目录」挡路的 MessageBox 取消（改由模态按行写「跳过 + 原因」）。
+- **加载到前端**：用户口径是「打开软件时刷新所有表单，而不是切页懒加载」——新增
+  `MainWindow.WarmUpWorkbenchesAsync()` 主动创建 6 个常驻页面并逐页预热（音/静/文三页新增公开
+  `ReloadFromIndexAsync()`，文本页越过 `_loaded` 首次显示守卫）；逐页 try/catch 隔离，只读索引库、
+  不解析任何文件。
+
+测试 561 → **573**（74 Format + 499 Domain，+5 Domain：`PrepareDatabaseAsync` 无项目建库 /
+四行投影与表名 / 无报告也能出四行 / 工作台索引可独立调用 / 取消真的中断）。
+仓库既有 flake `RealBankIndexSmokeTests` 的墙钟预算断言在整包并行下仍偶发（单独跑 2/2 通过）。
+
 ## P4：工程质量和交付
 
 - 把当前代码后置 UI 逐步迁移到 MVVM，但不牺牲现有 Windows-only 可运行性。

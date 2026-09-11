@@ -352,6 +352,17 @@ public sealed partial class TextWorkbenchPage : UserControl
 
     // ── 加载与索引 ───────────────────────────────────────────────────
 
+    /// <summary>
+    /// 宿主在启动扫描完成后调用（plan-15）：**主动**刷新本页数据到最新索引。
+    /// 用户口径是「打开软件时刷新所有表单，而不是切页懒加载」，因此这里越过
+    /// <c>_loaded</c> 首次显示守卫；只读索引库，不重新解析任何文件。
+    /// </summary>
+    public async Task ReloadFromIndexAsync()
+    {
+        _loaded = true;
+        await RefreshAsync();
+    }
+
     private async Task RefreshAsync()
     {
         var langRoot = _service.ResolveLangRoot(_host.Env.EffectiveGameDirectory(_host.Project));

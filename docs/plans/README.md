@@ -21,6 +21,7 @@
 | [plan-12](plan-12-static-workbench-shell-ui.md) | 第二批需求 | 静态数据工作台重做：资源工作台同款页面 + `cache/static-tables.db` | plan-09 |
 | [plan-13](plan-13-user-feedback-fixes.md) | 第三批需求（8 项，含截图反馈） | 用户反馈修复批次：tooltip 字体 / 图像行序 / 启动自动扫描四库 / lang 缺表自愈 / JSON 树滚轮 / 音频工作台重做 / 图像适应窗口 / 下拉裁字 | plan-09~12 |
 | [plan-14](plan-14-feedback-round2.md) | 用户反馈第二轮（5 项，含截图） | bank 行对比度 / 事件 bank 默认隐藏 / 单 FSB 自动展开 / lang 数据源改为语言目录内部 + 预览失败修复 / lang 导出入口移到侧边栏 | plan-13 |
+| [plan-15](plan-15-startup-scan-modal.md) | 用户反馈第四批（3 项） | 启动即全量扫描四张表 + 统一模态窗口（打开即扫、完成自动消失、失败才留下）+ 并入「加载资源」按钮 + 启动即预热四个工作台（不切页懒加载） | plan-13 / plan-14 |
 
 **第二批执行状态（2026-09）**：plan-09 ✅ / plan-10 ✅ / plan-11 ✅ / plan-12 ✅ 均已实施并入库。
 公共骨架与表缓存底座已就位（`WorkbenchShell`、`JsonTreeEditor`、`Application/Caching/`、
@@ -31,6 +32,12 @@
 
 **第三批执行状态（2026-09）**：plan-13 ✅ 已实施并入库（8 项全部修复；
 四个缓存库改为**每次启动自动建库/校表 + 增量扫描**，新入口 `StartupScanService`）。
+
+**第五批执行状态（2026-09）**：plan-15 ✅ 已实施（3 项：启动即全量扫描四张表；
+统一模态窗口 `StartupScanDialog`（打开即扫、**不可取消**、完成自动消失、有跳过/失败才留下）；
+侧边栏「自动加载游戏资源…」与启动合并为同一入口，`ScanDialog` 已删除；
+「加载到前端」= 启动即预热四个工作台，不再依赖切页懒加载）。
+测试 561 → **573**（74 Format + 499 Domain）。
 
 **第四批执行状态（2026-09）**：plan-14 ✅ 已实施（5 项：bank 行对比度改为工作台自带树模板
 ——离屏实测选中行底色从「与列表底相同」变为 `#20304A`（亮度差 +26）；bank 树默认隐藏事件 bank
@@ -65,7 +72,7 @@ plan-01 不依赖布局改造，可随时开工；plan-03/04 很小，也可在 
    dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r win-x64 --self-contained false -o artifacts/publish-win-x64 --no-restore
    ```
 
-   当前基线（2026-09，plan-14 完成后实测）：**562 个测试全绿（74 Format + 488 Domain）**。
+   当前基线（2026-09，plan-15 完成后实测）：**573 个测试全绿（74 Format + 499 Domain）**。
    历史：plan-02 期为 274（62+212），plan-08 期为 334（74+260），plan-09 期为 476（74+402），
    plan-09~12 完成后为 528（74+454），plan-13 完成后为 549（74+475），plan-14 完成后为 562（74+488）。
    注 1：2026-09 本机曾出现 2 个真实 lang 门控测试失败，根因是测试把活动语言写死为 `LLC_zh-CN`，

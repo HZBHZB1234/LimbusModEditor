@@ -194,12 +194,11 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     }
 
     /// <summary>启动引导（傻瓜化）：有上次项目就自动恢复；否则主窗口的
-    /// 「无项目遮罩」引导「新建 / 打开 / 最近项目」（不再弹独立欢迎窗口）。</summary>
+    /// 「无项目遮罩」引导「新建 / 打开 / 最近项目」（不再弹独立欢迎窗口）。
+    /// plan-15：四个缓存库不再在这里单独建 —— 统一交给启动模态（见
+    /// <see cref="RunStartupScanAsync"/>），无论有无项目都跑一遍。</summary>
     private async Task OnWindowLoadedAsync()
     {
-        // 四个缓存库先建好/校好（新建、0 字节、上次建库被打断的半成品都在这里补掉），
-        // 这样各工作台首次打开时不会再撞上「库文件在但没有表」。
-        await EnsureStartupCacheDatabasesAsync();
         var last = _env.Config.LastProjectFile;
         if (!string.IsNullOrWhiteSpace(last) && File.Exists(last))
         {
@@ -210,59 +209,97 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
             }
             catch (Exception ex) { ShowError("恢复上次项目失败", ex); }
         }
+        // 没有可恢复的项目：启动扫描仍要跑（打开即扫，用户不必先点任何按钮）
+        // —— 它会把四个索引库准备好，并说明「还没有项目所以跳过资源扫描」。
+        await RunStartupScanAsync();
+        await WarmUpWorkbenchesAsync();
         UpdateHint();
     }
 
-    /// <summary>启动时把四个缓存库（资源 / 音频 / 静态表 / lang 文本）建好并校表。
-    /// 失败只提示不改流程：缓存只影响速度。</summary>
-    private async Task EnsureStartupCacheDatabasesAsync()
+    /// <summary>
+    /// 启动扫描的唯一入口（plan-15）：**一个模态窗口跑完四张表 + 全部资源**，扫完窗口自动关闭，
+    /// 随后保存项目、刷新界面，并把四个工作台的数据全部预热。
+    ///
+    /// <para>它同时是侧边栏「① 获取资源 → 自动加载游戏资源…」的实现 —— 按钮与启动走同一条路，
+    /// 原来的两步式只扫资源的 <c>ScanDialog</c> 已删除。</para>
+    ///
+    /// <para><b>为什么每次启动都真跑一遍</b>：扫描是增量的（每步真实枚举磁盘、只重解析签名变过的
+    /// 文件），热启动秒级；自动跑比让用户自己判断「要不要点扫描」更符合傻瓜化目标，也避免各工作台
+    /// 首次打开才发现索引没建。</para>
+    /// </summary>
+    /// <param name="projectMatchesIndex">打开项目时刚回灌成功才传 true：索引里每一行都能在项目里
+    /// 找到对应记录，于是资源扫描可以跳过「119 万行逐条对账」（实测那一步占 50 秒里的 ~40 秒）。
+    /// 手动点侧边栏按钮时为 false（慢但绝对安全）。</param>
+    private async Task RunStartupScanAsync(bool projectMatchesIndex = false)
     {
+        _startupScanCancellation?.Cancel();
+        _startupScanCancellation = null;
+        StartupScanReport? report;
         try
         {
-            var repaired = await Task.Run(() => _startupScan.EnsureCacheDatabases());
-            if (repaired.Count > 0)
-                StatusText.Text = $"缓存库已就绪（新建/补表 {repaired.Count} 个：{string.Join("、", repaired.Select(Path.GetFileName))}）";
+            StatusText.Text = _project is null
+                ? "启动扫描：正在准备四个索引库…"
+                : "启动扫描：正在检查全部资源与四张表…";
+            var dialog = new StartupScanDialog(_startupScan, _cacheScan, _project, projectMatchesIndex) { Owner = this };
+            _startupScanCancellation = dialog.Cancellation;
+            dialog.ShowDialog();
+            report = dialog.Result;
         }
         catch (Exception ex)
         {
-            StatusText.Text = $"缓存库检查失败（不影响功能，仅影响速度）：{ex.Message}";
+            ShowError("启动扫描失败", ex);
+            return;
         }
+        finally
+        {
+            _startupScanCancellation = null;
+        }
+
+        if (report is null) { UpdateHint(); return; } // 用户关窗取消：不保存、不刷新
+
+        // 扫描写了项目资产表 → 落盘（静默失败，不打断流程）。
+        if (report.ScannedCount > 0 && _project is not null && _projectFile is not null)
+            await SaveProjectQuietlyAsync();
+
+        // 「加载到前端」：先把四个工作台的数据全部预热，再刷新界面状态。
+        await WarmUpWorkbenchesAsync();
+        RefreshProjectState();
+        StatusText.Text = report.Describe();
+        if (_project is null || _project.Assets.Count == 0) UpdateHint();
     }
 
     /// <summary>
-    /// 启动扫描（本次改造）：每次启动 / 打开项目都<b>把全部资源扫一遍</b>——
-    /// 游戏资源（Unity 缓存里全部 bundle）+ 音频 / 静态表 / lang 三个索引，
-    /// 四个缓存库也一并建好。后台执行、状态栏实时显示进度，完成后保存项目并刷新界面。
+    /// 把四个工作台的数据一次性预热（plan-15，用户口径：**打开软件时刷新所有表单，而不是切页懒加载**）。
     ///
-    /// <para>为什么不再用「空项目才弹扫描窗口」：扫描是增量的（每步都真实枚举磁盘、
-    /// 只重解析签名变过的文件），热启动秒级；自动跑一遍比让用户自己判断「要不要点扫描」
-    /// 更符合傻瓜化目标，也避免各工作台首次打开才发现索引没建。</para>
+    /// <para>页面 <b>主动创建</b>（未创建过的一并建出来），每个页面自己去读各自的表缓存 —— 扫描已经
+    /// 把这些库写好，所以这一步只是读现成数据（本机实测：bank 917ms / 静态表 11ms / text 608ms），
+    /// 不解析任何文件。逐页 try/catch 隔离：某一页读失败只写状态栏，不影响其它页，更不影响扫描结论。</para>
     /// </summary>
-    private async Task RunStartupScanAsync()
+    private async Task WarmUpWorkbenchesAsync()
     {
-        if (_project is null) return;
-        _startupScanCancellation?.Cancel();
-        var cancellation = new CancellationTokenSource();
-        _startupScanCancellation = cancellation;
-        var progress = new Progress<StartupScanProgress>(p => StatusText.Text = $"{p.Label}：{p.Detail}");
-        try
+        foreach (var key in PageOrder)
         {
-            StatusText.Text = "启动扫描：正在检查全部资源与缓存库…";
-            // projectMatchesIndex：刚才回灌成功时，索引里每一行都能在项目里找到对应记录，
-            // 于是扫描可以跳过「119 万行逐条对账」（实测那一步占 50 秒里的 ~40 秒）。
-            var report = await _startupScan.ScanAllAsync(_project, progress, cancellation.Token, _assetsMatchIndex);
-            if (cancellation.IsCancellationRequested) return;
-            if (report.ScannedCount > 0 && _projectFile is not null) await SaveProjectQuietlyAsync();
-            RefreshProjectState();
-            StatusText.Text = report.Describe();
-            if (_project.Assets.Count == 0) UpdateHint();
-        }
-        catch (OperationCanceledException) { /* 关窗 / 切项目：正常取消 */ }
-        catch (Exception ex) { ShowError("启动扫描失败", ex); }
-        finally
-        {
-            if (ReferenceEquals(_startupScanCancellation, cancellation)) _startupScanCancellation = null;
-            cancellation.Dispose();
+            try
+            {
+                if (!_pages.ContainsKey(key))
+                {
+                    var created = CreatePage(key);
+                    if (created is null) continue;
+                    _pages[key] = created;
+                }
+                switch (_pages[key])
+                {
+                    case AssetsWorkbenchPage assets: assets.OnProjectRefreshed(); break;
+                    case BankWorkbenchPage bank: await bank.ReloadFromIndexAsync(); break;
+                    case StaticWorkbenchPage tables: await tables.ReloadFromIndexAsync(); break;
+                    case TextWorkbenchPage texts: await texts.ReloadFromIndexAsync(); break;
+                    case SettingsPage settings: settings.Reload(); break;
+                }
+            }
+            catch (Exception ex)
+            {
+                StatusText.Text = $"预热「{key}」工作台失败（不影响其它页面）：{ex.Message}";
+            }
         }
     }
 
@@ -308,8 +345,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     }
 
     /// <summary>项目就绪后的无感流程：共享目录自动配置；打开时从扫描索引
-    /// 后台回灌纯引用资产（项目文件已瘦身，不再携带它们）；项目仍无资源时
-    /// 自动弹出扫描窗口（傻瓜化核心）。</summary>
+    /// 后台回灌纯引用资产（项目文件已瘦身，不再携带它们）；随后跑统一启动扫描模态
+    /// （plan-15：每次打开/恢复项目都把四张表 + 全部资源扫一遍，增量、只重解析签名变过的文件）。</summary>
     private async Task AfterProjectOpenedAsync(string prefix)
     {
         RefreshProjectState(prefix);
@@ -317,10 +354,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
         await RehydrateAssetsFromIndexAsync();
         RefreshProjectState(prefix);
 
-        // 启动扫描（本次改造）：每次打开/恢复项目都把全部资源扫一遍（增量，
-        // 只重解析签名变过的文件），四个缓存库也在这里补齐。空项目同样走这条路，
-        // 不再弹「先扫描资源」的窗口——扫完提示条会直接引导下一步。
-        await RunStartupScanAsync();
+        await RunStartupScanAsync(_assetsMatchIndex);
+        await WarmUpWorkbenchesAsync();
         UpdateHint();
     }
 
@@ -444,34 +479,12 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
         if (report.Any) StatusText.Text = $"自动配置：{report.Describe()}（共享设置已保存到程序目录）";
     }
 
-    /// <summary>加载游戏资源入口（侧边栏「① 获取资源」）。autoStart=true 时
-    /// 窗口打开即开始（用于新建/打开空项目后的自动引导）。</summary>
-    private async void Scan_Click(object sender, RoutedEventArgs e) => await PromptScanAsync(autoStart: false);
-
-    private async Task PromptScanAsync(bool autoStart)
+    /// <summary>加载游戏资源入口（侧边栏「① 获取资源」）。plan-15：与启动扫描<b>合并</b>——
+    /// 打开的是同一个模态（四张表 + 全部资源），不再有只扫资源的两步式窗口。</summary>
+    private async void Scan_Click(object sender, RoutedEventArgs e)
     {
         if (_project is null) { StatusText.Text = "请先创建或打开项目"; return; }
-        var cacheDirectory = _env.EffectiveUnityCacheDirectory(_project);
-        if (string.IsNullOrWhiteSpace(cacheDirectory) || !Directory.Exists(cacheDirectory))
-        {
-            HintText.Text = "⚠ 尚未找到 Unity 缓存目录 —— 请确认游戏已启动过一次（生成缓存），或在「设置」页中指定缓存目录后重试。";
-            MessageBox.Show(this,
-                "还没有可加载的 Unity 缓存目录。\n\n请先启动一次游戏让缓存生成，或打开「设置」页手动指定缓存目录\n（LocalLow/Unity/ProjectMoon_LimbusCompany）。",
-                "自动加载游戏资源", MessageBoxButton.OK, MessageBoxImage.Information);
-            return;
-        }
-        var dialog = new ScanDialog(_cacheScan, _project, cacheDirectory, _env.EffectiveGameDirectory(_project), autoStart) { Owner = this };
-        dialog.ShowDialog();
-        if (dialog.Result is not null && _projectFile is not null)
-        {
-            await SaveProjectQuietlyAsync();
-            RefreshProjectState($"加载完成：新增 {dialog.Result.AddedAssets} 个资源，更新 {dialog.Result.UpdatedAssets} 个 —— 现在就可以在资源视图里浏览并编辑了");
-        }
-        else
-        {
-            RefreshProjectState();
-        }
-        UpdateHint();
+        await RunStartupScanAsync();
     }
 
     /// <summary>傻瓜化一键导出：扫描资源上的全部修改 → Carra2 → 模组目录。</summary>

@@ -398,6 +398,12 @@ public partial class BankWorkbenchPage : UserControl
 
     // ── 加载与索引 ───────────────────────────────────────────────────
 
+    /// <summary>
+    /// 宿主在启动扫描完成后调用（plan-15）：**主动**刷新本页数据到最新索引。
+    /// 不强制重建索引（扫描刚写完库，这里是热读路径），也不解析任何文件。
+    /// </summary>
+    public Task ReloadFromIndexAsync() => RefreshAsync();
+
     private async Task RefreshAsync(bool forceReindex = false)
     {
         var gameDirectory = _host.Env.EffectiveGameDirectory(_host.Project);

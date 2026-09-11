@@ -455,26 +455,99 @@ public partial class AssetsWorkbenchPage : UserControl
         _ => null,
     };
 
-    /// <summary>图像预览：棋盘格透明底 + 滚轮缩放 + 拖拽平移 + 双击复位；
-    /// 有替换时可在「替换图 ↔ 原图」之间切换。</summary>
+    /// <summary>图像预览的视口高度（固定高度才能让 ScrollViewer 有确定的可视区，
+    /// 「适应窗口」比例也才有意义）。</summary>
+    private const double ImagePreviewViewportHeight = 260;
+
+    /// <summary>小图默认最多放大到几倍（再大就只是糊；用户仍可滚轮继续放大）。</summary>
+    private const double ImagePreviewMaxFitScale = 2.0;
+
+    /// <summary>
+    /// 图像预览：棋盘格透明底 + <b>默认缩放到合适大小（适应窗口）</b> + 滚轮缩放 +
+    /// 拖拽平移 + 双击复位「适应窗口」；有替换时可在「替换图 ↔ 原图」之间切换。
+    ///
+    /// <para><b>为什么默认要自己算缩放</b>：<c>ScrollViewer</c> 会以「无限尺寸」测量内容，
+    /// 所以 <c>Stretch.Uniform</c> 在这里不起作用——图像会按原始像素铺开，超大纹理一进来
+    /// 就只能看到左上角。改成「按图片像素显式定尺寸 + <c>LayoutTransform</c> 缩放」：
+    /// 默认缩放 = 视口 / 图像（大图缩到看得全、小图最多放大 2 倍），滚轮再在此基础上乘用户倍数。
+    /// 用 <c>LayoutTransform</c> 而非 <c>RenderTransform</c>，放大后布局随之变大，
+    /// 滚动条与拖拽平移才会生效。</para>
+    /// </summary>
     private UIElement BuildImageView(AssetPreview preview)
     {
         var container = new DockPanel { LastChildFill = true };
-        var image = new Image { Stretch = Stretch.Uniform, RenderTransformOrigin = new Point(0.5, 0.5) };
-        var scale = new ScaleTransform(1, 1);
-        var transforms = new TransformGroup();
-        transforms.Children.Add(scale);
-        image.RenderTransform = transforms;
-        if (preview.ImagePng is not null) image.Source = LoadBitmap(preview.ImagePng);
+        var bitmap = preview.ImagePng is null ? null : LoadBitmap(preview.ImagePng);
+        var image = new Image
+        {
+            Stretch = Stretch.Fill, // 尺寸完全由「像素 × 缩放」决定，不再依赖 Uniform 的自动适配
+            Width = bitmap?.PixelWidth ?? 1,
+            Height = bitmap?.PixelHeight ?? 1,
+            Source = bitmap,
+        };
+        var zoom = new ScaleTransform(1, 1);
+        image.LayoutTransform = zoom;
 
+        var zoomInfo = new TextBlock
+        {
+            Foreground = WbBrush("WbTextMutedBrush"),
+            FontSize = 10.5,
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 6, 0, 0),
+        };
         var scroll = new ScrollViewer
         {
             Background = TryFindResource("Checkerboard") as Brush ?? WbBrush("WbListBrush"),
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            Height = 180,
+            Height = ImagePreviewViewportHeight,
             Content = image,
         };
+
+        var fitScale = 1.0;       // 适应窗口的比例（视口 / 图像）
+        var userScale = 1.0;      // 用户滚轮倍数（1 = 适应窗口）
+
+        void UpdateScalingMode()
+        {
+            // 放大到 1.5 倍以上时用最近邻：像素纹理放大后要保持硬边（清晰），
+            // 缩小时则用高质量重采样，避免细节糊成噪点。
+            RenderOptions.SetBitmapScalingMode(image,
+                zoom.ScaleX >= 1.5 ? BitmapScalingMode.NearestNeighbor : BitmapScalingMode.HighQuality);
+        }
+
+        void UpdateZoomInfo()
+        {
+            if (bitmap is null) { zoomInfo.Text = "没有可显示的图像。"; return; }
+            var percent = zoom.ScaleX * 100;
+            zoomInfo.Text = Math.Abs(userScale - 1.0) < 0.001
+                ? $"适应窗口：{percent:0}%（{bitmap.PixelWidth}×{bitmap.PixelHeight} 像素）· 滚轮缩放 · 拖拽平移 · 双击复位"
+                : $"缩放：{percent:0}%（{bitmap.PixelWidth}×{bitmap.PixelHeight} 像素）· 双击复位为适应窗口";
+        }
+
+        void ApplyZoom()
+        {
+            zoom.ScaleX = zoom.ScaleY = fitScale * userScale;
+            UpdateScalingMode();
+            UpdateZoomInfo();
+        }
+
+        void FitToViewport()
+        {
+            if (bitmap is null) return;
+            var viewportWidth = Math.Max(1, scroll.ActualWidth - 2);
+            var viewportHeight = Math.Max(1, scroll.ActualHeight - 2);
+            var fit = Math.Min(viewportWidth / bitmap.PixelWidth, viewportHeight / bitmap.PixelHeight);
+            fitScale = Math.Clamp(fit, 0.02, ImagePreviewMaxFitScale);
+            ApplyZoom();
+        }
+
+        // 视口尺寸变化（拖分隔条 / 换选中项）时重新适应：用户手动缩放过就不打扰他。
+        scroll.SizeChanged += (_, _) =>
+        {
+            if (Math.Abs(userScale - 1.0) > 0.001) return;
+            FitToViewport();
+        };
+        scroll.Loaded += (_, _) => FitToViewport();
+
         Point? dragOrigin = null;
         double originHorizontal = 0, originVertical = 0;
         image.MouseLeftButtonDown += (_, e) =>
@@ -493,32 +566,46 @@ public partial class AssetsWorkbenchPage : UserControl
             scroll.ScrollToVerticalOffset(originVertical - (current.Y - origin.Y));
         };
         image.MouseLeftButtonUp += (_, _) => { dragOrigin = null; image.ReleaseMouseCapture(); };
-        scroll.MouseDoubleClick += (_, _) => { scale.ScaleX = scale.ScaleY = 1; };
+        scroll.MouseDoubleClick += (_, _) => { userScale = 1.0; FitToViewport(); };
         scroll.PreviewMouseWheel += (_, e) =>
         {
             var factor = e.Delta > 0 ? 1.15 : 1 / 1.15;
-            scale.ScaleX = Math.Clamp(scale.ScaleX * factor, 0.1, 16);
-            scale.ScaleY = scale.ScaleX;
+            userScale = Math.Clamp(userScale * factor, 0.05, 16);
+            ApplyZoom();
             e.Handled = true;
         };
 
+        var bar = new StackPanel { Orientation = Orientation.Horizontal };
         if (preview.AlternateImagePng is not null)
         {
             var toggle = new ToggleButton
             {
                 Content = $"{preview.AlternateLabel ?? "原图"}（勾选切换）",
                 Padding = new Thickness(8, 3, 8, 3),
-                Margin = new Thickness(0, 0, 0, 4),
-                HorizontalAlignment = HorizontalAlignment.Left,
+                Margin = new Thickness(0, 0, 6, 4),
                 ToolTip = "在替换后的图与缓存原图之间切换显示。",
             };
             var primary = preview.ImagePng;
             var alternate = preview.AlternateImagePng;
-            toggle.Checked += (_, _) => image.Source = LoadBitmap(alternate);
-            toggle.Unchecked += (_, _) => image.Source = primary is null ? null : LoadBitmap(primary);
-            DockPanel.SetDock(toggle, Dock.Top);
-            container.Children.Add(toggle);
+            toggle.Checked += (_, _) => { image.Source = LoadBitmap(alternate); FitToViewport(); };
+            toggle.Unchecked += (_, _) => { image.Source = primary is null ? null : LoadBitmap(primary); FitToViewport(); };
+            bar.Children.Add(toggle);
         }
+        var fitButton = new Button
+        {
+            Content = "适应窗口",
+            Padding = new Thickness(8, 3, 8, 3),
+            Margin = new Thickness(0, 0, 0, 4),
+            ToolTip = "把图像缩放到刚好能在预览区里看全（等同双击预览区）。",
+        };
+        fitButton.Click += (_, _) => { userScale = 1.0; FitToViewport(); };
+        bar.Children.Add(fitButton);
+        // DockPanel 的顺序必须「顶栏 → 说明文字 → 预览区」：LastChildFill 会让最后一个
+        // 子元素吃掉剩余空间，所以承载图像的 ScrollViewer 必须最后加入。
+        DockPanel.SetDock(bar, Dock.Top);
+        DockPanel.SetDock(zoomInfo, Dock.Bottom);
+        container.Children.Add(bar);
+        container.Children.Add(zoomInfo);
         container.Children.Add(scroll);
         return container;
     }

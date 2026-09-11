@@ -49,18 +49,21 @@ public class LangTextWorkbenchServiceTests : IDisposable
     // ── 枚举 ─────────────────────────────────────────────────────────
 
     [Fact]
-    public void Enumerate_lists_active_language_root_config_and_excludes_other_languages()
+    public void Enumerate_lists_active_language_files_and_excludes_config_and_other_languages()
     {
         SeedLangRoot();
         _service.EnumerateFiles(LangRoot); // 再跑一遍确认幂等
         var files = _service.EnumerateFiles(LangRoot);
         var relatives = files.Select(x => x.RelativePath).ToArray();
 
-        Assert.Equal("config.json", relatives[0]); // 根级 config.json 必在
+        // plan-14：config.json 不是工作台文件（只有活动语言目录下的 *.json 才是）。
+        Assert.DoesNotContain("config.json", relatives);
         Assert.Contains("LLC_zh-CN/AbDlg_Faust.json", relatives);
         Assert.Contains("LLC_zh-CN/StoryData/S1.json", relatives); // 子目录逐层展开
         Assert.DoesNotContain("LLC_en/en.json", relatives);        // 其余语言目录不索引
         Assert.All(relatives, x => Assert.DoesNotContain('\\', x)); // 相对路径恒 '/' 分隔
+        // 相对路径仍是「相对 lang 根」（= 补丁键口径，含语言目录前缀），按字典序。
+        Assert.Equal(relatives.OrderBy(x => x, StringComparer.Ordinal), relatives);
 
         var faust = files.Single(x => x.RelativePath == "LLC_zh-CN/AbDlg_Faust.json");
         Assert.Equal(1, faust.KeyCount); // 顶层键数（JSON 对象才计）：顶层只有 "dataList"
@@ -126,7 +129,50 @@ public class LangTextWorkbenchServiceTests : IDisposable
     [Fact]
     public void Edit_set_requires_enumerated_lang_root()
     {
-        Assert.Throws<InvalidOperationException>(() => _service.BeginEdit("config.json"));
+        Assert.Throws<InvalidOperationException>(() => _service.BeginEdit("LLC_zh-CN/AbDlg_Faust.json"));
+    }
+
+    /// <summary>
+    /// plan-14 的回归点：页面的「索引命中」路径只读 <c>cache/text-index.db</c>（不调 EnumerateFiles），
+    /// 因此必须显式 <see cref="LangTextWorkbenchService.AttachLangRoot"/>，否则编辑集没有基线，
+    /// 现象就是「点文件后预览区一片空白、明细只显示 —」。
+    /// </summary>
+    [Fact]
+    public void Attach_lang_root_enables_editing_on_the_index_hit_path()
+    {
+        SeedLangRoot();
+        var viaIndex = new LangTextWorkbenchService();
+        const string rel = "LLC_zh-CN/AbDlg_Faust.json";
+
+        // 只 AttachLangRoot 之前：编辑集方法没有基线（页面若漏掉这一步就是这个报错）。
+        Assert.Throws<InvalidOperationException>(() => viaIndex.BeginEdit(rel));
+
+        viaIndex.AttachLangRoot(LangRoot);
+        var text = viaIndex.BeginEdit(rel);
+        Assert.False(string.IsNullOrWhiteSpace(text));
+        Assert.True(viaIndex.IsModified(rel));
+        Assert.Equal(Path.GetFullPath(LangRoot), viaIndex.CurrentLangRoot);
+        viaIndex.AttachLangRoot(LangRoot); // 幂等
+        Assert.True(viaIndex.IsModified(rel));
+    }
+
+    /// <summary>活动语言目录的解析：跟随 config.json、大小写照磁盘、缺失时返回 null。</summary>
+    [Fact]
+    public void Resolve_language_directory_follows_config_and_returns_null_when_missing()
+    {
+        SeedLangRoot();
+        var expected = Path.GetFullPath(Path.Combine(LangRoot, "LLC_zh-CN"));
+        Assert.Equal(expected, _service.ResolveLanguageDirectory(LangRoot));
+
+        // config.json 里的大小写与磁盘目录不一致：按磁盘真实目录名解析（显示口径要写对）。
+        File.WriteAllText(Path.Combine(LangRoot, "config.json"), """{"lang":"llc_ZH-cn"}""");
+        Assert.Equal(expected, _service.ResolveLanguageDirectory(LangRoot));
+
+        // 指向不存在的目录 / 没有 config.json：null（页面按「没有可浏览的文本表」处理）。
+        File.WriteAllText(Path.Combine(LangRoot, "config.json"), """{"lang":"NOPE"}""");
+        Assert.Null(_service.ResolveLanguageDirectory(LangRoot));
+        File.Delete(Path.Combine(LangRoot, "config.json"));
+        Assert.Null(_service.ResolveLanguageDirectory(LangRoot));
     }
 
     [Fact]
@@ -295,7 +341,8 @@ public class LangTextWorkbenchServiceTests : IDisposable
         stopwatch.Stop();
 
         var relatives = files.Select(x => x.RelativePath).ToList();
-        Assert.Contains("config.json", relatives);
+        // plan-14：config.json 不再是工作台文件（它只用来解析活动语言 + 进索引签名）。
+        Assert.DoesNotContain("config.json", relatives);
         Assert.All(relatives, x => Assert.DoesNotContain('\\', x));
         Assert.All(files, x => Assert.True(File.Exists(x.FullPath), $"枚举条目应真实存在: {x.RelativePath}"));
 

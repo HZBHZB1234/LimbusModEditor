@@ -100,6 +100,64 @@ public class UnityCacheScanServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Project_matches_index_hint_skips_reconciliation_without_changing_the_result()
+    {
+        // plan-13：启动扫描每次都跑，真实规模下「索引命中 bundle 的 119 万行逐条对账」
+        // 是纯 no-op 却要几十秒；调用方在「刚成功回灌过」时可以声明 projectMatchesIndex。
+        // 这个测试钉死两条：① 该声明确实跳过了对账；② 结果与不跳过的路径逐字段相同。
+        var (realCache, gameDirectory) = FindRealEnvironment();
+        if (realCache is null) return; // 无真实样本的机器自动跳过
+
+        var picked = EnumerateRealEntries(realCache)
+            .FirstOrDefault(x => new FileInfo(x.DataPath).Length is > 0 and < 8 * 1024 * 1024);
+        if (picked is null) return;
+        var tempCache = Path.Combine(_root, "cache");
+        var tempEntry = Path.Combine(tempCache, picked.OuterKey, picked.InnerKey);
+        Directory.CreateDirectory(tempEntry);
+        File.Copy(picked.DataPath, Path.Combine(tempEntry, "__data"));
+
+        var indexFile = Path.Combine(_root, "hint-index", "unity-cache-index.json");
+        var service = new UnityCacheScanService(indexFile);
+
+        // ① 冷扫描：建索引 + 建项目（等价于「用户第一次加载资源」）。
+        var coldProject = new ModProject { Name = "Cold" };
+        var cold = await service.ScanIntoProjectAsync(coldProject, tempCache, gameDirectory);
+        Assert.True(cold.AddedAssets > 0);
+        Assert.False(cold.SkippedRowReconciliation);
+
+        // ② 第二次启动：先回灌（项目与索引一致），再带声明扫描。
+        var warmProject = new ModProject { Name = "Warm" };
+        var rehydrated = await service.RehydrateFromIndexAsync(warmProject);
+        Assert.Equal(coldProject.Assets.Count, rehydrated);
+
+        var warm = await service.ScanIntoProjectAsync(
+            warmProject, tempCache, gameDirectory, progress: null, cancellationToken: default,
+            projectMatchesIndex: true);
+
+        Assert.True(warm.SkippedRowReconciliation, "带声明时不该再逐行对账");
+        Assert.True(warm.SkippedMerge, "「项目与索引一致 + 没有任何 bundle 解析成功」时整段合并都该跳过");
+        Assert.Equal(0, warm.ScannedBundles);      // 没有 bundle 变化
+        Assert.Equal(1, warm.IndexedBundles);      // 走索引命中
+        Assert.Equal(0, warm.UpdatedAssets);       // 没合并，就没有「更新」计数
+        Assert.Equal(coldProject.Assets.Count, warmProject.Assets.Count); // 跳过合并不等于丢资产
+        Assert.Single(warmProject.Sources);        // 缓存来源仍然登记（导出要跳过 Directory 来源）
+
+        // ③ 两条路径的项目内容必须逐条相同（回灌 + 跳过对账 == 回灌 + 逐行对账）。
+        Assert.Equal(
+            coldProject.Assets.Select(x => x.LogicalPath).OrderBy(x => x, StringComparer.Ordinal).ToArray(),
+            warmProject.Assets.Select(x => x.LogicalPath).OrderBy(x => x, StringComparer.Ordinal).ToArray());
+
+        var comparison = await service.ScanIntoProjectAsync(
+            warmProject, tempCache, gameDirectory, progress: null, cancellationToken: default,
+            projectMatchesIndex: false);
+        Assert.False(comparison.SkippedRowReconciliation);
+        Assert.False(comparison.SkippedMerge);
+        Assert.Equal(coldProject.Assets.Count, comparison.UpdatedAssets); // 对账把每条都数成「已存在」
+        Assert.Equal(coldProject.Assets.Count, warmProject.Assets.Count); // 对账不改内容
+        Assert.Single(warmProject.Sources);                               // 来源不重复登记
+    }
+
+    [Fact]
     public async Task Materializing_an_edited_asset_copies_its_bundle_and_repoints_siblings()
     {
         var (realCache, _) = FindRealEnvironment();

@@ -35,16 +35,19 @@
         <!-- 中栏：搜索 / 筛选 / 浏览（plan-03：搜索行只留搜索框，手动导入入口全部移除） -->
         <Border Grid.Column="0" Background="{StaticResource WbPanelBrush}" BorderBrush="{StaticResource WbBorderBrush}" BorderThickness="1" Padding="14" Margin="0,0,8,0">
             <DockPanel>
-                <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,6">
-                    <TextBox x:Name="SearchBox" Width="300" Height="28" VerticalContentAlignment="Center" ToolTip="搜索资源名称或路径（支持中文名 / 原路径）" TextChanged="SearchBox_TextChanged"/>
-                </StackPanel>
-                <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,8">
+                <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,6">
+                    <TextBox x:Name="SearchBox" Width="300" MinHeight="32" VerticalContentAlignment="Center" ToolTip="搜索资源名称或路径（支持中文名 / 原路径）" TextChanged="SearchBox_TextChanged"/>
+                </WrapPanel>
+                <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,8">
                     <TextBlock Text="类型" VerticalAlignment="Center" Foreground="{StaticResource WbTextMutedBrush}" Margin="0,0,4,0"/>
-                    <ComboBox x:Name="TypeFilter" Width="110" Height="28" SelectionChanged="Filter_Changed" ToolTip="按资源类型筛选"/>
+                    <!-- 筛选下拉统一走 WorkbenchFilterCombo：不给固定 Height（Fluent 模板 MinHeight=32，
+                         写死 28 会把内容盒压扁、中文被裁剪），宽度按最长候选项给足，避免被右侧箭头裁掉。
+                         排序项最长（「按大小（大→小）」这类），预算放宽到 180。 -->
+                    <ComboBox x:Name="TypeFilter" Style="{StaticResource WorkbenchFilterCombo}" Width="120" SelectionChanged="Filter_Changed" ToolTip="按资源类型筛选"/>
                     <TextBlock Text="状态" VerticalAlignment="Center" Foreground="{StaticResource WbTextMutedBrush}" Margin="8,0,4,0"/>
-                    <ComboBox x:Name="StateFilter" Width="100" Height="28" SelectionChanged="Filter_Changed" ToolTip="按修改状态筛选"/>
+                    <ComboBox x:Name="StateFilter" Style="{StaticResource WorkbenchFilterCombo}" Width="120" SelectionChanged="Filter_Changed" ToolTip="按修改状态筛选"/>
                     <TextBlock Text="排序" VerticalAlignment="Center" Foreground="{StaticResource WbTextMutedBrush}" Margin="8,0,4,0"/>
-                    <ComboBox x:Name="SortFilter" Width="120" Height="28" SelectedIndex="0" SelectionChanged="Filter_Changed" ToolTip="结果排序方式">
+                    <ComboBox x:Name="SortFilter" Style="{StaticResource WorkbenchFilterCombo}" Width="180" SelectedIndex="0" SelectionChanged="Filter_Changed" ToolTip="结果排序方式">
                         <ComboBoxItem Content="按名称"/>
                         <ComboBoxItem Content="按大小（大→小）"/>
                         <ComboBoxItem Content="按大小（小→大）"/>
@@ -58,22 +61,22 @@
                               Checked="Filter_Changed" Unchecked="Filter_Changed"
                               ToolTip="静态数据 bundle（static_s1_0_assets_all_*）里的表默认不在资源工作台显示，请到「🧩 静态数据工作台」编辑；勾选后此处也可见。"/>
                     <Button Content="清除筛选" Click="ClearFilters_Click" Margin="10,0,0,0" Padding="10,3"/>
-                </StackPanel>
+                </WrapPanel>
                 <Expander DockPanel.Dock="Top" Header="高级筛选" Foreground="{StaticResource WbTextMutedBrush}" Margin="0,0,0,8">
-                    <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                    <WrapPanel Margin="0,6,0,0">
                         <TextBlock Text="最小 KB" VerticalAlignment="Center" Foreground="{StaticResource WbTextMutedBrush}" Margin="0,0,4,0"/>
-                        <TextBox x:Name="MinSizeFilter" Width="60" Height="28" VerticalContentAlignment="Center" TextChanged="SearchBox_TextChanged"/>
+                        <TextBox x:Name="MinSizeFilter" Width="60" MinHeight="32" VerticalContentAlignment="Center" TextChanged="SearchBox_TextChanged"/>
                         <TextBlock Text="最大 KB" VerticalAlignment="Center" Foreground="{StaticResource WbTextMutedBrush}" Margin="8,0,4,0"/>
-                        <TextBox x:Name="MaxSizeFilter" Width="60" Height="28" VerticalContentAlignment="Center" TextChanged="SearchBox_TextChanged"/>
+                        <TextBox x:Name="MaxSizeFilter" Width="60" MinHeight="32" VerticalContentAlignment="Center" TextChanged="SearchBox_TextChanged"/>
                         <CheckBox x:Name="ReplacedOnlyFilter" Content="仅已替换" VerticalAlignment="Center" Margin="10,0,0,0" Checked="Filter_Changed" Unchecked="Filter_Changed"/>
-                    </StackPanel>
+                    </WrapPanel>
                 </Expander>
-                <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,8">
+                <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,8">
                     <ToggleButton x:Name="AssetViewListToggle" Style="{StaticResource ViewToggle}" Content="☰ 列表"
                                   Click="AssetViewMode_Click" ToolTip="扁平列表视图（当前搜索结果）"/>
                     <ToggleButton x:Name="AssetViewTreeToggle" Style="{StaticResource ViewToggle}" Content="🗂 目录树"
                                   IsChecked="True" Click="AssetViewMode_Click" ToolTip="按游戏容器目录浏览（类文件夹，双击展开）"/>
-                </StackPanel>
+                </WrapPanel>
                 <Grid>
                     <ListView x:Name="AssetList" Visibility="Collapsed" Background="{StaticResource WbListBrush}" BorderBrush="{StaticResource WbBorderBrush}" Foreground="{StaticResource WbTextPrimaryBrush}" SelectionChanged="AssetList_SelectionChanged"
                              MouseDoubleClick="AssetList_DoubleClick" PreviewMouseRightButtonDown="AssetList_PreviewMouseRightButtonDown"

@@ -86,6 +86,47 @@ public static class AssetDisplay
     /// <summary>用户友好的资源路径（用于提示/详情），等价 TreePath。</summary>
     public static string DisplayPath(AssetRecord asset) => TreePath(asset);
 
+    /// <summary>树叶子消歧后缀的分隔符（仅在同名叶子出现时追加）。</summary>
+    public const string LeafDisambiguatorSeparator = " · ";
+
+    /// <summary>同名叶子节点的消歧后缀（不含分隔符本身）。
+    /// <para>m_Container 是「路径 → 对象」的<b>加载清单</b>而非资源清单：同一个
+    /// 路径可以挂多个对象（真实缓存 19,581 组重名 / 覆盖 47,631 条资源，其中
+    /// 18,233 组发生在同一个 bundle 内 —— 一个入口连带的 Prefab / GameObject /
+    /// Transform / Renderer 等零件共享同一条容器路径）。树叶子若只显示路径
+    /// 末段，用户会看到一串完全相同的条目而无法分辨该选哪一条，
+    /// 故对重名的叶子补「类型 + 对象编号」。</para>
+    /// <para>逐级加长，只为让同级叶子互相区分：常规是「类型 #编号」；
+    /// <paramref name="includeBundle"/> = true 再补 bundle 归属，留给「同类型
+    /// 同编号、只差 bundle」那一小类。23,326 条唯一路径保持原样、零后缀。</para>
+    /// <para>层级分隔符有意与路径分隔符「/」不同：路径本身很少含「/」以外的
+    /// 分隔符，树据此把后缀与真实路径末段分开，也让用户一眼看出是消歧信息
+    /// 而非资源名的一部分。</para>
+    /// </summary>
+    public static string LeafDisambiguator(AssetRecord asset, bool includeTypeLabel, bool includeBundle = false)
+    {
+        ArgumentNullException.ThrowIfNull(asset);
+        var parts = new List<string>(3);
+        if (includeTypeLabel) parts.Add(TypeLabel(asset.Type));
+        if (asset.UnityPathId is { } pathId)
+            parts.Add("#" + pathId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        if (includeBundle && BundleLabel(asset) is { } bundle)
+            parts.Add(bundle);
+        else if (parts.Count == 0 && BundleLabel(asset) is { } fallback)
+            parts.Add(fallback);
+        return string.Join(' ', parts);
+    }
+
+    /// <summary>bundle 归属标签：扫描索引的缓存外层键 + 内层键（同名资源可能
+    /// 分布在多个 bundle）。取不到时回退到资源 Id，保证消歧键唯一。</summary>
+    private static string? BundleLabel(AssetRecord asset)
+    {
+        var outer = asset.Metadata.TryGetValue("cacheOuter", out var o) ? o : asset.Account;
+        var inner = asset.Metadata.TryGetValue("cacheInner", out var i) ? i : asset.Bundle;
+        if (string.IsNullOrWhiteSpace(outer) && string.IsNullOrWhiteSpace(inner)) return null;
+        return $"{outer}/{inner}".Trim('/');
+    }
+
     private static string LeafCandidate(AssetRecord asset)
     {
         if (IsCacheReference(asset))

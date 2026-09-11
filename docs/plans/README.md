@@ -19,6 +19,8 @@
 | [plan-10](plan-10-text-workbench-ui.md) | 第二批需求 | 文本工作台重做：树形浏览 + 共享编辑器 + `cache/text-index.db` | plan-09 |
 | [plan-11](plan-11-bank-workbench-all-audio-view.md) | 第二批需求 | 音频工作台重做：跨 bank 样本总表 + bank 树 + `cache/bank-index.db` | plan-09 |
 | [plan-12](plan-12-static-workbench-shell-ui.md) | 第二批需求 | 静态数据工作台重做：资源工作台同款页面 + `cache/static-tables.db` | plan-09 |
+| [plan-13](plan-13-user-feedback-fixes.md) | 第三批需求（8 项，含截图反馈） | 用户反馈修复批次：tooltip 字体 / 图像行序 / 启动自动扫描四库 / lang 缺表自愈 / JSON 树滚轮 / 音频工作台重做 / 图像适应窗口 / 下拉裁字 | plan-09~12 |
+| [plan-14](plan-14-feedback-round2.md) | 用户反馈第二轮（5 项，含截图） | bank 行对比度 / 事件 bank 默认隐藏 / 单 FSB 自动展开 / lang 数据源改为语言目录内部 + 预览失败修复 / lang 导出入口移到侧边栏 | plan-13 |
 
 **第二批执行状态（2026-09）**：plan-09 ✅ / plan-10 ✅ / plan-11 ✅ / plan-12 ✅ 均已实施并入库。
 公共骨架与表缓存底座已就位（`WorkbenchShell`、`JsonTreeEditor`、`Application/Caching/`、
@@ -26,6 +28,18 @@
 （资源页在收口阶段完成色值迁移，结构未动）。
 **验收门全部闭合**：`WorkbenchPages/` 下硬编码设计色为 0（`grep #RRGGBB`/`Color.FromRgb(0x` 无命中），
 色值只存在于 `Themes/Theme.xaml` 与 `Themes/WorkbenchStyles.xaml`。
+
+**第三批执行状态（2026-09）**：plan-13 ✅ 已实施并入库（8 项全部修复；
+四个缓存库改为**每次启动自动建库/校表 + 增量扫描**，新入口 `StartupScanService`）。
+
+**第四批执行状态（2026-09）**：plan-14 ✅ 已实施（5 项：bank 行对比度改为工作台自带树模板
+——离屏实测选中行底色从「与列表底相同」变为 `#20304A`（亮度差 +26）；bank 树默认隐藏事件 bank
+（勾选框 / 「仅事件 bank」强制显示）；单 FSB 的 bank 展开即到样本层；文本工作台数据源改为
+**活动语言目录内部**（不再显示 `config.json` 与语言目录包裹层，补丁键仍是 lang 根相对路径 =
+加载器兼容门）+ 修掉「索引命中路径没把 lang 根交给服务 → 点文件预览一片空白」；
+lang 导出/直接应用两个按钮移到侧边栏「② 产出模组」）。
+测试 549 → 562；新增 `BankTreeRules` / `LangTextDisplay` 两个纯逻辑类、`AttachLangRoot` 契约，
+以及索引内容口径版本（`TextIndexStore.IndexFormatVersion`，旧库自动重建）。
 
 **实测收益（本机真实数据）**：
 `text-index.db` 二次进页面 608ms、搜索 105ms（vs 逐文件现读 1962ms）；
@@ -51,11 +65,16 @@ plan-01 不依赖布局改造，可随时开工；plan-03/04 很小，也可在 
    dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r win-x64 --self-contained false -o artifacts/publish-win-x64 --no-restore
    ```
 
-   当前基线（2026-09，plan-09~12 全部完成后实测）：**528 个测试全绿（74 Format + 454 Domain）**。
-   历史：plan-02 期为 274（62+212），plan-08 期为 334（74+260），plan-09 期为 476（74+402）。
-   注：2026-09 本机曾出现 2 个真实 lang 门控测试失败，根因是测试把活动语言写死为 `LLC_zh-CN`，
+   当前基线（2026-09，plan-14 完成后实测）：**562 个测试全绿（74 Format + 488 Domain）**。
+   历史：plan-02 期为 274（62+212），plan-08 期为 334（74+260），plan-09 期为 476（74+402），
+   plan-09~12 完成后为 528（74+454），plan-13 完成后为 549（74+475），plan-14 完成后为 562（74+488）。
+   注 1：2026-09 本机曾出现 2 个真实 lang 门控测试失败，根因是测试把活动语言写死为 `LLC_zh-CN`，
    而本机 `config.json` 指向汉化组目录 `LLc-CN-LCTA`——已改为**跟随 config.json**，不得再写死。
+   注 2：`RealBankIndexSmokeTests` 的「读索引 < 1.5s」是**墙钟预算**断言，两个测试项目并行跑时
+   偶发超时（单独跑 2/2 通过）；它是既有 flake，与 plan-13/14 的改动无关，待定是否放宽预算。
 2. **仓库文本文件只通过 read/edit/write 工具修改**（历史上有中文乱码事故）；pwsh 只用于 build/test/git/publish。
+   （plan-14 期间用 pwsh 的 `Get-Content -Raw | Set-Content` 改过一次本文件，直接把 UTF-8 写成了 ANSI，
+   本文件按 HEAD 版本 + 该轮内容重建。这条规则不是形式主义。）
 3. **提交纪律**：提交信息用中文；每个里程碑独立提交；提交前必须 build+test 全绿；完成后更新 `docs/ROADMAP.md`（新节）、`docs/USAGE.md`（界面变化）、必要时 `docs/REVIEW.md`。
 4. **不猜测原则**：未知负载/未知压缩/未知字段一律 fail fast 并给中文错误；没有真实样本验证不宣称兼容。真实样本门控测试（`Real*` 前缀）在无样本机器上自动跳过。
 5. **真实加载器 = LCTA**（`E:\desktop\work\LCTA-Limbus-company-transfer-auto\launcher`，GPL-3.0）：代码可读作事实来源，不得整段复制；格式事实（路径/布局/常量）可以引用。
@@ -69,7 +88,7 @@ plan-01 不依赖布局改造，可随时开工；plan-03/04 很小，也可在 
 | 游戏目录 | `C:\Program Files (x86)\Steam\steamapps\common\Limbus Company` | 本机存在，含 LimbusCompany.exe（`docs/NEXT-STEPS.md` §2） |
 | Unity 缓存根 | `%LocalAppData%Low\Unity\ProjectMoon_LimbusCompany`（junction → `D:\Unity\...`） | 1459 个 `<outer>/<inner>/__data`，本机已确认 |
 | Bank 目录 | `<游戏>/LimbusCompany_Data/StreamingAssets/Assets/Sound/FMODBuilds/Desktop` | 1531 个 .bank，本机已确认（LCTA `launcher/sound.py:67-68`） |
-| lang 目录 | `<游戏>/LimbusCompany_Data/lang` | `config.json` 内容 `{"lang":"LLC_zh-CN",...}`；活动语言目录 `LLC_zh-CN` 含根级 JSON 数百个 + 子目录（StoryData 920 文件、PersonalityVoiceDlg 187、BattleAnnouncerDlg 61、BgmLyrics 15、EGOVoiceDig 14、Info 2、Font 0），本机已确认 |
+| lang 目录 | `<游戏>/LimbusCompany_Data/lang` | 活动语言目录由 `config.json` 的 `lang` 字段决定（本机曾为 `LLC_zh-CN`，后被汉化组改为 `LLc-CN-LCTA`——**代码一律跟随 config.json，不得写死**）；活动语言目录含根级 JSON 数百个 + 子目录（StoryData 920 文件、PersonalityVoiceDlg 187、BattleAnnouncerDlg 61、BgmLyrics 15、EGOVoiceDig 14、Info 2、Font 0），本机已确认；plan-14 起 `config.json` 本身不再是工作台文件 |
 | 静态 bundle | `static_s1_0_assets_all_<32hex>.bundle`，经 catalog 定位（catalog_S1.bin 在 `LimbusCompany_Data/StreamingAssets/aa/`） | LCTA `launcher/staticmod.py:65,108-156` |
 | 事件 bank / 音频 bank | `<id>.bank` SNDH 合法为 size 0；`<id>.assets.bank` SNDH (offset,size) 直指 FSB5（codec 16=Vorbis） | `docs/NEXT-STEPS.md` §2、`RealBankTests` |
 | 游戏 Unity 版本 | 6000.3.12f1；SerializedFile 版本串抹为 `0.0.0`；类型树全部内嵌 | `docs/ROADMAP.md` P0.1 |

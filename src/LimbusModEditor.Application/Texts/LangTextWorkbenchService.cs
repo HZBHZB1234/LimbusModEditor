@@ -106,14 +106,71 @@ public sealed class LangTextWorkbenchService
     /// <see cref="LangTextPatchService.ReadActiveLanguage"/>，保持单一实现。</summary>
     public string? ReadActiveLanguage(string langRoot) => _patch.ReadActiveLanguage(langRoot);
 
+    /// <summary>
+    /// 活动语言目录（<c>&lt;lang 根&gt;/&lt;config.json 的 lang&gt;</c>）。
+    /// <b>大小写按磁盘上的真实目录名解析</b>：config.json 里写的是玩家/汉化组填的字符串，
+    /// 大小写可能与磁盘目录不同（本机实测存在 <c>LLc-CN-LCTA</c> 这类混合大小写目录），
+    /// Windows 的 <c>Directory.Exists</c> 对此不敏感，但工作台要按<b>真实目录名</b>去匹配
+    /// 枚举出来的相对路径前缀，写错大小写会让「语言目录内部」的显示口径整体错位。
+    /// 未配置 / 目录不存在时返回 null（调用方按「按 lang 根退化列出」处理）。
+    /// </summary>
+    public string? ResolveLanguageDirectory(string langRoot)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(langRoot);
+        var active = ReadActiveLanguage(langRoot);
+        if (string.IsNullOrWhiteSpace(active)) return null;
+        var expected = Path.Combine(langRoot, active);
+        if (!Directory.Exists(expected)) return null;
+        try
+        {
+            foreach (var candidate in Directory.EnumerateDirectories(langRoot))
+            {
+                if (string.Equals(Path.GetFileName(candidate), active, StringComparison.OrdinalIgnoreCase))
+                    return Path.GetFullPath(candidate);
+            }
+            foreach (var candidate in Directory.EnumerateDirectories(langRoot, active, SearchOption.TopDirectoryOnly))
+                return Path.GetFullPath(candidate);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // 枚举失败不致命：退回 config.json 里写的那个名字。
+        }
+        return Path.GetFullPath(expected);
+    }
+
+    /// <summary>
+    /// 只把「当前 lang 根」交给服务，不做枚举。给<b>读索引命中</b>的调用方用：
+    /// 页面在索引新鲜时直接读 <c>cache/text-index.db</c>（不重读文件），此时若不同时定位
+    /// lang 根，编辑集方法（<see cref="BeginEdit"/> 等）没有基线，会抛
+    /// <see cref="InvalidOperationException"/>——现象就是「点文件后预览区一片空白」。
+    /// 幂等，可重复调用。
+    /// </summary>
+    public void AttachLangRoot(string langRoot)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(langRoot);
+        _langRoot = Path.GetFullPath(langRoot);
+    }
+
     // ── 枚举与索引 ────────────────────────────────────────────────────
 
-    /// <summary>枚举工作台数据源：根级 <c>config.json</c> + config.json 指向的活动语言
-    /// 目录下全部 *.json（子目录逐层展开，如 StoryData）。其余翻译组目录不索引。
-    /// 相对路径以 '/' 分隔，先 config.json 后字典序。同时记录大小、顶层键数
-    /// （JSON 对象才计）与 UTF-8 合法性。调用成功后本服务进入「已定位」状态，
-    /// 编辑集方法以该 lang 根为基线。非 UTF-8 文件：IsUtf8=false、键数 0、明确标记不猜。
-    /// 单个文件读取失败不中断枚举（按不可读处理）。
+    /// <summary>
+    /// 枚举工作台数据源：<b>config.json 指向的活动语言目录</b>下全部 *.json
+    /// （子目录逐层展开，如 StoryData）。其余翻译组目录不索引。
+    ///
+    /// <para><b>config.json 本身不是工作台文件</b>（本轮口径调整）：它只作为「活动语言是谁」的
+    /// 输入（<see cref="ReadActiveLanguage"/>）与索引签名的一部分
+    /// （<see cref="ComputeConfigContentHash"/>），不再出现在文件清单 / 树 / 列表里——
+    /// 它不是可翻译的文本表，摆在工作台里只会让用户点出一个几十字节的配置。</para>
+    ///
+    /// <para>相对路径<b>以 lang 根为基准、'/' 分隔、按字典序</b>（形如
+    /// <c>LLc-CN-LCTA/AbDlg_Faust.json</c>）。<b>这个「带语言目录前缀」的口径不许改</b>：
+    /// 补丁文档的键就是它，真实加载器按 <c>&lt;游戏&gt;/LimbusCompany_Data/lang/&lt;键&gt;</c>
+    /// 备份并应用；界面上的「从语言目录内部开始」只是显示口径，由
+    /// <see cref="LangTextDisplay"/> 负责映射。</para>
+    ///
+    /// <para>同时记录大小、顶层键数（JSON 对象才计）与 UTF-8 合法性。调用成功后本服务进入
+    /// 「已定位」状态，编辑集方法以该 lang 根为基线。非 UTF-8 文件：IsUtf8=false、键数 0、
+    /// 明确标记不猜。单个文件读取失败不中断枚举（按不可读处理）。</para>
     ///
     /// <para><paramref name="cached"/> 与 <paramref name="refreshed"/> 是 plan-10 的
     /// <b>加速旁路</b>（可选，缺省即旧行为）：目录结构仍然真实枚举（保证增删文件不会漏），
@@ -131,9 +188,6 @@ public sealed class LangTextWorkbenchService
         _langRoot = Path.GetFullPath(langRoot);
 
         var files = new List<LangTextFileInfo>();
-        var config = Path.Combine(langRoot, "config.json");
-        if (File.Exists(config)) files.Add(BuildFileInfo(_langRoot, config, cached, refreshed));
-
         var active = ReadActiveLanguage(langRoot);
         if (!string.IsNullOrWhiteSpace(active))
         {

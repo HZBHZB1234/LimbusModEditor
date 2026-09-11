@@ -44,6 +44,9 @@ public partial class JsonTreeEditor : UserControl
     public JsonTreeEditor()
     {
         InitializeComponent();
+        // 这棵树在 XAML 里声明（不经过 WorkbenchShell.CreateTree），因此滚轮支持要在这里显式接上：
+        // 否则指针悬停在树行上时滚轮事件被行/模板 ScrollViewer 吃掉，只有悬停空白处才滚得动。
+        WorkbenchShell.EnableWheelScrolling(Tree);
     }
 
     /// <summary>文档变更（值写回 / 删除键 / 保存原文）。载入文档时也会触发一次（IsModified=false）。</summary>

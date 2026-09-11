@@ -8,12 +8,17 @@
         AllowDrop="True" Drop="Window_Drop" DragOver="Window_DragOver"
         PreviewKeyDown="Window_PreviewKeyDown">
     <Window.Resources>
-        <!-- 活动栏图标按钮（plan-02：6 个页面入口，选中项高亮左侧竖条） -->
+        <!-- 活动栏图标按钮（plan-02：6 个页面入口，选中项高亮左侧竖条）。
+
+             图标字体（Segoe MDL2 Assets）刻意只写在按钮内容那个 TextBlock 上，不写在本样式上：
+             WPF 的 ToolTip 会继承 PlacementTarget 的字体属性，而符号字体（MDL2 / Fluent Icons 等）
+             **没有字体回退**，一旦 RadioButton 自己声明了图标字体，悬浮提示里的中文就会
+             全部渲染成豆腐块（□□□□）——这正是「活动栏 6 个按钮的提示全是方块」的根因。
+             图标字号/居中不变：按钮仍是 48x44，模板的 ContentPresenter 照旧居中；TextBlock
+             自带 FontFamily/FontSize，因此也不受外部字体样式影响。 -->
         <Style x:Key="ActivityButton" TargetType="RadioButton">
             <Setter Property="Width" Value="48"/>
             <Setter Property="Height" Value="44"/>
-            <Setter Property="FontSize" Value="18"/>
-            <Setter Property="FontFamily" Value="Segoe MDL2 Assets"/>
             <Setter Property="Background" Value="Transparent"/>
             <Setter Property="Foreground" Value="#9FB0BF"/>
             <Setter Property="BorderThickness" Value="0"/>
@@ -74,18 +79,24 @@
             <!-- 活动栏：VS Code 左侧图标栏，直切页面（无顶部标签页） -->
             <Border Grid.Column="0" Background="#161B22" BorderBrush="{StaticResource BorderLineBrush}" BorderThickness="0,0,1,0">
                 <StackPanel>
-                    <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivityAssets" Content="&#xE7B8;"
-                                 ToolTip="资源工作台（搜索 / 按容器浏览资源）" Click="ActivityAssets_Click"/>
-                    <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivityBank" Content="&#xE15D;"
-                                 ToolTip="音频工作台（Bank 样本浏览 / 试听 / 替换）" Click="ActivityBank_Click"/>
-                    <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivityText" Content="&#xE8A5;"
-                                 ToolTip="文本工作台（lang 文本）" Click="ActivityText_Click"/>
-                    <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivityStatic" Content="&#xE71D;"
-                                 ToolTip="静态数据工作台" Click="ActivityStatic_Click"/>
-                    <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivityHelp" Content="&#xE897;"
-                                 ToolTip="使用教程" Click="ActivityHelp_Click"/>
-                    <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivitySettings" Content="&#xE713;"
-                                 ToolTip="设置（共享目录 / 项目元数据）" Click="ActivitySettings_Click"/>
+                    <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivityAssets" ToolTip="资源工作台（搜索 / 按容器浏览资源）" Click="ActivityAssets_Click">
+                        <TextBlock Text="&#xE7B8;" FontFamily="Segoe MDL2 Assets" FontSize="18"/>
+                    </RadioButton>
+                    <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivityBank" ToolTip="音频工作台（Bank 样本浏览 / 试听 / 替换）" Click="ActivityBank_Click">
+                        <TextBlock Text="&#xE15D;" FontFamily="Segoe MDL2 Assets" FontSize="18"/>
+                    </RadioButton>
+                    <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivityText" ToolTip="文本工作台（lang 文本）" Click="ActivityText_Click">
+                        <TextBlock Text="&#xE8A5;" FontFamily="Segoe MDL2 Assets" FontSize="18"/>
+                    </RadioButton>
+                    <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivityStatic" ToolTip="静态数据工作台" Click="ActivityStatic_Click">
+                        <TextBlock Text="&#xE71D;" FontFamily="Segoe MDL2 Assets" FontSize="18"/>
+                    </RadioButton>
+                    <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivityHelp" ToolTip="使用教程" Click="ActivityHelp_Click">
+                        <TextBlock Text="&#xE897;" FontFamily="Segoe MDL2 Assets" FontSize="18"/>
+                    </RadioButton>
+                    <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivitySettings" ToolTip="设置（共享目录 / 项目元数据）" Click="ActivitySettings_Click">
+                        <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="18"/>
+                    </RadioButton>
                 </StackPanel>
             </Border>
             <!-- 共享侧边栏：所有页面共用、切换页面时不消失（plan-02 需求 5） -->
@@ -115,6 +126,12 @@
                         <Button Content="导出模组（向导）…" Click="Export_Click" Margin="0,8,0,0" Padding="8,6"
                                 ToolTip="需要挑选导出范围或格式时使用。"/>
                         <Button Content="导出全部（多格式）" Click="ExportAll_Click" Margin="0,8,0,0" Padding="8,6"/>
+                        <!-- lang 文本导出（plan-14 14.5）：编辑集在文本工作台页面对象里，
+                             所以这两个入口转调该页面的通道（未打开过页面时引导先改文本）。 -->
+                        <Button Content="导出 lang 补丁…" Click="ExportLangPatch_Click" Margin="0,8,0,0" Padding="8,6"
+                                ToolTip="把文本工作台里改过的文本导出为 RFC6902 语言补丁（.json），放进模组目录后由加载器在启动时应用、退出时还原。"/>
+                        <Button Content="直接应用到 lang 目录…" Click="ApplyLangToGame_Click" Margin="0,8,0,0" Padding="8,6"
+                                ToolTip="警告：把文本工作台的修改直接写进游戏 lang 目录（不推荐——优先用「导出 lang 补丁…」；编辑器不负责备份/还原）。"/>
                         <Separator Margin="0,14"/>
                         <TextBlock Text="更多" Style="{StaticResource SectionLabel}"/>
                         <Button Content="打开模组目录" Click="OpenModsDirectory_Click" Padding="8,6"

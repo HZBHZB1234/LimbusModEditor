@@ -97,19 +97,18 @@ public partial class StaticWorkbenchPage : UserControl
         Shell.AddSearchItem(_clearDocumentCache);
 
         // ── 筛选行（含视图切换）──────────────────────────────────────
-        _viewSwitch = new ComboBox { Width = 130, Height = 28, Margin = new Thickness(0, 0, 6, 0) };
-        _viewSwitch.Items.Add("🗂 数据类树");
-        _viewSwitch.Items.Add("☰ 表列表");
-        _viewSwitch.SelectedIndex = 0;
+        // 视图切换也是同一个下拉构件（原先 Height=28 同样会把中文裁掉），只是提示语不同。
+        _viewSwitch = WorkbenchShell.CreateFilterCombo(
+            "数据类树 = 按 dataClass 分组（与资源工作台的容器目录同语义）；表列表 = 扁平表",
+            "🗂 数据类树", "☰ 表列表");
         _viewSwitch.SelectionChanged += (_, _) => SwitchView((StaticViewMode)Math.Max(0, _viewSwitch.SelectedIndex));
-        _viewSwitch.ToolTip = "数据类树 = 按 dataClass 分组（与资源工作台的容器目录同语义）；表列表 = 扁平表";
         Shell.AddFilterItem(_viewSwitch);
 
-        _stateFilter = MakeCombo(130, "按状态筛选", "全部", "仅已修改", "仅已缓存正文", "仅非 UTF-8");
+        _stateFilter = WorkbenchShell.CreateFilterCombo("按状态筛选", "全部", "仅已修改", "仅已缓存正文", "仅非 UTF-8");
         _stateFilter.SelectionChanged += (_, _) => ApplyFilter();
         Shell.AddFilterItem(_stateFilter);
 
-        _sortFilter = MakeCombo(160, "排序方式",
+        _sortFilter = WorkbenchShell.CreateFilterCombo("排序方式",
             "按数据类 + 表名", "按表名", "按大小（大→小）", "按大小（小→大）", "已修改在前");
         _sortFilter.SelectionChanged += (_, _) => ApplyFilter();
         Shell.AddFilterItem(_sortFilter);
@@ -169,13 +168,9 @@ public partial class StaticWorkbenchPage : UserControl
 
     private static Style? FindStyle(string key) => System.Windows.Application.Current?.TryFindResource(key) as Style;
 
-    private static ComboBox MakeCombo(double width, string toolTip, params string[] items)
-    {
-        var combo = new ComboBox { Width = width, Height = 28, Margin = new Thickness(0, 0, 6, 0), ToolTip = toolTip };
-        foreach (var item in items) combo.Items.Add(item);
-        combo.SelectedIndex = 0;
-        return combo;
-    }
+    // 原先这里有个 MakeCombo(width, toolTip, items)：宽度由调用方拍脑袋写死，且 Height=28 小于
+    // Fluent 模板的 MinHeight(32)，中文会被裁剪。现统一改用 WorkbenchShell.CreateFilterCombo
+    // （具名样式 + 按最长候选项估算宽度），故本方法删除。
 
     // ── 定位与索引 ───────────────────────────────────────────────────
 

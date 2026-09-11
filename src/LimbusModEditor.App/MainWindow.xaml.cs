@@ -31,6 +31,15 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     private readonly AppEnvironment _env = AppEnvironment.Current;
     private readonly UnityCacheScanService _cacheScan =
         new(Path.Combine(AppEnvironment.Current.CacheDirectory, "unity-cache-index.json"));
+    /// <summary>启动扫描（每次启动/打开项目都跑一遍全部资源 + 四个缓存库）。
+    /// 与 <see cref="_cacheScan"/> 共用同一实例，避免两个扫描器同时写同一个索引库。</summary>
+    private readonly StartupScanService _startupScan;
+    private CancellationTokenSource? _startupScanCancellation;
+
+    /// <summary>项目里的引用资产是否已与扫描索引逐条一致（打开项目时成功回灌过即为 true）。
+    /// 启动扫描据此跳过「119 万行逐条对账」——真实规模下那一步要几十秒且结果恒为 no-op。
+    /// 保守起见：只有回灌成功才置 true，任何「可能删掉记录」的路径都不会把它留在 true。</summary>
+    private bool _assetsMatchIndex;
     private readonly UnityCacheExportService _cacheExporter = new();
     private DebugApplySession? _debugSession;
     private ModProject? _project;
@@ -85,6 +94,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     public MainWindow()
     {
         InitializeComponent();
+        _startupScan = new StartupScanService(_env, _cacheScan);
         UpdateDirectoryStatus();
         UpdateHint();
         // 启动即进入资源工作台（活动栏首个入口）。
@@ -158,10 +168,38 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     private void ActivityHelp_Click(object sender, RoutedEventArgs e) => ShowPage("help");
     private void ActivitySettings_Click(object sender, RoutedEventArgs e) => ShowPage("settings");
 
+    // ── 侧边栏的 lang 导出入口（plan-14 14.5）─────────────────────────────
+    // 文本编辑集是文本工作台页面对象里的内存状态（服务实例属于页面），
+    // 所以侧边栏这两个按钮只做「转调」：页面没打开过 → 编辑集一定是空的 → 引导先改文本。
+    // 不在这里另建一套编辑集/导出实现（那会出现两份互相看不见的状态）。
+
+    private void ExportLangPatch_Click(object sender, RoutedEventArgs e)
+        => RunLangWorkbenchChannel(page => page.ExportPatchInteractive(),
+            "还没有文本编辑集：点「文本工作台（lang 补丁）…」改完文本后，再回来点「导出 lang 补丁…」。");
+
+    private void ApplyLangToGame_Click(object sender, RoutedEventArgs e)
+        => RunLangWorkbenchChannel(page => page.ApplyToGameInteractive(),
+            "还没有文本编辑集：点「文本工作台（lang 补丁）…」改完文本后，再回来点「直接应用到 lang 目录…」。");
+
+    /// <summary>把侧边栏的 lang 入口路由到文本工作台的既有通道（没有编辑集时打开页面并说明）。</summary>
+    private void RunLangWorkbenchChannel(Action<TextWorkbenchPage> channel, string emptyHint)
+    {
+        if (_pages.TryGetValue("text", out var page) && page is TextWorkbenchPage workbench && workbench.EditedFileCount > 0)
+        {
+            channel(workbench);
+            return;
+        }
+        ShowPage("text");
+        StatusText.Text = emptyHint;
+    }
+
     /// <summary>启动引导（傻瓜化）：有上次项目就自动恢复；否则主窗口的
     /// 「无项目遮罩」引导「新建 / 打开 / 最近项目」（不再弹独立欢迎窗口）。</summary>
     private async Task OnWindowLoadedAsync()
     {
+        // 四个缓存库先建好/校好（新建、0 字节、上次建库被打断的半成品都在这里补掉），
+        // 这样各工作台首次打开时不会再撞上「库文件在但没有表」。
+        await EnsureStartupCacheDatabasesAsync();
         var last = _env.Config.LastProjectFile;
         if (!string.IsNullOrWhiteSpace(last) && File.Exists(last))
         {
@@ -173,6 +211,59 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
             catch (Exception ex) { ShowError("恢复上次项目失败", ex); }
         }
         UpdateHint();
+    }
+
+    /// <summary>启动时把四个缓存库（资源 / 音频 / 静态表 / lang 文本）建好并校表。
+    /// 失败只提示不改流程：缓存只影响速度。</summary>
+    private async Task EnsureStartupCacheDatabasesAsync()
+    {
+        try
+        {
+            var repaired = await Task.Run(() => _startupScan.EnsureCacheDatabases());
+            if (repaired.Count > 0)
+                StatusText.Text = $"缓存库已就绪（新建/补表 {repaired.Count} 个：{string.Join("、", repaired.Select(Path.GetFileName))}）";
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = $"缓存库检查失败（不影响功能，仅影响速度）：{ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// 启动扫描（本次改造）：每次启动 / 打开项目都<b>把全部资源扫一遍</b>——
+    /// 游戏资源（Unity 缓存里全部 bundle）+ 音频 / 静态表 / lang 三个索引，
+    /// 四个缓存库也一并建好。后台执行、状态栏实时显示进度，完成后保存项目并刷新界面。
+    ///
+    /// <para>为什么不再用「空项目才弹扫描窗口」：扫描是增量的（每步都真实枚举磁盘、
+    /// 只重解析签名变过的文件），热启动秒级；自动跑一遍比让用户自己判断「要不要点扫描」
+    /// 更符合傻瓜化目标，也避免各工作台首次打开才发现索引没建。</para>
+    /// </summary>
+    private async Task RunStartupScanAsync()
+    {
+        if (_project is null) return;
+        _startupScanCancellation?.Cancel();
+        var cancellation = new CancellationTokenSource();
+        _startupScanCancellation = cancellation;
+        var progress = new Progress<StartupScanProgress>(p => StatusText.Text = $"{p.Label}：{p.Detail}");
+        try
+        {
+            StatusText.Text = "启动扫描：正在检查全部资源与缓存库…";
+            // projectMatchesIndex：刚才回灌成功时，索引里每一行都能在项目里找到对应记录，
+            // 于是扫描可以跳过「119 万行逐条对账」（实测那一步占 50 秒里的 ~40 秒）。
+            var report = await _startupScan.ScanAllAsync(_project, progress, cancellation.Token, _assetsMatchIndex);
+            if (cancellation.IsCancellationRequested) return;
+            if (report.ScannedCount > 0 && _projectFile is not null) await SaveProjectQuietlyAsync();
+            RefreshProjectState();
+            StatusText.Text = report.Describe();
+            if (_project.Assets.Count == 0) UpdateHint();
+        }
+        catch (OperationCanceledException) { /* 关窗 / 切项目：正常取消 */ }
+        catch (Exception ex) { ShowError("启动扫描失败", ex); }
+        finally
+        {
+            if (ReferenceEquals(_startupScanCancellation, cancellation)) _startupScanCancellation = null;
+            cancellation.Dispose();
+        }
     }
 
     /// <summary>P3.1: new-mod wizard scaffolds a project plus a minimal,
@@ -226,14 +317,10 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
         await RehydrateAssetsFromIndexAsync();
         RefreshProjectState(prefix);
 
-        // 空项目自动要求加载资源（完成后即可直接编辑）。回灌成功过的项目
-        // 资产数 > 0，不会误触发。
-        if (_project is { Assets.Count: 0 })
-        {
-            var cacheDirectory = _env.EffectiveUnityCacheDirectory(_project);
-            if (UnityCacheScanService.EnumerateCacheEntries(cacheDirectory).Count > 0)
-                await PromptScanAsync(autoStart: true);
-        }
+        // 启动扫描（本次改造）：每次打开/恢复项目都把全部资源扫一遍（增量，
+        // 只重解析签名变过的文件），四个缓存库也在这里补齐。空项目同样走这条路，
+        // 不再弹「先扫描资源」的窗口——扫完提示条会直接引导下一步。
+        await RunStartupScanAsync();
         UpdateHint();
     }
 
@@ -242,12 +329,16 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     /// 任何 bundle，秒级）。索引库缺失时静默返回 0（随后空项目逻辑会引导扫描）。</summary>
     private async Task<int> RehydrateAssetsFromIndexAsync()
     {
+        _assetsMatchIndex = false; // 先保守置否：只有真的回灌成功才敢声称「项目与索引一致」
         if (_project is null) return 0;
         try
         {
             StatusText.Text = "正在从扫描索引重建资源列表（不解析 bundle，秒级）…";
             var added = await _cacheScan.RehydrateFromIndexAsync(_project);
             if (added > 0) StatusText.Text = $"资源索引已重建（{added} 条引用资产，后台完成，未解析任何 bundle）。";
+            // 回灌成功后，索引里每一行都能在项目里找到对应记录 → 启动扫描可以跳过
+            // 「119 万行逐条对账」（实测该步占启动扫描 50 秒里的 ~40 秒）。
+            _assetsMatchIndex = true;
             return added;
         }
         catch (Exception ex) { ShowError("重建资源索引失败", ex); return 0; }
@@ -531,7 +622,9 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
         }
         if (_project.Assets.Count == 0)
         {
-            HintText.Text = "下一步：点击侧边栏「自动加载游戏资源」把游戏素材加入项目（引用模式，不复制文件）——加载完成后即可搜索并编辑。";
+            HintText.Text = "编辑器每次启动都会自动扫描全部游戏资源（引用模式，不复制文件）。这里仍是 0，"
+                          + "通常是还没找到 Unity 缓存：请确认「设置」页的缓存目录并先启动一次游戏生成缓存，"
+                          + "再点侧边栏「自动加载游戏资源」重试。";
             return;
         }
         if (edits == 0)
@@ -745,6 +838,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
 
     private async void Window_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
+        _startupScanCancellation?.Cancel(); // 启动扫描（后台增量扫描）随关窗取消
         _assetsPage?.PersistUiState(); // plan-04：关窗时持久化布局占比
         WorkbenchShell.PersistAllPreviewWidths(); // plan-10：四个工作台的列宽一次性合并落盘
         if (_project is not null && !_project.RestoreDebugFilesOnClose) return;

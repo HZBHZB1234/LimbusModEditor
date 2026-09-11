@@ -20,6 +20,7 @@ public sealed class SqliteTableCache
     private readonly string _dbFile;
     private readonly string _schemaSql;
     private readonly string _connectionString;
+    private bool _schemaReady;
 
     /// <param name="dbFile">数据库文件路径（通常来自 <see cref="WorkbenchCachePaths"/>）。</param>
     /// <param name="schemaSql">建表脚本（<see cref="WorkbenchCacheSchema"/>；必须幂等，用
@@ -55,7 +56,7 @@ public sealed class SqliteTableCache
     // ── 建表 / 轻量迁移 ─────────────────────────────────────────────
 
     /// <summary>幂等建表。库损坏（打不开 / 表结构坏）时删库重建后重试一次。
-    /// 调用方应在每次使用缓存前调用它。</summary>
+    /// 调用方应在每次使用缓存前调用它（<see cref="Read"/> / <see cref="Write"/> 已内置一次）。</summary>
     public void EnsureSchema()
     {
         try
@@ -68,6 +69,23 @@ public sealed class SqliteTableCache
             RecreateOrThrow(ex);
             EnsureSchemaCore();
         }
+    }
+
+    /// <summary>
+    /// 读/写前的建表保证（每个实例只做一次）。
+    ///
+    /// <para><b>为什么必须内建</b>：<see cref="Open"/> 用的是
+    /// <c>SqliteOpenMode.ReadWriteCreate</c>，因此「库文件不存在」或「库文件是 0 字节」
+    /// （上次建库被打断 / 只创建了文件）时连接照样能开，随后的
+    /// <c>SELECT … FROM index_meta</c> 会抛 <c>SQLite Error 1: 'no such table: index_meta'</c>
+    /// —— 页面上表现成「载入 lang 文件失败」。缓存是纯加速旁路，
+    /// <b>任何缺失都该被无声补建</b>，绝不能把缺表当业务错误抛给用户。</para>
+    /// </summary>
+    private void EnsureSchemaOnce()
+    {
+        if (_schemaReady) return;
+        EnsureSchema();
+        _schemaReady = true;
     }
 
     private void EnsureSchemaCore()
@@ -134,6 +152,7 @@ public sealed class SqliteTableCache
     public void Write(Action<SqliteConnection, SqliteTransaction> work)
     {
         ArgumentNullException.ThrowIfNull(work);
+        EnsureSchemaOnce();
         try
         {
             WriteCore(work);
@@ -172,6 +191,7 @@ public sealed class SqliteTableCache
     public T Read<T>(Func<SqliteConnection, T> query)
     {
         ArgumentNullException.ThrowIfNull(query);
+        EnsureSchemaOnce();
         try
         {
             using var connection = Open();
@@ -292,6 +312,7 @@ public sealed class SqliteTableCache
     {
         SqliteConnection.ClearAllPools(); // 池化会保留原生句柄，不清理在 Windows 上删不掉文件
         foreach (var path in SidecarFiles()) TryDelete(path);
+        _schemaReady = false; // 库已删：下一次读/写要重新建表（否则会读到「刚删掉的库」的假象）
         WasRecreated = true;
     }
 

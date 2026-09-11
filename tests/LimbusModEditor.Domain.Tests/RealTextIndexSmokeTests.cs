@@ -66,7 +66,10 @@ public sealed class RealTextIndexSmokeTests : IDisposable
 
         var languagePrefix = active + "/";
         var relatives = files.Select(x => x.RelativePath).ToList();
-        Assert.Contains("config.json", relatives);
+        // plan-14：config.json 不再是工作台文件（只用来解析活动语言 + 进索引签名）。
+        Assert.DoesNotContain("config.json", relatives);
+        // 全部条目都在活动语言目录之下（大小写照磁盘，config.json 里可能写成别的大小写）。
+        Assert.All(relatives, x => Assert.StartsWith(languagePrefix, x, StringComparison.OrdinalIgnoreCase));
         // 子目录（StoryData）+ 根级文件并存。
         Assert.Contains(relatives, x => x.StartsWith(languagePrefix + "StoryData/", StringComparison.Ordinal));
         Assert.Contains(relatives, x => x.StartsWith(languagePrefix, StringComparison.Ordinal) && x.Count(c => c == '/') == 1);

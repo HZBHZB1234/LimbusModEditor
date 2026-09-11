@@ -42,15 +42,40 @@ public sealed record TextureFormatCapability(
 /// <summary>PNG conversion for Unity Texture2D formats. Supports all
 /// uncompressed formats (Alpha8, ARGB4444, RGB24, RGBA32, ARGB32, RGB565,
 /// BGR24, R16, RGBA4444, BGRA32, RG16, R8) plus managed DXT1/DXT5 codecs.</summary>
+///
+/// <remarks>
+/// <b>行序约定（上下颠倒的根因）</b>：Unity 的 Texture2D 像素负载<b>以左下角为原点</b>——
+/// 负载里的第 0 行是图像<b>最下面</b>一行（与 GPU 纹理坐标一致），而 PNG / ImageSharp 的
+/// 行序自上而下。两者相差一次上下翻转：
+/// <list type="bullet">
+/// <item>解码（<see cref="ToImage"/> / <see cref="ToPng"/> / <see cref="ToPngCropped"/>）
+/// 必须翻一次，否则资源工作台里的纹理与 Sprite 子图都是倒的；</item>
+/// <item>编码（<see cref="FromPng"/>）必须翻回去，保证「读出来 → 换图 → 写回去」的
+/// 像素逐字节往返不变（写回后游戏里的朝向也就与原版一致）。</item>
+/// </list>
+/// 翻转只改变行序，不改变 <c>UnitySpriteCrop</c> 的坐标换算：那里的
+/// <c>y = textureHeight - rectY - height</c> 正是「Unity 左下原点 → 图像左上原点」的换算，
+/// 与这里的翻转互为配套（真实样本 <c>banner_MirrorDungeon7_en</c> 的口径）。
+/// </remarks>
 public sealed class UnityTextureCodec
 {
+    /// <summary>Unity 像素负载的行序以左下角为原点（第 0 行 = 图像最下面一行）。
+    /// 保留成常量而不是散落的 <c>height - 1 - y</c>：这个约定是「图为什么是倒的」的唯一开关，
+    /// 后续若要支持 <c>Texture2D</c> 的平台相关行序，只需在这里加分支。</summary>
+    public const bool UnityPixelDataIsBottomUp = true;
+
+    /// <summary>某一行（图像坐标，0 = 最上面一行）在负载字节里的行号。</summary>
+    private static int StorageRow(int imageRow, int height)
+        => UnityPixelDataIsBottomUp ? height - 1 - imageRow : imageRow;
+
     public byte[] ToPng(UnityTextureInfo texture)
     {
         using var image = ToImage(texture); using var output = new MemoryStream(); image.SaveAsPng(output); return output.ToArray();
     }
 
     /// <summary>解码后按矩形裁剪再输出 PNG（Sprite 子图预览用）。坐标以图像
-    /// 左上角为原点、已由调用方完成 Unity 左下原点换算与边界校验。</summary>
+    /// 左上角为原点、已由调用方完成 Unity 左下原点换算与边界校验；
+    /// 行序（自下而上 → 自上而下）由 <see cref="ToImage"/> 统一处理，调用方不必再翻。</summary>
     public byte[] ToPngCropped(UnityTextureInfo texture, int x, int y, int width, int height)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(width);
@@ -65,6 +90,7 @@ public sealed class UnityTextureCodec
         return output.ToArray();
     }
 
+    /// <summary>解码为图像。<b>行序已翻正</b>（负载自下而上 → 图像自上而下，见类注释）。</summary>
     public Image<Rgba32> ToImage(UnityTextureInfo texture)
     {
         ArgumentNullException.ThrowIfNull(texture);
@@ -74,11 +100,16 @@ public sealed class UnityTextureCodec
         var expected = checked(texture.Width * texture.Height * bytesPerPixel);
         if (texture.PixelData.Length < expected) throw new InvalidDataException($"Texture2D pixel data is too short; expected {expected} bytes, got {texture.PixelData.Length}.");
         var image = new Image<Rgba32>(texture.Width, texture.Height);
-        for (var y = 0; y < texture.Height; y++) for (var x = 0; x < texture.Width; x++)
-            image[x, y] = ReadPixel(texture.Format, texture.PixelData, (y * texture.Width + x) * bytesPerPixel);
+        for (var y = 0; y < texture.Height; y++)
+        {
+            var row = StorageRow(y, texture.Height) * texture.Width * bytesPerPixel;
+            for (var x = 0; x < texture.Width; x++)
+                image[x, y] = ReadPixel(texture.Format, texture.PixelData, row + x * bytesPerPixel);
+        }
         return image;
     }
 
+    /// <summary>把图像编码回 Unity 负载。<b>行序翻回自下而上</b>，与 <see cref="ToImage"/> 对称。</summary>
     public UnityTextureInfo FromPng(ReadOnlySpan<byte> pngData, UnityTexturePixelFormat format = UnityTexturePixelFormat.Rgba32)
     {
         if (!IsEncodeSupported(format)) throw new NotSupportedException($"Unsupported Unity TextureFormat: {format}");
@@ -86,8 +117,12 @@ public sealed class UnityTextureCodec
         if (format is UnityTexturePixelFormat.Dxt1 or UnityTexturePixelFormat.Dxt5) return EncodeDxt(image, format);
         var bytesPerPixel = BytesPerPixel(format);
         var pixels = new byte[checked(image.Width * image.Height * bytesPerPixel)];
-        for (var y = 0; y < image.Height; y++) for (var x = 0; x < image.Width; x++)
-            WritePixel(format, pixels, (y * image.Width + x) * bytesPerPixel, image[x, y]);
+        for (var y = 0; y < image.Height; y++)
+        {
+            var row = StorageRow(y, image.Height) * image.Width * bytesPerPixel;
+            for (var x = 0; x < image.Width; x++)
+                WritePixel(format, pixels, row + x * bytesPerPixel, image[x, y]);
+        }
         return new(image.Width, image.Height, format, pixels);
     }
 
@@ -192,7 +227,17 @@ public sealed class UnityTextureCodec
                 for (var i = 0; i < 16; i++) alphas[i] = ap[(int)((abits >> (3 * i)) & 7)];
             }
             DecodeColorBlock(texture.PixelData, ref offset, colors);
-            for (var py = 0; py < 4; py++) for (var px = 0; px < 4; px++) { var x = bx * 4 + px; var y = by * 4 + py; if (x < texture.Width && y < texture.Height) { var c = colors[py * 4 + px]; image[x, y] = new Rgba32(c.R, c.G, c.B, alphas[py * 4 + px]); } }
+            // 块行序同样是自下而上：负载里的块行 0 是块网格的最下面一行（见类注释）。
+            for (var py = 0; py < 4; py++) for (var px = 0; px < 4; px++)
+            {
+                var x = bx * 4 + px;
+                var y = texture.Height - 1 - (by * 4 + py);
+                if (x < texture.Width && y >= 0 && y < texture.Height)
+                {
+                    var c = colors[py * 4 + px];
+                    image[x, y] = new Rgba32(c.R, c.G, c.B, alphas[py * 4 + px]);
+                }
+            }
         }
         return image;
     }
@@ -208,7 +253,18 @@ public sealed class UnityTextureCodec
     {
         var bw = (image.Width + 3) / 4; var bh = (image.Height + 3) / 4; using var stream = new MemoryStream(); using var writer = new BinaryWriter(stream);
         var px = new Rgba32[16];
-        for (var by = 0; by < bh; by++) for (var bx = 0; bx < bw; bx++) { for (var py = 0; py < 4; py++) for (var pxi = 0; pxi < 4; pxi++) px[py * 4 + pxi] = image[Math.Min(bx * 4 + pxi, image.Width - 1), Math.Min(by * 4 + py, image.Height - 1)]; if (format == UnityTexturePixelFormat.Dxt5) WriteAlphaBlock(writer, px); WriteColorBlock(writer, px, format == UnityTexturePixelFormat.Dxt1); }
+        for (var by = 0; by < bh; by++) for (var bx = 0; bx < bw; bx++)
+        {
+            for (var py = 0; py < 4; py++) for (var pxi = 0; pxi < 4; pxi++)
+            {
+                // 块行序自下而上（与 DecodeDxt 对称）：先算负载行号（超界按边缘行复制），
+                // 再换算成图像行号取像素。
+                var x = Math.Min(bx * 4 + pxi, image.Width - 1);
+                var storageRow = Math.Min(by * 4 + py, image.Height - 1);
+                px[py * 4 + pxi] = image[x, image.Height - 1 - storageRow];
+            }
+            if (format == UnityTexturePixelFormat.Dxt5) WriteAlphaBlock(writer, px); WriteColorBlock(writer, px, format == UnityTexturePixelFormat.Dxt1);
+        }
         return new(image.Width, image.Height, format, stream.ToArray());
     }
 

@@ -46,9 +46,10 @@ public static class TextIndexHitKind
 /// （单测 <c>TextIndexStoreTests</c> 用「有缓存 vs 删库」逐字段比对证明这一点）。</para>
 ///
 /// <para><b>失效规则</b>（唯一实现，无例外）：
-/// ① 整库：<c>index_meta.signature</c> = <b>活动语言目录签名 + config.json 内容哈希</b>
+/// ① 整库：<c>index_meta.signature</c> = <b>内容口径版本 + 活动语言目录签名 + config.json 内容哈希</b>
 /// （内容哈希是必需的：活动语言由 config.json 的 <c>lang</c> 字段决定，
-/// 几十字节的小文件改写后大小可能不变，只比目录 mtime 会漏掉「玩家切换了活动语言」）；
+/// 几十字节的小文件改写后大小可能不变，只比目录 mtime 会漏掉「玩家切换了活动语言」；
+/// 版本前缀见 <see cref="IndexFormatVersion"/>——「收录哪些文件」的口径变了也要让旧库重建）；
 /// ② 单文件：<c>files</c> 行的 <c>(size, mtime_ticks)</c> 与磁盘不符才重解析；
 /// ③ 增删文件：目录结构每次都真实枚举，与库里行集不一致即整表重建。</para>
 ///
@@ -88,14 +89,28 @@ public sealed class TextIndexStore
     /// <summary>库文件路径（诊断/测试用）。</summary>
     public string DatabasePath => _cache.DbFile;
 
+    /// <summary>
+    /// 索引<b>内容口径</b>版本，参与源签名。只要「工作台收录哪些文件 / 每行存什么」这类
+    /// 口径变了就必须 +1：签名里其它两项（目录 mtime、config.json 内容哈希）都不会因此变化，
+    /// 不升版的话旧库会一直被判定为「新鲜」，旧口径的行（例如已废弃的 <c>config.json</c> 行）
+    /// 就会一直留在库里并被读出来。
+    /// <list type="bullet">
+    /// <item><c>v1</c>：首版（活动语言目录 + 根级 <c>config.json</c>）。</item>
+    /// <item><c>v2</c>（plan-14）：不再收录根级 <c>config.json</c>——它是「活动语言是谁」的输入，
+    /// 不是可翻译的文本表。</item>
+    /// </list>
+    /// </summary>
+    public const string IndexFormatVersion = "v2";
+
     /// <summary>本实例（或底层库）是否因损坏而执行过删库重建。</summary>
     public bool WasRecreated => _cache.WasRecreated;
 
     // ── 源签名 ───────────────────────────────────────────────────────
 
     /// <summary>
-    /// 描述一个 lang 根：源键（规范化路径，忽略大小写）+ 签名（目录签名 <c>length:mtime</c>
-    /// + config.json 内容哈希）。任何一项变（含切换活动语言）都使整库失效重建。
+    /// 描述一个 lang 根：源键（规范化路径，忽略大小写）+ 签名（<b>内容口径版本</b>
+    /// + 目录签名 <c>length:mtime</c> + config.json 内容哈希）。任何一项变
+    /// （含切换活动语言、以及「收录哪些文件」的口径升级）都使整库失效重建。
     /// </summary>
     public static TextIndexSource DescribeSource(string langRoot)
     {
@@ -105,7 +120,7 @@ public sealed class TextIndexStore
         var configHash = LangTextWorkbenchService.ComputeConfigContentHash(full);
         return new TextIndexSource(full, full.ToLowerInvariant(),
             directorySignature.Format(), configHash,
-            $"{directorySignature.Format()}|{configHash}");
+            $"{IndexFormatVersion}|{directorySignature.Format()}|{configHash}");
     }
 
     /// <summary>非抛出式：目录不存在时返回 null（页面按「没有 lang 目录」处理）。</summary>
@@ -395,8 +410,8 @@ public sealed class TextIndexStore
 }
 
 /// <summary>
-/// plan-10：一个 lang 源的缓存标识。签名 = 活动语言目录签名 + config.json 内容哈希
-/// （两者任一变化都使整库失效）。
+/// plan-10：一个 lang 源的缓存标识。签名 = 内容口径版本 + 活动语言目录签名
+/// + config.json 内容哈希（任一变化都使整库失效）。
 /// </summary>
 /// <param name="LangRoot">规范化后的 lang 根路径（原样大小写，用于拼接完整路径）。</param>
 /// <param name="SourceKey">存进 <c>index_meta.source_key</c> 的源标识（小写规范化，忽略大小写比较）。</param>

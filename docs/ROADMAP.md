@@ -563,6 +563,55 @@ static mod 可以使用资源工作台类似的页面。事实上我们也可以
 `Themes/WorkbenchStyles.xaml`）。资源页未改结构（splitter/交互保持原样），
 用页面试装探针验证「四个工作台全部可构造渲染 + 12 个共享画刷与 7 个共享样式全部可解析」。
 
+## P3.13 用户反馈修复批次（2026-09，完成）
+
+用户截图反馈的 8 项缺陷/改造，按 `docs/plans/plan-13-user-feedback-fixes.md` 逐条实施：
+① 活动栏 tooltip 中文豆腐块（图标字体只写在内容 `TextBlock` 上，tooltip 不再继承符号字体）；
+② 资源工作台图像上下颠倒（`UnityTextureCodec` 统一「Unity 负载左下原点」行序：解码翻正、
+写回翻回，DXT 块行同理，Sprite 裁剪换算与其互为配套）；③ 缓存加载/创建改为
+**每次启动自动扫描全部资源 + 四个 db**（新增 `Application/Scanning/StartupScanService`：
+四库建库校表 → 游戏资源 → 音频索引 → 静态表索引 → lang 文本索引，逐步容错、增量、
+状态栏实时进度，取代「空项目才弹扫描窗口」）；④ 「载入 lang 文件失败：no such table: index_meta」
+（真实现场：`cache/text-index.db` 为 0 字节；`SqliteTableCache.Read/Write` 与
+`UnityCacheSqliteIndexStore` 读路径内置缺表自愈）；⑤ JSON 树悬停行时滚轮失效
+（`WorkbenchShell.EnableWheelScrolling`：收已处理事件 + 显式滚动 + 合成事件重入保护）；
+⑥ 音频工作台改为资源工作台同款两视图（☰ 全部音频 / 🗂 bank 树）+ 右侧只留四个按钮 +
+**播放进度条替代单一试听按钮**（200ms 轮询 `MediaPlayer.Position`，可点击跳转）；
+⑦ 图像预览默认「适应窗口」（`LayoutTransform` 缩放 + 视口比例，放大后滚动/拖拽才有效）；
+⑧ 筛选下拉中文被裁（共享样式 `WorkbenchFilterCombo`：MinHeight 32 + 按候选项估算宽度，
+筛选行改 `WrapPanel` 自动换行）。
+
+测试 528 → **549**（74 Format + 475 Domain）；详见 plan-13 的逐项证据与人工验证步骤。
+
+## P3.14 用户反馈第二轮（2026-09，完成）
+
+用户第二轮截图反馈的 5 项，按 `docs/plans/plan-14-feedback-round2.md` 逐条实施：
+
+① **音频工作台行对比度**（用户原话「bank 这里的对比度不清晰」）：根因是共享树样式只设了
+`Foreground`，选中/hover 底色完全交给 WPF-UI 默认模板——离屏渲染实测其选中行底色与列表底
+**完全相同**（都是 `#11151A`）。`WorkbenchTreeItem` 改为自带 `ControlTemplate`
+（箭头列 + 行底 + 左侧 2px 强调条 + `ItemsPresenter`，虚拟化与惰性展开照旧），
+新增 `WbRowHoverBrush #1C242E` / `WbRowSelectedBrush #20304A` 两个令牌：选中行亮度差 +26，
+另加主色文字；`ListView` 用 Fluent 默认模板实测选中底色 `#414448`（差 +47），本来就够清楚，未动。
+② **bank 树默认隐藏事件 bank**：纯规则 `Application/Assets/BankTreeRules` 抽出来单测，
+筛选行新增「显示事件 bank」勾选框（默认不勾），选「仅事件 bank」时强制显示（否则会显示空树），
+隐藏数量在状态条/空态如实说明（不静默丢数据）。
+③ **单 FSB 的 bank 展开即到样本层**（`ShouldAutoExpandSingleFsb`）：多 FSB 的 bank 行为不变，
+仍惰性生成、不物化上千样本行；FSB 节点 `Tag` 补上所属 bank（不再依赖 `Parent` 反查），
+占位子项改用单例哨兵判定「这一层建过没有」（页面级 bool 会让第二个 bank 永远停在「载入中…」）。
+④ **文本工作台数据源改为活动语言目录内部**：不再显示根级 `config.json`，也不再有语言目录
+包裹层（树顶层直接是 `AbDlg_Faust.json` / `StoryData/`）；新增纯映射类
+`Application/Texts/LangTextDisplay`——**补丁键仍是相对 lang 根（含语言目录前缀）**，
+这是真实加载器（LCTA changes.py 按 `<lang>/<键>` 应用）的兼容门，只改显示口径。
+⑤ **修掉「点 lang 文件后预览一片空白」**：索引命中路径（读 `cache/text-index.db`）不经过
+`EnumerateFiles`，服务因此没有 lang 根基线，`BeginEdit` 直接抛错 → 编辑列只留 `—`；
+现在无条件 `AttachLangRoot(langRoot)`（plan-13 的启动扫描让索引总是新鲜，所以这条路径必然被走到）。
+另外把「导出 lang 补丁…」「直接应用到 lang 目录…」两个按钮从文本工作台编辑列移到
+侧边栏「② 产出模组」板块（编辑集在页面对象里，侧边栏只做转调）。
+
+测试 549 → **561**（74 Format + 487 Domain）；新增 `BankTreeRulesTests` / `LangTextDisplayTests` /
+`AttachLangRoot` 契约与真实数据断言更新。离屏渲染脚手架在 git 忽略的 `artifacts/wpf-check/`。
+
 ## P4：工程质量和交付
 
 - 把当前代码后置 UI 逐步迁移到 MVVM，但不牺牲现有 Windows-only 可运行性。

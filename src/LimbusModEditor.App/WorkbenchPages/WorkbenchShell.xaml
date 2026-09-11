@@ -30,12 +30,14 @@
         <!-- 浏览列：搜索行 → 筛选行 → 视图切换对 → 内容（空态提示覆盖在内容之上） -->
         <Border Grid.Column="0" Style="{StaticResource WorkbenchBrowsePanel}">
             <DockPanel>
-                <StackPanel x:Name="SearchRowHost" DockPanel.Dock="Top" Orientation="Horizontal"
-                            Margin="0,0,0,6" Visibility="Collapsed"/>
-                <StackPanel x:Name="FilterRowHost" DockPanel.Dock="Top" Orientation="Horizontal"
-                            Margin="0,0,0,8" Visibility="Collapsed"/>
-                <StackPanel x:Name="ViewToggleRowHost" DockPanel.Dock="Top" Orientation="Horizontal"
-                            Margin="0,0,0,8" Visibility="Collapsed"/>
+                <!-- 三行宿主一律用 WrapPanel：筛选下拉按最长候选项给足宽度后，一横行在
+                     默认窗口尺寸下会超出浏览列（约 600px）而被裁掉；WrapPanel 会自动换行。 -->
+                <WrapPanel x:Name="SearchRowHost" DockPanel.Dock="Top"
+                           Margin="0,0,0,6" Visibility="Collapsed"/>
+                <WrapPanel x:Name="FilterRowHost" DockPanel.Dock="Top"
+                           Margin="0,0,0,8" Visibility="Collapsed"/>
+                <WrapPanel x:Name="ViewToggleRowHost" DockPanel.Dock="Top"
+                           Margin="0,0,0,8" Visibility="Collapsed"/>
                 <Grid>
                     <ContentControl x:Name="BrowseHost"/>
                     <TextBlock x:Name="EmptyHint" Style="{StaticResource WorkbenchEmptyHint}"/>

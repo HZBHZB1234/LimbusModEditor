@@ -23,7 +23,13 @@ public sealed record UnityCacheScanResult(
     int IndexedBundles,
     int AddedAssets,
     int UpdatedAssets,
-    IReadOnlyList<string> Diagnostics);
+    IReadOnlyList<string> Diagnostics,
+    /// <summary>本次是否跳过了「索引命中 bundle 的逐行对账」（调用方声明项目已与索引一致）。
+    /// 为 true 时 <see cref="UpdatedAssets"/> 不包含「已存在但未逐条确认」的资产。</summary>
+    bool SkippedRowReconciliation = false,
+    /// <summary>本次是否连整个合并段都跳过了（项目与索引一致 + 没有任何 bundle 需要解析/新增）：
+    /// 此时合并结果必然为空，跳过的是「建 127 万条路径字典」这类纯 no-op 开销。</summary>
+    bool SkippedMerge = false);
 
 /// <summary>
 /// 傻瓜化核心：一键扫描游戏 Unity 缓存，把全部 bundle 的对象索引登记进项目。
@@ -73,12 +79,28 @@ public sealed class UnityCacheScanService
         catch (Exception) { return []; }
     }
 
+    /// <summary>
+    /// 扫描缓存目录并把对象索引登记进项目（引用模式，不复制任何文件）。
+    /// </summary>
+    /// <param name="project">目标项目。</param>
+    /// <param name="cacheDirectory">Unity 缓存根（<c>&lt;外层&gt;/&lt;内层&gt;/__data</c> 的父目录）。</param>
+    /// <param name="gameDirectory">游戏目录（读 catalog 做 vanilla 基线判定；可空）。</param>
+    /// <param name="progress">进度回调（后台线程）。</param>
+    /// <param name="cancellationToken">取消。</param>
+    /// <param name="projectMatchesIndex">
+    /// 调用方保证「索引里目前每一行都能在项目里找到对应记录」（打开项目时刚成功跑过一次
+    /// <see cref="RehydrateFromIndexAsync"/>）。为 true 时，索引命中的 bundle 不再逐行对账
+    /// ——那一步在真实规模下要读 119 万行并做 127 万次字典查找（实测约 40 秒），
+    /// 而结果恒为 no-op。**这个保证必须由调用方给出**：传错会让「项目里缺失的记录」
+    /// 不被补回，因此只有「刚回灌过、且本次会话没有删过记录」的路径才允许传 true。
+    /// </param>
     public async Task<UnityCacheScanResult> ScanIntoProjectAsync(
         ModProject project,
         string cacheDirectory,
         string? gameDirectory = null,
         IProgress<UnityCacheScanProgress>? progress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool projectMatchesIndex = false)
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentException.ThrowIfNullOrWhiteSpace(cacheDirectory);
@@ -91,9 +113,20 @@ public sealed class UnityCacheScanService
         if (entries.Count == 0)
             throw new InvalidDataException($"缓存目录里没有 <外层>/<内层>/__data 缓存条目：{cacheDirectory}");
 
-        // 建表 / 读索引 / 解析 catalog 也全部在后台线程完成（避免调用方 UI
-        // 线程上的同步卡顿），一次性载入内存字典与静态 bundle 键集合。
-        var (store, bundleIndex, catalog, staticInnerHashes) = await Task.Run(() =>
+        // 建表 / 读索引在后台线程完成（避免调用方 UI 线程上的同步卡顿）。
+        //
+        // plan-13：catalog 与「静态 bundle 内层键集合」改成**完全惰性**——只有某个 bundle
+        // 真的被解析成功后才需要它们（vanilla 基线 + 静态标记）。真实 catalog.bin（5 MB）
+        // 解析一次约 17 秒（本机实测，解析走正则启发式），而启动扫描每次都跑：
+        // 缓存里总有几条永远解析不了的条目（本机 2 条），若在解析前就要求 catalog，
+        // 每次启动都会白花这 17 秒。惰性后「热启动 / 只有坏条目」两种情况一分钱不花。
+        var catalogLazy = new Lazy<CatalogFileService?>(() => LoadCatalog(gameDirectory),
+            LazyThreadSafetyMode.ExecutionAndPublication);
+        var staticHashesLazy = new Lazy<IReadOnlySet<string>>(() => catalogLazy.Value is { } catalog
+                ? StaticBundleLocator.StaticInnerHashes(catalog)
+                : (IReadOnlySet<string>)new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+            LazyThreadSafetyMode.ExecutionAndPublication);
+        var (store, bundleIndex) = await Task.Run(() =>
         {
             var s = _store;
             if (s is not null)
@@ -109,16 +142,10 @@ public sealed class UnityCacheScanService
             var idx = s is not null
                 ? s.ReadBundleIndex(StringComparer.OrdinalIgnoreCase)
                 : new Dictionary<string, UnityCacheIndexBundle>(StringComparer.OrdinalIgnoreCase);
-            var cat = LoadCatalog(gameDirectory);
-            // plan-08：静态数据 bundle 的内层键集合（catalog 一次性解析，之后按
-            // 内层键 O(1) 判定；官方热修会换 hash，所以每次扫描都重新解析）。
-            var staticHashes = StaticBundleLocator.StaticInnerHashes(cat);
-            return (s, idx, cat, staticHashes);
+            return (s, idx);
         }, cancellationToken);
 
         var diagnostics = new List<string>();
-        if (catalog is null && !string.IsNullOrWhiteSpace(gameDirectory))
-            diagnostics.Add("官方 catalog 缺失或无法解析，本次扫描不做 vanilla 基线判定。");
 
         var total = entries.Count;
         var processed = 0;
@@ -154,7 +181,7 @@ public sealed class UnityCacheScanService
                     }
                     else
                     {
-                        var (records, bundle, rows) = ParseEntry(entry, catalog, staticInnerHashes);
+                        var (records, bundle, rows) = ParseEntry(entry, () => catalogLazy.Value, () => staticHashesLazy.Value);
                         results.Add((entry, false, bundle, records, rows));
                         Interlocked.Increment(ref scanned);
                     }
@@ -177,6 +204,9 @@ public sealed class UnityCacheScanService
             progress?.Report(new UnityCacheScanProgress(total, processed, string.Empty, scanned, indexed));
         }, cancellationToken).ConfigureAwait(false);
         diagnostics.AddRange(failures.OrderBy(x => x, StringComparer.Ordinal));
+        // catalog 只在真的用上时才可能为空：惰性被触发过 + 加载失败 + 配了游戏目录。
+        if (catalogLazy.IsValueCreated && catalogLazy.Value is null && !string.IsNullOrWhiteSpace(gameDirectory))
+            diagnostics.Add("官方 catalog 缺失或无法解析，本次扫描不做 vanilla 基线判定。");
 
         // 收尾阶段反馈：合并百万级资产与写索引库可能持续数十秒到数分钟，
         // 让 UI 明确展示当前阶段而不是停在最后一条解析进度上。
@@ -187,28 +217,57 @@ public sealed class UnityCacheScanService
         // 全缓存 ≈ 119 万资产：必须用字典索引，逐条 FirstOrDefault 是 O(N²)。
         // 阶段 C2 惰性构记录：未变化的 bundle（索引命中）只产出路径字符串，
         // 路径已存在就不再构造 AssetRecord（项目刚回灌时 119 万条几乎零成本）。
+        //
+        // plan-13：整段合并只在「真有事要做」时执行 —— 项目已与索引逐条一致（打开项目刚回灌过）
+        // 且本次没有任何 bundle 需要解析/新增时，合并结果恒为空，而它要建一张 127 万条的
+        // 路径字典（真实规模下数百 MB 的分配 + 一次字典插入风暴）。启动扫描每次都跑，
+        // 这段纯 no-op 的开销就是「每次启动都要白等」的来源。
+        var reconcileIndexHits = !projectMatchesIndex;
+        // 「有没有解析成功过任何 bundle」用 results 判定（解析失败的条目根本不进 results），
+        // 而不是「有没有条目看起来需要解析」：真实缓存里那几条永远解析不了的坏条目
+        // 不该让整段合并（含 127 万条路径字典）白跑。
+        var needMerge = reconcileIndexHits || results.Any(x => !x.FromCache);
+        var cacheSourceRegistered = project.Sources.Any(x =>
+            string.Equals(x.Path, cacheDirectory, StringComparison.OrdinalIgnoreCase));
+        if (!needMerge)
+        {
+            // 索引命中的 bundle 无需对账；但要保留「索引可能已过期（磁盘上删了 bundle）」
+            // 的收缩能力 —— 那由后面的 PersistIndex 完成，与项目资产无关。
+            PersistIndex(store, entries, results, cancellationToken);
+            RegisterCacheSource(project, cacheDirectory, ref cacheSourceRegistered);
+            return new UnityCacheScanResult(total, scanned, indexed, added, updated, diagnostics,
+                SkippedRowReconciliation: true, SkippedMerge: true);
+        }
+
         var existingByPath = new Dictionary<string, AssetRecord>(StringComparer.OrdinalIgnoreCase);
         foreach (var existingAsset in project.Assets)
             existingByPath.TryAdd(existingAsset.LogicalPath, existingAsset);
-        var cacheSourceRegistered = project.Sources.Any(x =>
-            string.Equals(x.Path, cacheDirectory, StringComparison.OrdinalIgnoreCase));
         // 索引命中的 bundle 需要行数据参与合并：单条流式查询分组载入
         // （冷扫描没有命中项，完全跳过这一步）。
-        var rowsByBundle = store is not null && results.Any(x => x.FromCache)
+        // 项目已与索引逐条一致时这趟读行 + 对账是纯 no-op，直接跳过：
+        // 真实规模下它占掉启动扫描的绝大部分时间（实测 50.5 秒里的 ~40 秒）。
+        var rowsByBundle = store is not null && reconcileIndexHits && results.Any(x => x.FromCache)
             ? store.ReadAllRowsGrouped(StringComparer.OrdinalIgnoreCase)
             : null;
         foreach (var (entry, fromCache, cachedBundle, records, _) in results.OrderBy(x => x.Entry.OuterKey, StringComparer.Ordinal)
                      .ThenBy(x => x.Entry.InnerKey, StringComparer.Ordinal))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            // 静态标记：索引里记录的标记 + 本次 catalog 判定（任一命中即视为静态）。
-            var isStaticBundle = cachedBundle.StaticBundle || staticInnerHashes.Contains(entry.InnerKey);
+            // 静态标记：以索引里记录的标记为主；catalog 本次已被解析过（有 bundle 解析成功）
+            // 时再用内层键集合补一刀 —— 但**绝不在这里主动触发 catalog 解析**
+            // （见本方法开头的惰性说明）。旧索引/旧项目（没有 static_bundle 语义）由
+            // 项目记录里已有的标记兜底：命中分支里只要记录上已有标记就保留，
+            // 免得一次「什么都没变」的扫描把静态标记全抹掉。
+            var isStaticBundle = cachedBundle.StaticBundle
+                || (staticHashesLazy.IsValueCreated && staticHashesLazy.Value.Contains(entry.InnerKey));
             if (fromCache)
             {
                 // bundle 未变化：数据与索引完全同源（含 vanilla 基线），已有记录
                 // 无需刷新字段；只有项目里缺失的路径（如从未扫描过的新项目）
-                // 才构造记录。
-                var cachedRows = rowsByBundle is not null && rowsByBundle.TryGetValue(entry.DataPath, out var rows)
+                // 才构造记录。项目已与索引一致时（reconcileIndexHits=false）这一趟
+                // 整体跳过 —— 注意这里**不能**用 continue：后面还有「登记缓存来源」
+                // 的公共代码，跳过整个 bundle 的循环体即可。
+                var cachedRows = reconcileIndexHits && rowsByBundle is not null && rowsByBundle.TryGetValue(entry.DataPath, out var rows)
                     ? rows
                     : (IReadOnlyList<UnityCacheIndexRow>)Array.Empty<UnityCacheIndexRow>();
                 foreach (var row in cachedRows)
@@ -217,7 +276,11 @@ public sealed class UnityCacheScanService
                     if (existingByPath.TryGetValue(logicalPath, out var existingAsset))
                     {
                         // 已存在：只补/清静态标记（旧项目没有该标记时也能对齐）。
-                        if (isStaticBundle) existingAsset.Metadata[StaticBundleMetadataKey] = "true";
+                        // 记录上已有标记就保留：旧索引（static_bundle 列全是 0）在
+                        // 「什么都没变」的扫描里不该把标记抹掉。
+                        var staticForAsset = isStaticBundle
+                            || existingAsset.Metadata.ContainsKey(StaticBundleMetadataKey);
+                        if (staticForAsset) existingAsset.Metadata[StaticBundleMetadataKey] = "true";
                         else existingAsset.Metadata.Remove(StaticBundleMetadataKey);
                         updated++;
                         continue;
@@ -267,24 +330,28 @@ public sealed class UnityCacheScanService
                     updated++;
                 }
             }
-            // 登记缓存来源（导出全部会跳过 Directory 来源；缓存写回由
-            // UnityCacheExportService 负责）。
-            if (!cacheSourceRegistered)
-            {
-                project.Sources.Add(new ProjectSource
-                {
-                    DisplayName = "游戏资源（Unity 缓存扫描）",
-                    Path = cacheDirectory,
-                    Format = Domain.Formats.ModFormatKind.Directory
-                });
-                cacheSourceRegistered = true;
-            }
         }
+        RegisterCacheSource(project, cacheDirectory, ref cacheSourceRegistered);
 
         progress?.Report(new UnityCacheScanProgress(total, total, string.Empty, scanned, indexed,
             Phase: "正在写入索引库…"));
         PersistIndex(store, entries, results, cancellationToken);
-        return new UnityCacheScanResult(total, scanned, indexed, added, updated, diagnostics);
+        return new UnityCacheScanResult(total, scanned, indexed, added, updated, diagnostics,
+            SkippedRowReconciliation: !reconcileIndexHits);
+    }
+
+    /// <summary>登记缓存来源（导出全部会跳过 Directory 来源；缓存写回由
+    /// <c>UnityCacheExportService</c> 负责）。已登记过则什么都不做。</summary>
+    private static void RegisterCacheSource(ModProject project, string cacheDirectory, ref bool registered)
+    {
+        if (registered) return;
+        project.Sources.Add(new ProjectSource
+        {
+            DisplayName = "游戏资源（Unity 缓存扫描）",
+            Path = cacheDirectory,
+            Format = Domain.Formats.ModFormatKind.Directory
+        });
+        registered = true;
     }
 
     /// <summary>打开旧项目时的后台回灌：纯引用资产不再存进项目文件（阶段 C
@@ -327,19 +394,29 @@ public sealed class UnityCacheScanService
 
     // ── 单个 bundle：完整解析（仅新鲜度未命中时才走到这里）─────────────
 
+    /// <summary>
+    /// 解析一个缓存 bundle，产出索引行 + 记录。
+    ///
+    /// <para><paramref name="catalogProvider"/> / <paramref name="staticHashesProvider"/> 都是
+    /// <b>惰性提供者</b>，且刻意在 <c>ScanBundle</c> <b>成功之后</b>才取值
+    /// （两者最终都会触发 5 MB catalog.bin 的解析，本机实测约 17 秒）：
+    /// 缓存里总有几条永远解析不了的条目（本机 2 条），若在解析前就取，
+    /// 每次扫描都会为了它们白花十几秒。解析失败时这两个 provider 一次都不会被调用。</para>
+    /// </summary>
     private (IReadOnlyList<AssetRecord> Records, UnityCacheIndexBundle Bundle, IReadOnlyList<UnityCacheIndexRow> Rows) ParseEntry(
         UnityCacheScanEntry entry,
-        CatalogFileService? catalog,
-        IReadOnlySet<string>? staticInnerHashes = null)
+        Func<CatalogFileService?> catalogProvider,
+        Func<IReadOnlySet<string>> staticHashesProvider)
     {
         var info = new FileInfo(entry.DataPath);
-        var isStaticBundle = staticInnerHashes?.Contains(entry.InnerKey) == true;
+        // 先解析：这一步抛异常（损坏 / 未知格式）时下面两个惰性值都不会被触发。
+        var descriptors = new UnityAssetService().ScanBundle(entry.DataPath);
+        var isStaticBundle = staticHashesProvider().Contains(entry.InnerKey);
         var bundle = new UnityCacheIndexBundle(entry.DataPath, info.Length, info.LastWriteTimeUtc.Ticks, entry.OuterKey, entry.InnerKey, isStaticBundle);
 
-        var descriptors = new UnityAssetService().ScanBundle(entry.DataPath);
         var records = new List<AssetRecord>(descriptors.Count);
         string? baselineSummary = null;
-        if (catalog is not null)
+        if (catalogProvider() is { } catalog)
         {
             try { baselineSummary = CatalogBaselineService.Evaluate(catalog, entry.DataPath).Summary; }
             catch (Exception) { baselineSummary = null; }
@@ -462,5 +539,23 @@ public sealed class UnityCacheScanService
         if (!File.Exists(catalogPath)) return null;
         try { return CatalogFileService.Load(catalogPath); }
         catch (Exception ex) when (ex is InvalidDataException or IOException) { return null; }
+    }
+
+    /// <summary>该缓存条目是否需要重新解析：索引里没有，或 (size, mtime) 与磁盘不符。
+    /// 读不到元数据（被占用 / 权限）时按「需要解析」处理（宁可多解析一次，不假装新鲜）。
+    /// 这是 catalog 是否必须解析的唯一判据（见 <see cref="ScanIntoProjectAsync"/> 的说明）。</summary>
+    private static bool IsMissingOrChanged(UnityCacheScanEntry entry, IReadOnlyDictionary<string, UnityCacheIndexBundle> index)
+    {
+        try
+        {
+            var info = new FileInfo(entry.DataPath);
+            return !index.TryGetValue(entry.DataPath, out var cached) ||
+                   cached.Size != info.Length ||
+                   cached.MTimeUtcTicks != info.LastWriteTimeUtc.Ticks;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return true;
+        }
     }
 }

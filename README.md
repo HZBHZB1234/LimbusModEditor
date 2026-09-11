@@ -17,14 +17,18 @@ not as a launcher replacement.
    (`config/shared-config.json`) — every project reuses them; values from old
    `.lmeproj` files migrate into the shared config on first open (empty slots
    only, manual values are never overwritten).
-3. **Scan** — an empty project automatically prompts for a game-resource scan:
-   the editor indexes every Unity cache bundle (`<outer>/<inner>/__data`) in
-   reference mode (no files are copied) with a persistent incremental SQLite
-   index in the program cache (`cache/unity-cache-index.db`), so rescans only
-   do freshness checks plus incremental writes. Damaged/unknown bundles are
-   reported as per-entry diagnostics instead of aborting the scan. Scanned
+3. **Scan** — every start runs an automatic scan (status bar shows live per-step progress):
+   the four cache databases (`cache/unity-cache-index.db`, `bank-index.db`,
+   `static-tables.db`, `text-index.db`) are created/repaired first, then the editor
+   indexes every Unity cache bundle (`<outer>/<inner>/__data`) in reference mode (no
+   files are copied) with a persistent incremental SQLite index, then refreshes the
+   audio / static-table / lang-text indexes. Each step really enumerates the disk but
+   only re-parses files whose signature changed (hot start is seconds); a missing
+   prerequisite (no game directory yet) only skips that step. Damaged/unknown bundles
+   are reported as per-entry diagnostics instead of aborting the scan. Scanned
    (reference-mode) assets live in the index, not in the project file —
-   opening a project rehydrates them from the index in the background.
+   opening a project rehydrates them from the index in the background. The sidebar's
+   "自动加载游戏资源" button remains as the manual re-scan entry.
 4. **Edit** — the workspace uses a VS Code-style layout: an activity bar opens
    tabbed workbenches (assets / lang text / static data, Ctrl+Tab to cycle,
    fixed assets tab + closable tool tabs). The asset view defaults to a lazy
@@ -34,10 +38,11 @@ not as a launcher replacement.
    state / sort filters plus a default-on "container assets only" filter that
    hides technical support objects. Rows show friendly name, type, state and
    size — never cache keys or Path IDs. The right-hand preview follows the
-   selection: decoded texture thumbnails, readable text/JSON content, or audio
-   audition (FSB → WAV through the FMOD DLLs, played locally, temp file
-   removed afterwards); text/JSON assets open in a built-in editor whose saves
-   are registered as ordinary reversible replacements. Replace textures, edit
+   selection: decoded texture thumbnails (default "fit to window", Unity's
+   bottom-up pixel rows normalised on decode and flipped back on write-back),
+   readable text/JSON content, or audio audition (FSB → WAV through the FMOD DLLs,
+   played locally, temp file removed afterwards); text/JSON assets open in a
+   built-in editor whose saves are registered as ordinary reversible replacements. Replace textures, edit
    Sprite metadata / serialized fields; drag & drop is supported (packages/
    folders to import, an image onto a selected texture to replace it), plus
    double-click actions, Ctrl+F and per-asset undo. Editing a scanned bundle
@@ -53,7 +58,12 @@ not as a launcher replacement.
    rationale and prerequisite for each; it appears automatically when several
    outlets apply and stays out of the way for pure Unity asset edits. The
    classic export wizard, multi-format export, debug overlay and lang /
-   staticmod channels remain available.
+   staticmod channels remain available. The two lang-text channels (export the
+   RFC6902 patch, or apply it straight into the game's lang directory) live in the
+   sidebar's export section; the text workbench itself browses the **active
+   language folder's contents** (as pointed at by `lang/config.json`, e.g.
+   `LLc-CN-LCTA`) — no `config.json` row, no extra wrapper level — while the patch
+   document keeps its loader-compatible keys relative to the lang root.
 
 Legacy flow (importing existing mod packages as project sources) is unchanged:
 import copies packages into the project source area and records them in the

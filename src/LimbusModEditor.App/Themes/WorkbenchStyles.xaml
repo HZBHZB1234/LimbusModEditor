@@ -29,6 +29,22 @@
     <SolidColorBrush x:Key="WbDangerBrush" Color="#D9554F"/>       <!-- 警告/破坏性操作 -->
     <SolidColorBrush x:Key="WbCodeForegroundBrush" Color="#D8E2EA"/><!-- 代码/JSON 文字 -->
 
+    <!-- ── plan-14.1：行的 hover / 选中底色 ──────────────────────────
+         为什么必须有自己的令牌：树/列表此前只设了 Foreground，hover 与选中的底色
+         完全由 WPF-UI 的默认模板决定，在自定义的深色列表底（WbListBrush #11151A）上
+         几乎看不见（用户原话「bank 这里的对比度不清晰」）。底色既然是设计决定，
+         就该和其余色值一样只出现在本文件里。
+
+         选值理由（两支都是「面板底 #171D24 与强调色 #4C8DDA 之间」的同一族深色，
+         不引入新色相，保证与四个工作台的既有观感同族）：
+         · WbRowHoverBrush   #1C242E：比列表底亮一档，三通道全部上抬（+11/+15/+20），
+           是「指到哪一行」的轻提示，不能抢过选中态，所以只做到可见即止。
+         · WbRowSelectedBrush #20304A：向强调色 #4C8DDA 的色相靠（蓝分量最高），
+           与列表底的亮度差约 23/255（见验收脚本的像素断言 ≥20），选中行一眼可辨；
+           文字另转主色 + 左侧 2px 强调条，三重信号叠加（只靠底色在深色主题里太弱）。 -->
+    <SolidColorBrush x:Key="WbRowHoverBrush" Color="#1C242E"/>     <!-- 行 hover 底 -->
+    <SolidColorBrush x:Key="WbRowSelectedBrush" Color="#20304A"/>  <!-- 行选中底 -->
+
     <FontFamily x:Key="WbMonospaceFont">Consolas</FontFamily>
 
     <!-- 棋盘格透明底（plan-05 图像预览）：两个色阶原先是资源页里的字面量，
@@ -98,10 +114,153 @@
         <Setter Property="ScrollViewer.CanContentScroll" Value="True"/>
     </Style>
 
-    <Style x:Key="WorkbenchTreeItem" TargetType="TreeViewItem"
-           BasedOn="{StaticResource {x:Type TreeViewItem}}">
+    <!-- 展开/收起箭头按钮（WorkbenchTreeItem 模板内部用）：
+         自绘 10×10 人字形（Path 描边），右侧 90° 旋转表示「已展开」。
+         为什么不用 Fluent 的 ToggleButton 模板：那个模板自带一整块 hover/pressed 底
+         （在只有 ~27px 高的树行里形成一块方斑），也拿不到「展开方向」这个状态；
+         这里只需要一个 16×16 的点击热区 + 一支箭头的两种朝向。
+
+         ClickMode=Press：按下即展开，不等抬起——树行的点击热区很小，
+         等抬起会让「按住拖动滚动」这类操作误展开/误收起。 -->
+    <Style x:Key="WorkbenchTreeExpandToggle" TargetType="ToggleButton">
+        <Setter Property="Focusable" Value="False"/>
+        <Setter Property="Width" Value="16"/>
+        <Setter Property="Height" Value="16"/>
+        <Setter Property="Margin" Value="4,0,2,0"/>
+        <Setter Property="VerticalAlignment" Value="Center"/>
+        <Setter Property="ClickMode" Value="Press"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ToggleButton">
+                    <Border Background="Transparent">
+                        <Path x:Name="Chevron" Width="10" Height="10"
+                              Data="M3,1 L9,5 L3,9"
+                              Stroke="{StaticResource WbTextSecondaryBrush}" StrokeThickness="1.4"
+                              StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                              HorizontalAlignment="Center" VerticalAlignment="Center"
+                              RenderTransformOrigin="0.5,0.5">
+                            <Path.RenderTransform>
+                                <RotateTransform Angle="0"/>
+                            </Path.RenderTransform>
+                        </Path>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <!-- 展开时箭头转 90°：直接给 Path 换一个 RenderTransform。
+                             不写成「TargetName 指向 RotateTransform」——ControlTemplate 的
+                             TargetName 只对出现在模板逻辑树里的元素可靠，属性元素里的
+                             Transform 会报 MC4111（无法找到 Trigger 目标）。 -->
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="Chevron" Property="RenderTransform">
+                                <Setter.Value>
+                                    <RotateTransform Angle="90"/>
+                                </Setter.Value>
+                            </Setter>
+                        </Trigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Chevron" Property="Stroke" Value="{StaticResource WbTextPrimaryBrush}"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- 树节点（plan-14.1 改为自带 ControlTemplate）。
+
+         为什么不再 BasedOn Fluent 的 TreeViewItem 模板：四个工作台共用本样式，
+         Fluent 模板的 hover/选中底色在自定义深色列表底（WbListBrush #11151A）上
+         几乎不可见，而它的内部画刷键名随 WPF-UI 版本变化，覆写等于绑死版本。
+         自绘模板把「底色 + 文字色 + 左侧强调条」三个决定集中在这里，键名不变
+         （其它页面用 WorkbenchShell.CreateTreeItemStyle() 按名取）。
+
+         模板必须保留的三件事（破坏了就会打坏别的页面）：
+         ① 惰性展开：header 之外还必须有 ItemsPresenter，子树才渲染得出来——
+            资源/文本/静态三个工作台都靠「占位子项 + Expanded 时填充」这套惰性机制。
+         ② 虚拟化：ItemsPresenter 直接放在模板里（不套额外 ScrollViewer），
+            WorkbenchTree 的 VirtualizingPanel.IsVirtualizing 才会照常生效。
+         ③ 手动创建的 TreeViewItem 与模板生成的容器共用本样式（页面逐项赋 Style），
+            因此模板里不能假设有任何外部资源依赖。 -->
+    <Style x:Key="WorkbenchTreeItem" TargetType="TreeViewItem">
         <Setter Property="Foreground" Value="{StaticResource WbTextPrimaryBrush}"/>
         <Setter Property="FontWeight" Value="Normal"/>
+        <Setter Property="Padding" Value="0,3"/>
+        <Setter Property="HorizontalContentAlignment" Value="Left"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="TreeViewItem">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <!-- 箭头列：子树放在这一列右侧，于是每下一层自然缩进一列宽 -->
+                            <ColumnDefinition Width="22"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <!-- 展开箭头：IsChecked 双向绑 IsExpanded（模板内部绑定不带 DataContext，
+                             所以用 RelativeSource TemplatedParent，而不是裸 {Binding IsExpanded}）。 -->
+                        <ToggleButton x:Name="Expander" Grid.Row="0" Grid.Column="0"
+                                      Style="{StaticResource WorkbenchTreeExpandToggle}"
+                                      IsChecked="{Binding IsExpanded, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}"/>
+
+                        <!-- 行本体：底色只铺在这一行上（不含子树），否则选中父节点会连整棵子树一起染色 -->
+                        <Border x:Name="Row" Grid.Row="0" Grid.Column="1"
+                                Background="{TemplateBinding Background}"
+                                BorderThickness="0">
+                            <Grid x:Name="RowLayout">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="2"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+
+                                <!-- 选中行左侧 2px 强调条：与底色一起构成「选中」的第二重信号 -->
+                                <Border x:Name="AccentBar" Grid.Column="0" Width="2"
+                                        Background="{StaticResource WbAccentBrush}"
+                                        Visibility="Collapsed"/>
+
+                                <ContentPresenter x:Name="PART_Header" Grid.Column="1"
+                                                  ContentSource="Header"
+                                                  Margin="4,0,0,0"
+                                                  HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                                  VerticalAlignment="Center"/>
+                            </Grid>
+                        </Border>
+
+                        <!-- 子树：直接放 ItemsPresenter（见上方②，不要套 ScrollViewer） -->
+                        <ItemsPresenter x:Name="ItemsHost" Grid.Row="1" Grid.Column="1"/>
+                    </Grid>
+
+                    <ControlTemplate.Triggers>
+                        <!-- 无子项时箭头不显示也不占位：占位子项（惰性展开用）在 UI 上不该像「还有一层」。
+                             注意不能「无子项 ⇒ 隐藏箭头」了事——展开箭头必须在填充之前就点得到，
+                             所以判据是 HasItems（有占位项 = 有东西可展开）。 -->
+                        <Trigger Property="HasItems" Value="False">
+                            <Setter TargetName="Expander" Property="Visibility" Value="Hidden"/>
+                        </Trigger>
+                        <Trigger Property="IsExpanded" Value="False">
+                            <Setter TargetName="ItemsHost" Property="Visibility" Value="Collapsed"/>
+                        </Trigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Row" Property="Background" Value="{StaticResource WbRowHoverBrush}"/>
+                        </Trigger>
+                        <!-- 选中优先于 hover：写成 IsSelected 的 Trigger 排在后面，
+                             同一个 TargetName+Property 上后写的触发器在两者同时为真时胜出（WPF 触发器按声明顺序生效）。 -->
+                        <Trigger Property="IsSelected" Value="True">
+                            <Setter TargetName="Row" Property="Background" Value="{StaticResource WbRowSelectedBrush}"/>
+                            <Setter TargetName="AccentBar" Property="Visibility" Value="Visible"/>
+                            <Setter Property="Foreground" Value="{StaticResource WbAccentBrush}"/>
+                        </Trigger>
+                        <!-- 禁用项（如灰显的加密 bank 行）压暗，但仍可读 -->
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Foreground" Value="{StaticResource WbTextFaintBrush}"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
     </Style>
 
     <!-- ── 大表（plan-11「全部音频」总表：5 万行级，必须行虚拟化）─────── -->
@@ -206,11 +365,31 @@
         <Setter Property="Margin" Value="0,0,6,0"/>
     </Style>
 
-    <!-- ── 搜索框 / 值编辑框 / 原始 JSON 框 ────────────────────────── -->
+    <!-- ── 搜索框 / 筛选下拉 / 值编辑框 / 原始 JSON 框 ─────────────── -->
+
+    <!-- 搜索框：只要下限高度，不再写死 Height。
+         Fluent（WPF-UI）模板的 ComboBox/TextBox 自带 MinHeight=32，用 Height="28" 反而比它更小，
+         模板的内容盒被压扁后中文字形会被上下裁掉（「全部类型」这类下拉的选中文字被切一半）。
+         给下限而不是固定高度：控件在 32 之上仍可随字体/DPI 自适应。 -->
     <Style x:Key="WorkbenchSearchBox" TargetType="TextBox"
            BasedOn="{StaticResource {x:Type TextBox}}">
         <Setter Property="Width" Value="300"/>
-        <Setter Property="Height" Value="28"/>
+        <Setter Property="MinHeight" Value="32"/>
+        <Setter Property="VerticalContentAlignment" Value="Center"/>
+    </Style>
+
+    <!-- 筛选下拉（类型 / 状态 / 排序 / 视图切换…）：与 WorkbenchViewToggle 同样用
+         BasedOn="{StaticResource {x:Type ComboBox}}" 保留 Fluent 模板，只约束最小尺寸。
+
+         为什么不给固定 Height：Fluent ComboBox 的默认 MinHeight 是 32，而各页面此前普遍写
+         Height="28"——固定值小于模板下限，模板内容盒被挤压，中日韩字形会被裁掉右边/下边
+         （现象就是筛选下拉里「全部类型」等文字缺笔画，中文尤其明显）。
+         这里只给 MinHeight=32 + MinWidth=120 + 文字垂直居中；具体宽度由
+         WorkbenchShell.CreateFilterCombo 按最长候选项估算后赋值（避免被右侧箭头裁掉）。 -->
+    <Style x:Key="WorkbenchFilterCombo" TargetType="ComboBox"
+           BasedOn="{StaticResource {x:Type ComboBox}}">
+        <Setter Property="MinHeight" Value="32"/>
+        <Setter Property="MinWidth" Value="120"/>
         <Setter Property="VerticalContentAlignment" Value="Center"/>
     </Style>
 

@@ -110,7 +110,9 @@ public sealed class TextIndexStoreTests : IDisposable
 
         var files = EnumerateViaCache(service, out var rebuilt);
         Assert.True(rebuilt); // 首次：无记录 → 整库重建
-        Assert.Equal(5, files.Count);
+        // 合成 lang 根里活动语言目录下有 4 个文件（plan-14：根级 config.json 不再收录）。
+        Assert.Equal(4, files.Count);
+        Assert.DoesNotContain(files, x => x.RelativePath == "config.json");
 
         // 表结构 / 列名被单测钉死（plan-10 §2）。
         var columns = ReadColumns("files");
@@ -214,6 +216,39 @@ public sealed class TextIndexStoreTests : IDisposable
         WriteFile(Path.Combine(otherRoot, "config.json"), """{"lang":"LLC_zh-CN"}""");
         Assert.True(_store.EnsureSource(TextIndexStore.DescribeSource(otherRoot)));
         Assert.Equal(0, _store.ReadFileCount());
+    }
+
+    /// <summary>
+    /// plan-14 的口径升级自愈：v1 库（收录过根级 <c>config.json</c>）在口径升到
+    /// <see cref="TextIndexStore.IndexFormatVersion"/> 后必须被判为过期 → 整库重建，
+    /// 否则目录 mtime 与 config.json 内容都没变，「新鲜」的旧库会继续吐出一行
+    /// <c>config.json</c>，用户就会在文本工作台里看到一个本该消失的条目。
+    /// </summary>
+    [Fact]
+    public void Legacy_index_content_format_is_invalidated_and_the_config_row_disappears()
+    {
+        SeedLangRoot();
+        var service = new LangTextWorkbenchService();
+        var current = TextIndexStore.DescribeSource(LangRoot);
+
+        // 伪造一个 v1 库：签名不带口径版本，并塞一行根级 config.json（v1 的口径）。
+        var legacy = current with { Signature = $"{current.DirectorySignature}|{current.ConfigContentHash}" };
+        Assert.True(_store.EnsureSource(legacy));
+        var configPath = Path.Combine(LangRoot, "config.json");
+        _store.PersistFiles(legacy, [
+            new LangTextFileInfo("config.json", configPath, new FileInfo(configPath).Length, 3, true, 0),
+            .. service.EnumerateFiles(LangRoot),
+        ]);
+        Assert.Contains("config.json", _store.ReadFiles(LangRoot).Select(x => x.RelativePath));
+
+        // 换到当前口径：签名不同 → 整库重建，旧行不再存在。
+        Assert.True(_store.EnsureSource(current), "内容口径版本变了必须重建整库");
+        var files = service.EnumerateFiles(LangRoot, _store.ReadFileMap());
+        _store.PersistFiles(current, files);
+
+        var rows = _store.ReadFiles(LangRoot).Select(x => x.RelativePath).ToList();
+        Assert.DoesNotContain("config.json", rows);
+        Assert.Equal(files.Count, rows.Count);
     }
 
     [Fact]
@@ -414,6 +449,55 @@ public sealed class TextIndexStoreTests : IDisposable
         var live = service.EnumerateFiles(LangRoot);
         AssertSameFiles(before, live);
         Assert.Equal(beforeHits, service.Search("Faust", live));
+    }
+
+    // ── 0 字节 / 无表库自愈（真实缺陷回归）───────────────────────────
+
+    [Fact]
+    public void Zero_byte_database_file_is_repaired_instead_of_failing_with_no_such_table()
+    {
+        // 真实现场（本机 artifacts/publish-win-x64/cache/text-index.db = 0 字节）：
+        // 库文件在但没有任何表时，以前 IsFresh → ReadSourceSignature → SELECT … FROM index_meta
+        // 直接抛「SQLite Error 1: 'no such table: index_meta'」，页面显示成
+        // 「载入 lang 文件失败」。缓存是纯加速旁路，缺表必须被无声补建。
+        SeedLangRoot();
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        File.WriteAllBytes(_store.DatabasePath, []);
+        Assert.Equal(0, new FileInfo(_store.DatabasePath).Length);
+
+        var store = new TextIndexStore(_cacheDirectory);
+        var source = TextIndexStore.DescribeSource(LangRoot);
+
+        Assert.False(store.IsFresh(source));          // 不抛，判定为「需要重建」
+        Assert.Equal(0, store.ReadFileCount());       // 表已补建：读得动，只是空
+        Assert.Empty(store.ReadFiles(LangRoot));
+        Assert.Empty(store.ReadHits());
+        Assert.Null(store.ReadSourceKey());
+
+        // 补建之后完全可用：建索引、命中、搜索都与无缓存路径一致。
+        var service = new LangTextWorkbenchService();
+        var files = service.EnumerateFiles(LangRoot);
+        store.PersistFiles(source, files);
+        Assert.True(store.IsFresh(source));
+        Assert.Equal(files.Count, store.ReadFileCount());
+        Assert.Equal(service.Search("Faust", files), service.Search("Faust", files, cached: store.ReadHits()));
+    }
+
+    [Fact]
+    public void Persistent_files_into_a_freshly_created_database_works_without_EnsureSource_first()
+    {
+        // 页面冷启动路径：库文件根本不存在 → PersistFiles 内部会先 EnsureSource + 建表。
+        SeedLangRoot();
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        if (File.Exists(_store.DatabasePath)) File.Delete(_store.DatabasePath);
+
+        var store = new TextIndexStore(_cacheDirectory);
+        var source = TextIndexStore.DescribeSource(LangRoot);
+        var files = new LangTextWorkbenchService().EnumerateFiles(LangRoot);
+        store.PersistFiles(source, files);
+
+        Assert.Equal(files.Count, store.ReadFileCount());
+        Assert.True(store.IsFresh(source));
     }
 
     // ── SQL 辅助（测试直接查库，把列名与取值钉死）────────────────────

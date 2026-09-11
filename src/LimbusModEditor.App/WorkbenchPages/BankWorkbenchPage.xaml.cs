@@ -5,6 +5,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Media;
+using System.Windows.Threading;
 using LimbusModEditor.Application.AppConfig;
 using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Application.Build;
@@ -20,27 +21,29 @@ namespace LimbusModEditor.App;
 /// 音频工作台（plan-06 首版 → plan-11 重做）：按 FMOD Bank 浏览 / 试听 / 替换音频样本，
 /// 并可导出整包 <c>.bank</c> 或 <c>.rebank</c> 到<b>模组目录</b>（绝不写游戏目录）。
 ///
-/// <para><b>plan-11 的三视图</b>：</para>
+/// <para><b>plan-11 的两视图</b>（互斥，右上角标准切换对）：</para>
 /// <list type="number">
 /// <item><b>☰ 全部音频</b>：跨全部 bank 的样本总表（列 = 样本名 / bank / FSB / codec / 采样率 /
 /// 声道 / 时长 / 大小 / 状态）。数据源是 <c>cache/bank-index.db</c> 的 <c>samples</c> 表
 /// （本机实测 52826 行），用 <see cref="DataGrid"/> 行虚拟化承载；筛选与排序都在内存行集上做，
 /// 不重新读盘。</item>
 /// <item><b>🗂 bank 树</b>：bank → FSB → 样本 三层，惰性展开。</item>
-/// <item><b>☰ bank 列表</b>：首个版本的逐 bank 表（类型 / FSB 数 / 大小）。</item>
 /// </list>
 ///
-/// <para><b>索引是加速旁路</b>：删掉 <c>cache/bank-index.db</c> 后三个视图的数据与筛选结果
+/// <para>首版的第三视图「☰ bank 列表」（逐个 bank 的类型 / FSB 数 / 大小）已删除：
+/// 它和 bank 树的信息完全重合，只是把同一份 <see cref="BankIndexEntry"/> 摊平再排一次；
+/// 少一个视图就少一份要跟着筛选/重建同步的状态。</para>
+///
+/// <para><b>索引是加速旁路</b>：删掉 <c>cache/bank-index.db</c> 后两个视图的数据与筛选结果
 /// 完全一致，只是每次进页面要重新解析 1531 个 bank（冷建 ~19s，热读 ~0.9s）。</para>
 /// </summary>
 public partial class BankWorkbenchPage : UserControl
 {
-    /// <summary>浏览列视图形态（与列表/树两个按钮无关，本页有三种）。</summary>
+    /// <summary>浏览列的两种呈现形态（与壳的列表/树切换对一一对应）。</summary>
     private enum BankViewMode
     {
-        AllAudio,
+        AudioList,
         BankTree,
-        BankList,
     }
 
     /// <summary>
@@ -97,16 +100,15 @@ public partial class BankWorkbenchPage : UserControl
     private readonly Dictionary<string, bool> _modifiedBanks = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly TextBox _search;
-    private readonly ComboBox _viewSwitch;
     private readonly ComboBox _kindFilter;
     private readonly ComboBox _codecFilter;
     private readonly ComboBox _durationFilter;
     private readonly CheckBox _modifiedOnly;
+    private readonly CheckBox _showEventBanks;
     private readonly ComboBox _sortFilter;
     private readonly DataGrid _audioGrid;
-    private readonly ListView _bankList;
     private readonly TreeView _bankTree;
-    private readonly ListView _sampleList;
+    private readonly StackPanel _sampleDetail;
     private readonly TextBlock _contextInfo;
     private readonly TextBlock _sampleInfo;
     private readonly Button _auditionButton;
@@ -114,20 +116,19 @@ public partial class BankWorkbenchPage : UserControl
     private readonly Button _replaceButton;
     private readonly Button _exportBankButton;
     private readonly Button _exportRebankButton;
-    private readonly Button _locateButton;
     private readonly Button _cancelIndexButton;
     private readonly Button _reloadButton;
     private readonly Button _clearCacheButton;
+    private readonly ProgressBar _playBar;
+    private readonly TextBlock _playTime;
+    private readonly DispatcherTimer _playTimer;
 
     private System.Windows.Media.MediaPlayer? _player;
     private string? _playerFile;
     private string? _bankDirectory;
-    private BankViewMode _viewMode = BankViewMode.AllAudio;
+    private BankViewMode _viewMode = BankViewMode.AudioList;
     private BankIndexEntry? _selectedBank;
-    private BankFileEntry? _selectedFileEntry;
     private SampleRow? _selectedSample;
-    private List<SampleRow> _editSampleRows = [];
-    private int _editGeneration;
     private bool _isSelecting;
     private bool _indexing;
     private CancellationTokenSource? _indexCancellation;
@@ -151,25 +152,38 @@ public partial class BankWorkbenchPage : UserControl
         Shell.AddSearchItem(_cancelIndexButton);
         Shell.AddSearchItem(_clearCacheButton);
 
-        // ── 筛选行（含视图切换）──────────────────────────────────────
-        _viewSwitch = new ComboBox { Width = 130, Height = 28, Margin = new Thickness(0, 0, 6, 0) };
-        _viewSwitch.Items.Add("☰ 全部音频");
-        _viewSwitch.Items.Add("🗂 bank 树");
-        _viewSwitch.Items.Add("☰ bank 列表");
-        _viewSwitch.SelectedIndex = 0;
-        _viewSwitch.SelectionChanged += (_, _) => SwitchView((BankViewMode)Math.Max(0, _viewSwitch.SelectedIndex));
-        _viewSwitch.ToolTip = "全部音频 = 跨全部 bank 的样本总表；bank 树 = bank → FSB → 样本；bank 列表 = 逐个 bank";
-        Shell.AddFilterItem(_viewSwitch);
-
-        _kindFilter = MakeFilterCombo(120, "按 bank 类型筛选（事件 bank 没有样本负载）", "全部类型", "仅音频 bank", "仅事件 bank", "加密/无法识别");
+        // ── 筛选行（视图切换已移到右上角的标准切换对）──────────────────
+        // 下拉一律走壳的共享工厂：具名样式（MinHeight=32，不写死 28，否则中文被裁）
+        // + 按最长候选项估算宽度（不再由调用点拍脑袋传宽度魔数）。
+        //
+        // 类型下拉的候选项顺序 = BankTreeKindFilter 的取值顺序（见 ToKindFilter）：
+        // 两处必须一起改，否则「全部类型」会被映射成错误的档位。
+        _kindFilter = WorkbenchShell.CreateFilterCombo("按 bank 类型筛选（只影响 bank 树；事件 bank 没有样本负载）",
+            "全部类型", "仅音频 bank", "仅事件 bank", "加密/无法识别");
         _kindFilter.SelectionChanged += (_, _) => ApplyFilter();
         Shell.AddFilterItem(_kindFilter);
 
-        _codecFilter = MakeFilterCombo(120, "按 codec 筛选（音频 bank 的 FSB 头部字段）", "全部 codec");
+        _showEventBanks = new CheckBox
+        {
+            Content = "显示事件 bank",
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(6, 0, 6, 0),
+            // 默认不勾：音频 bank 只有 100 多个，事件 bank 有上千个，默认全列会把音频 bank 淹掉
+            // （plan-14.2 用户要求）。勾上只影响树，总表本来就只有样本行。
+            IsChecked = false,
+            ToolTip = "事件 bank（SNDH 表为空）没有任何可试听/替换的样本，默认不在 bank 树里显示；" +
+                      "勾选后一并列出。选「仅事件 bank」筛选时会自动显示，无需勾选。",
+        };
+        _showEventBanks.Checked += (_, _) => ApplyFilter();
+        _showEventBanks.Unchecked += (_, _) => ApplyFilter();
+        Shell.AddFilterItem(_showEventBanks);
+
+        _codecFilter = WorkbenchShell.CreateFilterCombo("按 codec 筛选（音频 bank 的 FSB 头部字段）", "全部 codec");
         _codecFilter.SelectionChanged += (_, _) => ApplyFilter();
         Shell.AddFilterItem(_codecFilter);
 
-        _durationFilter = MakeFilterCombo(130, "按时长筛选", "全部时长", "≤ 1 秒", "1~5 秒", "5~30 秒", "> 30 秒", "无法计算时长");
+        _durationFilter = WorkbenchShell.CreateFilterCombo("按时长筛选",
+            "全部时长", "≤ 1 秒", "1~5 秒", "5~30 秒", "> 30 秒", "无法计算时长");
         _durationFilter.SelectionChanged += (_, _) => ApplyFilter();
         Shell.AddFilterItem(_durationFilter);
 
@@ -184,8 +198,7 @@ public partial class BankWorkbenchPage : UserControl
         _modifiedOnly.Unchecked += (_, _) => ApplyFilter();
         Shell.AddFilterItem(_modifiedOnly);
 
-        _sortFilter = MakeFilterCombo(150,
-            "排序方式（在内存行集上排序，不重新读盘）",
+        _sortFilter = WorkbenchShell.CreateFilterCombo("排序方式（在内存行集上排序，不重新读盘）",
             "按 bank + 样本", "按名称", "按时长（长→短）", "按大小（大→小）", "已修改在前");
         _sortFilter.SelectionChanged += (_, _) => ApplyFilter();
         Shell.AddFilterItem(_sortFilter);
@@ -216,6 +229,7 @@ public partial class BankWorkbenchPage : UserControl
                     _selectedSample = row;
                     SelectBank(row.BankPath, loadEditor: false);
                     LoadEditorForSample(row);
+                    RefreshActionButtons();
                 }
             }
             finally { _isSelecting = false; }
@@ -223,78 +237,93 @@ public partial class BankWorkbenchPage : UserControl
 
         // ── 视图二：bank 树 ──────────────────────────────────────────
         _bankTree = WorkbenchShell.CreateTree();
-        _bankTree.ToolTip = "bank → FSB → 样本；展开时才生成下一层";
+        _bankTree.ToolTip = "bank → FSB → 样本；展开时才生成下一层；双击已在别的视图里选中的样本即在此定位";
         _bankTree.SelectedItemChanged += (_, e) => OnTreeSelectionChanged(e.NewValue as TreeViewItem);
         _bankTree.AddHandler(TreeViewItem.ExpandedEvent, new RoutedEventHandler(TreeItem_Expanded));
-
-        // ── 视图三：bank 列表 ────────────────────────────────────────
-        _bankList = WorkbenchShell.CreateList();
-        _bankList.ItemContainerStyle = WorkbenchShell.CreateListItemStyle();
-        var bankGrid = new GridView();
-        bankGrid.Columns.Add(Column("bank 文件", nameof(BankFileEntry.FileName), 280));
-        bankGrid.Columns.Add(Column("类型", nameof(BankFileEntry.KindLabel), 90));
-        bankGrid.Columns.Add(Column("FSB 数", nameof(BankFileEntry.FsbCount), 70));
-        bankGrid.Columns.Add(Column("大小", nameof(BankFileEntry.FileSizeBytes), 100));
-        _bankList.View = bankGrid;
-        _bankList.SelectionChanged += (_, _) =>
-        {
-            if (_isSelecting) return;
-            if (_bankList.SelectedItem is not BankFileEntry entry) return;
-            _isSelecting = true;
-            try
-            {
-                _selectedFileEntry = entry;
-                _selectedSample = null;
-                SelectBank(entry.FullPath, loadEditor: true);
-            }
-            finally { _isSelecting = false; }
-        };
+        // 双击定位：首版的「在 bank 树中定位」按钮已按计划删除，能力移到这里
+        // （树/list 交互本身），所以别再为它单开一个按钮位和一份启用状态。
+        _bankTree.MouseDoubleClick += (_, _) => LocateInTree();
 
         Shell.SetBrowseContent(_audioGrid);
         Shell.SetEmptyHint("正在准备音频索引…");
-        Shell.ViewModeChanged += (_, _) => { /* 本页视图由 _viewSwitch 控制，忽略列表/树切换事件 */ };
+
+        // 视图切换走壳的标准切换对（plan-09 共享件）；本页只把「列表 / 树」映射到自己的
+        // BankViewMode。AddViewToggles 只设置按钮初始状态、不触发事件，所以这里的状态是同步的。
+        Shell.AddViewToggles("☰ 全部音频", "🗂 bank 树", treeDefault: false);
+        Shell.ViewModeChanged += (_, mode) =>
+            SwitchView(mode == WorkbenchViewMode.Tree ? BankViewMode.BankTree : BankViewMode.AudioList);
 
         // ── 编辑列 ───────────────────────────────────────────────────
-        _contextInfo = new TextBlock { Text = "未选择 bank", TextWrapping = TextWrapping.Wrap, Style = FindStyle("WorkbenchSectionLabel") };
-        _sampleList = WorkbenchShell.CreateList();
-        _sampleList.ItemContainerStyle = WorkbenchShell.CreateListItemStyle();
-        _sampleList.Height = 240;
-        var sampleGrid = new GridView();
-        sampleGrid.Columns.Add(Column("样本", nameof(SampleRow.Name), 170));
-        sampleGrid.Columns.Add(Column("FSB", nameof(SampleRow.FsbLabel), 56));
-        sampleGrid.Columns.Add(Column("codec", nameof(SampleRow.CodecName), 70));
-        sampleGrid.Columns.Add(Column("采样率", nameof(SampleRow.SampleRate), 70));
-        sampleGrid.Columns.Add(Column("声道", nameof(SampleRow.Channels), 50));
-        sampleGrid.Columns.Add(Column("时长", nameof(SampleRow.DurationLabel), 70));
-        sampleGrid.Columns.Add(Column("大小", nameof(SampleRow.SizeLabel), 80));
-        sampleGrid.Columns.Add(Column("状态", nameof(SampleRow.StateLabel), 60));
-        _sampleList.View = sampleGrid;
-        _sampleList.SelectionChanged += (_, _) =>
+        // bank 上下文行用主文字色（plan-14.1）：它下面是「选中样本」小节的次/弱色标签，
+        // 若这行也用弱色，「当前在看哪个 bank」和「说明文字」就糊在同一层，看不出主次。
+        _contextInfo = new TextBlock
         {
-            if (_isSelecting) return;
-            _selectedSample = _sampleList.SelectedItem as SampleRow;
-            RefreshActionButtons();
-            if (_selectedSample is { } row) Shell.SetStatus($"{row.LocationLabel} · {row.CodecName} · {row.DurationLabel} · {row.SizeLabel} 字节");
+            Text = "未选择 bank",
+            Style = FindStyle("WorkbenchSectionLabel"),
+            Foreground = TryBrush("WbTextPrimaryBrush"),
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 6, 0, 0),
         };
+        _sampleDetail = BuildSampleDetailPanel();
 
-        _auditionButton = WorkbenchShell.CreateButton("▶ 试听样本", async (_, _) => await AuditionAsync(), isEnabled: false);
+        // 播放进度：把唯一的「试听」按钮换成进度条 + 播放/停止 + 时间标签。
+        _auditionButton = WorkbenchShell.CreateButton("▶ 播放", async (_, _) => await AuditionAsync(), isEnabled: false);
+        _auditionButton.ToolTip = "解码当前样本并用系统播放器试听；播放中再点一次即停止";
+        _playBar = new ProgressBar
+        {
+            Height = 6,
+            Minimum = 0,
+            Maximum = 1,
+            Value = 0,
+            Margin = new Thickness(8, 0, 8, 0),
+            IsEnabled = false,
+            VerticalAlignment = VerticalAlignment.Center,
+            ToolTip = "播放进度（可在进度条上点击/拖动跳转）",
+        };
+        _playBar.PreviewMouseLeftButtonDown += PlayBar_PreviewMouseDown;
+        _playBar.PreviewMouseMove += PlayBar_PreviewMouseMove;
+        _playTime = new TextBlock { Text = "00:00 / —", Foreground = TryBrush("WbTextMutedBrush"), VerticalAlignment = VerticalAlignment.Center };
+
+        // 200ms：进度条视觉上连续（5 帧/秒足够），又不会为了刷一根 6px 的条频繁抢 UI 线程。
+        _playTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
+        _playTimer.Tick += (_, _) => UpdatePlaybackUi();
+
+        // 动作区只留四个按钮：播放/停止在进度条旁边，「在 bank 树中定位」已被删除
+        // （定位能力挂到 bank 树双击上，见 LocateInTree）。
         _exportWavButton = WorkbenchShell.CreateButton("导出样本 WAV…", async (_, _) => await ExportSampleWavAsync(), isEnabled: false);
         _replaceButton = WorkbenchShell.CreateButton("用 WAV 替换…", async (_, _) => await ReplaceSampleAsync(), isEnabled: false);
         _exportBankButton = WorkbenchShell.CreateButton("导出整包 .bank…", async (_, _) => await ExportAsync(ModFormatKind.Bank), isEnabled: false);
+        _exportBankButton.ToolTip = "把当前 bank（含已登记的替换）导出到模组目录";
         _exportRebankButton = WorkbenchShell.CreateButton("导出 .rebank…", async (_, _) => await ExportAsync(ModFormatKind.Rebank), isEnabled: false);
-        _locateButton = WorkbenchShell.CreateButton("在 bank 树中定位", (_, _) => LocateInTree(), isEnabled: false);
+        _exportRebankButton.ToolTip = "把当前 bank 导出为 .rebank 补丁包到模组目录";
         var buttonRow = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
-        foreach (var button in new[] { _auditionButton, _exportWavButton, _replaceButton, _exportBankButton, _exportRebankButton, _locateButton })
+        foreach (var button in new[] { _replaceButton, _exportWavButton, _exportBankButton, _exportRebankButton })
             buttonRow.Children.Add(button);
 
-        _sampleInfo = new TextBlock { Text = "—", Style = FindStyle("WorkbenchStatusText") };
+        var playRow = new Grid { Margin = new Thickness(0, 4, 0, 0) };
+        playRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        playRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        playRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        Grid.SetColumn(_playBar, 1);
+        Grid.SetColumn(_playTime, 2);
+        playRow.Children.Add(_auditionButton);
+        playRow.Children.Add(_playBar);
+        playRow.Children.Add(_playTime);
+
+        _sampleInfo = new TextBlock { Text = "—", Style = FindStyle("WorkbenchStatusText"), Margin = new Thickness(0, 6, 0, 0) };
+
         var editPanel = new StackPanel();
         editPanel.Children.Add(WorkbenchShell.CreatePanelTitle("bank / 样本"));
         editPanel.Children.Add(_contextInfo);
-        editPanel.Children.Add(_sampleList);
+        editPanel.Children.Add(WorkbenchShell.CreateSectionLabel("选中样本", new Thickness(0, 10, 0, 0)));
+        editPanel.Children.Add(_sampleDetail);
+        editPanel.Children.Add(WorkbenchShell.CreateSectionLabel("播放", new Thickness(0, 10, 0, 0)));
+        editPanel.Children.Add(playRow);
+        editPanel.Children.Add(WorkbenchShell.CreateSectionLabel("操作", new Thickness(0, 10, 0, 0)));
         editPanel.Children.Add(buttonRow);
         editPanel.Children.Add(_sampleInfo);
         Shell.SetEditContent(new ScrollViewer { Content = editPanel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+        RefreshSampleDetail();
 
         Loaded += async (_, _) => await RefreshAsync();
     }
@@ -303,17 +332,6 @@ public partial class BankWorkbenchPage : UserControl
 
     private static Style? FindStyle(string key) => System.Windows.Application.Current?.TryFindResource(key) as Style;
 
-    private static ComboBox MakeFilterCombo(double width, string toolTip, params string[] items)
-    {
-        var combo = new ComboBox { Width = width, Height = 28, Margin = new Thickness(0, 0, 6, 0), ToolTip = toolTip };
-        foreach (var item in items) combo.Items.Add(item);
-        combo.SelectedIndex = 0;
-        return combo;
-    }
-
-    private static GridViewColumn Column(string header, string path, double width)
-        => new() { Header = header, DisplayMemberBinding = new Binding(path), Width = width };
-
     private static void AddColumn(DataGrid grid, string header, string path, double width)
         => grid.Columns.Add(new DataGridTextColumn
         {
@@ -321,6 +339,62 @@ public partial class BankWorkbenchPage : UserControl
             Binding = new Binding(path),
             Width = new DataGridLength(width),
         });
+
+    /// <summary>
+    /// 编辑列的键值行：左列 72px 次色标签，右列值（值文本在刷新时改写）。
+    ///
+    /// <para>plan-14.1：标签列 64 → 72px、标签色 <c>WbTextMutedBrush</c> →
+    /// <c>WbTextSecondaryBrush</c>。「采样率 / 已修改」这类标签在 64px 下会被
+    /// CharacterEllipsis 截成省略号，同时弱色标签压在面板底上几乎读不出来；
+    /// 值与标签同处一屏，标签太弱就只剩值可读、行与行的对应关系丢失。
+    /// （两个画刷的具体色值只在 Themes/WorkbenchStyles.xaml 里，页面不写色值。）</para>
+    /// </summary>
+    private static void AddDetailRow(Panel panel, string label, TextBlock value)
+    {
+        var grid = new Grid { Margin = new Thickness(0, 1, 0, 1) };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(72) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        var caption = new TextBlock
+        {
+            Text = label,
+            Foreground = TryBrush("WbTextSecondaryBrush"),
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            VerticalAlignment = VerticalAlignment.Top,
+        };
+        Grid.SetColumn(value, 1);
+        grid.Children.Add(caption);
+        grid.Children.Add(value);
+        panel.Children.Add(grid);
+    }
+
+    /// <summary>键值行的值文本：默认主文字色（与次色标签拉开层次；刷新时可换成金色）。</summary>
+    private static TextBlock DetailValue() => new()
+    {
+        TextWrapping = TextWrapping.Wrap,
+        Foreground = TryBrush("WbTextPrimaryBrush"),
+    };
+
+    /// <summary>选中样本的紧凑键值格（左列 64px 弱色标签，右列值）；行序固定，值在刷新时改写。</summary>
+    private static StackPanel BuildSampleDetailPanel()
+    {
+        var panel = new StackPanel();
+        foreach (var label in new[] { "名称", "bank", "FSB", "codec", "采样率", "声道", "时长", "大小", "状态" })
+            AddDetailRow(panel, label, DetailValue());
+        return panel;
+    }
+
+    /// <summary>
+    /// 写一个键值格的值。<paramref name="brush"/> 为 null 时用<b>主文字色</b>而不是清空 Foreground：
+    /// 清成 null 会让文字落回继承色，「未修改的普通值」与「已修改（金色）」两种状态的层次就没了
+    /// （plan-14.1：值必须显式主色、标签次色）。
+    /// </summary>
+    private static void SetDetailValue(Panel panel, int index, string text, Brush? brush = null)
+    {
+        if (index >= panel.Children.Count || panel.Children[index] is not Grid grid) return;
+        if (grid.Children.Count < 2 || grid.Children[1] is not TextBlock value) return;
+        value.Text = text;
+        value.Foreground = brush ?? TryBrush("WbTextPrimaryBrush");
+    }
 
     // ── 加载与索引 ───────────────────────────────────────────────────
 
@@ -445,7 +519,6 @@ public partial class BankWorkbenchPage : UserControl
         }
 
         RebuildCodecFilter();
-        _bankList.ItemsSource = null;
         ApplyFilter();
         _bankDirectory = directory;
         if (_entries.Count == 0)
@@ -477,9 +550,22 @@ public partial class BankWorkbenchPage : UserControl
         _codecFilter.SelectedIndex = 0;
         _durationFilter.SelectedIndex = 0;
         _modifiedOnly.IsChecked = false;
+        _showEventBanks.IsChecked = false;   // 回到默认口径：事件 bank 不显示
         _sortFilter.SelectedIndex = 0;
         ApplyFilter();
     }
+
+    /// <summary>类型下拉的选中项 → 树筛选档位。下标与 <c>CreateFilterCombo</c> 的候选项顺序一一对应。</summary>
+    private BankTreeKindFilter ToKindFilter() => _kindFilter.SelectedIndex switch
+    {
+        1 => BankTreeKindFilter.AudioOnly,
+        2 => BankTreeKindFilter.EventOnly,
+        3 => BankTreeKindFilter.Unrecognized,
+        _ => BankTreeKindFilter.All,
+    };
+
+    /// <summary>勾选框「显示事件 bank」是否勾上（bank 树专用，总表不受影响）。</summary>
+    private bool ShowEventBanksChecked => _showEventBanks.IsChecked == true;
 
     private void ApplyFilter()
     {
@@ -537,58 +623,63 @@ public partial class BankWorkbenchPage : UserControl
         _viewSamples.Clear();
         foreach (var row in sorted) _viewSamples.Add(row);
 
-        if (_viewMode == BankViewMode.BankList)
-        {
-            var filteredEntries = _entries.Where(entry => MatchesKindFilter(entry)).ToList();
-            if (query.Length > 0)
-                filteredEntries = filteredEntries.Where(x => x.FileName.Contains(query, StringComparison.OrdinalIgnoreCase)).ToList();
-            _bankList.ItemsSource = filteredEntries.Select(x => x.ToFileEntry()).ToList();
-        }
-        else if (_viewMode == BankViewMode.BankTree)
+        // 事件 bank 的隐藏量在这里算一次：总表与树共用同一份「默认隐藏事件 bank」口径，
+        // 两处都由它出文案（不静默丢数据）。
+        var hiddenEventBanks = BankTreeRules.CountHiddenEventBanks(_entries, ToKindFilter(), ShowEventBanksChecked);
+        var hiddenNote = BankTreeRules.DescribeHiddenEventBanks(hiddenEventBanks);
+
+        if (_viewMode == BankViewMode.BankTree)
         {
             RebuildTree();
+            if (hiddenNote is not null) Shell.SetStatus(hiddenNote);
         }
 
-        Shell.SetEmptyHint(_viewSamples.Count == 0 && _viewMode == BankViewMode.AllAudio
-            ? (_allSamples.Count == 0 ? "索引里还没有样本。" : "没有样本匹配当前筛选条件。")
+        Shell.SetEmptyHint(_viewSamples.Count == 0 && _viewMode == BankViewMode.AudioList
+            ? (_allSamples.Count == 0
+                ? "索引里还没有样本。"
+                : "没有样本匹配当前筛选条件。")
+              + (hiddenNote is null ? string.Empty : $"\n{hiddenNote}")
             : null);
     }
 
-    private bool MatchesKindFilter(BankIndexEntry entry) => _kindFilter.SelectedIndex switch
-    {
-        1 => entry.Kind == BankKind.Audio,
-        2 => entry.Kind == BankKind.Event,
-        3 => entry.Kind is BankKind.Encrypted or BankKind.Unknown,
-        _ => true,
-    };
-
     private void SwitchView(BankViewMode mode)
     {
+        if (_viewMode == mode &&
+            ReferenceEquals(Shell.Browse.Content, mode == BankViewMode.BankTree ? _bankTree : _audioGrid))
+            return;
         _viewMode = mode;
-        switch (mode)
+        if (mode == BankViewMode.BankTree)
         {
-            case BankViewMode.AllAudio:
-                Shell.SetBrowseContent(_audioGrid);
-                break;
-            case BankViewMode.BankTree:
-                Shell.SetBrowseContent(_bankTree);
-                RebuildTree();
-                break;
-            default:
-                Shell.SetBrowseContent(_bankList);
-                _bankList.ItemsSource = _entries.Select(x => x.ToFileEntry()).ToList();
-                break;
+            Shell.SetBrowseContent(_bankTree);
+            RebuildTree();
+        }
+        else
+        {
+            Shell.SetBrowseContent(_audioGrid);
         }
         ApplyFilter();
     }
 
     // ── bank 树（bank → FSB → 样本，惰性展开）───────────────────────
 
+    /// <summary>
+    /// FSB 节点的 Tag（plan-14.3）。
+    ///
+    /// <para>此前 FSB 节点的 Tag 只是一个 <c>int</c>，填充样本时靠
+    /// <c>item.Parent</c> 反查所属 bank。自动展开单 FSB 时那个 FSB 节点的容器
+    /// <b>往往还没生成</b>（容器要等父节点展开后才由虚拟化面板生产），
+    /// <c>Parent</c> 会是 null → 拿不到所属 bank。这里把所属 bank 直接随 Tag 带上：
+    /// 与容器是否生成无关，自动展开也能走同一条填充路径。</para>
+    /// </summary>
+    private sealed record FsbNodeTag(BankIndexEntry Bank, int FsbIndex);
+
     private void RebuildTree()
     {
         if (_viewMode != BankViewMode.BankTree) return;
+        var filter = ToKindFilter();
+        var showEventBanks = ShowEventBanksChecked;
         var roots = new List<TreeViewItem>();
-        foreach (var entry in _entries.Where(MatchesKindFilter))
+        foreach (var entry in _entries.Where(x => BankTreeRules.ShouldShowBank(x.Kind, filter, showEventBanks)))
         {
             var node = new TreeViewItem
             {
@@ -596,7 +687,7 @@ public partial class BankWorkbenchPage : UserControl
                 Tag = entry,
                 Style = WorkbenchShell.CreateTreeItemStyle(),
             };
-            node.Items.Add(new TreeViewItem { Header = PlaceholderText }); // 惰性占位
+            node.Items.Add(CreatePlaceholder()); // 惰性占位
             roots.Add(node);
         }
         _bankTree.ItemsSource = roots;
@@ -604,44 +695,95 @@ public partial class BankWorkbenchPage : UserControl
 
     private const string PlaceholderText = "载入中…";
 
+    /// <summary>
+    /// 惰性占位子项的 Tag（**单例哨兵**，plan-14.3）。
+    ///
+    /// <para>为什么用一个对象当哨兵、而不是用 <c>Tag == null</c>：事件 bank 展开后，
+    /// 占位子项会被换成一行「无样本负载（事件 bank）」说明文字，它也没有真实 Tag；
+    /// 用 <c>Tag == null</c> 判定就会把那行说明误当成「还没填充」，每次展开都重新填一遍。
+    /// 有了哨兵，「这一层建过没有」就是一次引用比较，且判定只影响该节点本身
+    /// （不能用页面级 bool：那会让第一个展开的 bank 之后，别的 bank 永远停在「载入中…」）。</para>
+    /// </summary>
+    private static readonly object PlaceholderTag = new();
+
+    private static TreeViewItem CreatePlaceholder() => new() { Header = PlaceholderText, Tag = PlaceholderTag };
+
+    /// <summary>该节点是否还挂着惰性占位（= 这一层还没建过）。</summary>
+    private static bool IsPlaceholder(TreeViewItem item)
+        => item.Items.Count == 1 && item.Items[0] is TreeViewItem { Tag: var tag } && ReferenceEquals(tag, PlaceholderTag);
+
+    /// <summary>
+    /// 惰性填充：节点展开时才把下一层建出来（<b>幂等</b>：只在还挂着占位时填充）。
+    /// </summary>
     private void TreeItem_Expanded(object sender, RoutedEventArgs e)
     {
         if (e.OriginalSource is not TreeViewItem item) return;
-        if (item.Tag is BankIndexEntry entry)
+        switch (item.Tag)
         {
-            item.Items.Clear();
-            var byFsb = entry.Samples.GroupBy(x => x.FsbIndex).OrderBy(x => x.Key);
-            foreach (var group in byFsb)
-            {
-                var fsbNode = new TreeViewItem
-                {
-                    Header = $"FSB {group.Key}（{group.Count()} 个样本）",
-                    Tag = group.Key,
-                    Style = WorkbenchShell.CreateTreeItemStyle(),
-                };
-                fsbNode.Items.Add(new TreeViewItem { Header = PlaceholderText });
-                item.Items.Add(fsbNode);
-            }
-            if (entry.Samples.Count == 0)
-                item.Items.Add(new TreeViewItem { Header = entry.KindNote ?? "无样本负载（事件 bank）", Style = WorkbenchShell.CreateTreeItemStyle() });
+            case BankIndexEntry entry when IsPlaceholder(item):
+                BuildFsbNodes(item, entry);
+                break;
+            case FsbNodeTag fsb when IsPlaceholder(item):
+                BuildSampleNodes(item, fsb.Bank, fsb.FsbIndex);
+                break;
         }
-        else if (item.Tag is int fsbIndex && item.Parent is TreeViewItem parent && parent.Tag is BankIndexEntry bank)
+    }
+
+    /// <summary>把 bank 节点的子项建出来（每个 FSB 一行 + 事件 bank 的说明行），
+    /// 单 FSB 时顺带把那个 FSB 展开到样本层（plan-14.3）。</summary>
+    private void BuildFsbNodes(TreeViewItem item, BankIndexEntry entry)
+    {
+        item.Items.Clear();
+        var fsbNodes = new List<(TreeViewItem Node, FsbNodeTag Tag)>();
+        foreach (var group in entry.Samples.GroupBy(x => x.FsbIndex).OrderBy(x => x.Key))
         {
-            item.Items.Clear();
-            foreach (var sample in bank.Samples.Where(x => x.FsbIndex == fsbIndex))
+            var tag = new FsbNodeTag(entry, group.Key);
+            var fsbNode = new TreeViewItem
             {
-                var row = _allSamples.FirstOrDefault(x =>
-                    string.Equals(x.BankPath, bank.Path, StringComparison.OrdinalIgnoreCase) &&
-                    x.FsbIndex == sample.FsbIndex && x.SampleIndex == sample.SampleIndex);
-                if (row is null) continue;
-                item.Items.Add(new TreeViewItem
-                {
-                    Header = $"{row.Name}（{row.CodecName} · {row.DurationLabel} · {row.SizeLabel} 字节）",
-                    Tag = row,
-                    Foreground = row.IsModified ? TryBrush("WbModifiedBrush") : null,
-                    Style = WorkbenchShell.CreateTreeItemStyle(),
-                });
-            }
+                Header = $"FSB {group.Key}（{group.Count()} 个样本）",
+                Tag = tag,
+                Style = WorkbenchShell.CreateTreeItemStyle(),
+            };
+            fsbNode.Items.Add(CreatePlaceholder()); // 惰性占位
+            item.Items.Add(fsbNode);
+            fsbNodes.Add((fsbNode, tag));
+        }
+        if (entry.Samples.Count == 0)
+            item.Items.Add(new TreeViewItem { Header = entry.KindNote ?? "无样本负载（事件 bank）", Style = WorkbenchShell.CreateTreeItemStyle() });
+
+        // plan-14.3：只有一个 FSB 的 bank 直接把 FSB 也展开（少一层手点）。
+        // 走的是与「手点展开 FSB」**同一条**填充路径（BuildSampleNodes），
+        // 否则自动展开与手点展开的树会长得不一样。
+        // 这里不能只设 IsExpanded 等事件：此刻 FSB 节点的容器往往还没生成，
+        // Expanded 的冒泡路由到不了挂在 TreeView 上的处理器（见 FsbNodeTag 的注释）。
+        if (BankTreeRules.ShouldAutoExpandSingleFsb(fsbNodes.Count))
+        {
+            var (node, tag) = fsbNodes[0];
+            BuildSampleNodes(node, tag.Bank, tag.FsbIndex);
+            node.IsExpanded = true;
+        }
+    }
+
+    /// <summary>把 FSB 节点的样本行建出来（同 <see cref="BuildFsbNodes"/> 的幂等判据）。</summary>
+    private void BuildSampleNodes(TreeViewItem item, BankIndexEntry bank, int fsbIndex)
+    {
+        if (item.Items.Count > 0) return;
+
+        foreach (var sample in bank.Samples.Where(x => x.FsbIndex == fsbIndex))
+        {
+            var row = _allSamples.FirstOrDefault(x =>
+                string.Equals(x.BankPath, bank.Path, StringComparison.OrdinalIgnoreCase) &&
+                x.FsbIndex == sample.FsbIndex && x.SampleIndex == sample.SampleIndex);
+            if (row is null) continue;
+            item.Items.Add(new TreeViewItem
+            {
+                Header = $"{row.Name}（{row.CodecName} · {row.DurationLabel} · {row.SizeLabel} 字节）",
+                Tag = row,
+                // 未选中时一律主文字色（plan-14.1 第 5 条）：只有「已修改」才换金色，
+                // 其余交给样式里的主色，不再用默认模板那层偏暗的灰。
+                Foreground = row.IsModified ? TryBrush("WbModifiedBrush") : TryBrush("WbTextPrimaryBrush"),
+                Style = WorkbenchShell.CreateTreeItemStyle(),
+            });
         }
     }
 
@@ -661,40 +803,45 @@ public partial class BankWorkbenchPage : UserControl
                     _selectedSample = row;
                     SelectBank(row.BankPath, loadEditor: false);
                     LoadEditorForSample(row);
-                    _sampleList.SelectedItem = _editSampleRows.FirstOrDefault(x =>
-                        x.FsbIndex == row.FsbIndex && x.SampleIndex == row.SampleIndex);
                 }
                 finally { _isSelecting = false; }
-                RefreshActionButtons();
                 break;
-            case int fsbIndex when item.Parent is TreeViewItem { Tag: BankIndexEntry bank }:
+            case FsbNodeTag fsb:
                 _selectedSample = null;
-                SelectBank(bank.Path, loadEditor: true);
-                Shell.SetStatus($"FSB {fsbIndex} · {bank.FileName}");
+                SelectBank(fsb.Bank.Path, loadEditor: true);
+                Shell.SetStatus($"FSB {fsb.FsbIndex} · {fsb.Bank.FileName}");
                 break;
         }
     }
 
-    /// <summary>在三个视图里把一个 bank 标为「当前选中」（不重入触发选择事件）。</summary>
+    /// <summary>选中一个 bank（不重入触发选择事件）。</summary>
     private void SelectBank(string bankPath, bool loadEditor)
     {
         _selectedBank = _entries.FirstOrDefault(x => string.Equals(x.Path, bankPath, StringComparison.OrdinalIgnoreCase));
-        _selectedFileEntry = _selectedBank?.ToFileEntry();
         if (loadEditor) LoadEditorForBank(_selectedBank);
-        RefreshActionButtons();
+        else RefreshActionButtons();
     }
 
-    /// <summary>在 bank 树里定位当前样本所属的 bank（切到树视图并展开到该 bank）。</summary>
+    /// <summary>
+    /// 在 bank 树里定位当前样本所属的 bank（展开并滚到可视区）。
+    /// 首版这是「在 bank 树中定位」按钮；按钮已按计划删除，能力改挂在
+    /// bank 树的<b>双击</b>上——用户已经在树里点上来的情况下，双击就是「定位到这个 bank」，
+    /// 不再占一个按钮位、也不必维护它的启用状态。
+    /// </summary>
     private void LocateInTree()
     {
         if (_selectedSample is not { } row) return;
-        _viewSwitch.SelectedIndex = 1; // 触发 SwitchView(BankTree)
-        RebuildTree();
+        if (_viewMode != BankViewMode.BankTree)
+        {
+            Shell.SetViewMode(WorkbenchViewMode.Tree); // 触发 ViewModeChanged → SwitchView(BankTree)
+            RebuildTree();
+        }
         foreach (var item in _bankTree.Items.OfType<TreeViewItem>())
         {
             if (item.Tag is not BankIndexEntry entry) continue;
             if (!string.Equals(entry.Path, row.BankPath, StringComparison.OrdinalIgnoreCase)) continue;
             item.IsExpanded = true;
+            item.IsSelected = true;
             item.BringIntoView();
             Shell.SetStatus($"已在 bank 树中定位：{entry.FileName}（{row.FsbLabel} · 样本 {row.SampleIndex}）");
             return;
@@ -702,45 +849,68 @@ public partial class BankWorkbenchPage : UserControl
         Shell.SetStatus("当前筛选条件下 bank 树里没有这个 bank（先清除筛选再定位）。");
     }
 
-    // ── 编辑列（样本表 + 选中上下文）────────────────────────────────
+    // ── 编辑列（选中上下文 + 选中样本明细）──────────────────────────
 
-    private void LoadEditorForBank(BankIndexEntry? entry)
+    /// <summary>
+    /// 载入编辑列的 bank 上下文。<paramref name="clearSample"/> 表示「换 bank」：
+    /// 此时选中样本已经不属于这个 bank，必须清掉——既会清空明细块，
+    /// 也会经 <see cref="StopAudio"/> 把播放进度条归零（plan-11）。
+    /// 「同一 bank 内继续选样本」的路径传 false，免得每次选样本都自断播放。
+    /// </summary>
+    private void LoadEditorForBank(BankIndexEntry? entry, bool clearSample = false)
     {
-        var generation = ++_editGeneration;
+        if (entry is null || clearSample) _selectedSample = null;
         StopAudio();
-        _editSampleRows = [];
-        _sampleList.ItemsSource = null;
         if (entry is null)
         {
             _contextInfo.Text = "未选择 bank";
             _sampleInfo.Text = "—";
+            RefreshSampleDetail();
             RefreshActionButtons();
             return;
         }
         _contextInfo.Text = $"{entry.FileName} · {entry.KindLabel} · {entry.SizeBytes:N0} 字节 · FSB {entry.FsbCount} 个" +
                             (string.IsNullOrWhiteSpace(entry.KindNote) ? string.Empty : $"\n{entry.KindNote}") +
                             (string.IsNullOrWhiteSpace(entry.Note) ? string.Empty : $"\n{entry.Note}");
-        var modified = _modifiedBanks.ContainsKey(entry.FileName);
-        _editSampleRows = _allSamples
-            .Where(x => string.Equals(x.BankPath, entry.Path, StringComparison.OrdinalIgnoreCase))
-            .OrderBy(x => x.FsbIndex).ThenBy(x => x.SampleIndex)
-            .Select(x => x with { IsModified = modified })
-            .ToList();
-        _sampleList.ItemsSource = _editSampleRows;
         _sampleInfo.Text = entry.Samples.Count == 0
             ? (entry.Kind == BankKind.Event ? "事件 bank：无 FSB 负载（SNDH 表为空），没有可试听/替换的样本。" : "该 bank 没有可解析的样本。")
-            : $"{_editSampleRows.Count} 个样本（索引快照，未重新解析 bank 文件）";
-        if (generation != _editGeneration) return;
+            : $"{entry.Samples.Count} 个样本（索引快照，未重新解析 bank 文件）";
+        RefreshSampleDetail();
         RefreshActionButtons();
     }
 
     private void LoadEditorForSample(SampleRow row)
     {
         var entry = _entries.FirstOrDefault(x => string.Equals(x.Path, row.BankPath, StringComparison.OrdinalIgnoreCase));
-        LoadEditorForBank(entry);
-        _sampleList.SelectedItem = _editSampleRows.FirstOrDefault(x =>
-            x.FsbIndex == row.FsbIndex && x.SampleIndex == row.SampleIndex);
+        LoadEditorForBank(entry); // 不清样本：row 就是要在编辑列里展开的那个
+        RefreshSampleDetail();
         Shell.SetStatus($"{row.LocationLabel} · {row.CodecName} · {row.DurationLabel} · {row.SizeLabel} 字节");
+    }
+
+    /// <summary>
+    /// 把选中样本的明细写进「选中样本」键值块。找不到选中项时整块显示「未选择样本」
+    /// （九个标签保留，值一律清空），免得残留上一个样本的数据误导人。
+    /// </summary>
+    private void RefreshSampleDetail()
+    {
+        var row = _selectedSample;
+        var modifiedBrush = TryBrush("WbModifiedBrush");
+        if (row is null)
+        {
+            // 标签列次色、值列主色：整块只剩一行「未选择样本」（其余值置空保留标签，避免残留上个样本的数据）。
+            SetDetailValue(_sampleDetail, 0, "未选择样本");
+            for (var i = 1; i < _sampleDetail.Children.Count; i++) SetDetailValue(_sampleDetail, i, string.Empty);
+            return;
+        }
+        SetDetailValue(_sampleDetail, 0, row.Name);
+        SetDetailValue(_sampleDetail, 1, row.BankFileName);
+        SetDetailValue(_sampleDetail, 2, row.FsbLabel);
+        SetDetailValue(_sampleDetail, 3, row.CodecName);
+        SetDetailValue(_sampleDetail, 4, row.SampleRate > 0 ? $"{row.SampleRate:N0} Hz" : "—");
+        SetDetailValue(_sampleDetail, 5, row.Channels > 0 ? $"{row.Channels} 声道" : "—");
+        SetDetailValue(_sampleDetail, 6, row.DurationLabel);
+        SetDetailValue(_sampleDetail, 7, $"{row.SizeLabel} 字节");
+        SetDetailValue(_sampleDetail, 8, row.StateLabel, row.IsModified ? modifiedBrush : null);
     }
 
     private SampleRow? SelectedSample => _selectedSample;
@@ -752,13 +922,108 @@ public partial class BankWorkbenchPage : UserControl
         var hasProject = _host.Project is not null;
         var fmodDirectory = _host.Env.EffectiveFmodLibraryDirectory(_host.Project);
         var hasFmod = !string.IsNullOrWhiteSpace(fmodDirectory) && Directory.Exists(fmodDirectory);
-        _auditionButton.IsEnabled = hasSample && hasFmod;
+        // 播放按钮在播放中必须保持可点（再点一次就是「停止」），否则用户没有停止的入口。
+        _auditionButton.Content = _player is null ? "▶ 播放" : "■ 停止";
+        _auditionButton.IsEnabled = hasSample && (hasFmod || _player is not null);
         _exportWavButton.IsEnabled = hasSample && hasFmod;
         _replaceButton.IsEnabled = hasSample && hasProject && _host.ProjectFile is not null;
         _exportBankButton.IsEnabled = _selectedBank is not null && hasProject;
         _exportRebankButton.IsEnabled = _selectedBank is not null && hasProject;
-        _locateButton.IsEnabled = hasSample;
         _clearCacheButton.IsEnabled = !_indexing && _index.Store.Exists;
+    }
+
+    // ── 播放进度（plan-11：唯一的试听按钮 → 进度条 + 播放/停止 + 时间）────
+
+    /// <summary>
+    /// 停止播放并释放临时 WAV。除了原有的摘钩/删文件，现在还负责停掉进度定时器、
+    /// 把进度条与时间标签归零（<see cref="ResetPlaybackUi"/>），并刷新按钮上的
+    /// 「▶ 播放 / ■ 停止」文案。所有原有调用点（选 bank、选样本、播放失败、导出前置等）
+    /// 都因此自动获得「进度归零」的行为。
+    /// </summary>
+    private void StopAudio()
+    {
+        var player = _player;
+        _player = null;
+        if (player is not null)
+        {
+            try { player.Stop(); player.Close(); }
+            catch (Exception) { /* 已释放 */ }
+        }
+        var file = _playerFile;
+        _playerFile = null;
+        if (file is not null)
+        {
+            try { File.Delete(file); } catch (Exception) { /* 系统清理 */ }
+        }
+        _playTimer.Stop();
+        ResetPlaybackUi();
+        RefreshActionButtons();
+    }
+
+    /// <summary>进度条与时间标签归零（停止 / 切换选择时调用）。</summary>
+    private void ResetPlaybackUi()
+    {
+        _playBar.Value = 0;
+        var total = SelectedSample?.DurationSeconds;
+        _playBar.Maximum = total is > 0 ? total.Value : 1;
+        // 时长未知：进度条与「总时长」都不可信，直接禁用并显示占位，不编一个假的时长。
+        _playBar.IsEnabled = total is > 0 && _player is not null;
+        _playTime.Text = $"00:00 / {(total is > 0 ? FormatTime(total.Value) : "—")}";
+    }
+
+    /// <summary>启动播放进度刷新（播放开始时调用）。时长未知时进度条保持禁用。</summary>
+    private void StartPlaybackUi(double? durationSeconds)
+    {
+        _playBar.Value = 0;
+        _playBar.Maximum = durationSeconds is > 0 ? durationSeconds.Value : 1;
+        _playBar.IsEnabled = durationSeconds is > 0;
+        _playTime.Text = $"00:00 / {(durationSeconds is > 0 ? FormatTime(durationSeconds.Value) : "—")}";
+        _playTimer.Start();
+    }
+
+    /// <summary>
+    /// 定时器每 200ms 拉一次 <c>MediaPlayer.Position</c> 更新进度条与时间标签。
+    /// 位置/时长都以播放器为准（时长取 <c>NaturalDuration</c>，解码出的 WAV 的实际长度），
+    /// 不用索引里的 <c>SampleCount / SampleRate</c> 估算——那是「原始样本」的时长，
+    /// 和试听用的临时 WAV 未必逐毫秒一致。
+    /// </summary>
+    private void UpdatePlaybackUi()
+    {
+        if (_player is not { } player) return;
+        var total = player.NaturalDuration.HasTimeSpan ? player.NaturalDuration.TimeSpan.TotalSeconds : 0;
+        var position = player.Position.TotalSeconds;
+        if (total <= 0) return;
+        if (_playBar.Maximum != total) _playBar.Maximum = total;
+        _playBar.Value = Math.Clamp(position, 0, total);
+        _playBar.IsEnabled = true;
+        _playTime.Text = $"{FormatTime(position)} / {FormatTime(total)}";
+    }
+
+    /// <summary>点击进度条跳转播放位置（纯播放器操作，不碰索引与解码逻辑）。</summary>
+    private void PlayBar_PreviewMouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e) => SeekToPointer();
+
+    /// <summary>按住拖动时跟随跳转（未按下左键不响应，避免只是划过就跳）。</summary>
+    private void PlayBar_PreviewMouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (e.LeftButton != System.Windows.Input.MouseButtonState.Pressed) return;
+        SeekToPointer();
+    }
+
+    private void SeekToPointer()
+    {
+        if (_player is not { } player || _playBar.ActualWidth <= 0) return;
+        var total = player.NaturalDuration.HasTimeSpan ? player.NaturalDuration.TimeSpan.TotalSeconds : 0;
+        if (total <= 0) return;
+        var target = Math.Clamp(System.Windows.Input.Mouse.GetPosition(_playBar).X / _playBar.ActualWidth, 0, 1) * total;
+        player.Position = TimeSpan.FromSeconds(target);
+        _playBar.Value = target;
+        _playTime.Text = $"{FormatTime(target)} / {FormatTime(total)}";
+    }
+
+    private static string FormatTime(double seconds)
+    {
+        var total = (int)Math.Round(Math.Max(0, seconds));
+        return $"{total / 60:00}:{total % 60:00}";
     }
 
     // ── 试听 / 导出样本 ──────────────────────────────────────────────
@@ -785,12 +1050,14 @@ public partial class BankWorkbenchPage : UserControl
             var file = Path.Combine(Path.GetTempPath(), $"lme-bank-{Guid.NewGuid():N}.wav");
             await File.WriteAllBytesAsync(file, wav);
             var player = new System.Windows.Media.MediaPlayer();
-            player.MediaEnded += (_, _) => StopAudio();
+            player.MediaEnded += (_, _) => StopAudio(); // 播完即停：停定时器、进度归零、按钮还原
             player.MediaFailed += (_, args) => { StopAudio(); Shell.SetStatus($"播放失败：{args.ErrorException?.Message ?? "未知原因"}"); };
             player.Open(new Uri(file));
             _player = player;
             _playerFile = file;
             player.Play();
+            StartPlaybackUi(player.NaturalDuration.HasTimeSpan ? player.NaturalDuration.TimeSpan.TotalSeconds : null);
+            RefreshActionButtons(); // 按钮切成「■ 停止」
             Shell.SetStatus($"正在播放 {sample.Name}（WAV {wav.Length / 1024} KB）");
         }
         catch (Exception ex) { StopAudio(); Shell.SetStatus($"试听失败：{ex.Message}"); }
@@ -975,9 +1242,11 @@ public partial class BankWorkbenchPage : UserControl
             _sampleRecords.Clear();
             _allSamples.Clear();
             _viewSamples.Clear();
-            _bankList.ItemsSource = null;
             _bankTree.ItemsSource = null;
-            _sampleList.ItemsSource = null;
+            _selectedBank = null;
+            _selectedSample = null;
+            LoadEditorForBank(null);
+            RefreshSampleDetail();
             RefreshActionButtons();
             Shell.SetEmptyHint("索引缓存已清空：点「重新扫描」重建（不影响游戏目录里的任何文件）。");
             Shell.SetStatus("已删除 cache/bank-index.db。再次进入本页或点「重新扫描」会重新建索引。");
@@ -993,21 +1262,4 @@ public partial class BankWorkbenchPage : UserControl
     }
 
     private static Brush? TryBrush(string key) => System.Windows.Application.Current?.TryFindResource(key) as Brush;
-
-    private void StopAudio()
-    {
-        var player = _player;
-        _player = null;
-        if (player is not null)
-        {
-            try { player.Stop(); player.Close(); }
-            catch (Exception) { /* 已释放 */ }
-        }
-        var file = _playerFile;
-        _playerFile = null;
-        if (file is not null)
-        {
-            try { File.Delete(file); } catch (Exception) { /* 系统清理 */ }
-        }
-    }
 }

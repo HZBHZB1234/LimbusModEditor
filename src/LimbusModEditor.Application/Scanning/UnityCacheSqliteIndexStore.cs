@@ -29,6 +29,7 @@ public sealed class UnityCacheSqliteIndexStore
 {
     private readonly string _connectionString;
     private readonly string _dbFile;
+    private bool _schemaReady;
 
     public UnityCacheSqliteIndexStore(string dbFile)
     {
@@ -46,6 +47,25 @@ public sealed class UnityCacheSqliteIndexStore
         var connection = new SqliteConnection(_connectionString);
         connection.Open();
         return connection;
+    }
+
+    /// <summary>
+    /// 读路径专用：先保证表结构存在（每实例一次），再返回连接。
+    ///
+    /// <para><b>为什么读也要建表</b>：连接串是 <c>ReadWriteCreate</c>，
+    /// 「库文件不存在」或「库文件是 0 字节」（上次建库被打断）时连接照样能开，
+    /// 随后 <c>SELECT … FROM bundles</c> 会抛 <c>no such table</c>。
+    /// 索引只是加速旁路，缺表必须被无声补建成空库（= 冷扫描），
+    /// 而不是把「缓存没建成」当业务错误抛给用户。</para>
+    /// </summary>
+    private SqliteConnection OpenEnsured()
+    {
+        if (!_schemaReady)
+        {
+            EnsureSchema();
+            _schemaReady = true;
+        }
+        return Open();
     }
 
     /// <summary>建表（幂等）。写连接顺带开启 WAL，提升并发读与批量写表现。</summary>
@@ -219,7 +239,7 @@ public sealed class UnityCacheSqliteIndexStore
     public Dictionary<string, UnityCacheIndexBundle> ReadBundleIndex(StringComparer comparer)
     {
         var index = new Dictionary<string, UnityCacheIndexBundle>(comparer);
-        using var connection = Open();
+        using var connection = OpenEnsured();
         EnsureStaticBundleColumn(connection);
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT data_path, size, mtime_ticks, outer_key, inner_key, static_bundle FROM bundles";
@@ -240,7 +260,7 @@ public sealed class UnityCacheSqliteIndexStore
     public Dictionary<string, List<UnityCacheIndexRow>> ReadAllRowsGrouped(StringComparer comparer)
     {
         var grouped = new Dictionary<string, List<UnityCacheIndexRow>>(comparer);
-        using var connection = Open();
+        using var connection = OpenEnsured();
         EnsureContainerEntryColumn(connection);
         using var command = connection.CreateCommand();
         command.CommandText = """
@@ -271,7 +291,7 @@ public sealed class UnityCacheSqliteIndexStore
     /// 存储，聚合按键分组不依赖物理顺序）。调用方逐 bundle 重建 AssetRecord。</summary>
     public IEnumerable<(UnityCacheIndexBundle Bundle, IReadOnlyList<UnityCacheIndexRow> Rows)> ReadAll()
     {
-        using var connection = Open();
+        using var connection = OpenEnsured();
         var bundles = new List<UnityCacheIndexBundle>();
         EnsureStaticBundleColumn(connection);
         using (var command = connection.CreateCommand())

@@ -298,4 +298,66 @@ public class SqliteTableCacheTests : IDisposable
         Assert.Contains("container_entry", ColumnsOf(store, "items"));
         Assert.Equal(1, CountItems(store)); // 旧行保留，新列为 null
     }
+
+    // ── 缺表自愈（真实缺陷回归：「载入 lang 文件失败：no such table: index_meta」）──
+
+    [Fact]
+    public void Read_on_a_missing_database_file_creates_the_schema_instead_of_throwing()
+    {
+        // 连接串是 ReadWriteCreate：以前「库文件不存在」时读路径会先建出一个空库，
+        // 随后 SELECT … FROM index_meta 抛 no such table。读路径必须自己补建表。
+        var store = CreateStore();
+        Assert.False(File.Exists(DbPath()));
+
+        Assert.Null(store.ReadSourceSignature("D:/game/lang"));
+        Assert.True(File.Exists(DbPath()));
+        Assert.Equal(0, CountItems(store)); // 业务表也建好了
+    }
+
+    [Fact]
+    public void Read_on_a_zero_byte_database_file_repairs_it()
+    {
+        // 真实现场：程序目录 cache/text-index.db 是 0 字节（上次建库被打断），
+        // 页面一读就报 no such table: index_meta。0 字节库必须被无声补建。
+        var path = DbPath();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllBytes(path, []); // 0 字节
+        Assert.Equal(0, new FileInfo(path).Length);
+
+        var store = CreateStore();
+        Assert.Null(store.ReadSourceSignature("D:/game/lang"));
+        Assert.True(new FileInfo(path).Length > 0);
+
+        store.EnsureSource("D:/game/lang", "sig-1");
+        InsertItems(store, 3);
+        Assert.True(store.MatchesSource("D:/game/lang", "sig-1"));
+        Assert.Equal(3, CountItems(store));
+    }
+
+    [Fact]
+    public void Write_to_a_database_without_tables_creates_them_first()
+    {
+        var path = DbPath();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllBytes(path, []);
+        var store = CreateStore();
+
+        InsertItems(store, 2); // 以前这里会抛 no such table: items
+        Assert.Equal(2, CountItems(store));
+    }
+
+    [Fact]
+    public void Deleted_database_is_recreated_on_the_next_read()
+    {
+        var store = CreateStore();
+        store.EnsureSource("D:/game/lang", "sig-1");
+        InsertItems(store, 5);
+        store.DeleteDatabase();
+
+        // 删库后同一个实例继续读：必须重新建表（不能以为表还在）
+        Assert.Null(store.ReadSourceSignature("D:/game/lang"));
+        Assert.Equal(0, CountItems(store));
+        InsertItems(store, 1);
+        Assert.Equal(1, CountItems(store));
+    }
 }

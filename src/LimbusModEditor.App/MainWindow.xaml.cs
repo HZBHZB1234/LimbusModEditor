@@ -93,13 +93,22 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
 
     public MainWindow()
     {
+        StartupTrace.Mark("MainWindow ctor 开始");
         InitializeComponent();
         _startupScan = new StartupScanService(_env, _cacheScan);
-        UpdateDirectoryStatus();
-        UpdateHint();
         // 启动即进入资源工作台（活动栏首个入口）。
         ShowPage("assets");
-        Loaded += async (_, _) => await OnWindowLoadedAsync();
+        StartupTrace.Mark("MainWindow ctor 结束（资源页已就位）");
+        // plan-15 修复「双击启动后过一会儿才弹窗」：目录定位（扫描 Steam 库 / LocalLow 候选）
+        // 与提示条渲染都排到<b>首次呈现之后</b>再跑，任何一秒级动作都不许挡在窗口出现之前。
+        Loaded += async (_, _) =>
+        {
+            StartupTrace.Mark("MainWindow Loaded");
+            await Dispatcher.InvokeAsync(() => { },
+                System.Windows.Threading.DispatcherPriority.Background);
+            StartupTrace.Mark("首次呈现已排空（Background 优先级到手）");
+            await OnWindowLoadedAsync();
+        };
     }
 
     // ── 页面切换（plan-02 第 3 步）────────────────────────────────────────
@@ -199,7 +208,10 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     /// <see cref="RunStartupScanAsync"/>），无论有无项目都跑一遍。</summary>
     private async Task OnWindowLoadedAsync()
     {
+        StartupTrace.Mark("OnWindowLoaded: UpdateHint 前");
+        UpdateHint();
         var last = _env.Config.LastProjectFile;
+        StartupTrace.Mark($"OnWindowLoaded: UpdateHint 后，最近项目={last}");
         if (!string.IsNullOrWhiteSpace(last) && File.Exists(last))
         {
             try
@@ -213,6 +225,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
         // —— 它会把四个索引库准备好，并说明「还没有项目所以跳过资源扫描」。
         await RunStartupScanAsync();
         await WarmUpWorkbenchesAsync();
+        UpdateDirectoryStatus(); // 目录状态一览放在最后：定位器要扫盘，绝不挡在模态窗口之前
         UpdateHint();
     }
 
@@ -229,8 +242,16 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     /// </summary>
     /// <param name="projectMatchesIndex">打开项目时刚回灌成功才传 true：索引里每一行都能在项目里
     /// 找到对应记录，于是资源扫描可以跳过「119 万行逐条对账」（实测那一步占 50 秒里的 ~40 秒）。
-    /// 手动点侧边栏按钮时为 false（慢但绝对安全）。</param>
-    private async Task RunStartupScanAsync(bool projectMatchesIndex = false)
+    /// 手动点侧边栏按钮时按 <see cref="_assetsMatchIndex"/> 的当前值判断（回灌成功后它就是 true）。</param>
+    /// <param name="prepare">可选的前奏（plan-15 修复「双击启动后过一会儿才弹窗」）：
+    /// 自动配置目录 + 从扫描索引回灌引用资产这类<b>几十秒级</b>的打开项目动作，以前跑在
+    /// <b>窗口弹出之前</b>，用户看到的是一段没有任何反馈的空白等待（真实项目回灌 119 万行约 14 秒）。
+    /// 现在它们作为第一步进模态窗口内执行并显示进度，窗口因此<b>立即</b>弹出。
+    /// 前奏拿到的两个回调：<c>status</c> 写窗口里的进度行，<c>matchesIndex</c> 告诉宿主
+    /// 「索引与项目已一致」（回灌成功）→ 资源扫描可跳逐条对账。</param>
+    private async Task RunStartupScanAsync(
+        bool? projectMatchesIndex = null,
+        Func<Action<string>, Action, CancellationToken, Task>? prepare = null)
     {
         _startupScanCancellation?.Cancel();
         _startupScanCancellation = null;
@@ -240,9 +261,56 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
             StatusText.Text = _project is null
                 ? "启动扫描：正在准备四个索引库…"
                 : "启动扫描：正在检查全部资源与四张表…";
-            var dialog = new StartupScanDialog(_startupScan, _cacheScan, _project, projectMatchesIndex) { Owner = this };
+            StartupTrace.Mark("RunStartupScanAsync: 构造模态窗口前");
+            // 先开一个最小「正在准备…」窗口占位（构造几乎零成本），模态在它的 Loaded 里再构造 ——
+            // 构造模态本身要探四张表（SQLite count，本机实测 ~430ms），不能让用户多等这一下。
+            // 探测任务<b>在占位窗口显示前就起跑</b>（后台线程），与占位显示并行，不占弹出延迟。
+            var countsTask = Task.Run(() => _startupScan.ProbeCacheTables());
+            var placeholderText = new TextBlock
+            {
+                Text = _project is null
+                    ? "正在准备四个索引库…"
+                    : "正在准备四张表与全部资源，请稍候…",
+                Margin = new Thickness(20, 16, 20, 16),
+                Foreground = AppTheme.TextSecondary,
+                TextWrapping = TextWrapping.Wrap,
+            };
+            var placeholder = new Window
+            {
+                Title = "正在扫描并加载资源",
+                Width = 420,
+                Height = 120,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Background = AppTheme.WindowBackground,
+                ResizeMode = ResizeMode.NoResize,
+                WindowStyle = WindowStyle.ToolWindow,
+                Owner = this,
+                Content = placeholderText,
+            };
+            StartupScanDialog? dialog = null;
+            placeholder.Loaded += (_, _) =>
+            {
+                // 占位窗口已经在屏幕上了：**不等**探测结果，立刻把模态顶上（用户看到的是
+                // 「主窗口 → 等待窗口 → 扫描窗口」连续三下，没有一段空白停顿）。
+                // 四张表的行数由模态自己在探测任务完成后填进去（通常几十毫秒后）。
+                StartupTrace.Mark("占位窗口已显示，立刻构造模态");
+                dialog = new StartupScanDialog(
+                    _startupScan, _cacheScan, _project,
+                    projectMatchesIndex ?? _assetsMatchIndex,
+                    prepare,
+                    countsTask);
+                placeholderText.Text = string.Empty;
+                StartupTrace.Mark("模态已构造，关掉占位窗口");
+                placeholder.Close();
+            };
+            placeholder.ShowDialog();
+
+            if (dialog is null) return; // 占位窗口被用户提前关掉：当作取消
+            StartupTrace.Mark("RunStartupScanAsync: ShowDialog 前");
             _startupScanCancellation = dialog.Cancellation;
+            dialog.Owner = this;
             dialog.ShowDialog();
+            StartupTrace.Mark("RunStartupScanAsync: ShowDialog 返回（窗口已关闭）");
             report = dialog.Result;
         }
         catch (Exception ex)
@@ -338,45 +406,90 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     /// 需要时自动要求加载资源 → 更新提示。</summary>
     private async Task OpenProjectFileAsync(string projectFile, string? statusPrefix = null)
     {
-        _project = await _projects.LoadAsync(projectFile);
+        using (StartupTrace.Span($"OpenProjectFileAsync: LoadAsync({Path.GetFileName(projectFile)})"))
+            _project = await _projects.LoadAsync(projectFile);
         _projectFile = Path.GetFullPath(projectFile);
         _env.RegisterRecentProject(_projectFile, _project.Name);
         await AfterProjectOpenedAsync(statusPrefix ?? "已打开项目");
     }
 
-    /// <summary>项目就绪后的无感流程：共享目录自动配置；打开时从扫描索引
-    /// 后台回灌纯引用资产（项目文件已瘦身，不再携带它们）；随后跑统一启动扫描模态
-    /// （plan-15：每次打开/恢复项目都把四张表 + 全部资源扫一遍，增量、只重解析签名变过的文件）。</summary>
+    /// <summary>项目就绪后的无感流程（plan-15 修复启动时序）：这里只做<b>秒级</b>的事
+    /// （加载项目文件、记录最近项目），把<b>几十秒级</b>的「自动配置目录 + 从索引回灌引用资产」
+    /// 作为模态窗口的第一段前奏交给 <see cref="RunStartupScanAsync"/>。
+    ///
+    /// <para>为什么必须这么改：这两个动作原先在这里先跑完，窗口才弹出来 —— 真实项目的回灌
+    /// （119 万行）约 14 秒，用户双击图标后只看到一段空白等待。现在模态窗口立即弹出，
+    /// 回灌进度就在窗口里显示。</para>
+    /// </summary>
     private async Task AfterProjectOpenedAsync(string prefix)
     {
+        StartupTrace.Mark("AfterProjectOpened: RefreshProjectState");
         RefreshProjectState(prefix);
-        await AutoConfigureAsync();
-        await RehydrateAssetsFromIndexAsync();
-        RefreshProjectState(prefix);
-
-        await RunStartupScanAsync(_assetsMatchIndex);
-        await WarmUpWorkbenchesAsync();
+        StartupTrace.Mark("AfterProjectOpened: 进入 RunStartupScanAsync");
+        using (StartupTrace.Span("AfterProjectOpened: RunStartupScanAsync（含模态全程）"))
+            await RunStartupScanAsync(projectMatchesIndex: false, prepare: PrepareProjectInsideModalAsync);
+        StartupTrace.Mark("AfterProjectOpened: 预热工作台");
+        using (StartupTrace.Span("AfterProjectOpened: WarmUpWorkbenchesAsync"))
+            await WarmUpWorkbenchesAsync();
+        UpdateDirectoryStatus(); // 目录状态一览放在最后：定位器要扫盘，绝不挡在模态窗口之前
         UpdateHint();
+        StartupTrace.Mark("AfterProjectOpened: 完成");
+    }
+
+    /// <summary>
+    /// 模态窗口内的第一段前奏：无感自动配置共享目录（只填空位，从不覆盖手动值）→
+    /// 从扫描索引回灌纯引用资产（项目文件已瘦身，不再携带它们）。
+    /// <paramref name="status"/> 写窗口里的进度行；<paramref name="matchesIndex"/> 报告
+    /// 「索引与项目已一致」，让后续资源扫描跳过逐条对账（真实规模下省几十秒）。
+    /// </summary>
+    private async Task PrepareProjectInsideModalAsync(
+        Action<string> status, Action matchesIndex, CancellationToken cancellationToken)
+    {
+        if (_project is not { } project || _projectFile is null) return;
+
+        status("正在自动配置目录（游戏 / Unity 缓存 / 模组 / FMOD）…");
+        StartupTrace.Mark("前奏: AutoConfigureAsync 前");
+        using (StartupTrace.Span("前奏: AutoConfigureAsync"))
+            await AutoConfigureAsync();
+
+        cancellationToken.ThrowIfCancellationRequested();
+        status("正在从扫描索引重建资源列表（不解析任何 bundle）…");
+        StartupTrace.Mark("前奏: 回灌前");
+        var added = await RehydrateAssetsFromIndexAsync(project, cancellationToken);
+        StartupTrace.Mark("前奏: 回灌后");
+        if (added is null) return; // 已被取消
+        status(added > 0
+            ? $"资源索引已重建（{added:N0} 条引用资产，未解析任何 bundle）"
+            : "资源索引已是最新（项目里的引用资产无需重建）");
     }
 
     /// <summary>阶段 C 项目瘦身配套：项目文件不再携带纯引用资产（真实全缓存
     /// 项目曾把 .lmeproj 撑到 1.6GB），打开时从扫描索引 SQLite 库重建（不解析
-    /// 任何 bundle，秒级）。索引库缺失时静默返回 0（随后空项目逻辑会引导扫描）。</summary>
-    private async Task<int> RehydrateAssetsFromIndexAsync()
+    /// 任何 bundle，秒级）。索引库缺失时静默返回 0（随后空项目逻辑会引导扫描）。
+    /// 返回 null 表示被取消（关窗）。</summary>
+    /// <param name="project">要回灌的项目（显式传入：模态前奏里 <c>_project</c> 字段可能已被替换）。</param>
+    /// <param name="cancellationToken">取消（关窗）：回灌途中取消就立刻收手，不当作失败报告。</param>
+    private async Task<int?> RehydrateAssetsFromIndexAsync(ModProject project, CancellationToken cancellationToken)
     {
         _assetsMatchIndex = false; // 先保守置否：只有真的回灌成功才敢声称「项目与索引一致」
-        if (_project is null) return 0;
         try
         {
-            StatusText.Text = "正在从扫描索引重建资源列表（不解析 bundle，秒级）…";
-            var added = await _cacheScan.RehydrateFromIndexAsync(_project);
-            if (added > 0) StatusText.Text = $"资源索引已重建（{added} 条引用资产，后台完成，未解析任何 bundle）。";
+            var added = await _cacheScan.RehydrateFromIndexAsync(project);
+            cancellationToken.ThrowIfCancellationRequested();
             // 回灌成功后，索引里每一行都能在项目里找到对应记录 → 启动扫描可以跳过
             // 「119 万行逐条对账」（实测该步占启动扫描 50 秒里的 ~40 秒）。
             _assetsMatchIndex = true;
             return added;
+        }        catch (OperationCanceledException)
+        {
+            return null;
         }
-        catch (Exception ex) { ShowError("重建资源索引失败", ex); return 0; }
+        catch (Exception ex)
+        {
+            // 失败只写状态栏 + 诊断：模态窗口还在跑，不能再弹一个模态 MessageBox 把它顶掉。
+            StatusText.Text = $"重建资源索引失败（不影响功能，本次跳过逐条对账加速）：{ex.Message}";
+            return 0;
+        }
     }
 
     private async void SaveProject_Click(object sender, RoutedEventArgs e)

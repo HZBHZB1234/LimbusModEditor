@@ -32,8 +32,12 @@ public sealed class StartupScanDialog : Window
     private readonly UnityCacheScanService _cacheScan;
     private readonly ModProject? _project;
     private readonly bool _projectMatchesIndex;
+    private readonly Func<Action<string>, Action, CancellationToken, Task>? _prepare;
+    private readonly Task<IReadOnlyList<CacheTableRowCount>>? _initialCountsTask;
     private readonly CancellationTokenSource _cancellation = new();
     private readonly Stopwatch _watch = Stopwatch.StartNew();
+    /// <summary>前奏（回灌）成功后由宿主回调置真：索引与项目已一致 → 资源扫描可跳逐条对账。</summary>
+    private bool _projectMatchesIndexNow;
 
     private readonly TextBlock _headline;
     private readonly TextBlock _state;
@@ -61,11 +65,20 @@ public sealed class StartupScanDialog : Window
     /// <param name="project">当前项目；<b>允许 null</b>（启动阶段还没打开项目：只建库 + 探针，不扫资源）。</param>
     /// <param name="projectMatchesIndex">宿主保证「索引里每一行都能在项目里找到对应记录」时为 true
     /// （回灌刚成功）：资源扫描跳过逐条对账，真实规模下省几十秒。不确定传 false。</param>
+    /// <param name="prepare">可选前奏（plan-15 修复「双击启动后过一会儿才弹窗」）：打开项目时
+    /// 需要先跑的几十秒级动作（自动配置目录、从索引回灌 119 万行引用资产）——它们<b>必须在窗口里跑</b>，
+    /// 否则用户先看到的是一段没有任何反馈的空白等待。参数：<c>status</c> 写进度行、
+    /// <c>matchesIndex</c> 报告「索引与项目已一致」（决定资源扫描是否跳逐条对账）、
+    /// <c>CancellationToken</c> 关窗即取消。</param>
+    /// <param name="initialCounts">可选：宿主在<b>后台</b>已经起跑的「四张表现场读况」任务。
+    /// 已经完成时直接用作初始行数；还在跑时先显示「—」，完成后再填（绝不为它多等一秒）。</param>
     public StartupScanDialog(
         StartupScanService service,
         UnityCacheScanService cacheScan,
         ModProject? project,
-        bool projectMatchesIndex = false)
+        bool projectMatchesIndex = false,
+        Func<Action<string>, Action, CancellationToken, Task>? prepare = null,
+        Task<IReadOnlyList<CacheTableRowCount>>? initialCounts = null)
     {
         ArgumentNullException.ThrowIfNull(service);
         ArgumentNullException.ThrowIfNull(cacheScan);
@@ -73,6 +86,8 @@ public sealed class StartupScanDialog : Window
         _cacheScan = cacheScan;
         _project = project;
         _projectMatchesIndex = projectMatchesIndex;
+        _prepare = prepare;
+        _initialCountsTask = initialCounts;
 
         Title = "正在扫描并加载资源";
         Width = 760;
@@ -116,11 +131,12 @@ public sealed class StartupScanDialog : Window
         AddHeader(grid, 2, "状态", 2);
         AddHeader(grid, 3, "库写入", 3);
 
-        // 打开窗口先探一次现场：用户一眼看到四张表现在各有多少行（库没建也显示「—」而不是空白）。
-        // 初始状态 = 「等待」（Pending），行数据/状态文案都由 Application 层的投影给出，窗口不另写映射。
-        var initialCounts = _service.ProbeCacheTables();
-        TableCounts = initialCounts;
-        var initialViews = StartupScanReport.CreateCacheTableRows(initialCounts, null);
+        // 打开窗口先灌一次<b>已知行数</b>：宿主在后台已经起了「探四张表」的任务（本机四个库约 430ms），
+        // 已经完成就直接用，还在跑就先显示「—」并把补填挂到任务上 —— 绝不为它多等一毫秒。
+        // 初始状态 = 「等待」（Pending），行数据与状态文案都由 Application 层的投影给出，窗口不另写映射。
+        var readyCounts = initialCounts is { IsCompletedSuccessfully: true } done ? done.Result : null;
+        TableCounts = readyCounts;
+        var initialViews = StartupScanReport.CreateCacheTableRows(readyCounts, null);
         for (var index = 0; index < initialViews.Count && index < _rows.Length; index++)
         {
             var view = initialViews[index];
@@ -200,6 +216,24 @@ public sealed class StartupScanDialog : Window
 
         Loaded += async (_, _) => await RunAsync();
         Closed += (_, _) => { try { _cancellation.Cancel(); } catch (ObjectDisposedException) { /* 已收尾 */ } };
+
+        // 宿主起跑的四张表探测任务完成时把行数补上（这时窗口已经在屏幕上，用户看到的是数字跳进来，
+        // 而不是「窗口晚半秒才出现」）。
+        if (readyCounts is null && _initialCountsTask is { } pending)
+        {
+            _ = pending.ContinueWith(
+                task =>
+                {
+                    if (!task.IsCompletedSuccessfully) return;
+                    Dispatcher.InvokeAsync(() =>
+                    {
+                        if (IsLoaded) ApplyCounts(task.Result);
+                    });
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
     }
 
     private static void AddHeader(Grid grid, int column, string text, int row)
@@ -233,9 +267,13 @@ public sealed class StartupScanDialog : Window
     {
         if (_started) return;
         _started = true;
+        StartupTrace.Mark("模态: RunAsync 开始");
 
         // 打开窗口先探一次现场：用户一眼看到「现在库里有什么」（库没建也会显示 0 行而不是空白）。
-        ApplyCounts(_service.ProbeCacheTables());
+        // 探测器是 SQLite count（本机四个库合计约 430ms），因此<b>必须异步</b>：它同步跑在 UI 线程
+        // 上会把「窗口已弹出」往后拖半秒（plan-15 修复实测 1.25s → 1.8s 这段就是它）。
+        if (_initialCountsTask is null)
+            ApplyCounts(await Task.Run(() => _service.ProbeCacheTables(), _cancellation.Token));
 
         var progress = new Progress<StartupScanProgress>(p =>
         {
@@ -248,6 +286,27 @@ public sealed class StartupScanDialog : Window
         {
             var project = _project;
             var steps = new List<StartupScanStepResult>();
+
+            // ⓪ 前奏（打开项目才有）：自动配置目录 + 从索引回灌引用资产。这两件事都是几十秒级，
+            //    放在这里跑而不是「窗口弹出之前」跑 —— 否则用户双击图标后先看到一段空白等待。
+            _projectMatchesIndexNow = _projectMatchesIndex;
+            if (_prepare is not null)
+            {
+                _headline.Text = "正在准备项目资源";
+                _state.Text = "正在准备项目…";
+                _progress.IsIndeterminate = true;
+                _progress.Value = 0;
+                await _prepare(
+                    text =>
+                    {
+                        LastStatus = text;
+                        _state.Text = text;
+                    },
+                    () => _projectMatchesIndexNow = true,
+                    _cancellation.Token);
+                _progress.IsIndeterminate = false;
+            }
+            _headline.Text = "正在扫描并加载资源";
 
             // ① 四个缓存库建库/校表（没有项目也照跑：这是「四张表」能读出行的前提）。
             MarkRow(0, "检查中", AppTheme.TextSecondary);
@@ -272,7 +331,7 @@ public sealed class StartupScanDialog : Window
             // ② 游戏资源：Unity 缓存里的全部 bundle（引用模式，只登记对象索引）。
             MarkRow(0, "扫描中", AppTheme.Accent);
             _state.Text = "扫描游戏资源：正在枚举 Unity 缓存…";
-            var assets = await _service.ScanUnityAssetsStepAsync(project, progress, _cancellation.Token, _projectMatchesIndex);
+            var assets = await _service.ScanUnityAssetsStepAsync(project, progress, _cancellation.Token, _projectMatchesIndexNow);
             steps.Add(assets);
             ApplyStep(assets);
 

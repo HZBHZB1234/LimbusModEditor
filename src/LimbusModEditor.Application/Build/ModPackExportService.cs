@@ -1,3 +1,4 @@
+using LimbusModEditor.Application.Texts;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Domain.Formats;
 using LimbusModEditor.Domain.Projects;
@@ -107,7 +108,7 @@ public sealed class ModPackExportService
                 ExportSlot.Carra => await ExportCarraAsync(project, projectRoot, plan, item, context, progress, cancellationToken),
                 ExportSlot.Lunartique => Skip(item, "Lunartique 包在 S8 落地"),
                 ExportSlot.LangBus or ExportSlot.LangPatch or ExportSlot.LangPathset =>
-                    Skip(item, "语言文本导出在 S5 落地"),
+                    ExportLangAsync(plan, item),
                 ExportSlot.StaticMod => Skip(item, "静态数据模组导出在 S8 落地"),
                 _ => Skip(item, "未实现的槽位"),
             });
@@ -287,6 +288,41 @@ public sealed class ModPackExportService
         }
         reason = string.Empty;
         return true;
+    }
+
+    // ── 语言文本：_text/{bus|patch|pathset} ─────────────────────────
+
+    /// <summary>
+    /// 每条被改文本表在每个格式槽位各出一份文件（plan-16 §3）：产物的相对路径沿用
+    /// 条目路径（<c>StoryData/S1.json</c>），因此子目录结构在多语言目录下天然隔离。
+    ///
+    /// <para>bus 有「可表达性门」：差分里出现删除/数组增删时只跳过 bus 槽位并说明原因，
+    /// patch / pathset 照常产出。</para>
+    /// </summary>
+    private static ModPackSlotResult ExportLangAsync(ModExportPlan plan, ModExportPlanItem item)
+    {
+        var format = item.Descriptor.Slot switch
+        {
+            ExportSlot.LangBus => LangExportFormat.Bus,
+            ExportSlot.LangPatch => LangExportFormat.Patch,
+            _ => LangExportFormat.Pathset,
+        };
+        var outputs = new List<string>();
+        var diagnostics = new List<string>();
+        foreach (var entry in plan.LangEntries)
+        {
+            var result = LangExportFormatter
+                .Format(entry.RelativePath, entry.PatchKey, plan.ModName, entry.VanillaText, entry.ModifiedText)
+                .First(x => x.Format == format);
+            foreach (var note in result.Notes) diagnostics.Add($"{entry.RelativePath}：{note}");
+            if (!result.Written) continue;
+            var output = Path.Combine(item.Directory, entry.RelativePath.Replace('/', Path.DirectorySeparatorChar));
+            Directory.CreateDirectory(Path.GetDirectoryName(output)!);
+            File.WriteAllText(output, result.JsonText!, new System.Text.UTF8Encoding(false));
+            outputs.Add(output);
+        }
+        return new ModPackSlotResult(item.Descriptor, outputs.Count > 0, item.Directory,
+            outputs.Count, outputs, diagnostics, []);
     }
 
     // ── 资源：_data/carra ───────────────────────────────────────────

@@ -220,12 +220,59 @@
 
 ```text
 dotnet build LimbusModEditor.slnx --no-restore   ✓ 0 警告 0 错误
-dotnet test LimbusModEditor.slnx --no-build      ✓ 416 通过（74 Format + 342 Domain；真实数据门控测试本机全部真跑，
-                                                   另 2 个 lang 门测试因游戏 lang 目录变化为存量失败，见缺陷 5 说明）
-dotnet publish ... -o artifacts/publish-win-x64  ✓ LimbusModEditor.App.exe（37 文件 / 6.8MB，UI 冒烟启动通过）
+dotnet test LimbusModEditor.slnx --no-build      ✓ 610 通过（74 Format + 536 Domain；真实数据门控测试本机全部真跑）
+dotnet publish ... -o artifacts/publish-win-x64  ✓ LimbusModEditor.App.exe（发布成功）
 ```
 
-### 6.1 性能量化基线（P3.9，真实缓存 1459 bundle / 1,194,061 资产）
+### 6.1 plan-16 导出/调试重构的设计变更与风险（2026-09）
+
+**改了什么（为什么不能只改 UI）**：
+
+1. **口径变更**：`text-index.db` 的条目从「相对 lang 根」改成「相对活动语言目录」。
+   这不是显示层调整——索引、编辑集、搜索命中、导出源全部换成新口径，并在
+   `index_meta` 新增 `language_prefix`（存绝对路径、原样大小写）供读取方拼回磁盘路径。
+   口径版本升到 **v4**，旧库自动整库重建（本机实测 2048 行 / 362246 条命中重建正常）。
+   **风险点**：加载器仍要「相对 lang 根」的键，两套口径之间只剩
+   `LangTextWorkbenchService.ToPatchKey` 一处转换。已有往返测试钉死；
+   若将来有人「顺手统一口径」，`Real_lang_table_edit_round_trips_through_patch_replay`
+   与 `LangEntryCaliberTests` 会红。
+2. **`.rebank` 条目名**（真实缺陷）：加载器按 `(FSB 序号, 样本名)` 匹配，旧实现写 `{i}.fsb`
+   ——**一条都匹配不上**，而加载器还会因「替换数 0」报错回滚。现在用 `Fsb5Parser` 核对
+   「改后与原版样本集合同构」并用 FMOD 逐样本解码；结构不符或缺 DLL 时**整份跳过并说明**。
+   真实数据实测：`1D306I.assets.rebank` 条目 `0/1D306I-04.wav`（真实样本名）。
+3. **可表达性门**：`bus`/`pathset` 表达不了的改动（删除、数组增删、路径原文档不存在）
+   会让加载器**静默跳过**。因此只要有一个操作表达不了，该格式就**整份不产出**并逐条说明原因，
+   `patch` 照常产出完整改动。实测发现「数组下标越界的赋值」也会被静默跳过——已纳入判据。
+4. **调试写盘面扩大**：从「覆盖层铺几个文件」扩大到「bank 覆盖 + 缓存 `__data` 就地重写 +
+   lang 目录补丁 + 静态模组 catalog 双写」。护栏相应加强：逐文件 sha256 + 备份 +
+   `steps.tsv` 清单 + 关闭时**逆序逐字节还原** + 目标被外部改动则不覆盖（记冲突）+
+   中途失败先整体回滚；游戏运行中拒绝执行。
+   **风险点**：catalog 写入按 `crc@Hash128+0x44`/`size@Hash128+0x48` 显式读写，并用
+   size 合理性（0.1–50 MB）作布局判据；布局不符即拒绝写（宁可不应用也不写错位置）。
+   本机实测 catalog 记录 `size=2257973` 与磁盘 `__data` 字节数完全一致。
+   已知未做：静态模组的 `fullFiles` 条目（本版只支持 `opType=jsonpatch`，遇到 fullFiles 明确报错，
+   编辑器导出走的也是 jsonpatch）。
+5. **`v2` 文本美化规则集**：**不做**。该引擎只支持字符串替换/包裹类动作（`replace/wrap/gradient/skill_color`），
+   无法无损承载「精确逐字段赋值」，强行生成会得到「加载器不报错但改动丢失」的规则集。
+   升级路径（C# 侧实现等价解释器 + 生成后回放比对）写在 plan-16 §10.1。
+
+本机实测：catalog 记录 `size=2257973` 与磁盘 `__data` 实际字节数**完全一致**（
+`catalog_S1.bin` 记录 `crc=0xB52BCD07`，`static_s1_0_assets_all_fa6984a9….bundle`）。
+
+**调试验收（本机真实数据，端到端跑通）**：
+- 音频 rebank 链路：`1D306I.assets.bank` → 计划点亮 `_fmod/{bank,rebank}` → 导出产出
+  `1D306I.assets.bank` 与 `1D306I.assets.rebank`（条目 `0/1D306I-04.wav`，RIFF 校验通过）；
+- `ModApplyServiceTests` 5 条覆盖：bank 备份覆盖后逐字节还原、lang 补丁放进 lang 目录并在关闭时删除、
+  外部改动不覆盖并报冲突、未支持格式列明原因、目标缺失只报不写。
+- 静态模组：`Locate` 在真实 `catalog_S1.bin` 上定位成功（inner `fa6984a9…` / outer `64bd0105…`），
+  并通过「记录 size == 磁盘 `__data` 字节数」证明偏移选择正确。
+
+**保留未删的旧代码（有意）**：`ModExportService`（含 `ExportAllAsync`）、`ExportProgressWindow`、
+`ExportReportWindow` 仍有 CLI 与测试使用（`BankExportTests` / `MultiFormatExportTests` /
+`ModExportServiceTests` / `SourceImportTests` / `LunartiqueConversionTests`）。它们不再是界面入口，
+但删掉会连带 17 处引用与 5 个测试文件——本轮按「不做界面外的破坏性清理」处理，留待后续计划。
+
+### 6.2 性能量化基线（P3.9，真实缓存 1459 bundle / 1,194,061 资产）
 
 | 路径 | 优化前（JSON 索引时代） | 优化后（SQLite + 项目瘦身） |
 |---|---|---|

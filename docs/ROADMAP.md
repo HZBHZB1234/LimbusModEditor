@@ -18,15 +18,18 @@
 - Unity Bundle 与独立 `.assets` 的对象索引、对象替换、Sprite 元数据编辑。
 - Unity 对象基础字段树读取，以及布尔/整数/浮点/字符串字段修改记录。
 - lang 文本模组通道：RFC6902 差分补丁的生成/应用（`TextDiffService`）与
-  真实加载器兼容的 `patchs` 文档读写（`LangTextPatchService`），主窗口
-  「文本模组（lang 补丁）…」入口。
+  真实加载器兼容的 `patchs` 文档读写（`LangTextPatchService`）；**plan-16 起**另有三套语言格式
+  （`bus` 规则集 / `patch` RFC6902 / `pathset` 覆盖清单，见 `LangExportFormatter`），
+  导出统一走侧边栏「导出模组…」。
 - .staticmod 静态数据模组通道：staticmod/v1 包读取/写出/补丁应用预览/
-  从 JSON 差分生成（`StaticModService`），主窗口「静态数据模组…」入口。
+  从 JSON 差分生成（`StaticModService`）；**plan-16 起**由 `_static/staticmod` 槽位统一导出，
+  调试期由 `StaticModApplyService` 按加载器语义应用（catalog 双写）。
 - 官方 catalog（catalog.bin/catalog_S1.bin）只读解析与 vanilla 基线判定：
   导入 bundle 时自动判定相对 vanilla 是否被修改/新增，资源列表展示。
 - 图像预览、图集拆分/恢复、文本/JSON 编辑、资源替换记录。
 - 用户提供合法 FMOD/FSBank DLL 后的 FSB↔WAV 工作流。
-- Debug overlay 备份、应用、失败回滚、冲突保护和游戏启动。
+- 调试（plan-16 起由 `ModApplyService` + `StaticModApplyService` 承担）：导出后按加载器语义
+  铺到游戏目录与 Unity 缓存，逐文件备份 + `steps.tsv` 还原清单 + 关闭时逐字节还原 + 冲突不覆盖。
 - 领域测试与格式测试；Windows x64 发布流程。
 
 当前验证基线应保持：
@@ -640,6 +643,56 @@ static mod 可以使用资源工作台类似的页面。事实上我们也可以
 测试 561 → **573**（74 Format + 499 Domain，+5 Domain：`PrepareDatabaseAsync` 无项目建库 /
 四行投影与表名 / 无报告也能出四行 / 工作台索引可独立调用 / 取消真的中断）。
 仓库既有 flake `RealBankIndexSmokeTests` 的墙钟预算断言在整包并行下仍偶发（单独跑 2/2 通过）。
+
+## P3.16 导出格式体系 + 导出/调试一体化重构（2026-09，完成）
+
+用户第三批口径（逐条）：① lang 模组编辑的导出格式改为参考 LCTA，允许多种导出格式、
+**不再支持现有格式**；② lang 页面的**后端数据库条目不再保留根文件夹**（`text-index.db` 的
+条目从 `LLc-CN-LCTA/…` 改为 `StoryData/…`、`AbDlg_Faust.json`）；③ 导出模组 / 应用模组整套设计重做——
+删掉资源页调试板块、bank 页两个导出按钮、侧边栏整个「② 产出模组」板块，只留
+**导出模组**与**使用当前修改启动游戏进行调试**两个按钮，导出按「种类 → 格式」两层建目录。
+按 `docs/plans/plan-16-export-and-debug-redesign.md` 实施（S1–S9 全部落地）：
+
+- **S1/S2 条目口径去根**：`files.rel_path` / `hits.rel_path` 改为「相对活动语言目录」，
+  索引、编辑集、搜索命中、界面全链路统一；`index_meta` 新增 `language_prefix`
+  （存活动语言目录的绝对路径，原样大小写），读取方据此拼回真实路径，不再重读 config.json 猜；
+  口径版本 v2 → **v4**（语言目录名并入签名），旧库自动整库重建。
+  加载器口径的补丁键由 `LangTextWorkbenchService.ToPatchKey` 在导出时补回（唯一接缝，有往返测试）。
+  本机真实库核对：2048 行、命中 362246 条，条目第一段从 `LLc-CN-LCTA` 变为 `AbDlg_Faust.json` 等。
+- **S3/S4 导出流水线**：`ExportLayout`（种类 _fmod/_data/_text/_static → 格式 bank/rebank/carra/
+  lunartique/bus/patch/pathset/staticmod）是布局的唯一事实来源；`ModExportPlanService`
+  **先分析后导出**（没改的种类/格式一律不点亮并给中文原因）；`ModPackExportService` 逐槽位写出
+  （空槽不建目录），bank 走 `BankFormatHandler`、rebank 走 `RebankArchive`、carra 走既有
+  `UnityCacheExportService`，格式层零重写。文本/静态编辑集从页面搬到宿主持有的
+  `LangEditSession` / `StaticEditSession`。
+- **`.rebank` 真实缺陷修正**：加载器（`launcher/bankmod.py`）按 `(FSB 序号, 样本名)` 匹配条目，
+  旧实现写 `{i}.fsb` **一条都匹配不上**并被判「替换数 0」回滚。现在用 `Fsb5Parser` 做样本结构对齐
+  + FMOD 逐样本解码成 WAV；结构对不上或缺 DLL 就整份跳过并说明。
+  本机真实数据实测产出 `1D306I.assets.rebank`，条目 `0/1D306I-04.wav`（真实样本名，RIFF 校验通过）。
+- **S5 语言多格式**：每条被改文本表同时产出 `bus/`（lcta-bus 规则集）、`patch/`（RFC6902 patchs，
+  键 = 加载器口径）、`pathset/`（覆盖清单）。三者各有一条**往返验证**（bus 用 `bus.py` 语义的
+  等价解释器回放）。**可表达性门**：bus/pathset 只能「按路径赋值 / 覆盖已存在位置」，
+  遇到 remove、数组增删、或路径在原文档里不存在时**整份不产出**并逐条说明原因
+  （半份规则集会让用户以为全改了，比没有这个格式更危险）。`v2` 文本美化规则集**不做**
+  （引擎只支持字符串替换/包裹类动作，无法无损承载精确字段赋值，见计划 §10.1）。
+- **S6 界面收口**：侧边栏只剩「导出模组…」与「使用当前修改启动游戏进行调试」；
+  删除资源页调试板块、bank 页两个导出按钮、文本页导出/直接应用通道、
+  `ExportWizardWindow`/`MultiExportReportWindow`/`ExportAdvisorWindow`；
+  新增 `ModExportReportWindow`（逐槽位结果 + 保存 JSON）。
+- **S7/S7b 调试应用**：`ModApplyService` 模拟加载器语义——bank 备份后覆盖、rebank 展开成整包后覆盖、
+  Carra 包逐对象写回缓存 `__data`（校验类型表索引一致）、语言补丁 JSON 放进 lang 目录；
+  每个文件改动前 sha256 + 备份 + `steps.tsv` 还原清单，关闭编辑器时逆序逐字节还原，
+  目标被外部改过则不覆盖并报冲突，应用中途失败先整体回滚。
+  `StaticModApplyService` 处理静态模组：catalog 记录区按偏移显式定位与写入
+  （`static_s1_0_assets_all_<32hex>` → 唯一 Hash128 → 校验外层键 → `crc@+0x44`/`size@+0x48`，
+  并用 size 合理性作布局判据），改 TextAsset → 重打包 → 算解压块 CRC32 → 双写缓存与 catalog，
+  catalog/`__data`/`__info` 三者都在改写前备份。
+  本机真实数据核对：catalog 记录 `size=2257973` 与磁盘 `__data` 实际字节数**完全一致**。
+- **S8 其余槽位**：`_static/staticmod` 复用 `StaticModService` 产出 LCTA 兼容包；
+  `_data/lunartique` 从「改后 bundle」与缓存原版 bundle 派生两侧同构条目，缺缓存时整份跳过并说明。
+
+测试 573 → **610**（74 Format + 536 Domain）。仓库既有 flake `RealBankIndexSmokeTests`
+（墙钟预算断言）在整包并行下仍偶发，单独跑 2/2 通过。
 
 ## P4：工程质量和交付
 

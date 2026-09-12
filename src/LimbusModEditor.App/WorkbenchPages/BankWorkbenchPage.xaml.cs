@@ -92,7 +92,6 @@ public partial class BankWorkbenchPage : UserControl
 
     private readonly IWorkbenchHost _host;
     private readonly BankIndexService _index;
-    private readonly ModExportService _exporter = new(BuiltInFormatRegistry.Create());
     private readonly ObservableCollection<SampleRow> _viewSamples = [];
     private readonly List<SampleRow> _allSamples = [];
     private readonly List<BankIndexEntry> _entries = [];
@@ -114,8 +113,6 @@ public partial class BankWorkbenchPage : UserControl
     private readonly Button _auditionButton;
     private readonly Button _exportWavButton;
     private readonly Button _replaceButton;
-    private readonly Button _exportBankButton;
-    private readonly Button _exportRebankButton;
     private readonly Button _cancelIndexButton;
     private readonly Button _reloadButton;
     private readonly Button _clearCacheButton;
@@ -292,12 +289,8 @@ public partial class BankWorkbenchPage : UserControl
         // （定位能力挂到 bank 树双击上，见 LocateInTree）。
         _exportWavButton = WorkbenchShell.CreateButton("导出样本 WAV…", async (_, _) => await ExportSampleWavAsync(), isEnabled: false);
         _replaceButton = WorkbenchShell.CreateButton("用 WAV 替换…", async (_, _) => await ReplaceSampleAsync(), isEnabled: false);
-        _exportBankButton = WorkbenchShell.CreateButton("导出整包 .bank…", async (_, _) => await ExportAsync(ModFormatKind.Bank), isEnabled: false);
-        _exportBankButton.ToolTip = "把当前 bank（含已登记的替换）导出到模组目录";
-        _exportRebankButton = WorkbenchShell.CreateButton("导出 .rebank…", async (_, _) => await ExportAsync(ModFormatKind.Rebank), isEnabled: false);
-        _exportRebankButton.ToolTip = "把当前 bank 导出为 .rebank 补丁包到模组目录";
         var buttonRow = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
-        foreach (var button in new[] { _replaceButton, _exportWavButton, _exportBankButton, _exportRebankButton })
+        foreach (var button in new[] { _replaceButton, _exportWavButton })
             buttonRow.Children.Add(button);
 
         var playRow = new Grid { Margin = new Thickness(0, 4, 0, 0) };
@@ -933,8 +926,6 @@ public partial class BankWorkbenchPage : UserControl
         _auditionButton.IsEnabled = hasSample && (hasFmod || _player is not null);
         _exportWavButton.IsEnabled = hasSample && hasFmod;
         _replaceButton.IsEnabled = hasSample && hasProject && _host.ProjectFile is not null;
-        _exportBankButton.IsEnabled = _selectedBank is not null && hasProject;
-        _exportRebankButton.IsEnabled = _selectedBank is not null && hasProject;
         _clearCacheButton.IsEnabled = !_indexing && _index.Store.Exists;
     }
 
@@ -1191,51 +1182,10 @@ public partial class BankWorkbenchPage : UserControl
         return asset;
     }
 
-    // ── 导出（只写模组目录）─────────────────────────────────────────
-
-    private async Task ExportAsync(ModFormatKind format)
-    {
-        var project = _host.Project;
-        if (project is null || _host.ProjectFile is null || _selectedBank is null)
-        {
-            Shell.SetStatus("请先打开项目并选择一个 bank（导出走项目源管道）。");
-            return;
-        }
-        var modDirectory = _host.Env.EffectiveModDirectory(project);
-        var defaultDirectory = !string.IsNullOrWhiteSpace(modDirectory) && Directory.Exists(modDirectory)
-            ? modDirectory
-            : Path.Combine(Path.GetDirectoryName(_host.ProjectFile)!, "builds");
-        var extension = ModExportService.ExtensionFor(format);
-        var dialog = new Microsoft.Win32.SaveFileDialog
-        {
-            Filter = $"{extension} 模组 (*{extension})|*{extension}|所有文件 (*.*)|*.*",
-            FileName = Sanitize(Path.GetFileNameWithoutExtension(_selectedBank.FileName)) + extension,
-            InitialDirectory = defaultDirectory,
-            Title = "选择导出位置（默认模组目录，加载器可直接读取；编辑器绝不写游戏目录）",
-        };
-        if (dialog.ShowDialog(Window.GetWindow(this)) != true) return;
-
-        var projectDirectory = Path.GetDirectoryName(_host.ProjectFile)!;
-        var bankCopy = MaterializeBank(project, _selectedBank, projectDirectory);
-        await _host.SaveProjectAsync();
-        var fmodDirectory = _host.Env.EffectiveFmodLibraryDirectory(_host.Project);
-        try
-        {
-            using NativeFmodAudioCodec? codec = !string.IsNullOrWhiteSpace(fmodDirectory) && Directory.Exists(fmodDirectory)
-                ? new NativeFmodAudioCodec(fmodDirectory)
-                : null;
-            Shell.SetStatus("正在导出…");
-            var result = await _exporter.ExportWithEditsAsync(bankCopy, project, dialog.FileName, format, codec);
-            Shell.SetStatus($"导出完成：{result.AppliedReplacements} 个替换 → {result.OutputPath}");
-            if (result.AssetStatuses.Count > 0)
-            {
-                var skipped = result.AssetStatuses.Count(x => x.Status != ExportAssetStatus.Applied);
-                if (skipped > 0) Shell.SetStatus($"（{skipped} 条未应用，详见导出报告）");
-            }
-            new ExportReportWindow(result) { Owner = Window.GetWindow(this) }.ShowDialog();
-        }
-        catch (Exception ex) { Shell.SetStatus($"导出失败：{ex.Message}"); }
-    }
+    // ── 导出已移除（plan-16 S6）──────────────────────────────────────
+    // 旧的两个按钮（「导出整包 .bank…」「导出 .rebank…」）与其 ExportAsync 实现已删除：
+    // 音频产物统一由侧边栏「导出模组…」产出到 <项目名>_fmod/{bank,rebank}/，
+    // 差分包的条目名由导出器按真实样本名生成（旧实现写 {i}.fsb，加载器一条都匹配不上）。
 
     // ── 索引缓存维护 ─────────────────────────────────────────────────
 

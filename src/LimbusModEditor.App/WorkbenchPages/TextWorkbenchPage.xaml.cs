@@ -328,17 +328,8 @@ public sealed partial class TextWorkbenchPage : UserControl
     /// <summary>当前编辑集里的相对路径（lang 根口径 = 补丁键）。</summary>
     public IReadOnlyList<string> EditedFiles => _service.EditedFiles;
 
-    /// <summary>编辑集里的文件数（侧边栏导出入口据此提示「先改文本」）。</summary>
+    /// <summary>编辑集里的文件数（宿主与导出计划据此判断「有没有文本改动」）。</summary>
     public int EditedFileCount => _service.EditedFiles.Count;
-
-    /// <summary>
-    /// 宿主（侧边栏「② 产出模组 → 导出 lang 补丁…」）转调本页的导出通道。
-    /// 编辑集在<b>页面对象</b>里（内存），所以导出入口必须落在页面实例上，不能另起一套。
-    /// </summary>
-    public void ExportPatchInteractive() => ExportPatch_Click(this, new RoutedEventArgs());
-
-    /// <summary>宿主（侧边栏「直接应用到 lang 目录…」）转调本页的直接应用通道（内部有二次确认）。</summary>
-    public void ApplyToGameInteractive() => ApplyToGame_Click(this, new RoutedEventArgs());
 
     /// <summary>索引库文件路径（诊断用）。</summary>
     public string IndexDatabasePath => _store.DatabasePath;
@@ -808,8 +799,8 @@ public sealed partial class TextWorkbenchPage : UserControl
             : (_selectedFile.IsUtf8 ? string.Empty : "⚠ ") + Path.GetFileName(_selectedFile.RelativePath);
         _editSetText.Text = hasEdits
             ? $"编辑集：{edited.Count} 个文件已改（全部在内存里；lang 目录未被改动）——" +
-              "导出在左侧「② 产出模组 → 导出 lang 补丁…」"
-            : "编辑集：空（修改只进内存；改完文本后用左侧「② 产出模组 → 导出 lang 补丁…」落地）";
+              "用左侧「② 产出模组 → 导出模组…」把它们写成多套语言格式（bus / patch / pathset）"
+            : "编辑集：空（修改只进内存；改完文本后用左侧「② 产出模组 → 导出模组…」落地）";
 
         // 「已修改」金色标记要跟着编辑集走（列表行 + 树里的 ● 前缀）。
         var changed = false;
@@ -824,84 +815,9 @@ public sealed partial class TextWorkbenchPage : UserControl
         if (_treeRoot is not null) RebuildTree();
     }
 
-    // ── 导出与直接应用（与 plan-07 现状一一对应）─────────────────────
-
-    private async void ExportPatch_Click(object sender, RoutedEventArgs e)
-    {
-        if (_service.EditedFiles.Count == 0)
-        {
-            Shell.SetStatus("编辑集为空：先修改至少一个键再导出。");
-            return;
-        }
-        var project = _host.Project;
-        var modDirectory = _host.Env.EffectiveModDirectory(project);
-        var defaultDirectory = !string.IsNullOrWhiteSpace(modDirectory) && Directory.Exists(modDirectory)
-            ? modDirectory
-            : _host.ProjectFile is null ? null : Path.Combine(Path.GetDirectoryName(_host.ProjectFile)!, "builds");
-        var dialog = new Microsoft.Win32.SaveFileDialog
-        {
-            Filter = "lang 补丁 JSON (*.json)|*.json|所有文件 (*.*)|*.*",
-            FileName = (project?.Name is { Length: > 0 } name ? Sanitize(name) : "LME") + "-lang.json",
-            InitialDirectory = defaultDirectory,
-            Title = "导出 lang 补丁（放进模组目录后由加载器应用）",
-        };
-        if (dialog.ShowDialog(Window.GetWindow(this)) != true) return;
-        try
-        {
-            var report = await Task.Run(() => _service.ExportPatch(dialog.FileName));
-            var detail = string.Join("；", report.Files.Select(x =>
-                x.OperationCount > 0 ? $"{x.RelativePath} → {x.OperationCount} 个操作" : $"{x.RelativePath} → {x.Note ?? "无差异"}"));
-            Shell.SetStatus($"补丁已导出：{report.OutputPath}（编辑 {report.EditedFileCount} 个文件，{report.PatchedFileCount} 个进入补丁）\n{detail}");
-        }
-        catch (Exception ex)
-        {
-            Shell.SetStatus($"导出补丁失败：{ex.Message}");
-        }
-    }
-
-    private async void ApplyToGame_Click(object sender, RoutedEventArgs e)
-    {
-        var langRoot = _service.CurrentLangRoot;
-        if (langRoot is null || _service.EditedFiles.Count == 0)
-        {
-            Shell.SetStatus("编辑集为空或未定位 lang 根。");
-            return;
-        }
-        var confirm = MessageBox.Show(Window.GetWindow(this),
-            "这会直接把编辑集写入游戏 lang 目录（编辑器不负责备份/还原；真实加载器在启动/退出时才会 .bak 备份与还原）。\n\n" +
-            "推荐做法是「导出 lang 补丁…」把补丁放进模组目录，由加载器应用。\n\n确定要直接写入游戏目录吗？",
-            "直接应用到 lang 目录", MessageBoxButton.YesNo, MessageBoxImage.Warning);
-        if (confirm != MessageBoxResult.Yes) return;
-        try
-        {
-            var patchService = new LangTextPatchService();
-            var report = await Task.Run(() =>
-            {
-                var output = Path.Combine(Path.GetTempPath(), $"lme-lang-apply-{Guid.NewGuid():N}.json");
-                try
-                {
-                    var export = _service.ExportPatch(output);
-                    var document = patchService.Read(export.OutputPath);
-                    return string.Join("；", patchService.ApplyToDirectory(langRoot, document)
-                        .Select(x => $"{x.RelativePath} → {(x.Applied ? $"{x.OperationCount} 个操作已应用" : x.Note ?? "未应用")}"));
-                }
-                finally
-                {
-                    try { File.Delete(output); } catch (Exception) { /* 临时文件 */ }
-                }
-            });
-            Shell.SetStatus($"已直接应用到游戏 lang 目录：{report}");
-        }
-        catch (Exception ex)
-        {
-            Shell.SetStatus($"直接应用失败：{ex.Message}");
-        }
-    }
-
-    private static string Sanitize(string name)
-    {
-        var invalid = Path.GetInvalidFileNameChars();
-        var cleaned = new string(name.Trim().Select(c => invalid.Contains(c) ? '_' : c).ToArray());
-        return string.IsNullOrWhiteSpace(cleaned) ? "LME" : cleaned;
-    }
+    // ── 导出与直接应用（plan-16 S6 起已移除）──────────────────────────
+    // 旧的「导出 lang 补丁…」「直接应用到 lang 目录…」两个入口与实现一并删除：
+    // ① 文本改动统一由侧边栏「导出模组…」写成 <项目名>_text/{bus,patch,pathset}/… 多套格式；
+    // ② 「直接写游戏目录」这件事由「使用当前修改启动游戏进行调试」承担（带备份与关闭还原），
+    //    一条没有备份的裸写路径不该再留在界面上。
 }

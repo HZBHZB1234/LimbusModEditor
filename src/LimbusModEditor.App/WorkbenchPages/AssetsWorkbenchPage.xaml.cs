@@ -48,10 +48,6 @@ public partial class AssetsWorkbenchPage : UserControl
     private bool _treeMode = true;
     private bool _filtersInitialized;
 
-    /// <summary>调试操作由宿主（MainWindow）执行：页面只承载按钮与状态显示。</summary>
-    public event EventHandler? BuildOverlayRequested;
-    public event EventHandler? DebugApplyRequested;
-
     public AssetsWorkbenchPage(IWorkbenchHost host)
     {
         _host = host;
@@ -107,9 +103,6 @@ public partial class AssetsWorkbenchPage : UserControl
         SearchBox.Text = string.Empty;
         return true;
     }
-
-    /// <summary>调试状态由宿主写入（覆盖层构建 / 应用启动调试的结果）。</summary>
-    public void SetDebugState(string text) => DebugStateText.Text = text;
 
     /// <summary>关窗时持久化布局占比。</summary>
     public void PersistUiState() => SavePreviewWidth();
@@ -1411,12 +1404,6 @@ public partial class AssetsWorkbenchPage : UserControl
         }
         catch (Exception ex) { ShowError("导出 WAV 失败", ex); }
     }
-
-    // ── 调试覆盖层（实际操作在宿主，这里只转发）───────────────────────
-
-    private void BuildOverlay_Click(object sender, RoutedEventArgs e) => BuildOverlayRequested?.Invoke(this, EventArgs.Empty);
-
-    private void DebugApply_Click(object sender, RoutedEventArgs e) => DebugApplyRequested?.Invoke(this, EventArgs.Empty);
 
     // ── 列表 / 目录树视图切换 ────────────────────────────────────────────
 

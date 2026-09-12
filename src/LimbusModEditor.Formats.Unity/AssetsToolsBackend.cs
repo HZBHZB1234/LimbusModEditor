@@ -522,6 +522,29 @@ public sealed class AssetsToolsBackend : IDisposable
             ExternalGuid: externals[externalIndex].Guid.ToString());
     }
 
+    /// <summary>
+    /// 枚举一个 bundle 里的全部 SerializedFile 名（plan-16 S7：把 Carra 包里的对象写回
+    /// 缓存 <c>__data</c> 时，需要先知道对象落在哪个 SerializedFile 里）。
+    /// 非 bundle / 读取失败时返回空列表（调用方按「这个缓存条目写不了」处理，不猜）。
+    /// </summary>
+    public IReadOnlyList<string> BundleSerializedFileNames(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        try
+        {
+            var bundle = _manager.LoadBundleFile(path, unpackIfPacked: true);
+            if (bundle is null) return [];
+            _bundles.Add(bundle);
+            return bundle.file.GetAllFileNames()
+                .Where(name => bundle.file.IsAssetsFile(bundle.file.GetFileIndex(name)))
+                .ToArray();
+        }
+        catch (Exception ex) when (ex is InvalidDataException or IOException or NotSupportedException or EndOfStreamException)
+        {
+            return [];
+        }
+    }
+
     public IReadOnlyList<UnityAssetDescriptor> InspectBundle(string path)
     {
         var bundle = _manager.LoadBundleFile(path, unpackIfPacked: true) ?? throw new InvalidDataException($"无法读取 Unity Bundle: {path}");

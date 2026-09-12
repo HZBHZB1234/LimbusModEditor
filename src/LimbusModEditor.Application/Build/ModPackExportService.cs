@@ -354,7 +354,8 @@ public sealed class ModPackExportService
 
     // ── 共用 ────────────────────────────────────────────────────────
 
-    private static BankPackage LoadBank(string path)
+    /// <summary>读一个 bank 文件成可写包（导出与调试共用）。</summary>
+    public static BankPackage LoadBank(string path)
     {
         var bytes = File.ReadAllBytes(path);
         var info = BankParser.TryParse(bytes) ?? throw new InvalidDataException("无法解析原版 bank 文件。");
@@ -366,8 +367,9 @@ public sealed class ModPackExportService
     /// <summary>
     /// 把该 bank 上登记的样本替换写进 <paramref name="package"/>：WAV 用 FMOD/FSBANK 编码成
     /// FSB5 后按 FSB 序号整块替换（与 bank 页「用 WAV 替换…」的语义一致）。
+    /// <b>导出与调试共用本方法</b>——两条链路的音频语义必须逐字节一致。
     /// </summary>
-    private static async Task ApplyAudioEditsAsync(
+    public static async Task ApplyAudioEditsAsync(
         BankPackage package, BankEdit edit, ModExportPlanContext context,
         List<ExportAssetStatus> statuses, CancellationToken cancellationToken)
     {

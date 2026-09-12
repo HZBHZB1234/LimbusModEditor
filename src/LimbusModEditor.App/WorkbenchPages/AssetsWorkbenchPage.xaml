@@ -210,14 +210,6 @@
                             <Button x:Name="FsbInspectButton" Content="查看 FSB 结构" Click="InspectFsb_Click" IsEnabled="False" Margin="0,8,0,0" Padding="8,6"/>
                         </StackPanel>
                     </Expander>
-                    <Expander Header="调试" Foreground="{StaticResource WbTextMutedBrush}" Margin="0,12,0,0">
-                        <StackPanel Margin="0,6,0,0">
-                            <TextBlock Text="调试状态" Foreground="{StaticResource WbTextMutedBrush}"/>
-                            <TextBlock x:Name="DebugStateText" Text="未应用" TextWrapping="Wrap" Margin="0,2,0,8"/>
-                            <Button Content="构建调试覆盖层" Click="BuildOverlay_Click" Padding="8,6"/>
-                            <Button Content="应用并启动调试" Click="DebugApply_Click" Margin="0,8,0,0" Padding="8,6"/>
-                        </StackPanel>
-                    </Expander>
                 </StackPanel>
             </ScrollViewer>
         </Border>

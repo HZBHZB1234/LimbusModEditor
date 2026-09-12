@@ -22,10 +22,6 @@ namespace LimbusModEditor.App;
 public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
 {
     private readonly IProjectService _projects = new ProjectService();
-    private readonly ProjectBuildService _builder = new();
-    private readonly UnityBundleBuildService _unityBuilder = new();
-    private readonly UnitySerializedFileBuildService _serializedBuilder = new();
-    private readonly ModExportService _exporter = new(BuiltInFormatRegistry.Create());
     private readonly DebugApplyService _debugApply = new();
     private readonly GameLaunchService _gameLaunch = new();
     private readonly AppEnvironment _env = AppEnvironment.Current;
@@ -40,8 +36,6 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     /// 启动扫描据此跳过「119 万行逐条对账」——真实规模下那一步要几十秒且结果恒为 no-op。
     /// 保守起见：只有回灌成功才置 true，任何「可能删掉记录」的路径都不会把它留在 true。</summary>
     private bool _assetsMatchIndex;
-    private readonly UnityCacheExportService _cacheExporter = new();
-    private DebugApplySession? _debugSession;
     private ModProject? _project;
     private string? _projectFile;
 
@@ -156,10 +150,9 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
 
     private AssetsWorkbenchPage CreateAssetsPage()
     {
+        // plan-16：调试/覆盖层入口已从资源页删除（统一走侧边栏「导出模组…」与
+        // 「使用当前修改启动游戏进行调试」），页面不再需要事件转发。
         var page = new AssetsWorkbenchPage(this);
-        // 调试操作属于宿主职责（构建覆盖层 / 应用并启动游戏）。
-        page.BuildOverlayRequested += async (_, _) => await BuildOverlayAsync();
-        page.DebugApplyRequested += async (_, _) => await DebugApplyAsync();
         _assetsPage = page;
         return page;
     }
@@ -190,30 +183,10 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     private void ActivityHelp_Click(object sender, RoutedEventArgs e) => ShowPage("help");
     private void ActivitySettings_Click(object sender, RoutedEventArgs e) => ShowPage("settings");
 
-    // ── 侧边栏的 lang 导出入口（plan-14 14.5）─────────────────────────────
-    // 文本编辑集是文本工作台页面对象里的内存状态（服务实例属于页面），
-    // 所以侧边栏这两个按钮只做「转调」：页面没打开过 → 编辑集一定是空的 → 引导先改文本。
-    // 不在这里另建一套编辑集/导出实现（那会出现两份互相看不见的状态）。
-
-    private void ExportLangPatch_Click(object sender, RoutedEventArgs e)
-        => RunLangWorkbenchChannel(page => page.ExportPatchInteractive(),
-            "还没有文本编辑集：点「文本工作台（lang 补丁）…」改完文本后，再回来点「导出 lang 补丁…」。");
-
-    private void ApplyLangToGame_Click(object sender, RoutedEventArgs e)
-        => RunLangWorkbenchChannel(page => page.ApplyToGameInteractive(),
-            "还没有文本编辑集：点「文本工作台（lang 补丁）…」改完文本后，再回来点「直接应用到 lang 目录…」。");
-
-    /// <summary>把侧边栏的 lang 入口路由到文本工作台的既有通道（没有编辑集时打开页面并说明）。</summary>
-    private void RunLangWorkbenchChannel(Action<TextWorkbenchPage> channel, string emptyHint)
-    {
-        if (_pages.TryGetValue("text", out var page) && page is TextWorkbenchPage workbench && workbench.EditedFileCount > 0)
-        {
-            channel(workbench);
-            return;
-        }
-        ShowPage("text");
-        StatusText.Text = emptyHint;
-    }
+    // ── 侧边栏的 lang 导出入口已在 plan-16 S6 删除 ────────────────────────
+    // 旧的「导出 lang 补丁…」「直接应用到 lang 目录…」两个按钮及其转调通道删除：
+    // 文本编辑集自 S3 起由宿主持有（IWorkbenchHost.LangEdits），导出统一走「导出模组…」，
+    // 直接落盘统一走「使用当前修改启动游戏进行调试」。
 
     /// <summary>启动引导（傻瓜化）：有上次项目就自动恢复；否则主窗口的
     /// 「无项目遮罩」引导「新建 / 打开 / 最近项目」（不再弹独立欢迎窗口）。
@@ -516,69 +489,6 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
         catch (Exception ex) { ShowError("保存项目失败", ex); }
     }
 
-    private async void Export_Click(object sender, RoutedEventArgs e)
-    {
-        if (_project is null) { StatusText.Text = "请先创建或打开项目"; return; }
-        string? selectedSource = null;
-        if (!_project.Sources.Any())
-        {
-            var sourceDialog = new Microsoft.Win32.OpenFileDialog
-            {
-                Filter = "支持的源模组 (*.carra;*.carra2;*.rebank;*.bank;*.zip)|*.carra;*.carra2;*.rebank;*.bank;*.zip|所有文件 (*.*)|*.*",
-                Title = "选择源模组（项目还没有源时必选）"
-            };
-            if (sourceDialog.ShowDialog() != true) return;
-            selectedSource = sourceDialog.FileName;
-        }
-        var wizard = new ExportWizardWindow(_project, selectedSource) { Owner = this };
-        if (wizard.ShowDialog() != true || wizard.Result is not { } choice) return;
-        try
-        {
-            var fmodDirectory = _env.EffectiveFmodLibraryDirectory(_project);
-            using NativeFmodAudioCodec? nativeCodec = choice.Target == LimbusModEditor.Domain.Formats.ModFormatKind.Bank && !string.IsNullOrWhiteSpace(fmodDirectory) && Directory.Exists(fmodDirectory)
-                ? new NativeFmodAudioCodec(fmodDirectory) : null;
-            var result = await _exporter.ExportWithEditsAsync(selectedSource, _project, choice.OutputPath, choice.Target, nativeCodec);
-            StatusText.Text = $"导出完成：应用 {result.AppliedReplacements} 个替换 → {result.OutputPath}";
-            new ExportReportWindow(result) { Owner = this }.ShowDialog();
-        }
-        catch (Exception ex) { ShowError("导出模组失败", ex); }
-    }
-
-    /// <summary>导出全部（多格式项目）：a standard project mixes Unity-bundle
-    /// edits (Carra2) and audio edits (Bank/Rebank); each registered source is
-    /// exported to its own format into the chosen directory.</summary>
-    private async void ExportAll_Click(object sender, RoutedEventArgs e)
-    {
-        if (_project is null) { StatusText.Text = "请先创建或打开项目"; return; }
-        if (!_project.Sources.Any())
-        {
-            MessageBox.Show(this,
-                "项目还没有登记任何源模组。\n请用「导出模组（向导）…」，在向导里选择源模组文件后再导出。",
-                "导出全部", MessageBoxButton.OK, MessageBoxImage.Information);
-            return;
-        }
-        var dialog = new Microsoft.Win32.OpenFileDialog
-        {
-            CheckFileExists = false,
-            ValidateNames = false,
-            FileName = "选择此文件夹",
-            Title = "选择导出输出目录"
-        };
-        if (dialog.ShowDialog() != true) return;
-        var directory = Path.GetDirectoryName(dialog.FileName);
-        if (string.IsNullOrWhiteSpace(directory)) return;
-        try
-        {
-            var fmodDirectory = _env.EffectiveFmodLibraryDirectory(_project);
-            using NativeFmodAudioCodec? nativeCodec = !string.IsNullOrWhiteSpace(fmodDirectory) && Directory.Exists(fmodDirectory)
-                ? new NativeFmodAudioCodec(fmodDirectory) : null;
-            var result = await _exporter.ExportAllAsync(_project, directory, nativeCodec);
-            StatusText.Text = $"导出全部完成：成功 {result.SucceededCount}，失败 {result.FailedCount} → {directory}";
-            new MultiExportReportWindow(result, directory) { Owner = this }.ShowDialog();
-        }
-        catch (Exception ex) { ShowError("导出全部失败", ex); }
-    }
-
     /// <summary>项目保存的同步入口已被 async 版本取代：全缓存扫描后项目
     /// 含数十万资产，序列化必须在后台线程完成，不能阻塞 UI。</summary>
     private async Task<bool> SaveProjectInternalAsync()
@@ -613,110 +523,162 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
         await RunStartupScanAsync();
     }
 
-    /// <summary>傻瓜化一键导出：扫描资源上的全部修改 → Carra2 → 模组目录。</summary>
-    /// <summary>导出思路（P3.10）：不要求用户先搞清 Carra2 / Bank / lang 补丁 /
-    /// 多格式导出的区别——先分析项目里改了什么，再让用户挑出口。</summary>
-    private void ExportIdeas_Click(object sender, RoutedEventArgs e)
+    // ── plan-16：导出模组 / 调试启动（侧边栏仅这两个入口）────────────────
+
+    /// <summary>本次调试会话的备份目录（关闭时据此逐字节还原）。</summary>
+    private string? _debugApplyBackupDirectory;
+
+    /// <summary>
+    /// 侧边栏「导出模组…」：选定一个目录 → 分析全部修改 → 按「种类 → 格式」两层写出产物 → 报告。
+    /// 分析在写出之前完成（<see cref="ModExportPlanService"/>），因此报告与产物必然一致。
+    /// </summary>
+    private async void ExportMod_Click(object sender, RoutedEventArgs e)
     {
         if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }
-        if (PickExportIdea() is not { } idea) return;
-        RunExportIdea(idea.Kind);
-    }
-
-    private ExportIdea? PickExportIdea()
-        => _project is null ? null : ShowExportIdeas(new ExportAdvisor().Analyze(_project, BuildAdvisorContext()));
-
-    private ExportIdea? ShowExportIdeas(IReadOnlyList<ExportIdea> ideas)
-    {
-        var window = new ExportAdvisorWindow(ideas) { Owner = this };
-        return window.ShowDialog() == true ? window.Result : null;
-    }
-
-    private ExportAdvisorContext BuildAdvisorContext()
-    {
-        var fmodDirectory = _env.EffectiveFmodLibraryDirectory(_project);
-        return new ExportAdvisorContext(
-            _env.EffectiveGameDirectory(_project),
-            _env.EffectiveModDirectory(_project),
-            !string.IsNullOrWhiteSpace(fmodDirectory) && Directory.Exists(fmodDirectory));
-    }
-
-    /// <summary>把选中的导出思路路由到既有通道（不新增导出实现）。</summary>
-    private void RunExportIdea(ExportIdeaKind kind)
-    {
-        switch (kind)
-        {
-            case ExportIdeaKind.ScanFirst: Scan_Click(this, new RoutedEventArgs()); break;
-            case ExportIdeaKind.EditFirst:
-                ShowPage("assets");
-                _assetsPage?.FocusSearch();
-                StatusText.Text = "在资源视图里选中资源后替换或编辑，改完再来导出";
-                break;
-            case ExportIdeaKind.OneClickCarra2: OneClickExport_Click(this, new RoutedEventArgs()); break;
-            case ExportIdeaKind.ExportWizard: Export_Click(this, new RoutedEventArgs()); break;
-            case ExportIdeaKind.MultiFormat or ExportIdeaKind.AudioBank: ExportAll_Click(this, new RoutedEventArgs()); break;
-            case ExportIdeaKind.LangText: ShowPage("text"); break;
-            case ExportIdeaKind.DebugOverlay: _ = DebugApplyAsync(); break;
-        }
-    }
-
-    /// <summary>一键导出前自动给出导出思路：只有一条可行通道（纯 Unity 资源修改）
-    /// 时不打扰用户，直接导出；同时存在音频 / 已登记源模组等多种出口时先让用户挑。</summary>
-    private bool ShouldOfferExportIdeas(out IReadOnlyList<ExportIdea> ideas)
-    {
-        ideas = [];
-        if (_project is null) return false;
-        ideas = new ExportAdvisor().Analyze(_project, BuildAdvisorContext());
-        var channels = ideas.Count(x => x.Enabled &&
-            x.Kind is not (ExportIdeaKind.ScanFirst or ExportIdeaKind.EditFirst
-                or ExportIdeaKind.LangText or ExportIdeaKind.DebugOverlay));
-        return channels > 1;
-    }
-
-    private async void OneClickExport_Click(object sender, RoutedEventArgs e)
-    {
-        if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }
-        if (ShouldOfferExportIdeas(out var ideas))
-        {
-            if (ShowExportIdeas(ideas) is not { } idea) return;
-            if (idea.Kind != ExportIdeaKind.OneClickCarra2) { RunExportIdea(idea.Kind); return; }
-        }
         await AutoConfigureAsync();
-        var modDirectory = _env.EffectiveModDirectory(_project);
-        var defaultDirectory = !string.IsNullOrWhiteSpace(modDirectory) && Directory.Exists(modDirectory)
-            ? modDirectory
-            : Path.Combine(Path.GetDirectoryName(_projectFile)!, "builds");
+
+        // 选目录：用 SaveFileDialog 的「选择此文件夹」惯例（与本仓库既有一键导出的交互一致）。
         var dialog = new Microsoft.Win32.SaveFileDialog
         {
-            Filter = "Carra2 模组 (*.carra2)|*.carra2",
-            FileName = SanitizeFileName(_project.Name) + ".carra2",
-            InitialDirectory = defaultDirectory,
-            Title = "选择导出位置（默认放在模组目录，游戏加载器可直接读取）"
+            CheckFileExists = false,
+            ValidateNames = false,
+            FileName = "选择此文件夹",
+            Title = "选择导出目标目录（会在其中建 <项目名>_fmod / _data / _text / _static）",
+            InitialDirectory = Directory.Exists(_env.EffectiveModDirectory(_project) ?? string.Empty)
+                ? _env.EffectiveModDirectory(_project)
+                : Path.GetDirectoryName(_projectFile)!,
         };
         if (dialog.ShowDialog() != true) return;
-        OneClickExportButton.IsEnabled = false;
-        StatusText.Text = "正在导出（重打包被编辑的 bundle 并生成 Carra2）…";
-        var progressWindow = new ExportProgressWindow(
-            "一键导出模组",
-            "导出完成后会显示逐资源报告；长时间无进展请检查被编辑的 bundle 是否过大。") { Owner = this };
+        var root = Path.GetDirectoryName(dialog.FileName);
+        if (string.IsNullOrWhiteSpace(root)) return;
+
+        var progressWindow = new ExportProgressWindow("导出模组",
+            "正在分析当前修改并逐槽位写出；跳过的槽位与原因会在报告里列出来。") { Owner = this };
         var progress = new Progress<string>(progressWindow.Report);
-        void CloseProgress() { try { progressWindow.Close(); } catch { /* 已关闭 */ } }
-        IsEnabled = false;
         progressWindow.Show();
+        IsEnabled = false;
         try
         {
-            await MaterializeEditedAssetsAsync(progress);
-            await SaveProjectQuietlyAsync();
-            var result = await _cacheExporter.ExportCarra2Async(
-                _project, Path.GetDirectoryName(_projectFile)!, dialog.FileName,
-                _env.EffectiveUnityCacheDirectory(_project), default, progress);
-            CloseProgress();
-            StatusText.Text = $"导出完成：{result.AppliedReplacements} 个对象 → {result.OutputPath}";
-            new ExportReportWindow(result) { Owner = this }.ShowDialog();
+            var (plan, context) = await PrepareExportPlanAsync(root, progress);
+            if (plan.PlannedSlotCount == 0)
+            {
+                progressWindow.Close();
+                StatusText.Text = "没有可导出的修改（先改点东西：替换图片 / 替换音频样本 / 编辑文本表 / 编辑静态表）。";
+                new ModExportReportWindow(new ModPackExportResult(root, plan.ModName, [])) { Owner = this }.ShowDialog();
+                return;
+            }
+            var result = await new ModPackExportService().ExportAsync(_project, Path.GetDirectoryName(_projectFile)!,
+                plan, context, progress);
+            progressWindow.Close();
+            StatusText.Text = result.Describe();
+            new ModExportReportWindow(result) { Owner = this }.ShowDialog();
+        }
+        catch (Exception ex)
+        {
+            try { progressWindow.Close(); } catch { /* 已关闭 */ }
+            ShowError("导出模组失败", ex);
+        }
+        finally
+        {
+            IsEnabled = true;
             UpdateHint();
         }
-        catch (Exception ex) { CloseProgress(); ShowError("一键导出失败", ex); }
-        finally { IsEnabled = true; OneClickExportButton.IsEnabled = true; }
+    }
+
+    /// <summary>
+    /// 侧边栏「使用当前修改启动游戏进行调试」：导出到项目内 <c>builds/debug-pack</c>，
+    /// 再按加载器语义铺到游戏 / Unity 缓存（自动备份），然后启动游戏；关闭编辑器时逐字节还原。
+    /// </summary>
+    private async void DebugMod_Click(object sender, RoutedEventArgs e)
+    {
+        if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }
+        var gameDirectory = _env.EffectiveGameDirectory(_project);
+        if (string.IsNullOrWhiteSpace(gameDirectory) || !Directory.Exists(gameDirectory))
+        {
+            StatusText.Text = "请先在「设置」页配置游戏目录（调试要写游戏目录与 Unity 缓存）。";
+            return;
+        }
+        if (IsGameRunning())
+        {
+            MessageBox.Show(this, "检测到 LimbusCompany.exe 正在运行。\n调试会改动游戏文件与 Unity 缓存，请先关闭游戏再试。",
+                "调试启动", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        var confirm = MessageBox.Show(this,
+            "调试会把当前修改<b>直接铺到游戏目录与 Unity 缓存</b>（bank 覆盖、资源对象写回 __data、语言补丁放进 lang 目录）：\n" +
+            "• 改动前逐个文件备份到项目的 backups/ 目录，退出编辑器时自动还原；\n" +
+            "• 只用于自测，分发请用「导出模组…」；\n" +
+            "• 调试期间请不要用别的工具改同一批文件。\n\n确定继续吗？",
+            "使用当前修改启动游戏进行调试", MessageBoxButton.OKCancel, MessageBoxImage.Warning);
+        if (confirm != MessageBoxResult.OK) return;
+
+        await AutoConfigureAsync();
+        var projectRoot = Path.GetDirectoryName(_projectFile)!;
+        var debugPack = Path.Combine(projectRoot, "builds", "debug-pack");
+        var progressWindow = new ExportProgressWindow("调试启动", "正在导出调试包并铺到游戏…") { Owner = this };
+        var progress = new Progress<string>(progressWindow.Report);
+        progressWindow.Show();
+        IsEnabled = false;
+        try
+        {
+            var (plan, context) = await PrepareExportPlanAsync(debugPack, progress);
+            var export = await new ModPackExportService().ExportAsync(_project, projectRoot, plan, context, progress);
+            progressWindow.Report("正在铺到游戏目录与 Unity 缓存（自动备份）…");
+            var report = await new ModApplyService().ApplyAsync(_project, export,
+                gameDirectory, _env.EffectiveUnityCacheDirectory(_project),
+                Path.Combine(projectRoot, "backups"), context, progress);
+            _debugApplyBackupDirectory = report.BackupDirectory;
+            progressWindow.Close();
+
+            var launch = _gameLaunch.TryLaunch(gameDirectory, _project.GameExecutablePath);
+            var skippedNote = report.Skipped.Count == 0 ? string.Empty : $"；{report.Skipped.Count} 项未应用（见状态栏）";
+            StatusText.Text = launch.Started
+                ? $"{report.Describe()}{skippedNote}；游戏已启动，退出编辑器时自动还原"
+                : $"{report.Describe()}{skippedNote}；{launch.Message}";
+            if (launch.Started && report.Skipped.Count > 0)
+                MessageBox.Show(this, "以下内容本次调试未应用（原因如下）：\n\n" + string.Join("\n", report.Skipped),
+                    "调试启动", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            try { progressWindow.Close(); } catch { /* 已关闭 */ }
+            ShowError("调试启动失败（已回滚本次改动）", ex);
+        }
+        finally
+        {
+            IsEnabled = true;
+            UpdateHint();
+        }
+    }
+
+    /// <summary>
+    /// 导出/调试的共用前奏：实体化已编辑的缓存资源 → 存项目 → 分析计划。
+    /// 两条链路必须走同一份分析与同一份上下文（否则报告与实际产物会不一致）。
+    /// </summary>
+    private async Task<(ModExportPlan Plan, ModExportPlanContext Context)> PrepareExportPlanAsync(
+        string rootDirectory, IProgress<string>? progress)
+    {
+        await MaterializeEditedAssetsAsync(progress);
+        await SaveProjectQuietlyAsync();
+        var fmodDirectory = _env.EffectiveFmodLibraryDirectory(_project);
+        var context = new ModExportPlanContext(
+            UnityCacheDirectory: _env.EffectiveUnityCacheDirectory(_project),
+            FmodDirectory: fmodDirectory);
+        var plan = new ModExportPlanService().Plan(_project!, rootDirectory, _langEdits, _staticEdits, context);
+        return (plan, context);
+    }
+
+    /// <summary>游戏是否在运行（调试会写游戏文件，运行时一律拒绝）。</summary>
+    private static bool IsGameRunning()
+    {
+        try
+        {
+            return System.Diagnostics.Process.GetProcessesByName("LimbusCompany").Length > 0;
+        }
+        catch (Exception)
+        {
+            return false; // 查不到就按「没在跑」处理（后续应用仍会失败并回滚，不会静默）
+        }
     }
 
     private static string SanitizeFileName(string name)
@@ -771,7 +733,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
             HintText.Text = $"已索引 {_project.Assets.Count} 个游戏资源。下一步：在资源视图里按容器目录浏览或直接搜索（可切换排序与筛选），选中后用右侧按钮替换图片 / 编辑字段。";
             return;
         }
-        HintText.Text = $"已有 {edits} 处修改。下一步：点击侧边栏「一键导出模组」生成 .carra2 到模组目录（有多种出口时先给导出思路，也可点「导出思路（自动分析）…」主动查看）。";
+        HintText.Text = $"已有 {edits} 处修改。下一步：点击侧边栏「导出模组…」选一个目录，编辑器会按「库种类 → 格式」写出产物；想立刻验收就点「使用当前修改启动游戏进行调试」。";
     }
 
     private async Task SaveProjectQuietlyAsync()
@@ -873,120 +835,20 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
             : $"⚠ {label}：目录不存在{suffix}";
     }
 
-    // ── 调试覆盖层（页面按钮经事件转发到这里）────────────────────────────
-
-    private async Task DebugApplyAsync()
-    {
-        if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }
-        // 目标目录缺失时先无感自动获取一次（只填缺失项，不覆盖手动值）。
-        await Task.Run(() => _env.ApplyAutoConfigure(_project));
-        await SaveProjectQuietlyAsync();
-        ResetLocatorCache();
-        UpdateDirectoryStatus();
-        var debugTarget = _env.EffectiveModDirectory(_project) is { } mods && Directory.Exists(mods) ? mods
-            : _env.EffectiveUnityCacheDirectory(_project) is { } cache && Directory.Exists(cache) ? cache
-            : _env.EffectiveGameDirectory(_project);
-        if (string.IsNullOrWhiteSpace(debugTarget) || !Directory.Exists(debugTarget))
-        {
-            StatusText.Text = "请先在设置页配置游戏目录";
-            return;
-        }
-        try
-        {
-            var root = Path.GetDirectoryName(_projectFile)!;
-            var overlay = Path.Combine(root, "builds", "debug-overlay");
-            await MaterializeEditedAssetsAsync();
-            await SaveProjectQuietlyAsync();
-            await _builder.BuildOverlayAsync(_project, root, overlay);
-            await AddUnityBundlesToOverlayAsync(_project, root, overlay);
-            await AddUnitySerializedFilesToOverlayAsync(_project, root, overlay);
-            _debugSession = await _debugApply.ApplyAsync(_project, overlay, debugTarget);
-            var launch = _gameLaunch.TryLaunch(_env.EffectiveGameDirectory(_project)!, _project.GameExecutablePath);
-            _assetsPage?.SetDebugState(launch.Started
-                ? $"已应用 {_debugSession.Changes.Count} 个文件，游戏已启动，退出前可恢复"
-                : $"已应用 {_debugSession.Changes.Count} 个文件；{launch.Message}");
-            StatusText.Text = launch.Started ? "调试覆盖层已应用，游戏已启动" : launch.Message;
-        }
-        catch (Exception ex) { ShowError("应用调试覆盖层失败", ex); }
-    }
-
-    private async Task BuildOverlayAsync()
-    {
-        if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }
-        try
-        {
-            var root = Path.GetDirectoryName(_projectFile)!;
-            var output = Path.Combine(root, "builds", "debug-overlay");
-            await MaterializeEditedAssetsAsync();
-            await SaveProjectQuietlyAsync();
-            var result = await _builder.BuildOverlayAsync(_project, root, output);
-            var unity = await AddUnityBundlesToOverlayAsync(_project, root, output);
-            var serialized = await AddUnitySerializedFilesToOverlayAsync(_project, root, output);
-            _assetsPage?.SetDebugState($"覆盖层已构建：{result.AppliedEdits} 个文件编辑，{unity + serialized} 个 Unity 对象编辑");
-            StatusText.Text = $"构建完成：{output}";
-        }
-        catch (Exception ex) { ShowError("构建覆盖层失败", ex); }
-    }
-
-    private async Task<int> AddUnityBundlesToOverlayAsync(ModProject project, string root, string overlay)
-    {
-        var unityOutput = Path.Combine(root, "builds", "unity-bundles");
-        var bundles = await _unityBuilder.BuildAsync(project, unityOutput);
-        foreach (var bundle in bundles)
-        {
-            var original = project.Assets.FirstOrDefault(x =>
-                string.Equals(Path.GetFullPath(x.SourcePath ?? string.Empty), Path.GetFullPath(bundle.SourcePath), StringComparison.OrdinalIgnoreCase))
-                ?.Metadata.GetValueOrDefault("originalSourcePath");
-            var relative = GetSafeDebugRelativePath(_env, project, original, Path.GetFileName(bundle.OutputPath));
-            var target = Path.Combine(overlay, relative);
-            await LimbusModEditor.Application.Build.AtomicOutput.CopyAsync(bundle.OutputPath, target);
-        }
-        return bundles.Sum(x => x.AppliedAssets);
-    }
-
-    private async Task<int> AddUnitySerializedFilesToOverlayAsync(ModProject project, string root, string overlay)
-    {
-        var outputRoot = Path.Combine(root, "builds", "unity-serialized");
-        var files = await _serializedBuilder.BuildAsync(project, outputRoot);
-        foreach (var file in files)
-        {
-            var original = project.Assets.FirstOrDefault(x =>
-                string.Equals(Path.GetFullPath(x.SourcePath ?? string.Empty), Path.GetFullPath(file.SourcePath), StringComparison.OrdinalIgnoreCase))
-                ?.Metadata.GetValueOrDefault("originalSourcePath");
-            var relative = GetSafeDebugRelativePath(_env, project, original, Path.GetFileName(file.OutputPath));
-            var target = Path.Combine(overlay, relative);
-            await LimbusModEditor.Application.Build.AtomicOutput.CopyAsync(file.OutputPath, target);
-        }
-        return files.Sum(x => x.AppliedAssets);
-    }
-
-    private static string GetSafeDebugRelativePath(AppEnvironment env, ModProject project, string? original, string fallback)
-    {
-        if (string.IsNullOrWhiteSpace(original)) return fallback;
-        var source = Path.GetFullPath(original);
-        foreach (var root in new[] { env.EffectiveUnityCacheDirectory(project), env.EffectiveGameDirectory(project), env.EffectiveModDirectory(project) })
-        {
-            if (string.IsNullOrWhiteSpace(root)) continue;
-            var fullRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-            if (!source.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase)) continue;
-            var relative = Path.GetRelativePath(fullRoot, source);
-            if (!relative.StartsWith("..", StringComparison.Ordinal) && !Path.IsPathRooted(relative)) return relative;
-        }
-        return fallback;
-    }
-
     private async void Window_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
         _startupScanCancellation?.Cancel(); // 启动扫描（后台增量扫描）随关窗取消
         _assetsPage?.PersistUiState(); // plan-04：关窗时持久化布局占比
         WorkbenchShell.PersistAllPreviewWidths(); // plan-10：四个工作台的列宽一次性合并落盘
         if (_project is not null && !_project.RestoreDebugFilesOnClose) return;
-        if (_debugSession is null || !_debugSession.IsApplied) return;
+        if (string.IsNullOrWhiteSpace(_debugApplyBackupDirectory)) return;
         try
         {
-            await _debugApply.RestoreAsync(_debugSession);
-            if (_debugSession.RestoreConflicts.Count > 0)
-                MessageBox.Show(this, "以下游戏文件在调试期间已被其他程序修改，编辑器未覆盖恢复：\n" + string.Join("\n", _debugSession.RestoreConflicts), "调试恢复冲突", MessageBoxButton.OK, MessageBoxImage.Warning);
+            var conflicts = await new ModApplyService().RestoreAsync(_debugApplyBackupDirectory);
+            _debugApplyBackupDirectory = null;
+            if (conflicts.Count > 0)
+                MessageBox.Show(this, "以下游戏文件在调试期间已被其他程序修改，编辑器未覆盖恢复：" + Environment.NewLine +
+                    string.Join(Environment.NewLine, conflicts), "调试恢复冲突", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
         catch (Exception ex) { MessageBox.Show(this, $"恢复游戏文件失败：{ex.Message}", "调试恢复失败", MessageBoxButton.OK, MessageBoxImage.Error); }
     }

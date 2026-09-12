@@ -18,8 +18,9 @@ using LimbusModEditor.Formats.Bank;
 namespace LimbusModEditor.App;
 
 /// <summary>
-/// 音频工作台（plan-06 首版 → plan-11 重做）：按 FMOD Bank 浏览 / 试听 / 替换音频样本，
-/// 并可导出整包 <c>.bank</c> 或 <c>.rebank</c> 到<b>模组目录</b>（绝不写游戏目录）。
+/// 音频工作台（plan-06 首版 → plan-11 重做）：按 FMOD Bank 浏览 / 试听 / 替换音频样本。
+/// 导出自 plan-16 起统一由侧边栏「导出模组…」产出到 <c>&lt;项目名&gt;_fmod/{bank,rebank}/</c>，
+/// 本页只负责编辑（替换登记进项目），不再有导出按钮。
 ///
 /// <para><b>plan-11 的两视图</b>（互斥，右上角标准切换对）：</para>
 /// <list type="number">

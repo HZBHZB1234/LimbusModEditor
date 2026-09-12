@@ -123,7 +123,7 @@
                              已全部删除：导出统一走「导出模组…」，其产物按「种类 → 格式」两层
                              目录排布；调试统一走「使用当前修改启动游戏进行调试」。 -->
                         <TextBlock Text="② 产出模组" Style="{StaticResource SectionLabel}"/>
-                        <Button x:Name="OneClickExportButton" Content="导出模组…" Click="ExportMod_Click" Padding="8,6" Style="{StaticResource PrimaryButton}"
+                        <Button Content="导出模组…" Click="ExportMod_Click" Padding="8,6" Style="{StaticResource PrimaryButton}"
                                 ToolTip="选一个目录：编辑器会分析当前的全部修改，按「库种类 → 格式」建文件夹并写出产物。例如 &lt;项目名&gt;_fmod/bank/&lt;bank名&gt;.bank、&lt;项目名&gt;_text/patch/&lt;表名&gt;.json。没有改动或表达不了的格式会跳过并说明原因。"/>
                         <Button Content="使用当前修改启动游戏进行调试" Click="DebugMod_Click" Margin="0,8,0,0" Padding="8,6"
                                 ToolTip="把当前修改导出后直接铺到游戏目录与 Unity 缓存（bank 覆盖、资源对象写回 __data、语言补丁放进 lang 目录），自动备份并启动游戏；关闭编辑器时逐字节还原。分发模组仍请用「导出模组…」。"/>

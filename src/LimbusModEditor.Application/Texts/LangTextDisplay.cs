@@ -1,30 +1,30 @@
 namespace LimbusModEditor.Application.Texts;
 
 /// <summary>
-/// 文本工作台的**显示口径**映射（纯函数，可单测）。
+/// 文本工作台的**路径前缀工具**（纯函数，可单测）。
 ///
-/// <para><b>为什么需要它</b>：补丁键的口径必须是「相对 lang 根」——真实加载器按
-/// <c>&lt;游戏&gt;/LimbusCompany_Data/lang/&lt;键&gt;</c> 备份并应用补丁
-/// （见 <see cref="LangTextPatchService"/>）。而用户看工作台时，语言目录那外层
-/// （本机实测是汉化组的 <c>LLc-CN-LCTA</c>）与 <c>config.json</c> 都是噪声：
-/// 他要的是「从语言目录内部开始」的文件树。</para>
+/// <para><b>plan-16 §5 之前</b>它承担「显示口径 ⇄ 内部键」的双向映射：内部键（相对 lang 根，
+/// 形如 <c>LLc-CN-LCTA/AbDlg_Faust.json</c>）与显示路径（语言目录内部，形如
+/// <c>AbDlg_Faust.json</c>）互相转换。**本轮起条目口径本身就改成「相对活动语言目录」**
+/// （<see cref="LangTextWorkbenchService.CurrentLanguageDirectory"/>），界面、索引库、
+/// 编辑集、搜索命中、导出源全部统一到它——于是「显示路径 = 条目路径」，双向映射不再需要。</para>
 ///
-/// <para>两条口径因此被显式分开：</para>
-/// <list type="bullet">
-/// <item><b>补丁键（内部键）</b>：<c>LLc-CN-LCTA/AbDlg_Faust.json</c> —— 索引行、编辑集、
-/// 搜索命中、补丁文档一律用它，绝不改。</item>
-/// <item><b>显示路径</b>：<c>AbDlg_Faust.json</c> —— 只有界面用它（树 / 列表 / 状态文案）。</item>
-/// </list>
+/// <para>仍然保留的是「条目口径 → 加载器口径」的**单向前缀补回**：
+/// 真实加载器（LCTA <c>launcher/changes.py</c>）按
+/// <c>&lt;游戏&gt;/LimbusCompany_Data/lang/&lt;键&gt;</c> 定位并应用补丁，所以补丁文档的键必须是
+/// 「相对 lang 根」的（<c>LLc-CN-LCTA/AbDlg_Faust.json</c>）。该转换的**正式入口**是
+/// <see cref="LangTextWorkbenchService.ToPatchKey"/>（服务已持有 lang 根与语言目录）；
+/// 本类的 <see cref="PrefixOf"/> / <see cref="ToPatchKey"/> 是同一规则的纯函数形态，
+/// 供只需要路径计算、不持有服务实例的调用方（与单测）使用。</para>
 ///
-/// <para>映射规则是「去掉一层前缀」，两个方向都只做前缀判断，不做路径重写；
-/// 前缀按 <see cref="StringComparison.OrdinalIgnoreCase"/> 比对（Windows 路径大小写不敏感，
+/// <para>前缀按 <see cref="StringComparison.OrdinalIgnoreCase"/> 比对（Windows 路径大小写不敏感，
 /// 且 config.json 里写的语言名大小写未必与磁盘一致）。</para>
 /// </summary>
 public static class LangTextDisplay
 {
     /// <summary>
-    /// 显示前缀 = 活动语言目录相对 lang 根的路径 + <c>'/'</c>（如 <c>LLc-CN-LCTA/</c>）；
-    /// 语言目录不在 lang 根之下（或未解析出来）时返回空串（显示路径 = 内部键，不做映射）。
+    /// 语言目录前缀 = 活动语言目录相对 lang 根的路径 + <c>'/'</c>（如 <c>LLc-CN-LCTA/</c>）；
+    /// 语言目录不在 lang 根之下（或未解析出来）时返回空串（表示「不需要补前缀」）。
     /// </summary>
     public static string PrefixOf(string langRoot, string? languageDirectory)
     {
@@ -36,20 +36,15 @@ public static class LangTextDisplay
         return relative.Length == 0 ? string.Empty : relative.TrimEnd('/') + "/";
     }
 
-    /// <summary>内部键 → 显示路径（前缀命中才去掉；其它情况原样返回，例如退化路径）。</summary>
-    public static string ToDisplayPath(string prefix, string relativePath)
+    /// <summary>
+    /// 条目口径（相对活动语言目录）→ 加载器口径（相对 lang 根）：补回前缀。
+    /// 已经是带前缀的路径时不重复补。**导出补丁文档的键必须走这里**（或其服务形态
+    /// <see cref="LangTextWorkbenchService.ToPatchKey"/>）。
+    /// </summary>
+    public static string ToPatchKey(string prefix, string relativePath)
     {
         ArgumentNullException.ThrowIfNull(relativePath);
-        return prefix.Length > 0 && relativePath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
-            ? relativePath[prefix.Length..]
-            : relativePath;
-    }
-
-    /// <summary>显示路径 → 补丁键（补前缀；已经是带前缀的内部键时不重复补）。</summary>
-    public static string ToPatchKey(string prefix, string displayPath)
-    {
-        ArgumentNullException.ThrowIfNull(displayPath);
-        if (prefix.Length == 0) return displayPath;
-        return displayPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ? displayPath : prefix + displayPath;
+        if (prefix.Length == 0) return relativePath;
+        return relativePath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ? relativePath : prefix + relativePath;
     }
 }

@@ -84,6 +84,10 @@ public sealed class TextIndexStore
     {
         ArgumentNullException.ThrowIfNull(cache);
         _cache = cache;
+        // plan-16 §5 的轻量迁移：老库（v3 及以前）没有 language_prefix 列。
+        // 只补列、不动行——口径版本 v4 会保证旧行集在下次打开时整库重建。
+        try { _cache.EnsureColumn("index_meta", SqliteTableCache.MetaLanguagePrefixColumn, "TEXT"); }
+        catch (Exception ex) when (ex is InvalidDataException or IOException) { /* 缓存只影响速度：补列失败不阻断页面 */ }
     }
 
     /// <summary>库文件路径（诊断/测试用）。</summary>
@@ -98,9 +102,17 @@ public sealed class TextIndexStore
     /// <item><c>v1</c>：首版（活动语言目录 + 根级 <c>config.json</c>）。</item>
     /// <item><c>v2</c>（plan-14）：不再收录根级 <c>config.json</c>——它是「活动语言是谁」的输入，
     /// 不是可翻译的文本表。</item>
+    /// <item><c>v3</c>（plan-16 §5）：<b>条目口径去掉根文件夹</b>——<c>files.rel_path</c> /
+    /// <c>hits.rel_path</c> 改为「相对活动语言目录」（<c>StoryData/S1.json</c>），
+    /// 不再是「相对 lang 根」（<c>LLc-CN-LCTA/StoryData/S1.json</c>）。
+    /// 旧库的行集是旧口径，必须靠版本让它整库重建，否则会把带前缀的行读出来。</item>
+    /// <item><c>v4</c>（plan-16 §5 收口）：签名里并入<b>活动语言目录名</b>，并把它写进
+    /// <c>index_meta.language_prefix</c>——条目口径以语言目录为基准，读取方（<see cref="ReadFiles"/>）
+    /// 必须能拼回真实磁盘路径，不能再靠「重读 config.json + 枚举目录」猜。
+    /// 口径本身没变，但旧库没有该列/该签名项，靠版本让它重建一次。</item>
     /// </list>
     /// </summary>
-    public const string IndexFormatVersion = "v2";
+    public const string IndexFormatVersion = "v4";
 
     /// <summary>本实例（或底层库）是否因损坏而执行过删库重建。</summary>
     public bool WasRecreated => _cache.WasRecreated;
@@ -109,27 +121,44 @@ public sealed class TextIndexStore
 
     /// <summary>
     /// 描述一个 lang 根：源键（规范化路径，忽略大小写）+ 签名（<b>内容口径版本</b>
-    /// + 目录签名 <c>length:mtime</c> + config.json 内容哈希）。任何一项变
-    /// （含切换活动语言、以及「收录哪些文件」的口径升级）都使整库失效重建。
+    /// + 目录签名 <c>length:mtime</c> + config.json 内容哈希 + <b>活动语言目录名</b>）。
+    /// 任何一项变（含切换活动语言、以及「收录哪些文件 / 每行存什么」的口径升级）都使整库失效重建。
+    ///
+    /// <para><paramref name="languageDirectory"/> 是调用方已解析出的<b>活动语言目录</b>
+    /// （绝对路径或相对 lang 根的目录名，如 <c>LLc-CN-LCTA</c>）。条目口径（<c>rel_path</c>）是
+    /// 「相对活动语言目录」的，所以「活动语言目录是谁」必须进签名：不同语言的库绝不能互相当成新鲜；
+    /// 它同时被写进 <c>index_meta.language_prefix</c>，供「只有源键」的读取方（<see cref="ReadFiles"/>）
+    /// 拼回真实磁盘路径——**不重新读 config.json、不做目录枚举猜测**。传 null 表示调用方不关心
+    /// （签名退化为不含语言目录那一项）。</para>
     /// </summary>
-    public static TextIndexSource DescribeSource(string langRoot)
+    public static TextIndexSource DescribeSource(string langRoot, string? languageDirectory = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(langRoot);
         var full = Path.GetFullPath(langRoot);
         var directorySignature = CacheSignature.FromDirectory(full);
         var configHash = LangTextWorkbenchService.ComputeConfigContentHash(full);
+        // 存「绝对路径（原样大小写）」：条目是相对它的口径，读取方必须能拼回真实路径；
+        // 传进来的目录名（相对 lang 根的一层）在这里补齐成绝对路径。
+        var resolved = string.IsNullOrWhiteSpace(languageDirectory)
+            ? string.Empty
+            : Path.IsPathRooted(languageDirectory)
+                ? Path.GetFullPath(languageDirectory)
+                : Path.Combine(full, languageDirectory.Trim('/', '\\'));
+        // 签名里的小写化：同一目录既可传相对目录名、也可传绝对路径（大小写照磁盘），
+        // 它们必须是同一个源，否则「页面传绝对路径、测试传目录名」会互相判成不新鲜。
         return new TextIndexSource(full, full.ToLowerInvariant(),
             directorySignature.Format(), configHash,
-            $"{IndexFormatVersion}|{directorySignature.Format()}|{configHash}");
+            $"{IndexFormatVersion}|{directorySignature.Format()}|{configHash}|{resolved.ToLowerInvariant()}",
+            resolved);
     }
 
     /// <summary>非抛出式：目录不存在时返回 null（页面按「没有 lang 目录」处理）。</summary>
-    public static TextIndexSource? TryDescribeSource(string? langRoot)
+    public static TextIndexSource? TryDescribeSource(string? langRoot, string? languageDirectory = null)
     {
         if (string.IsNullOrWhiteSpace(langRoot) || !Directory.Exists(langRoot)) return null;
         try
         {
-            return DescribeSource(langRoot);
+            return DescribeSource(langRoot, languageDirectory);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
         {
@@ -149,29 +178,42 @@ public sealed class TextIndexStore
 
     // ── 读 ───────────────────────────────────────────────────────────
 
-    /// <summary>读索引里的文件条目（顺序与
-    /// <see cref="LangTextWorkbenchService.EnumerateFiles"/> 完全一致：根级 <c>config.json</c> 在最前，
-    /// 其余按相对路径字典序）。<paramref name="langRootOverride"/> 用于「库里的相对路径 + 当前 lang 根」
-    /// 拼出完整路径；缺省用索引自己的源路径。</summary>
-    public IReadOnlyList<LangTextFileInfo> ReadFiles(string? langRootOverride = null)
+    /// <summary>
+    /// 读索引里的文件条目（顺序与
+    /// <see cref="LangTextWorkbenchService.EnumerateFiles"/> 完全一致：按条目相对路径字典序）。
+    /// <paramref name="languageDirectoryOverride"/> 是<b>活动语言目录</b>——条目（<c>rel_path</c>）
+    /// 是「相对活动语言目录」的口径（plan-16 §5：条目里不带语言目录那一层），
+    /// 所以拼完整路径必须用它；缺省时按索引自己的 <c>source_key</c>（lang 根）
+    /// + <c>index_meta.language_prefix</c> 拼出（**不重读 config.json、不猜目录名**）。
+    /// </summary>
+    public IReadOnlyList<LangTextFileInfo> ReadFiles(string? languageDirectoryOverride = null)
     {
-        var langRoot = langRootOverride ?? ReadSourceKey();
-        if (string.IsNullOrWhiteSpace(langRoot)) return [];
+        var baseDirectory = languageDirectoryOverride;
+        if (string.IsNullOrWhiteSpace(baseDirectory))
+        {
+            // 存的是活动语言目录的绝对路径（原样大小写）：直接用，不重读 config.json、不枚举猜测。
+            var stored = ReadSourceLanguagePrefix();
+            if (!string.IsNullOrWhiteSpace(stored) && Directory.Exists(stored)) baseDirectory = stored;
+            else
+            {
+                var langRoot = ReadSourceKey();
+                if (string.IsNullOrWhiteSpace(langRoot)) return [];
+                baseDirectory = ResolveLanguageDirectoryPreservingCase(langRoot, stored);
+            }
+        }
+        var resolvedBase = baseDirectory;
         return _cache.Read(connection =>
         {
             var rows = new List<LangTextFileInfo>();
             using var command = connection.CreateCommand();
-            command.CommandText = """
-                SELECT rel_path, size, mtime_ticks, key_count, is_utf8 FROM files
-                ORDER BY CASE WHEN rel_path = 'config.json' THEN 0 ELSE 1 END, rel_path
-                """;
+            command.CommandText = "SELECT rel_path, size, mtime_ticks, key_count, is_utf8 FROM files ORDER BY rel_path";
             using var reader = command.ExecuteReader();
             while (reader.Read())
             {
                 var relative = reader.GetString(0);
                 rows.Add(new LangTextFileInfo(
                     relative,
-                    Path.GetFullPath(Path.Combine(langRoot, relative.Replace('/', Path.DirectorySeparatorChar))),
+                    Path.GetFullPath(Path.Combine(resolvedBase, relative.Replace('/', Path.DirectorySeparatorChar))),
                     reader.GetInt64(1),
                     reader.GetInt32(3),
                     reader.GetInt64(4) != 0,
@@ -183,10 +225,10 @@ public sealed class TextIndexStore
 
     /// <summary>索引里的文件条目字典（相对路径 → 条目），供
     /// <c>EnumerateFiles</c> 的加速旁路直接命中。</summary>
-    public IReadOnlyDictionary<string, LangTextFileInfo> ReadFileMap(string? langRootOverride = null)
+    public IReadOnlyDictionary<string, LangTextFileInfo> ReadFileMap(string? languageDirectoryOverride = null)
     {
         var map = new Dictionary<string, LangTextFileInfo>(StringComparer.OrdinalIgnoreCase);
-        foreach (var file in ReadFiles(langRootOverride)) map[file.RelativePath] = file;
+        foreach (var file in ReadFiles(languageDirectoryOverride)) map[file.RelativePath] = file;
         return map;
     }
 
@@ -254,6 +296,58 @@ public sealed class TextIndexStore
             return value is null or DBNull ? null : Convert.ToString(value);
         });
 
+    /// <summary>索引里记录的活动语言目录（原样大小写的绝对路径；没有记录/旧库返回空串）。</summary>
+    public string ReadSourceLanguagePrefix()
+        => _cache.Read(static connection =>
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT language_prefix FROM index_meta LIMIT 1";
+            var value = command.ExecuteScalar();
+            return value is null or DBNull ? string.Empty : Convert.ToString(value) ?? string.Empty;
+        });
+
+    /// <summary>
+    /// lang 根 + 存盘的活动语言目录（绝对路径或相对目录名）→ 真实路径（大小写照磁盘）。
+    ///
+    /// <para>为什么需要它：<c>index_meta.source_key</c> 是规范化小写（用于忽略大小写比较源），
+    /// 直接拿它拼路径会把 <c>LLc-CN-LCTA</c> 写成 <c>llc-cn-lcta</c>；而 <c>LangTextFileInfo</c>
+    /// 的逐字段比对（「有缓存 = 无缓存」的证据测试）要求磁盘大小写原样。
+    /// 存的是绝对路径时直接用；是目录名时逐段到磁盘上找真实目录名，找不到就按字面拼（不抛）。</para>
+    /// </summary>
+    private static string ResolveLanguageDirectoryPreservingCase(string langRoot, string languageDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(languageDirectory)) return Path.GetFullPath(langRoot);
+        if (Path.IsPathRooted(languageDirectory)) return Path.GetFullPath(languageDirectory);
+        var segments = languageDirectory.TrimEnd('/', '\\')
+            .Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries);
+        var current = Path.GetFullPath(langRoot);
+        foreach (var segment in segments)
+        {
+            var literal = Path.Combine(current, segment);
+            current = Directory.Exists(literal) && string.Equals(Path.GetFileName(literal), segment, StringComparison.Ordinal)
+                ? literal
+                : ProbeDirectoryCaseInsensitive(current, segment) ?? literal;
+        }
+        return current;
+    }
+
+    private static string? ProbeDirectoryCaseInsensitive(string parent, string name)
+    {
+        try
+        {
+            foreach (var candidate in Directory.EnumerateDirectories(parent))
+            {
+                if (string.Equals(Path.GetFileName(candidate), name, StringComparison.OrdinalIgnoreCase))
+                    return candidate;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // 枚举失败不致命：退回按字面拼（Windows 路径不敏感，仍大概率可用）。
+        }
+        return null;
+    }
+
     // ── 写：整库重建 / 增量刷新 ──────────────────────────────────────
 
     /// <summary>
@@ -267,7 +361,9 @@ public sealed class TextIndexStore
     public bool EnsureSource(TextIndexSource source)
     {
         ArgumentNullException.ThrowIfNull(source);
-        var rebuilt = _cache.EnsureSource(source.SourceKey, source.Signature);
+        // 活动语言前缀与签名一起对账（前缀变了同样整库重建）：它是「条目拼回磁盘路径」的唯一依据，
+        // 与签名里的那一份必须永远一致。
+        var rebuilt = _cache.EnsureSource(source.SourceKey, source.Signature, source.LanguagePrefix);
         if (!rebuilt) return false;
         return true;
     }
@@ -418,9 +514,13 @@ public sealed class TextIndexStore
 /// <param name="DirectorySignature">活动语言目录签名（<c>length:mtime</c>）。</param>
 /// <param name="ConfigContentHash">config.json 内容哈希（十六进制小写；不存在为 <c>none</c>）。</param>
 /// <param name="Signature">最终写进 <c>index_meta.signature</c> 的签名文本。</param>
+/// <param name="LanguagePrefix">活动语言目录前缀（<c>LLc-CN-LCTA/</c> 形态；写进
+/// <c>index_meta.language_prefix</c>）。条目 <c>rel_path</c> 是「相对它」的口径，
+/// 因此读取方拿「lang 根 + 它 + rel_path」才能拼回真实文件。</param>
 public sealed record TextIndexSource(
     string LangRoot,
     string SourceKey,
     string DirectorySignature,
     string ConfigContentHash,
-    string Signature);
+    string Signature,
+    string LanguagePrefix = "");

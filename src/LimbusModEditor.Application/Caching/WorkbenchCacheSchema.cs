@@ -20,11 +20,17 @@ public static class WorkbenchCacheSchema
     /// <summary>index_meta 表名（三库一致）。</summary>
     public const string IndexMetaTable = "index_meta";
 
-    /// <summary>公共建表片段：index_meta（调用方拼接在自己的建表脚本前面）。</summary>
+    /// <summary>公共建表片段：index_meta（调用方拼接在自己的建表脚本前面）。
+    ///
+    /// <para><c>language_prefix</c>（plan-16 §5）：文本索引的条目口径是「相对活动语言目录」，
+    /// 读取方要靠它把条目拼回真实磁盘路径（<c>LLc-CN-LCTA/</c> 形态；其它库留空）。
+    /// 旧库用 <see cref="SqliteTableCache.EnsureColumn"/> 补列，口径版本升级时整库重建。</para>
+    /// </summary>
     public const string IndexMetaSql = """
         CREATE TABLE IF NOT EXISTS index_meta (
-            source_key TEXT PRIMARY KEY,
-            signature  TEXT NOT NULL
+            source_key      TEXT PRIMARY KEY,
+            signature       TEXT NOT NULL,
+            language_prefix TEXT
         );
         """;
 

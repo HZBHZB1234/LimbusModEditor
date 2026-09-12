@@ -70,12 +70,20 @@ public sealed class TextIndexStoreTests : IDisposable
         return _work;
     }
 
+    /// <summary>索引源描述（活动语言目录与枚举用的同一口径：绝对路径 + 原样大小写）。</summary>
+    private TextIndexSource Source(string? activeLanguage = "LLC_zh-CN")
+        => TextIndexStore.DescribeSource(
+            LangRoot,
+            activeLanguage is null ? null : Path.Combine(LangRoot, activeLanguage));
+
     /// <summary>「有缓存」路径：走索引（必要时建索引）。</summary>
     private IReadOnlyList<LangTextFileInfo> EnumerateViaCache(LangTextWorkbenchService service, out bool rebuilt)
     {
-        var source = TextIndexStore.DescribeSource(LangRoot);
+        // 活动语言目录进签名与 index_meta.language_prefix（plan-16 §5：条目口径以它为基准）。
+        var languageDirectory = service.ResolveLanguageDirectory(LangRoot);
+        var source = TextIndexStore.DescribeSource(LangRoot, languageDirectory);
         rebuilt = _store.EnsureSource(source);
-        var files = service.EnumerateFiles(LangRoot, _store.ReadFileMap());
+        var files = service.EnumerateFiles(LangRoot, _store.ReadFileMap(languageDirectory));
         _store.PersistFiles(source, files);
         return files;
     }
@@ -86,7 +94,7 @@ public sealed class TextIndexStoreTests : IDisposable
         _store.DeleteDatabase();
         var service = new LangTextWorkbenchService();
         var files = service.EnumerateFiles(LangRoot);
-        _store.PersistFiles(TextIndexStore.DescribeSource(LangRoot), files);
+        _store.PersistFiles(Source(), files);
         return files;
     }
 
@@ -127,21 +135,23 @@ public sealed class TextIndexStoreTests : IDisposable
         Assert.All(kinds, k => Assert.Contains(k, new[] { "File", "Key", "Value" }));
 
         // 文件名命中与键路径命中都落进了 hits（可被 SQL 直接查出来）。
-        Assert.Equal(1, CountHits("File", "LLC_zh-CN/AbDlg_Faust.json", null));
-        Assert.Equal(1, CountHits("Key", "LLC_zh-CN/AbDlg_Faust.json", "dataList/0/dialog"));
+        // 条目口径 = 相对活动语言目录（plan-16 §5：不带 LLC_zh-CN/ 那一层）。
+        Assert.Equal(1, CountHits("File", "AbDlg_Faust.json", null));
+        Assert.Equal(1, CountHits("Key", "AbDlg_Faust.json", "dataList/0/dialog"));
 
         // 非 UTF-8 文件被标记，不是猜出来的。
-        var gbk = ReadFileRow("LLC_zh-CN/gbk.json");
+        var gbk = ReadFileRow("gbk.json");
         Assert.NotNull(gbk);
         Assert.False(gbk!.Value.Utf8);
         Assert.Equal(0, gbk.Value.KeyCount);
 
-        // 缓存往返：读回来的文件条目与枚举结果逐字段一致。
-        AssertSameFiles(files, _store.ReadFiles(LangRoot));
+        // 缓存往返：读回来的文件条目与枚举结果逐字段一致
+        //（拼路径靠 index_meta.language_prefix，不重读 config.json）。
+        AssertSameFiles(files, _store.ReadFiles());
 
         // 二次进页面：签名命中 → 不重建。
         var again = service.EnumerateFiles(LangRoot);
-        Assert.False(_store.EnsureSource(TextIndexStore.DescribeSource(LangRoot)));
+        Assert.False(_store.EnsureSource(Source()));
         AssertSameFiles(files, again);
     }
 
@@ -152,12 +162,12 @@ public sealed class TextIndexStoreTests : IDisposable
         var service = new LangTextWorkbenchService();
         var first = EnumerateViaCache(service, out _);
 
-        var reloaded = _store.ReadFileMap(LangRoot);
+        var reloaded = _store.ReadFileMap(service.ResolveLanguageDirectory(LangRoot));
         Assert.Equal(first.Count, reloaded.Count);
         foreach (var file in first) Assert.True(CacheHit(file, reloaded), $"应命中缓存: {file.RelativePath}");
 
         // 签名一致 → EnsureSource 不重建，行集不变。
-        Assert.False(_store.EnsureSource(TextIndexStore.DescribeSource(LangRoot)));
+        Assert.False(_store.EnsureSource(Source()));
         Assert.Equal(first.Count, _store.ReadFileCount());
     }
 
@@ -177,14 +187,14 @@ public sealed class TextIndexStoreTests : IDisposable
         WriteFile(target, """{"dataList":[{"id":1,"dialog":"改过的文本"},{"id":2,"dialog":"原始文本二"}],"added":true}""");
         var expected = new LangTextWorkbenchService().EnumerateFiles(LangRoot); // 现读（真值）
 
-        var cachedMap = _store.ReadFileMap(LangRoot);
+        var cachedMap = _store.ReadFileMap(service.ResolveLanguageDirectory(LangRoot));
         var actual = service.EnumerateFiles(LangRoot, cachedMap);
-        _store.PersistFiles(TextIndexStore.DescribeSource(LangRoot), actual);
+        _store.PersistFiles(Source(), actual);
 
-        var expectedTarget = expected.Single(x => x.RelativePath == "LLC_zh-CN/AbDlg_Faust.json");
-        var actualTarget = actual.Single(x => x.RelativePath == "LLC_zh-CN/AbDlg_Faust.json");
+        var expectedTarget = expected.Single(x => x.RelativePath == "AbDlg_Faust.json");
+        var actualTarget = actual.Single(x => x.RelativePath == "AbDlg_Faust.json");
         Assert.Equal(expectedTarget, actualTarget);
-        Assert.NotEqual(before.Single(x => x.RelativePath == "LLC_zh-CN/AbDlg_Faust.json").KeyCount, actualTarget.KeyCount);
+        Assert.NotEqual(before.Single(x => x.RelativePath == "AbDlg_Faust.json").KeyCount, actualTarget.KeyCount);
 
         // 其余文件仍然命中缓存（没被无谓重解析）。
         AssertSameFiles(expected, actual);
@@ -196,25 +206,25 @@ public sealed class TextIndexStoreTests : IDisposable
         SeedLangRoot("LLC_zh-CN");
         var service = new LangTextWorkbenchService();
         var first = EnumerateViaCache(service, out _);
-        Assert.Contains("LLC_zh-CN/AbDlg_Faust.json", first.Select(x => x.RelativePath));
+        Assert.Contains("AbDlg_Faust.json", first.Select(x => x.RelativePath));
 
         // 玩家切换活动语言：目录没动，只有 config.json 的内容变了。
         WriteFile(Path.Combine(LangRoot, "config.json"), """{"lang":"LLC_en","titleFont":"","contextFont":""}""");
-        var current = TextIndexStore.DescribeSource(LangRoot);
+        var current = Source("LLC_en");
         Assert.True(_store.EnsureSource(current), "config.json 内容变了必须整库重建（否则会继续读旧语言的索引）");
         Assert.Equal(0, _store.ReadFileCount());
 
         var afterEnumeration = service.EnumerateFiles(LangRoot, _store.ReadFileMap());
         _store.PersistFiles(current, afterEnumeration);
-        Assert.Contains("LLC_en/en.json", afterEnumeration.Select(x => x.RelativePath));
-        Assert.DoesNotContain("LLC_zh-CN/AbDlg_Faust.json", afterEnumeration.Select(x => x.RelativePath));
+        Assert.Contains("en.json", afterEnumeration.Select(x => x.RelativePath));
+        Assert.DoesNotContain("AbDlg_Faust.json", afterEnumeration.Select(x => x.RelativePath));
 
         // 换游戏目录（源键变）同样整库重建。
         Assert.False(_store.EnsureSource(current));
         var otherRoot = Path.Combine(_work, "other-game", "LimbusCompany_Data", "lang");
         Directory.CreateDirectory(otherRoot);
         WriteFile(Path.Combine(otherRoot, "config.json"), """{"lang":"LLC_zh-CN"}""");
-        Assert.True(_store.EnsureSource(TextIndexStore.DescribeSource(otherRoot)));
+        Assert.True(_store.EnsureSource(TextIndexStore.DescribeSource(otherRoot, Path.Combine(otherRoot, "LLC_zh-CN"))));
         Assert.Equal(0, _store.ReadFileCount());
     }
 
@@ -229,7 +239,7 @@ public sealed class TextIndexStoreTests : IDisposable
     {
         SeedLangRoot();
         var service = new LangTextWorkbenchService();
-        var current = TextIndexStore.DescribeSource(LangRoot);
+        var current = Source();
 
         // 伪造一个 v1 库：签名不带口径版本，并塞一行根级 config.json（v1 的口径）。
         var legacy = current with { Signature = $"{current.DirectorySignature}|{current.ConfigContentHash}" };
@@ -239,14 +249,14 @@ public sealed class TextIndexStoreTests : IDisposable
             new LangTextFileInfo("config.json", configPath, new FileInfo(configPath).Length, 3, true, 0),
             .. service.EnumerateFiles(LangRoot),
         ]);
-        Assert.Contains("config.json", _store.ReadFiles(LangRoot).Select(x => x.RelativePath));
+        Assert.Contains("config.json", _store.ReadFiles().Select(x => x.RelativePath));
 
         // 换到当前口径：签名不同 → 整库重建，旧行不再存在。
         Assert.True(_store.EnsureSource(current), "内容口径版本变了必须重建整库");
         var files = service.EnumerateFiles(LangRoot, _store.ReadFileMap());
         _store.PersistFiles(current, files);
 
-        var rows = _store.ReadFiles(LangRoot).Select(x => x.RelativePath).ToList();
+        var rows = _store.ReadFiles().Select(x => x.RelativePath).ToList();
         Assert.DoesNotContain("config.json", rows);
         Assert.Equal(files.Count, rows.Count);
     }
@@ -261,18 +271,18 @@ public sealed class TextIndexStoreTests : IDisposable
         File.Delete(Path.Combine(LangRoot, "LLC_zh-CN", "arr.json"));
         WriteFile(Path.Combine(LangRoot, "LLC_zh-CN", "StoryData", "S2.json"), """{"dataList":[{"dialog":"新增"}]}""");
 
-        var source = TextIndexStore.DescribeSource(LangRoot);
-        var files = service.EnumerateFiles(LangRoot, _store.ReadFileMap());
+        var source = Source();
+        var files = service.EnumerateFiles(LangRoot, _store.ReadFileMap(service.ResolveLanguageDirectory(LangRoot)));
         _store.PersistFiles(source, files);
 
-        var rows = _store.ReadFiles(LangRoot).Select(x => x.RelativePath).ToList();
-        Assert.DoesNotContain("LLC_zh-CN/arr.json", rows);
-        Assert.Contains("LLC_zh-CN/StoryData/S2.json", rows);
+        var rows = _store.ReadFiles().Select(x => x.RelativePath).ToList();
+        Assert.DoesNotContain("arr.json", rows);
+        Assert.Contains("StoryData/S2.json", rows);
         Assert.Equal(files.Count, rows.Count);
         Assert.Equal(files.Count, _store.ReadFileCount());
 
         // 新增文件也进了命中表（否则搜索会漏掉它）。
-        Assert.Equal(1, CountHits("Key", "LLC_zh-CN/StoryData/S2.json", "dataList/0/dialog"));
+        Assert.Equal(1, CountHits("Key", "StoryData/S2.json", "dataList/0/dialog"));
     }
 
     // ── Kind / KeyPath 命中写入与查询 ────────────────────────────────
@@ -285,16 +295,16 @@ public sealed class TextIndexStoreTests : IDisposable
         EnumerateViaCache(service, out _);
 
         // 键命中：key_path 是展平口径，snip 与 key_path 同值（与 Search 的产物一致）。
-        Assert.Equal(1, CountHits("Key", "LLC_zh-CN/AbDlg_Faust.json", "dataList/1/dialog"));
+        Assert.Equal(1, CountHits("Key", "AbDlg_Faust.json", "dataList/1/dialog"));
         // 值命中：key_path 指向叶子，snip 存完整值文本（查询到 Search 里才比对）。
-        Assert.Equal(1, CountHits("Value", "LLC_zh-CN/AbDlg_Faust.json", "dataList/0/dialog"));
-        var valueRows = ReadHitRows("Value", "LLC_zh-CN/AbDlg_Faust.json");
+        Assert.Equal(1, CountHits("Value", "AbDlg_Faust.json", "dataList/0/dialog"));
+        var valueRows = ReadHitRows("Value", "AbDlg_Faust.json");
         Assert.Contains("浮士德会亲自处理。", valueRows);
 
         // 非 UTF-8 / 非法 JSON 文件只留文件名命中行（键值事实一个都不许猜）。
-        var gbkRows = ReadHitRows(null, "LLC_zh-CN/gbk.json");
+        var gbkRows = ReadHitRows(null, "gbk.json");
         Assert.Single(gbkRows);
-        Assert.Equal("File", ReadDistinctHitKinds("LLC_zh-CN/gbk.json").Single());
+        Assert.Equal("File", ReadDistinctHitKinds("gbk.json").Single());
     }
 
     [Fact]
@@ -308,16 +318,16 @@ public sealed class TextIndexStoreTests : IDisposable
         var service = new LangTextWorkbenchService();
         EnumerateViaCache(service, out _);
 
-        var kinds = ReadDistinctHitKinds("LLC_zh-CN/many.json");
+        var kinds = ReadDistinctHitKinds("many.json");
         Assert.Contains("File", kinds);
         Assert.Contains("Key", kinds);
         Assert.Contains("Value", kinds);
 
         // 键候选一条不落（30 条）：键命中会让 per-file 计数涨到上限之上，
         // 截断键候选就会让「有缓存」漏掉搜索结果。
-        Assert.Equal(30, ReadHitRows("Key", "LLC_zh-CN/many.json").Count);
+        Assert.Equal(30, ReadHitRows("Key", "many.json").Count);
         // 值候选只保留排序上轮得到被检查的那些（前 19 个键之后的值永远轮不到）。
-        Assert.Equal(19, ReadHitRows("Value", "LLC_zh-CN/many.json").Count);
+        Assert.Equal(19, ReadHitRows("Value", "many.json").Count);
     }
 
     [Fact]
@@ -418,7 +428,7 @@ public sealed class TextIndexStoreTests : IDisposable
         File.WriteAllText(_store.DatabasePath, "这不是一个 SQLite 库，是一堆垃圾字节。");
 
         var store = new TextIndexStore(_cacheDirectory);
-        var source = TextIndexStore.DescribeSource(LangRoot);
+        var source = Source();
         // 建表时探测到损坏即删库重建（plan-09 已定的语义：删库重建是最便宜的修复，
         // 不往上抛——缓存只影响速度）。重建后必须报告「需要重新解析」。
         Assert.True(store.EnsureSource(source), "损坏库重建后必须要求调用方重新解析全部文件");
@@ -426,7 +436,7 @@ public sealed class TextIndexStoreTests : IDisposable
         Assert.Equal(0, store.ReadFileCount());
 
         // 重建后功能完全可用：枚举与搜索结果与之前一致。
-        var files = service.EnumerateFiles(LangRoot, store.ReadFileMap());
+        var files = service.EnumerateFiles(LangRoot, store.ReadFileMap(service.ResolveLanguageDirectory(LangRoot)));
         store.PersistFiles(source, files);
         AssertSameFiles(before, files);
         Assert.Equal(beforeHits, service.Search("dialog", files, cached: store.ReadHits()));
@@ -443,7 +453,7 @@ public sealed class TextIndexStoreTests : IDisposable
 
         _store.DeleteDatabase();
         Assert.False(File.Exists(_store.DatabasePath));
-        Assert.False(_store.IsFresh(TextIndexStore.DescribeSource(LangRoot)));
+        Assert.False(_store.IsFresh(Source()));
 
         // 页面在这种状态下会走「无缓存」路径：结果一字不差。
         var live = service.EnumerateFiles(LangRoot);
@@ -466,11 +476,11 @@ public sealed class TextIndexStoreTests : IDisposable
         Assert.Equal(0, new FileInfo(_store.DatabasePath).Length);
 
         var store = new TextIndexStore(_cacheDirectory);
-        var source = TextIndexStore.DescribeSource(LangRoot);
+        var source = Source();
 
         Assert.False(store.IsFresh(source));          // 不抛，判定为「需要重建」
         Assert.Equal(0, store.ReadFileCount());       // 表已补建：读得动，只是空
-        Assert.Empty(store.ReadFiles(LangRoot));
+        Assert.Empty(store.ReadFiles());
         Assert.Empty(store.ReadHits());
         Assert.Null(store.ReadSourceKey());
 
@@ -492,7 +502,7 @@ public sealed class TextIndexStoreTests : IDisposable
         if (File.Exists(_store.DatabasePath)) File.Delete(_store.DatabasePath);
 
         var store = new TextIndexStore(_cacheDirectory);
-        var source = TextIndexStore.DescribeSource(LangRoot);
+        var source = Source();
         var files = new LangTextWorkbenchService().EnumerateFiles(LangRoot);
         store.PersistFiles(source, files);
 

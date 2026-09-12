@@ -244,6 +244,20 @@ public sealed class SqliteTableCache
         });
     }
 
+    /// <summary>读某源的「活动语言前缀」（相对源根的子目录名 + <c>/</c>；没有记录返回 null）。</summary>
+    public string? ReadSourceLanguagePrefix(string sourceKey)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourceKey);
+        return Read(connection =>
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT language_prefix FROM index_meta WHERE source_key = $key";
+            command.Parameters.AddWithValue("$key", sourceKey);
+            var value = command.ExecuteScalar();
+            return value is null or DBNull ? null : Convert.ToString(value);
+        });
+    }
+
     /// <summary>库是否就是按这个源 + 这个签名建的（源换过 / 签名变过都返回 false）。</summary>
     public bool MatchesSource(string sourceKey, string signature)
     {
@@ -252,18 +266,25 @@ public sealed class SqliteTableCache
     }
 
     /// <summary>保证库是按当前源建的：源不一致 / 签名不一致 / 尚无记录时，
-    /// <b>清空全部业务表与旧 index_meta</b> 并写入当前 (source_key, signature)，
+    /// <b>清空全部业务表与旧 index_meta</b> 并写入当前 (source_key, signature, language_prefix)，
     /// 返回 true（= 调用方必须重新解析源）。一致时返回 false（可直接信任缓存）。
     ///
+    /// <para><paramref name="languagePrefix"/> 是「条目相对哪个子目录」（plan-16 §5 的活动语言
+    /// 目录前缀）。它与签名一起写入、一起对账：**前缀变了同样整库重建**，因为条目口径以它为基准，
+    /// 前缀与行集不匹配就会把文件路径拼到错误的位置。</para>
+    ///
     /// <para>这就是「源目录换（共享配置改游戏目录）即整体失效重建」的唯一实现。</para></summary>
-    public bool EnsureSource(string sourceKey, string signature)
+    public bool EnsureSource(string sourceKey, string signature, string languagePrefix = "")
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sourceKey);
         ArgumentNullException.ThrowIfNull(signature);
+        ArgumentNullException.ThrowIfNull(languagePrefix);
         EnsureSchema();
         var sources = Read(ReadSourceRows);
+        var storedPrefix = ReadSourceLanguagePrefix(sourceKey) ?? string.Empty;
         if (sources.Count == 1 && sources.TryGetValue(sourceKey, out var stored) &&
-            CacheSignature.Matches(stored, signature))
+            CacheSignature.Matches(stored, signature) &&
+            string.Equals(storedPrefix, languagePrefix, StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }
@@ -283,9 +304,10 @@ public sealed class SqliteTableCache
 
             using var insert = connection.CreateCommand();
             insert.Transaction = transaction;
-            insert.CommandText = "INSERT INTO index_meta (source_key, signature) VALUES ($key, $signature)";
+            insert.CommandText = "INSERT INTO index_meta (source_key, signature, language_prefix) VALUES ($key, $signature, $prefix)";
             insert.Parameters.AddWithValue("$key", sourceKey);
             insert.Parameters.AddWithValue("$signature", signature);
+            insert.Parameters.AddWithValue("$prefix", languagePrefix);
             insert.ExecuteNonQuery();
         });
         return true;
@@ -327,6 +349,9 @@ public sealed class SqliteTableCache
         while (reader.Read()) rows[reader.GetString(0)] = reader.GetString(1);
         return rows;
     }
+
+    /// <summary>index_meta 的活动语言前缀列（轻量迁移用；plan-16 §5 起）。</summary>
+    public const string MetaLanguagePrefixColumn = "language_prefix";
 
     /// <summary>业务表名（除 index_meta 与 SQLite 内部表外的所有表）。</summary>
     private static List<string> ReadBusinessTables(SqliteConnection connection, SqliteTransaction? transaction)

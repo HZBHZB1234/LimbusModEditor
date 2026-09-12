@@ -64,21 +64,23 @@ public sealed class RealTextIndexSmokeTests : IDisposable
         store.PersistFiles(source, files);
         coldWatch.Stop();
 
-        var languagePrefix = active + "/";
         var relatives = files.Select(x => x.RelativePath).ToList();
         // plan-14：config.json 不再是工作台文件（只用来解析活动语言 + 进索引签名）。
         Assert.DoesNotContain("config.json", relatives);
-        // 全部条目都在活动语言目录之下（大小写照磁盘，config.json 里可能写成别的大小写）。
-        Assert.All(relatives, x => Assert.StartsWith(languagePrefix, x, StringComparison.OrdinalIgnoreCase));
+        // plan-16 §5：条目口径 = 相对活动语言目录 —— 条目里**不带**语言目录那一层
+        // （大小写照磁盘，config.json 里可能写成别的大小写；这里断言的是「没有那一层」）。
+        Assert.All(relatives, x => Assert.False(
+            x.StartsWith(active + "/", StringComparison.OrdinalIgnoreCase),
+            $"条目不该带语言目录那一层: {x}"));
         // 子目录（StoryData）+ 根级文件并存。
-        Assert.Contains(relatives, x => x.StartsWith(languagePrefix + "StoryData/", StringComparison.Ordinal));
-        Assert.Contains(relatives, x => x.StartsWith(languagePrefix, StringComparison.Ordinal) && x.Count(c => c == '/') == 1);
+        Assert.Contains(relatives, x => x.StartsWith("StoryData/", StringComparison.Ordinal));
+        Assert.Contains(relatives, x => !x.Contains('/'));
         Assert.True(files.Count >= 1000, $"真实 lang 目录应有上千个 JSON，实际 {files.Count}");
         Assert.Equal(files.Count, store.ReadFileCount());
 
         // ── 二次进页面：签名命中，不再读全部文件 ──────────────────────
         Assert.False(store.EnsureSource(TextIndexStore.DescribeSource(langRoot)), "二次进页面不应重建");
-        var cachedMap = store.ReadFileMap(langRoot);
+        var cachedMap = store.ReadFileMap(service.CurrentLanguageDirectory);
         var warmWatch = Stopwatch.StartNew();
         var again = service.EnumerateFiles(langRoot, cachedMap);
         store.PersistFiles(source, again);

@@ -764,7 +764,13 @@ public sealed class StartupScanService
         try
         {
             var store = new TextIndexStore(_env.CacheDirectory);
-            var source = TextIndexStore.DescribeSource(langRoot);
+            var service = new LangTextWorkbenchService();
+            // 活动语言目录名进签名 + 进 index_meta.language_prefix（plan-16 §5：条目口径以它为基准）。
+            var languageDirectory = service.ResolveLanguageDirectory(langRoot);
+            var languageName = languageDirectory is null
+                ? null
+                : Path.GetFileName(languageDirectory.TrimEnd(Path.DirectorySeparatorChar));
+            var source = TextIndexStore.DescribeSource(langRoot, languageName);
             if (store.IsFresh(source))
             {
                 var count = TryReadCount(store.ReadFileCount);
@@ -774,8 +780,7 @@ public sealed class StartupScanService
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            var service = new LangTextWorkbenchService();
-            var cached = store.ReadFileMap(langRoot);
+            var cached = store.ReadFileMap(languageDirectory);
             var files = service.EnumerateFiles(langRoot, cached);
             store.PersistFiles(source, files);
             return Task.FromResult(new StartupScanStepResult(TextIndexStep, "lang 文本索引", StartupScanStepStatus.Scanned,

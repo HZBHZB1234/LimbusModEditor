@@ -75,13 +75,19 @@ public sealed record TextHitRow(LangTextSearchHit Hit, string DisplayPath)
 /// 进页面改走 <c>cache/text-index.db</c> 表缓存（二次进入不再全目录重读）。</para>
 ///
 /// <para><b>plan-14 改了什么</b>：① 数据源显示口径从「lang 根」下移到「活动语言目录内部」
-/// ——树顶层直接是 <c>AbDlg_Faust.json</c> / <c>StoryData</c>，不再有 <c>config.json</c>，
-/// 也不再有语言目录那一层包裹（映射见 <see cref="LangTextDisplay"/>；补丁键仍是 lang 根相对路径，
-/// 加载器兼容不许动）；② 修掉「点了文件预览一片空白」：索引命中路径也要把 lang 根交给服务
+/// ——树顶层直接是 <c>AbDlg_Faust.json</c> / <c>StoryData</c>，不再有 <c>config.json</c>；
+/// ② 修掉「点了文件预览一片空白」：索引命中路径也要把 lang 根交给服务
 /// （<see cref="LangTextWorkbenchService.AttachLangRoot"/>），否则编辑集没有基线；
 /// ③ 「导出 lang 补丁 / 直接应用到 lang 目录」两个按钮移出编辑列，改到侧边栏「② 产出模组」
 /// 板块（本页仍持有编辑集，导出通道由 <see cref="ExportPatchInteractive"/> /
 /// <see cref="ApplyToGameInteractive"/> 暴露给宿主）。</para>
+///
+/// <para><b>plan-16 改了什么</b>：① <b>条目口径去掉根文件夹</b>——树 / 列表 / 索引库 /
+/// 编辑集 / 搜索命中的路径一律「相对活动语言目录」（<c>StoryData/S1.json</c>、
+/// <c>AbDlg_Faust.json</c>），不再带 <c>LLc-CN-LCTA/</c> 那一层；加载器口径的补丁键
+/// 由 <see cref="LangTextWorkbenchService.ToPatchKey"/> 在导出时补回；② 树顶层
+/// <b>没有根节点</b>（文件夹在前 + 根级 json 平铺）；③ 导出与调试入口合并到侧边栏两个按钮，
+/// 本页的导出/直接应用通道待 S6 一并删除。</para>
 ///
 /// <para><b>缓存只是加速旁路</b>：删掉 <c>cache/text-index.db</c> 功能完全不受影响，
 /// 只是每次进页面要重新读全部 lang 文件。</para>
@@ -120,12 +126,10 @@ public sealed partial class TextWorkbenchPage : UserControl
     private IReadOnlyList<LangTextFileInfo> _files = [];
     private List<TextFileRow> _rows = [];
     private LangTextFileInfo? _selectedFile;
-    // 显示口径（plan-14）：内部键 = 相对 lang 根（= 补丁键，含语言目录前缀）；
-    // 显示路径 = 去掉该前缀。两张表由 SetBrowseItems 按枚举结果建立，导航只走它们，
-    // 不做字符串拼接（避免目录大小写/前缀不一致时映射错位）。
-    private string _displayPrefix = string.Empty;
+    // 条目口径（plan-16 §5）：相对**活动语言目录**（如 StoryData/S1.json、AbDlg_Faust.json），
+    // 不带语言目录那一层。界面、索引库、编辑集键、搜索结果全部用它；
+    // 补丁键（加载器口径）由 service.ToPatchKey(...) 在导出时补回语言目录那层。
     private Dictionary<string, LangTextFileInfo> _byDisplay = new(StringComparer.OrdinalIgnoreCase);
-    private Dictionary<string, LangTextFileInfo> _byKey = new(StringComparer.OrdinalIgnoreCase);
     private int _searchGeneration;
     private int _loadGeneration;
     private bool _loadingDocument;
@@ -381,13 +385,12 @@ public sealed partial class TextWorkbenchPage : UserControl
             return;
         }
 
-        // plan-14：**无条件**把 lang 根交给服务。索引命中路径不经过 EnumerateFiles，
-        // 而编辑集方法（BeginEdit/SetModified/…）都要求服务已定位 lang 根；
-        // 漏掉这一步的现象就是「点文件后预览区空白、明细只显示 —」（plan-13 之后
-        // 启动扫描让索引总是新鲜，于是必然踩到这条路径）。
+        // 无条件把 lang 根交给服务：索引命中路径不经过 EnumerateFiles，
+        // 而编辑集方法（BeginEdit/SetModified/…）都要求服务已定位 lang 根与活动语言目录
+        // （条目口径 = 相对活动语言目录，plan-16 §5）；漏掉这一步的现象就是
+        // 「点文件后预览区空白、明细只显示 —」。
         _service.AttachLangRoot(langRoot);
         var languageDirectory = _service.ResolveLanguageDirectory(langRoot);
-        _displayPrefix = LangTextDisplay.PrefixOf(langRoot, languageDirectory);
         var languageName = languageDirectory is null
             ? null
             : Path.GetFileName(languageDirectory.TrimEnd(Path.DirectorySeparatorChar));
@@ -396,13 +399,13 @@ public sealed partial class TextWorkbenchPage : UserControl
         Shell.SetStatus("正在检查文本索引…");
         try
         {
-            var source = TextIndexStore.DescribeSource(langRoot);
+            var source = TextIndexStore.DescribeSource(langRoot, languageName);
             var fresh = await Task.Run(() => _store.IsFresh(source));
             IReadOnlyList<LangTextFileInfo> files;
             long elapsed = 0;
             if (fresh)
             {
-                files = await Task.Run(() => _store.ReadFiles(langRoot));
+                files = await Task.Run(() => _store.ReadFiles(languageDirectory));
             }
             else
             {
@@ -411,7 +414,7 @@ public sealed partial class TextWorkbenchPage : UserControl
                 var watch = System.Diagnostics.Stopwatch.StartNew();
                 files = await Task.Run(() =>
                 {
-                    var cached = _store.ReadFileMap(langRoot);
+                    var cached = _store.ReadFileMap(languageDirectory);
                     var enumerated = _service.EnumerateFiles(langRoot, cached);
                     _store.PersistFiles(source, enumerated);
                     return enumerated;
@@ -422,16 +425,17 @@ public sealed partial class TextWorkbenchPage : UserControl
             if (generation != _loadGeneration) return;
 
             _files = files;
-            // 树按**显示路径**建：顶层就是语言目录的直接子项（文件 / StoryData 这类子目录）。
-            _treeRoot = LangTextTreeBuilder.Build(
-                files.Select(x => LangTextDisplay.ToDisplayPath(_displayPrefix, x.RelativePath)),
-                languageName ?? Path.GetFileName(langRoot.TrimEnd(Path.DirectorySeparatorChar)));
+            // 树按条目口径建（相对活动语言目录）：顶层就是语言目录的直接子项
+            // （文件夹 StoryData / BattleAnnouncerDlg… 与根级 AbDlg_*.json），
+            // **没有任何根节点、也没有语言目录那一层包裹**（plan-16 §4/§5）。
+            // rootName 只是构造器的内部容器名，不会渲染。
+            _treeRoot = LangTextTreeBuilder.Build(files.Select(x => x.RelativePath), "lang");
             _langInfo.Text = languageDirectory is null
                 ? $"lang 根：{langRoot}\n⚠ config.json 未指定活动语言（或目录不存在），没有可浏览的文本表。" +
                   $"{files.Count} 个 JSON 文件"
-                : $"数据源：{languageName}（活动语言目录内部 · {files.Count} 个 JSON 文件" +
+                : $"数据源：{languageName}（{files.Count} 个 JSON 文件 · 条目相对该语言目录" +
                   (fresh ? " · 索引命中" : $" · 索引{(_store.WasRecreated ? "已重建（原库损坏）" : "已更新")} {elapsed}ms") +
-                  $"）\nlang 根：{langRoot}　补丁键：{_displayPrefix}…（加载器按 lang 根应用，前缀不能丢）";
+                  $"）\nlang 根：{langRoot}　补丁键：{languageName}/…（导出补丁时自动补回这一层）";
             Shell.SetEmptyHint(languageDirectory is null
                 ? "config.json 里没有可用的活动语言目录：请检查 <游戏>/LimbusCompany_Data/lang/config.json 的 lang 字段。"
                 : null);
@@ -449,20 +453,16 @@ public sealed partial class TextWorkbenchPage : UserControl
     }
 
     /// <summary>把当前文件清单分发到「树 / 列表」两个视图（两视图共用同一份筛选结果），
-    /// 并建立「显示路径 ⇄ 内部键」两张映射表（树 / 列表 / 搜索命中的导航都走它）。</summary>
+    /// 并建立「条目路径 → 文件条目」映射表（树 / 列表 / 搜索命中的导航都走它）。
+    /// 本轮起条目路径 = 显示路径（相对活动语言目录），两者不再需要互相映射。</summary>
     private void SetBrowseItems()
     {
         _byDisplay = new Dictionary<string, LangTextFileInfo>(StringComparer.OrdinalIgnoreCase);
-        _byKey = new Dictionary<string, LangTextFileInfo>(StringComparer.OrdinalIgnoreCase);
-        foreach (var file in _files)
-        {
-            _byKey[file.RelativePath] = file;
-            _byDisplay[LangTextDisplay.ToDisplayPath(_displayPrefix, file.RelativePath)] = file;
-        }
+        foreach (var file in _files) _byDisplay[file.RelativePath] = file;
         _rows = _files
             .Select(x => new TextFileRow(
                 x.RelativePath,
-                LangTextDisplay.ToDisplayPath(_displayPrefix, x.RelativePath),
+                x.RelativePath,
                 x.KeyCount,
                 x.SizeBytes,
                 x.IsUtf8,
@@ -527,8 +527,9 @@ public sealed partial class TextWorkbenchPage : UserControl
         _suppressSelection = true;
         try
         {
-            // plan-14：树顶层直接是**活动语言目录的直接子项**（plan-10 时顶层是 lang 根，
-            // 展开后才看到语言目录，用户要多点两层且会被 config.json 干扰）。
+            // 树顶层 = **活动语言目录的直接子项**：文件夹（StoryData / BattleAnnouncerDlg…）
+            // 排在前面、根级 json 文件平铺在后。**没有根节点**（也从来没有语言目录那一层
+            // 包裹节点）——根容器只是 LangTextTreeBuilder 的内部结构，不渲染。
             _fileTree.ItemsSource = _treeRoot is null
                 ? null
                 : _treeRoot.Children.Select(CreateTreeItem).ToList();
@@ -546,9 +547,10 @@ public sealed partial class TextWorkbenchPage : UserControl
             Header = BuildTreeHeader(node),
             Tag = node,
             Style = WorkbenchShell.CreateTreeItemStyle(),
-            ToolTip = node.RelativePath.Length == 0
-                ? "lang 根"
-                : $"{node.RelativePath}（补丁键：{LangTextDisplay.ToPatchKey(_displayPrefix, node.RelativePath)}）",
+            // 条目路径（相对活动语言目录）+ 加载器口径的补丁键（导出时自动补回语言目录那层）。
+            ToolTip = node.IsFile
+                ? $"{node.RelativePath}\n补丁键：{_service.ToPatchKey(node.RelativePath)}"
+                : $"{node.RelativePath}/　（{node.Children.Count} 项）",
         };
         // 目录先放一个占位子项，真正展开时才生成下一层（与资源工作台同款惰性策略）。
         if (node.IsFolder && node.Children.Count > 0) item.Items.Add(new TreeViewItem { Header = "载入中…" });
@@ -559,7 +561,7 @@ public sealed partial class TextWorkbenchPage : UserControl
     {
         if (node.IsFile)
         {
-            var info = FindFileByDisplay(node.RelativePath);
+            var info = FindFileByPath(node.RelativePath);
             var suffix = info is null
                 ? string.Empty
                 : info.IsUtf8 ? $"（{info.KeyCount} 键 · {TextFileRow.FormatSize(info.SizeBytes)}）" : "（非 UTF-8）";
@@ -572,9 +574,9 @@ public sealed partial class TextWorkbenchPage : UserControl
             : $"{node.Name}（{node.Children.Count}）";
     }
 
-    /// <summary>显示路径 → 文件条目（树节点带的是显示路径，内部一律用带前缀的补丁键）。</summary>
-    private LangTextFileInfo? FindFileByDisplay(string displayPath)
-        => _byDisplay.TryGetValue(displayPath, out var file) ? file : null;
+    /// <summary>条目路径 → 文件条目（树 / 列表 / 搜索命中都用同一口径，不再需要映射）。</summary>
+    private LangTextFileInfo? FindFileByPath(string relativePath)
+        => _byDisplay.TryGetValue(relativePath, out var file) ? file : null;
 
     private void TreeItem_Expanded(object sender, RoutedEventArgs e)
     {
@@ -600,8 +602,7 @@ public sealed partial class TextWorkbenchPage : UserControl
     private void SyncTreeSelection()
     {
         if (_selectedFile is not { } file || _fileTree.Items.Count == 0) return;
-        var display = LangTextDisplay.ToDisplayPath(_displayPrefix, file.RelativePath);
-        var segments = display.Split('/');
+        var segments = file.RelativePath.Split('/');
         if (segments.Length == 0) return;
 
         _suppressSelection = true;
@@ -646,10 +647,9 @@ public sealed partial class TextWorkbenchPage : UserControl
         {
             var hits = await Task.Run(() => _service.Search(query, files, cached: _store.ReadHits()));
             if (generation != _searchGeneration) return;
-            // 结果行用显示路径（语言目录内部口径），但 Hit 原样保留内部键 →
-            // 点击跳转时不需要反解前缀。
+            // 命中的 RelativePath 就是条目口径（相对活动语言目录），直接当显示路径用。
             var rows = hits
-                .Select(x => new TextHitRow(x, LangTextDisplay.ToDisplayPath(_displayPrefix, x.RelativePath)))
+                .Select(x => new TextHitRow(x, x.RelativePath))
                 .ToList();
             _hitList.ItemsSource = rows;
             _hitHeader.Text = rows.Count == 0
@@ -674,11 +674,11 @@ public sealed partial class TextWorkbenchPage : UserControl
     }
 
     /// <summary>点击命中：跳到文件；键/值命中再定位到键（<see cref="JsonTreeEditor.SelectPath"/>）。
-    /// 命中带的是内部键（含语言目录前缀），先换回显示路径再交给 <see cref="SelectFileAsync"/>。</summary>
+    /// 命中的 RelativePath 就是条目口径，直接交给 <see cref="SelectFileAsync"/>。</summary>
     private async Task NavigateToHitAsync(TextHitRow row)
     {
-        if (!_byKey.ContainsKey(row.Hit.RelativePath)) return;
-        await SelectFileAsync(LangTextDisplay.ToDisplayPath(_displayPrefix, row.Hit.RelativePath),
+        if (!_byDisplay.ContainsKey(row.Hit.RelativePath)) return;
+        await SelectFileAsync(row.Hit.RelativePath,
             row.Hit.Kind == LangTextSearchKind.FileName ? null : row.Hit.KeyPath);
     }
 
@@ -686,12 +686,13 @@ public sealed partial class TextWorkbenchPage : UserControl
 
     /// <summary>
     /// 选中一个文件并载入编辑器。
-    /// <paramref name="displayPath"/> 是**显示路径**（语言目录内部口径，树 / 列表 / 状态文案用它）；
-    /// 服务层的编辑集一律用内部键（= 补丁键），映射由 <see cref="_byDisplay"/> 完成。
+    /// <paramref name="relativePath"/> 是**条目口径**（相对活动语言目录，树 / 列表 / 搜索结果都带它），
+    /// 服务层的编辑集与索引库也是同一口径；加载器口径的补丁键只在导出时由
+    /// <c>LangTextWorkbenchService.ToPatchKey</c> 补回。
     /// </summary>
-    private async Task SelectFileAsync(string displayPath, string? keyPath)
+    private async Task SelectFileAsync(string relativePath, string? keyPath)
     {
-        var file = FindFileByDisplay(displayPath);
+        var file = FindFileByPath(relativePath);
         if (file is null) return;
         var generation = ++_loadGeneration;
         _selectedFile = file;
@@ -699,23 +700,23 @@ public sealed partial class TextWorkbenchPage : UserControl
         try
         {
             _editor.Clear();
-            _fileTitle.Text = Path.GetFileName(displayPath);
+            _fileTitle.Text = Path.GetFileName(relativePath);
             _editPanel.Visibility = Visibility.Visible;
             SelectRowInViews(file.RelativePath);
-            Shell.SetStatus($"正在读取 {displayPath}…");
+            Shell.SetStatus($"正在读取 {relativePath}…");
 
             var text = await Task.Run(() => _service.BeginEdit(file.RelativePath));
             if (generation != _loadGeneration) return;
 
             _editor.LoadDocument(text, _service.TryGetVanillaText(file.RelativePath));
             if (!string.IsNullOrWhiteSpace(keyPath)) _editor.SelectPath(keyPath);
-            _fileDetail.Text = $"{displayPath} · {TextFileRow.FormatSize(file.SizeBytes)} · " +
+            _fileDetail.Text = $"{relativePath} · {TextFileRow.FormatSize(file.SizeBytes)} · " +
                                   (file.IsUtf8 ? $"{file.KeyCount} 个顶层键" : "非 UTF-8（不做编码猜测：键值搜索与编辑均跳过）") +
                                   (_service.IsModified(file.RelativePath) ? " · 已在编辑集中" : string.Empty) +
-                                  $"\n补丁键：{file.RelativePath}";
+                                  $"\n补丁键：{_service.ToPatchKey(file.RelativePath)}";
             Shell.SetStatus(keyPath is { Length: > 0 } && _editor.SelectedRow?.Path == keyPath
-                ? $"已定位到键 {keyPath}（{displayPath}）。"
-                : $"已载入 {displayPath}（修改只进内存编辑集）。");
+                ? $"已定位到键 {keyPath}（{relativePath}）。"
+                : $"已载入 {relativePath}（修改只进内存编辑集）。");
         }
         catch (Exception ex)
         {
@@ -777,12 +778,11 @@ public sealed partial class TextWorkbenchPage : UserControl
     {
         if (_selectedFile is null) return;
         var relativePath = _selectedFile.RelativePath;
-        var displayPath = LangTextDisplay.ToDisplayPath(_displayPrefix, relativePath);
         var reverted = _service.Revert(relativePath);
         Shell.SetStatus(reverted
-            ? $"已还原 {displayPath}（移出编辑集；lang 目录从未被改动）。"
+            ? $"已还原 {relativePath}（移出编辑集；lang 目录从未被改动）。"
             : "该文件不在编辑集中。");
-        await SelectFileAsync(displayPath, null);
+        await SelectFileAsync(relativePath, null);
     }
 
     /// <summary>刷新编辑集相关的 UI 状态（徽标 / 状态文案 / 列表与树上的「已修改」标记）。

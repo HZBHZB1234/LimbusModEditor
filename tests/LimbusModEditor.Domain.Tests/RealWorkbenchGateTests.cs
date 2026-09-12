@@ -179,10 +179,12 @@ public class RealWorkbenchGateTests
             Assert.Equal(1, report.EditedFileCount);
             Assert.Equal(1, report.PatchedFileCount);
 
-            // 补丁文档键必须是相对 lang 根的 '/' 路径。
+            // 补丁文档键必须是「相对 lang 根」的 '/' 路径 = 加载器口径（plan-16 §5：
+            // 条目是语言目录内部口径，导出时由 ToPatchKey 补回语言目录那一层）。
             var documentPatch = new LangTextPatchService().Read(patchPath);
             var patchEntry = Assert.Single(documentPatch.Patches);
-            Assert.Equal(target.RelativePath, patchEntry.Key);
+            Assert.Equal(service.ToPatchKey(target.RelativePath), patchEntry.Key);
+            Assert.StartsWith(service.LanguageDirectoryPrefix, patchEntry.Key, StringComparison.Ordinal);
             Assert.DoesNotContain('\\', patchEntry.Key);
 
             // 用 TextDiffService.Apply 把 ops 回放到 vanilla 快照 → 必须等于修改后的文档。

@@ -58,23 +58,24 @@ public class LangTextWorkbenchServiceTests : IDisposable
 
         // plan-14：config.json 不是工作台文件（只有活动语言目录下的 *.json 才是）。
         Assert.DoesNotContain("config.json", relatives);
-        Assert.Contains("LLC_zh-CN/AbDlg_Faust.json", relatives);
-        Assert.Contains("LLC_zh-CN/StoryData/S1.json", relatives); // 子目录逐层展开
-        Assert.DoesNotContain("LLC_en/en.json", relatives);        // 其余语言目录不索引
+        Assert.Contains("AbDlg_Faust.json", relatives);
+        Assert.Contains("StoryData/S1.json", relatives); // 子目录逐层展开
+        Assert.DoesNotContain("en.json", relatives);        // 其余语言目录不索引
         Assert.All(relatives, x => Assert.DoesNotContain('\\', x)); // 相对路径恒 '/' 分隔
-        // 相对路径仍是「相对 lang 根」（= 补丁键口径，含语言目录前缀），按字典序。
+        // plan-16 §5：条目口径 = 相对**活动语言目录**（不再带 LLC_zh-CN/ 那一层），按字典序。
+        Assert.All(relatives, x => Assert.DoesNotContain("LLC_zh-CN", x));
         Assert.Equal(relatives.OrderBy(x => x, StringComparer.Ordinal), relatives);
 
-        var faust = files.Single(x => x.RelativePath == "LLC_zh-CN/AbDlg_Faust.json");
+        var faust = files.Single(x => x.RelativePath == "AbDlg_Faust.json");
         Assert.Equal(1, faust.KeyCount); // 顶层键数（JSON 对象才计）：顶层只有 "dataList"
         Assert.True(faust.IsUtf8);
         Assert.Equal(new FileInfo(faust.FullPath).Length, faust.SizeBytes);
         Assert.True(Path.IsPathRooted(faust.FullPath) && File.Exists(faust.FullPath));
 
-        Assert.Equal(1, files.Single(x => x.RelativePath == "LLC_zh-CN/StoryData/S1.json").KeyCount);
-        Assert.Equal(0, files.Single(x => x.RelativePath == "LLC_zh-CN/arr.json").KeyCount); // 非对象不计键
+        Assert.Equal(1, files.Single(x => x.RelativePath == "StoryData/S1.json").KeyCount);
+        Assert.Equal(0, files.Single(x => x.RelativePath == "arr.json").KeyCount); // 非对象不计键
 
-        var gbk = files.Single(x => x.RelativePath == "LLC_zh-CN/gbk.json");
+        var gbk = files.Single(x => x.RelativePath == "gbk.json");
         Assert.False(gbk.IsUtf8); // 非 UTF-8 明确标记不猜
         Assert.Equal(0, gbk.KeyCount);
 
@@ -101,21 +102,21 @@ public class LangTextWorkbenchServiceTests : IDisposable
         // 文件名命中（无需读内容）
         var byName = _service.Search("Faust", files).ToList();
         Assert.Single(byName);
-        Assert.Equal("LLC_zh-CN/AbDlg_Faust.json", byName[0].RelativePath);
+        Assert.Equal("AbDlg_Faust.json", byName[0].RelativePath);
         Assert.Equal(LangTextSearchKind.FileName, byName[0].Kind);
 
         // 键命中（展平键路径）
         var byKey = _service.Search("dataList", files).ToList();
         Assert.All(byKey, x => Assert.Equal(LangTextSearchKind.Key, x.Kind));
-        Assert.Contains(byKey, x => x.RelativePath == "LLC_zh-CN/StoryData/S1.json" && x.KeyPath == "dataList/0/dialog");
-        Assert.Contains(byKey, x => x.RelativePath == "LLC_zh-CN/AbDlg_Faust.json" && x.KeyPath == "dataList/1/dialog");
+        Assert.Contains(byKey, x => x.RelativePath == "StoryData/S1.json" && x.KeyPath == "dataList/0/dialog");
+        Assert.Contains(byKey, x => x.RelativePath == "AbDlg_Faust.json" && x.KeyPath == "dataList/1/dialog");
 
         // 值命中（读文件内容；snippet 截取匹配窗口）
         var byValue = _service.Search("浮士德", files).ToList();
         Assert.Single(byValue);
         var valueHit = byValue[0];
         Assert.Equal(LangTextSearchKind.Value, valueHit.Kind);
-        Assert.Equal("LLC_zh-CN/AbDlg_Faust.json", valueHit.RelativePath);
+        Assert.Equal("AbDlg_Faust.json", valueHit.RelativePath);
         Assert.Equal("dataList/0/dialog", valueHit.KeyPath);
         Assert.Contains("浮士德", valueHit.Snippet);
 
@@ -129,7 +130,7 @@ public class LangTextWorkbenchServiceTests : IDisposable
     [Fact]
     public void Edit_set_requires_enumerated_lang_root()
     {
-        Assert.Throws<InvalidOperationException>(() => _service.BeginEdit("LLC_zh-CN/AbDlg_Faust.json"));
+        Assert.Throws<InvalidOperationException>(() => _service.BeginEdit("AbDlg_Faust.json"));
     }
 
     /// <summary>
@@ -142,7 +143,7 @@ public class LangTextWorkbenchServiceTests : IDisposable
     {
         SeedLangRoot();
         var viaIndex = new LangTextWorkbenchService();
-        const string rel = "LLC_zh-CN/AbDlg_Faust.json";
+        const string rel = "AbDlg_Faust.json";
 
         // 只 AttachLangRoot 之前：编辑集方法没有基线（页面若漏掉这一步就是这个报错）。
         Assert.Throws<InvalidOperationException>(() => viaIndex.BeginEdit(rel));
@@ -180,7 +181,7 @@ public class LangTextWorkbenchServiceTests : IDisposable
     {
         SeedLangRoot();
         _service.EnumerateFiles(LangRoot);
-        const string rel = "LLC_zh-CN/AbDlg_Faust.json";
+        const string rel = "AbDlg_Faust.json";
         var original = File.ReadAllText(Path.Combine(LangRoot, "LLC_zh-CN", "AbDlg_Faust.json"));
 
         var text = _service.BeginEdit(rel);
@@ -226,7 +227,7 @@ public class LangTextWorkbenchServiceTests : IDisposable
     {
         SeedLangRoot();
         _service.EnumerateFiles(LangRoot);
-        var ex = Assert.Throws<InvalidDataException>(() => _service.BeginEdit("LLC_zh-CN/gbk.json"));
+        var ex = Assert.Throws<InvalidDataException>(() => _service.BeginEdit("gbk.json"));
         Assert.Contains("UTF-8", ex.Message);
     }
 
@@ -237,7 +238,7 @@ public class LangTextWorkbenchServiceTests : IDisposable
     {
         SeedLangRoot();
         _service.EnumerateFiles(LangRoot);
-        const string rel = "LLC_zh-CN/AbDlg_Faust.json";
+        const string rel = "AbDlg_Faust.json";
         const string modifiedText = """
         {
           "dataList": [
@@ -250,7 +251,7 @@ public class LangTextWorkbenchServiceTests : IDisposable
         _service.SetModified(rel, modifiedText);
 
         // 无差异文件进编辑集但不进补丁
-        const string unchangedRel = "LLC_zh-CN/StoryData/S1.json";
+        const string unchangedRel = "StoryData/S1.json";
         _service.BeginEdit(unchangedRel);
         _service.SetModified(unchangedRel, File.ReadAllText(Path.Combine(LangRoot, "LLC_zh-CN", "StoryData", "S1.json")));
 
@@ -262,18 +263,23 @@ public class LangTextWorkbenchServiceTests : IDisposable
         Assert.Equal(Path.GetFullPath(outputPath), report.OutputPath);
         Assert.True(File.Exists(report.OutputPath));
 
+        // 报告里的条目是**加载器口径**（相对 lang 根，补回了语言目录那一层）：
+        // 报告是给「放进模组目录由加载器应用」这条链看的，所以键与 patchs 的键一致。
         var patched = report.Files.Where(x => x.OperationCount > 0).ToList();
         Assert.Single(patched);
-        Assert.Equal(rel, patched[0].RelativePath);
+        Assert.Equal(_service.ToPatchKey(rel), patched[0].RelativePath);
         var skipped = report.Files.Single(x => x.OperationCount == 0);
-        Assert.Equal(unchangedRel, skipped.RelativePath);
+        Assert.Equal(_service.ToPatchKey(unchangedRel), skipped.RelativePath);
         Assert.Contains("无差异", skipped.Note);
 
-        // 补丁文档：{"patchs": { "相对路径('/'分隔)": [RFC6902 ops…] }} —— 与 changes.py 语义一致
+        // 补丁文档：{"patchs": { "相对 lang 根路径('/'分隔)": [RFC6902 ops…] }} —— 与 changes.py 语义一致。
+        // 键是**加载器口径**（补回语言目录那一层），条目口径只用于界面/索引。
+        var patchKey = _service.ToPatchKey(rel);
+        Assert.Equal($"LLC_zh-CN/{rel}", patchKey);
         var root = JsonNode.Parse(File.ReadAllText(outputPath))!;
         var patchs = root["patchs"]!.AsObject();
         var entry = Assert.Single(patchs);
-        Assert.Equal(rel, entry.Key);
+        Assert.Equal(patchKey, entry.Key);
         var ops = entry.Value!.AsArray();
         Assert.All(ops, op =>
         {
@@ -288,7 +294,7 @@ public class LangTextWorkbenchServiceTests : IDisposable
 
         // 真实加载器同一套读取语义：LangTextPatchService 能读回补丁文档
         var document = new LangTextPatchService().Read(outputPath);
-        Assert.True(document.Patches.ContainsKey(rel));
+        Assert.True(document.Patches.ContainsKey(patchKey));
     }
 
     [Fact]
@@ -346,25 +352,34 @@ public class LangTextWorkbenchServiceTests : IDisposable
         Assert.All(relatives, x => Assert.DoesNotContain('\\', x));
         Assert.All(files, x => Assert.True(File.Exists(x.FullPath), $"枚举条目应真实存在: {x.RelativePath}"));
 
-        var languagePrefix = expectedLanguage + "/";
+        // plan-16 §5：条目口径 = 相对活动语言目录 —— **条目里不许再出现语言目录那一层**
+        // （这既是用户口径，也是「加载器键在导出时才补前缀」的前提）。
+        Assert.Equal(Path.GetFullPath(Path.Combine(RealLangDir, expectedLanguage)), service.CurrentLanguageDirectory);
+        Assert.Equal(expectedLanguage + "/", service.LanguageDirectoryPrefix);
+        Assert.All(relatives, x => Assert.False(
+            x.StartsWith(expectedLanguage + "/", StringComparison.OrdinalIgnoreCase),
+            $"条目不该带语言目录那一层: {x}"));
 
         // StoryData 子目录逐层展开（实测约 920 文件，留充足余量防游戏版本波动）
-        var storyData = relatives.Where(x => x.StartsWith(languagePrefix + "StoryData/", StringComparison.Ordinal)).ToList();
+        var storyData = relatives.Where(x => x.StartsWith("StoryData/", StringComparison.Ordinal)).ToList();
         Assert.True(storyData.Count >= 100, $"StoryData 应包含大量文件，实际 {storyData.Count}");
 
-        // 根级文件与子目录文件并存
-        Assert.Contains(relatives, x => x.StartsWith(languagePrefix, StringComparison.Ordinal) && x.Count(c => c == '/') == 1);
-        Assert.Contains(relatives, x => x.Count(c => c == '/') >= 2);
+        // 根级文件与子目录文件并存（实测目录层级最多到二级，不做更深层的硬断言）。
+        Assert.Contains(relatives, x => !x.Contains('/'));
+        Assert.Contains(relatives, x => x.Contains('/'));
 
         // 抽样验证键数与大小（只读这一个文件的内容，不全量读）
-        var sampleRel = relatives.FirstOrDefault(x => x == languagePrefix + "AbDlg_Faust.json")
-                        ?? relatives.First(x => x.StartsWith(languagePrefix, StringComparison.Ordinal) && x.Count(c => c == '/') == 1);
+        var sampleRel = relatives.FirstOrDefault(x => x == "AbDlg_Faust.json")
+                        ?? relatives.First(x => !x.Contains('/'));
         var sample = files.Single(x => x.RelativePath == sampleRel);
         Assert.True(sample.IsUtf8, $"抽样文件应为 UTF-8: {sampleRel}");
         var sampleNode = JsonNode.Parse(File.ReadAllText(sample.FullPath));
         var expectedKeys = sampleNode is JsonObject obj ? obj.Count : 0;
         Assert.Equal(expectedKeys, sample.KeyCount);
         Assert.Equal(new FileInfo(sample.FullPath).Length, sample.SizeBytes);
+
+        // 加载器口径的补丁键：条目 + 语言目录那一层（导出补丁时的键）
+        Assert.Equal(expectedLanguage + "/" + sampleRel, service.ToPatchKey(sampleRel));
 
         Assert.True(stopwatch.Elapsed.TotalSeconds < 60, $"枚举耗时 {stopwatch.Elapsed.TotalSeconds:F1}s，超出 60s 预算");
     }

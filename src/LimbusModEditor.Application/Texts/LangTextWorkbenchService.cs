@@ -82,14 +82,55 @@ public sealed class LangTextWorkbenchService
     private readonly Dictionary<string, EditEntry> _edits = new(StringComparer.OrdinalIgnoreCase);
 
     private string? _langRoot;
+    private string? _langDirectory;
 
     private sealed record EditEntry(string VanillaText, string ModifiedText);
 
     /// <summary>枚举后记录的当前 lang 根（<see cref="BeginEdit"/> 等编辑集方法依赖它）。</summary>
     public string? CurrentLangRoot => _langRoot;
 
-    /// <summary>编辑集中的相对路径（'/' 分隔，字典序）。</summary>
+    /// <summary>
+    /// 枚举后记录的活动语言目录（<c>&lt;lang 根&gt;/&lt;config.json 的 lang&gt;</c>）；
+    /// 未定位时为 null。
+    ///
+    /// <para><b>它是「条目口径」的基准</b>：<see cref="LangTextFileInfo.RelativePath"/>、
+    /// 编辑集键、搜索命中的 <c>RelativePath</c> 一律相对它（如 <c>StoryData/S1.json</c>、
+    /// <c>AbDlg_Faust.json</c>），**不带语言目录那一层**——这就是「条目里不要根文件夹」。
+    /// 加载器要的是「相对 lang 根」的键（<see cref="ToPatchKey"/> 负责把这一层补回来）。</para>
+    /// </summary>
+    public string? CurrentLanguageDirectory => _langDirectory;
+
+    /// <summary>编辑集中的相对路径（'/' 分隔，字典序；相对活动语言目录）。</summary>
     public IReadOnlyList<string> EditedFiles => _edits.Keys.OrderBy(x => x, StringComparer.Ordinal).ToArray();
+
+    /// <summary>
+    /// 条目口径 → 加载器口径：把语言目录那层补回来（<c>StoryData/S1.json</c> →
+    /// <c>LLc-CN-LCTA/StoryData/S1.json</c>）。真实加载器按
+    /// <c>&lt;游戏&gt;/LimbusCompany_Data/lang/&lt;键&gt;</c> 备份并应用补丁
+    /// （LCTA <c>launcher/changes.py</c>），所以**导出补丁文档的键必须走本方法**，
+    /// 不能直接用条目口径。语言目录未定位（或条目已在 lang 根之下）时原样返回。
+    /// </summary>
+    public string ToPatchKey(string relativeToLanguageDirectory)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(relativeToLanguageDirectory);
+        var normalized = NormalizeRelativePath(relativeToLanguageDirectory);
+        var prefix = LanguageDirectoryPrefix;
+        return prefix.Length > 0 && normalized.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+            ? normalized
+            : prefix + normalized;
+    }
+
+    /// <summary>语言目录相对 lang 根的路径 + <c>'/'</c>（如 <c>LLc-CN-LCTA/</c>）；未定位时为空串。</summary>
+    public string LanguageDirectoryPrefix
+    {
+        get
+        {
+            if (_langRoot is null || _langDirectory is null) return string.Empty;
+            var relative = Path.GetRelativePath(_langRoot, _langDirectory).Replace('\\', '/');
+            if (relative is "." or ".." || relative.StartsWith("../", StringComparison.Ordinal)) return string.Empty;
+            return relative.Length == 0 ? string.Empty : relative.TrimEnd('/') + "/";
+        }
+    }
 
     // ── 定位与活动语言 ────────────────────────────────────────────────
 
@@ -144,11 +185,16 @@ public sealed class LangTextWorkbenchService
     /// lang 根，编辑集方法（<see cref="BeginEdit"/> 等）没有基线，会抛
     /// <see cref="InvalidOperationException"/>——现象就是「点文件后预览区一片空白」。
     /// 幂等，可重复调用。
+    ///
+    /// <para>本轮（plan-16 §5）起它同时解析并记住<b>活动语言目录</b>：条目是「相对语言目录」
+    /// 的口径，没有它就没法把条目拼回磁盘路径。解析不出来（config.json 缺失/指向不存在的目录）
+    /// 时退回 lang 根当基准——此时条目口径退化为「相对 lang 根」，与浏览器行为一致。</para>
     /// </summary>
     public void AttachLangRoot(string langRoot)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(langRoot);
         _langRoot = Path.GetFullPath(langRoot);
+        _langDirectory = ResolveLanguageDirectory(_langRoot) ?? _langRoot;
     }
 
     // ── 枚举与索引 ────────────────────────────────────────────────────
@@ -162,11 +208,13 @@ public sealed class LangTextWorkbenchService
     /// （<see cref="ComputeConfigContentHash"/>），不再出现在文件清单 / 树 / 列表里——
     /// 它不是可翻译的文本表，摆在工作台里只会让用户点出一个几十字节的配置。</para>
     ///
-    /// <para>相对路径<b>以 lang 根为基准、'/' 分隔、按字典序</b>（形如
-    /// <c>LLc-CN-LCTA/AbDlg_Faust.json</c>）。<b>这个「带语言目录前缀」的口径不许改</b>：
-    /// 补丁文档的键就是它，真实加载器按 <c>&lt;游戏&gt;/LimbusCompany_Data/lang/&lt;键&gt;</c>
-    /// 备份并应用；界面上的「从语言目录内部开始」只是显示口径，由
-    /// <see cref="LangTextDisplay"/> 负责映射。</para>
+    /// <para><b>条目口径（本轮 plan-16 §5 改动）</b>：<see cref="LangTextFileInfo.RelativePath"/>
+    /// 以 <b>活动语言目录</b> 为基准、'/' 分隔、按字典序（形如 <c>StoryData/S1.json</c>、
+    /// <c>AbDlg_Faust.json</c>）——<b>不再带语言目录那一层</b>（本机旧口径是
+    /// <c>LLc-CN-LCTA/AbDlg_Faust.json</c>）。「条目里不要根文件夹」是用户口径，
+    /// 界面、索引库、搜索命中、编辑集键全部统一到它；补丁文档的键由
+    /// <see cref="ToPatchKey"/> 把语言目录那层补回来（加载器按 lang 根应用，见
+    /// <see cref="LangTextPatchService"/>）。<b>两者不是同一个口径，不许混用</b>。</para>
     ///
     /// <para>同时记录大小、顶层键数（JSON 对象才计）与 UTF-8 合法性。调用成功后本服务进入
     /// 「已定位」状态，编辑集方法以该 lang 根为基线。非 UTF-8 文件：IsUtf8=false、键数 0、
@@ -186,31 +234,28 @@ public sealed class LangTextWorkbenchService
         ArgumentException.ThrowIfNullOrWhiteSpace(langRoot);
         if (!Directory.Exists(langRoot)) throw new DirectoryNotFoundException($"lang 目录不存在: {langRoot}");
         _langRoot = Path.GetFullPath(langRoot);
+        // 活动语言目录 = 条目口径的基准；解析不出来时退回 lang 根（退化行为）
+        _langDirectory = ResolveLanguageDirectory(_langRoot) ?? _langRoot;
 
         var files = new List<LangTextFileInfo>();
-        var active = ReadActiveLanguage(langRoot);
-        if (!string.IsNullOrWhiteSpace(active))
+        if (!string.Equals(_langDirectory, _langRoot, StringComparison.OrdinalIgnoreCase))
         {
-            var activeDir = Path.Combine(langRoot, active);
-            if (Directory.Exists(activeDir))
+            foreach (var path in Directory.EnumerateFiles(_langDirectory, "*.json", SearchOption.AllDirectories)
+                         .OrderBy(x => x, StringComparer.Ordinal))
             {
-                foreach (var path in Directory.EnumerateFiles(activeDir, "*.json", SearchOption.AllDirectories)
-                             .OrderBy(x => x, StringComparer.Ordinal))
-                {
-                    files.Add(BuildFileInfo(_langRoot, path, cached, refreshed));
-                }
+                files.Add(BuildFileInfo(_langDirectory, path, cached, refreshed));
             }
         }
         return files;
     }
 
     private static LangTextFileInfo BuildFileInfo(
-        string langRoot,
+        string baseDirectory,
         string fullPath,
         IReadOnlyDictionary<string, LangTextFileInfo>? cached,
         Action<LangTextFileInfo, CacheObservation>? refreshed)
     {
-        var relative = Path.GetRelativePath(langRoot, fullPath).Replace('\\', '/');
+        var relative = Path.GetRelativePath(baseDirectory, fullPath).Replace('\\', '/');
         if (TryObserve(fullPath, out var observation) && cached is not null &&
             cached.TryGetValue(relative, out var hit) &&
             CacheObservation.Matches(hit, observation))
@@ -439,14 +484,16 @@ public sealed class LangTextWorkbenchService
 
     /// <summary>开始编辑一个文件：读取 lang 目录原文存为 vanilla 快照并进入编辑集，
     /// 返回当前应展示/编辑的文本（首次为原文；该文件已在编辑集中时返回当前修改文本，
-    /// 不重置快照）。原文非法 JSON 或非 UTF-8 时 fail fast。</summary>
+    /// 不重置快照）。原文非法 JSON 或非 UTF-8 时 fail fast。
+    /// <paramref name="relativePath"/> 是<b>相对活动语言目录</b>的条目口径（见
+    /// <see cref="CurrentLanguageDirectory"/>）。</summary>
     public string BeginEdit(string relativePath)
     {
-        var langRoot = RequireLangRoot();
+        var languageDirectory = RequireLanguageDirectory();
         relativePath = NormalizeRelativePath(relativePath);
         if (_edits.TryGetValue(relativePath, out var existing)) return existing.ModifiedText;
 
-        var fullPath = Path.Combine(langRoot, relativePath.Replace('/', Path.DirectorySeparatorChar));
+        var fullPath = Path.Combine(languageDirectory, relativePath.Replace('/', Path.DirectorySeparatorChar));
         if (!File.Exists(fullPath)) throw new FileNotFoundException($"lang 文件不存在: {relativePath}", fullPath);
         var vanilla = ReadTextStrict(fullPath);
         try { _ = JsonNode.Parse(vanilla); }
@@ -496,10 +543,14 @@ public sealed class LangTextWorkbenchService
 
     /// <summary>「导出 lang 补丁」：对每个编辑集条目用 <see cref="TextDiffService"/> 对
     /// vanilla 快照 → 修改文本生成 RFC6902 ops，组装 <see cref="LangPatchDocument"/>
-    /// （键 = 相对 lang 根路径，'/' 分隔）并经 <see cref="LangTextPatchService.Write"/>
-    /// 写到 <paramref name="outputPath"/>——与 LCTA changes.py 的 patchs 语义一致。
+    /// （键 = <b>相对 lang 根</b>路径，'/' 分隔，即 <see cref="ToPatchKey"/> 补回语言目录那层后的
+    /// 加载器口径）并经 <see cref="LangTextPatchService.Write"/> 写到
+    /// <paramref name="outputPath"/>——与 LCTA changes.py 的 patchs 语义一致。
     /// 无差异的文件不进入补丁文档（状态中注明）。只写指定输出路径，绝不触碰游戏目录。
-    /// 返回报告；编辑集为空时写出仅含空 patchs 的文档。</summary>
+    /// 返回报告；编辑集为空时写出仅含空 patchs 的文档。
+    ///
+    /// <para>本轮起本方法只服务旧调用点（静态页/侧边栏时代），plan-16 的统一导出走
+    /// <c>LangExportFormatter</c> 的多格式槽位。</para></summary>
     public LangTextExportReport ExportPatch(string outputPath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
@@ -510,14 +561,15 @@ public sealed class LangTextWorkbenchService
             var before = JsonNode.Parse(entry.VanillaText);
             var after = JsonNode.Parse(entry.ModifiedText);
             var ops = _diff.Generate(before, after);
+            var patchKey = ToPatchKey(relativePath);
             if (ops.Count > 0)
             {
-                document.Patches[relativePath] = ops;
-                statuses.Add(new LangTextExportFileStatus(relativePath, ops.Count));
+                document.Patches[patchKey] = ops;
+                statuses.Add(new LangTextExportFileStatus(patchKey, ops.Count));
             }
             else
             {
-                statuses.Add(new LangTextExportFileStatus(relativePath, 0, "编辑后无差异，未进入补丁"));
+                statuses.Add(new LangTextExportFileStatus(patchKey, 0, "编辑后无差异，未进入补丁"));
             }
         }
 
@@ -536,15 +588,15 @@ public sealed class LangTextWorkbenchService
 
     // ── 内部工具 ─────────────────────────────────────────────────────
 
-    private string RequireLangRoot() =>
-        _langRoot ?? throw new InvalidOperationException("请先调用 EnumerateFiles 定位 lang 根，再使用编辑集。");
+    private string RequireLanguageDirectory() =>
+        _langDirectory ?? _langRoot ?? throw new InvalidOperationException("请先调用 EnumerateFiles 定位 lang 根，再使用编辑集。");
 
     private static string NormalizeRelativePath(string relativePath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(relativePath);
         var normalized = relativePath.Trim().Replace('\\', '/');
         if (Path.IsPathRooted(normalized) || normalized.Split('/').Any(x => x is ".." or ""))
-            throw new InvalidDataException($"路径非法（必须是 lang 根内的相对路径）: {relativePath}");
+            throw new InvalidDataException($"路径非法（必须是活动语言目录内的相对路径）: {relativePath}");
         return normalized;
     }
 

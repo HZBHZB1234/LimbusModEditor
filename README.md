@@ -114,6 +114,25 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/publish.ps1
 Publishes Release win-x64 to `artifacts/publish-win-x64` and copies the FMOD
 DLLs from `third_party/fmod/` into `fmod/` inside the output (3/3 when staged).
 
+## Documentation
+
+| Document | What is in it |
+|---|---|
+| [`docs/README.md`](docs/README.md) | Documentation index: which file to read for what |
+| [`docs/STATUS.md`](docs/STATUS.md) | Current state, verification baseline, project rules, real-environment facts, open tasks, known limits |
+| [`docs/CODE-STRUCTURE.md`](docs/CODE-STRUCTURE.md) | Layering and dependency direction, directory map, UI shell, runtime flows, cross-file invariants, on-disk layout, "where do I change X" table |
+| [`docs/PROJECT-INDEX.md`](docs/PROJECT-INDEX.md) | **Per-file functional index** (every source/test file: purpose, key types, change-locality hints) plus the `AssetRecord.Metadata` key dictionary and a symptom → file lookup |
+| [`docs/USAGE.md`](docs/USAGE.md) | User manual: workflows, shortcuts, troubleshooting, format boundaries |
+| [`docs/REALDATA-VERIFY.md`](docs/REALDATA-VERIFY.md) | Real-data verification of the write-back chain (including the silently-discarded-changes defect and its root cause) |
+| [`docs/REVIEW.md`](docs/REVIEW.md) | Self-review: findings, design-change risks, quantified performance baseline |
+| [`docs/ARCHIVE-DESIGN-NOTES.md`](docs/ARCHIVE-DESIGN-NOTES.md) | Design decisions inherited from the (now archived) per-round plans that still constrain the code |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md) | Implementation history and forward-looking direction (long-form) |
+
+Analysis convention: structure and index documents are produced by **reading code**, not by
+running probes or taking screenshots. The per-round execution plans (`docs/plans/plan-*.md`) and
+`docs/NEXT-STEPS.md` were archived on 2026-09-12 after every item shipped — history is in git
+(`git show <commit>:docs/plans/<file>`).
+
 ## Verification
 
 ```text
@@ -130,3 +149,8 @@ one-click Carra2 export round-trips (real-sample gated), project persistence,
 source materialization, directory and package import, Carra/Lunartique/Rebank
 round trips, XZ compression round trips, bank probing, image/atlas operations,
 overlay backup/restore, and game launch path validation.
+
+Current baseline: **611 tests green** (74 format + 537 domain; real-data gated
+tests run for real on a machine with the game installed). Per-file test
+coverage, real-data gating variables and known flakes are documented in
+[`docs/PROJECT-INDEX.md`](docs/PROJECT-INDEX.md) §11.

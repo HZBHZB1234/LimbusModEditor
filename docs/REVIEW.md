@@ -142,7 +142,7 @@
 | plan-02 | 无项目时设置页可用、引导覆盖层正常 | ✅ `NoProjectOverlay` 只覆盖页面宿主（计划原文覆盖侧边栏+宿主会让设置页不可达，已在提交说明记录偏差）；`SettingsPage` 无项目时共享目录段可用、元数据段置灰 |
 | plan-03 自动加载 | 无手动加载入口；拖放收窄；ModImportService 保留 | ✅ `Import_Click` / `ImportDirectory_Click` grep 0 处；拖放仅「图片→选中图像资源」；`ModImportService` 与格式 handler 未动（CLI / 导出向导仍用） |
 | plan-04 可拖拽 | 拖动流畅、重启保持、双击复位、越界不破 | ✅ `GridSplitter` + `UiStateService`（`<程序目录>/config/ui-state.json`，损坏/缺失回退 + 钳制，6 个单测）；预览列默认 360 / 最小 260，浏览列最小 280 |
-| plan-01 属性与预览 | 真实数据：TextAsset 正文、Sprite 裁剪、AudioClip 试听、属性区正确 | ✅ 前后矩阵见 `docs/plans/REALDATA-VERIFY.md`：Sprite FAIL→622×182、TextAsset FAIL→UTF-8 正文、Texture2D 基线不回退；属性区对真实 Texture/Sprite/TextAsset 产出具体行；AudioClip 本机缓存无样本（音频在 FMOD bank），已实现三种负载形态 + fail fast + 合成单测 |
+| plan-01 属性与预览 | 真实数据：TextAsset 正文、Sprite 裁剪、AudioClip 试听、属性区正确 | ✅ 前后矩阵（历史计划文档，见 `docs/STATUS.md` §7 归档说明）：Sprite FAIL→622×182、TextAsset FAIL→UTF-8 正文、Texture2D 基线不回退；属性区对真实 Texture/Sprite/TextAsset 产出具体行；AudioClip 本机缓存无样本（音频在 FMOD bank），已实现三种负载形态 + fail fast + 合成单测 |
 | plan-05 预览管线 | 多形态、未知类型不空白、快速切换无过期覆盖 | ✅ 七形态 + Hex 兜底；真实缓存 Kind 矩阵（`AssetPreviewRegistryTests`）；代际守卫保留；大表截断 20 万字符 |
 | plan-06 音频工作台 | 1531 bank 判定、样本表、试听、导出、不写游戏目录 | ✅ 真实 bank 目录测试（既有 3 个）+ 新 `RealWorkbenchGateTests` 实测「切片→FMOD 2.2.26 解码→WAV→波形」；`.rebank` 结构与加载器解析规则一致；写盘点审查仅模组/项目/临时目录 |
 | plan-07 文本工作台 | 活动语言、920 文件索引、补丁回放一致、不默认写游戏目录 | ✅ 真实 lang 目录测试（既有）+ 新真实门：改 `AbDlg_Faust.json` → 导出补丁 → 回放 == 修改后；「直接应用」有显著警告 |

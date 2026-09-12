@@ -1,5 +1,13 @@
 # Limbus Mod Editor 后续开发路线图
 
+> **文档定位（2026-09-12）**：本文是**实现历史与后续方向**的长文记录（P0–P4 的原始表述），
+> 其中的「已完成」章节保留原样以存档决策上下文。**当前状态、铁律、待办与真实环境事实
+> 一律以 `docs/STATUS.md` 为准**；结构导航见 `docs/CODE-STRUCTURE.md` 与 `docs/PROJECT-INDEX.md`。
+>
+> 文中引用的 `docs/plans/plan-*.md`（17 份逐轮任务书）已于 2026-09-12 归档删除
+> （全部已实施入库），可用 `git log --oneline` / `git show <commit>:docs/plans/<file>` 取回；
+> 仍然有约束力的设计决策已提炼进 `docs/ARCHIVE-DESIGN-NOTES.md`。
+
 本文档记录当前工作区之后的开发任务。目标是把现有的 C#/.NET 8 + WPF
 骨架继续推进为面向 Limbus Company 的高级 Assets Studio + FMOD Studio
 工作流。任务可以按阶段拆给不同 agent，但每个任务都必须保留现有格式边界、

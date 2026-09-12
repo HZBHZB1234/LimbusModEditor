@@ -574,4 +574,5 @@ Unity 缓存时执行端到端写回验证：真实流纹理 PNG 替换 → 内�
 | `StaticTableIndexStoreTests` | 静态表索引缓存：元数据往返 / 内层哈希换源即整库重建 / **外层键轮换不触发重建** / **正文缓存有界（LRU 淘汰）** / 清空正文保留索引 / 损坏重建 |
 | `RealStaticIndexSmokeTests` | 真实静态 bundle：1392 张表建索引、热读 11ms vs 枚举 bundle 4.3s、正文按需加载且有界、dataClass 分组 |
 
-矩阵文件与前后对照见 `docs/plans/REALDATA-VERIFY.md`。
+矩阵文件与前后对照见 `docs/REVIEW.md` §5（重构自审表）与 `docs/REALDATA-VERIFY.md`；
+本轮前后的真实数据证据已随计划文档归档（历史见 `docs/STATUS.md` §7）。

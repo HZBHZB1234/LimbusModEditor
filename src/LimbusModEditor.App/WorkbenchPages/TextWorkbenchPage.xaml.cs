@@ -15,7 +15,7 @@ namespace LimbusModEditor.App;
 /// <param name="KeyCount">顶层键数。</param>
 /// <param name="SizeBytes">文件大小。</param>
 /// <param name="IsUtf8">是否合法 UTF-8（非 UTF-8 明确标记，不做编码猜测）。</param>
-/// <param name="Modified">是否在编辑集里。</param>
+/// <param name="Modified"><b>文本是否真的被改过</b>（与官方原文不同）——不是「打开过」。</param>
 public sealed record TextFileRow(string RelativePath, string DisplayPath, int KeyCount, long SizeBytes, bool IsUtf8, bool Modified)
 {
     /// <summary>行状态绑定（<c>WorkbenchListItem</c> 样式的 DataTrigger 读它）。</summary>
@@ -118,7 +118,8 @@ public sealed partial class TextWorkbenchPage : UserControl
     private readonly StackPanel _hitPanel;
 
     // 编辑列构件
-    private readonly Grid _editPanel;
+    private readonly StackPanel _editPanel;
+    private readonly ScrollViewer _editHost;
     private readonly TextBlock _fileTitle;
     private readonly Border _modifiedBadge;
     private readonly Button _revertFile;
@@ -140,6 +141,15 @@ public sealed partial class TextWorkbenchPage : UserControl
     private bool _loadingDocument;
     private bool _loaded;
     private bool _suppressSelection;
+
+    /// <summary>最近一次**成功载入编辑器**的条目路径（相对活动语言目录）。
+    ///
+    /// <para>用于抵抗「同一文件被重复触发载入」：文件树/列表在刷新（编辑集变化 →
+    /// <c>RefreshEditSetState</c> → 重建树 / 重绑列表）时会各自抛出选中事件，
+    /// 而 <see cref="SelectFileAsync"/> 一进去就 <c>_editor.Clear()</c>——重复调用会把
+    /// 已经渲染好的键值树清空（现象：树区空白、状态条只剩 <c>—</c>）。
+    /// 有了这个字段，重复触发退化成「重新定位到上次的键」，不再重建编辑器。</para></summary>
+    private string? _lastLoadedPath;
 
     public TextWorkbenchPage(IWorkbenchHost host)
     {
@@ -183,11 +193,12 @@ public sealed partial class TextWorkbenchPage : UserControl
             Text = "编辑集：空",
             Style = System.Windows.Application.Current?.TryFindResource("WorkbenchStatusText") as Style,
         };
-        var warning = WorkbenchShell.CreateSectionLabel(
+        // 这段说明曾经是一整段常驻文字，把键值树挤成三行（用户反馈「预览框太小」）。
+        // 内容重要但不该常驻吃高度，收进 tooltip；常驻只留「编辑集：N 个文件已改」一行。
+        _editSetText.ToolTip =
             "默认不写游戏 lang 目录：导出补丁 / 直接应用两个入口都在左侧「② 产出模组」板块；" +
-            "「直接应用」才会写入游戏目录，且编辑器不负责备份/还原（真实加载器在启动/退出时做 .bak）。");
-        warning.Foreground = System.Windows.Application.Current?.TryFindResource("WbTextFaintBrush") as System.Windows.Media.Brush;
-        warning.Margin = new Thickness(0, 2, 0, 0);
+            "「直接应用」才会写入游戏目录，且编辑器不负责备份/还原（真实加载器在启动/退出时做 .bak）。";
+        _editSetText.TextWrapping = TextWrapping.Wrap;
 
         var titleRow = new Grid { Margin = new Thickness(0, 0, 0, 8) };
         titleRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -202,23 +213,31 @@ public sealed partial class TextWorkbenchPage : UserControl
 
         var footer = new StackPanel { Margin = new Thickness(0, 8, 0, 0) };
         footer.Children.Add(_editSetText);
-        footer.Children.Add(warning);
 
-        // 编辑列只剩「文件标题 / 明细 / 树形编辑器 / 编辑集状态」四段：
-        // 导出与直接应用两个按钮已按反馈移到侧边栏「② 产出模组」板块（plan-14 14.5）。
-        _editPanel = new Grid { Visibility = Visibility.Collapsed };
-        _editPanel.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        _editPanel.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        _editPanel.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        _editPanel.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        Grid.SetRow(titleRow, 0);
-        Grid.SetRow(_fileDetail, 1);
-        Grid.SetRow(_editor, 2);
-        Grid.SetRow(footer, 3);
-        _editPanel.Children.Add(titleRow);
-        _editPanel.Children.Add(_fileDetail);
-        _editPanel.Children.Add(_editor);
-        _editPanel.Children.Add(footer);
+        // 编辑列：**照抄静态数据工作台的口径**（StaticWorkbenchPage：`new ScrollViewer
+        // { Content = editPanel }` 包一个 StackPanel）——编辑器是**内容高度**（树有多少行就多高），
+        // 整列纵向滚动。
+        //
+        // 为什么不再用「标题 / 明细 / 编辑器 * / 编辑集状态」四行 Grid：编辑器是其中唯一的 * 行，
+        // 余量不足时被上面的标题/明细与下面的状态文字挤扁，用户实测只剩三行（「预览框太小」）。
+        // 内容高度口径下树永远不会被挤，空间不够时是整列滚动（与静态页手感一致）；
+        // 树自身的可视区下限写在 JsonTreeEditor.xaml（TreeView 的 MinHeight）。
+        var editPanel = new StackPanel();
+        editPanel.Children.Add(titleRow);
+        editPanel.Children.Add(_fileDetail);
+        editPanel.Children.Add(_editor);
+        editPanel.Children.Add(footer);
+
+        _editPanel = editPanel;
+        _editHost = new ScrollViewer
+        {
+            Content = editPanel,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            // 外层滚动器不参与 Tab 焦点链：否则 Tab 会停在滚动器上，
+            // 用户从行内编辑框按 Tab 会「焦点消失」。
+            Focusable = false,
+            Visibility = Visibility.Collapsed,
+        };
 
         // ── 浏览列：搜索行 ────────────────────────────────────────────
         _search = WorkbenchShell.CreateSearchBox("搜索文件名 / 键路径 / 值（防抖 300ms；走索引库，后台线程）");
@@ -312,7 +331,7 @@ public sealed partial class TextWorkbenchPage : UserControl
         Shell.SetBrowseContent(content);
 
         // ── 编辑列接线 ───────────────────────────────────────────────
-        Shell.SetEditContent(_editPanel);
+        Shell.SetEditContent(_editHost);
         _editor.DocumentChanged += Editor_DocumentChanged;
         _editor.StatusMessage += (_, message) => Shell.SetStatus(message);
         Shell.SetStatus("正在准备文本工作台…");
@@ -465,7 +484,7 @@ public sealed partial class TextWorkbenchPage : UserControl
                 x.KeyCount,
                 x.SizeBytes,
                 x.IsUtf8,
-                _service.IsModified(x.RelativePath)))
+                _service.HasRealEdits(x.RelativePath)))
             .ToList();
         ApplyFileFilter();
         RebuildTree();
@@ -564,7 +583,7 @@ public sealed partial class TextWorkbenchPage : UserControl
             var suffix = info is null
                 ? string.Empty
                 : info.IsUtf8 ? $"（{info.KeyCount} 键 · {TextFileRow.FormatSize(info.SizeBytes)}）" : "（非 UTF-8）";
-            return info is not null && _service.IsModified(info.RelativePath)
+            return info is not null && _service.HasRealEdits(info.RelativePath)
                 ? $"● {node.Name}{suffix}"
                 : $"{node.Name}{suffix}";
         }
@@ -693,29 +712,47 @@ public sealed partial class TextWorkbenchPage : UserControl
     {
         var file = FindFileByPath(relativePath);
         if (file is null) return;
+
+        // 同一文件被重复触发（树/列表刷新各自抛一次选中事件）：不重建编辑器，
+        // 只把定位补上。见 _lastLoadedPath 的说明。
+        if (!_loadingDocument &&
+            string.Equals(_lastLoadedPath, file.RelativePath, StringComparison.OrdinalIgnoreCase))
+        {
+            if (!string.IsNullOrWhiteSpace(keyPath)) _editor.SelectPath(keyPath);
+            return;
+        }
+
         var generation = ++_loadGeneration;
         _selectedFile = file;
         _loadingDocument = true;
         try
         {
-            _editor.Clear();
             _fileTitle.Text = Path.GetFileName(relativePath);
-            _editPanel.Visibility = Visibility.Visible;
+            _editHost.Visibility = Visibility.Visible;
             SelectRowInViews(file.RelativePath);
             Shell.SetStatus($"正在读取 {relativePath}…");
 
+            // 先读、后清：读失败（非 UTF-8 / 非法 JSON / 文件被删）时不再抹掉
+            // 当前已经渲染好的键值树，只报错并保留现场。
             var text = await Task.Run(() => _service.BeginEdit(file.RelativePath));
             if (generation != _loadGeneration) return;
 
+            _editor.Clear();
             _editor.LoadDocument(text, _service.TryGetVanillaText(file.RelativePath));
+            _lastLoadedPath = file.RelativePath;
             if (!string.IsNullOrWhiteSpace(keyPath)) _editor.SelectPath(keyPath);
             _fileDetail.Text = $"{relativePath} · {TextFileRow.FormatSize(file.SizeBytes)} · " +
                                   (file.IsUtf8 ? $"{file.KeyCount} 个顶层键" : "非 UTF-8（不做编码猜测：键值搜索与编辑均跳过）") +
-                                  (_service.IsModified(file.RelativePath) ? " · 已在编辑集中" : string.Empty) +
+                                  (_service.HasRealEdits(file.RelativePath)
+                                      ? " · 已修改（未导出）"
+                                      : _service.IsModified(file.RelativePath)
+                                          ? " · 已建立基线（未改动）"
+                                          : string.Empty) +
                                   $"\n补丁键：{_service.ToPatchKey(file.RelativePath)}";
-            Shell.SetStatus(keyPath is { Length: > 0 } && _editor.SelectedRow?.Path == keyPath
-                ? $"已定位到键 {keyPath}（{relativePath}）。"
+            Shell.SetStatus(keyPath is { Length: > 0 }
+                ? $"已载入 {relativePath}，正在定位键 {keyPath}（树按需展开）…"
                 : $"已载入 {relativePath}（修改只进内存编辑集）。");
+            ReportKeyLocation(file.RelativePath, keyPath);
         }
         catch (Exception ex)
         {
@@ -728,6 +765,24 @@ public sealed partial class TextWorkbenchPage : UserControl
             _loadingDocument = false;
             RefreshEditSetState();
         }
+    }
+
+    /// <summary>
+    /// 定位结果的最终回报：<c>JsonTreeEditor.SelectPath</c> 需要等树走完一轮布局
+    /// （首层容器还没进可视树时设置 <c>IsSelected</c> 会被 WPF 忽略），所以刚载入时
+    /// 它可能返回 false 但随后自行完成。这里在 Loaded 优先级统一复查一次，
+    /// 成功就报「已定位」，失败就明说没找到——不再出现「点了搜索命中却毫无反应」。
+    /// </summary>
+    private void ReportKeyLocation(string relativePath, string? keyPath)
+    {
+        if (keyPath is not { Length: > 0 }) return;
+        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, new Action(() =>
+        {
+            if (!string.Equals(_selectedFile?.RelativePath, relativePath, StringComparison.OrdinalIgnoreCase)) return;
+            Shell.SetStatus(_editor.SelectedRow?.Path == keyPath
+                ? $"已定位到键 {keyPath}（{relativePath}）。"
+                : $"已载入 {relativePath}，但没有找到键 {keyPath}（可能已改名或被删除）。");
+        }));
     }
 
     /// <summary>把选中项同步到两个视图（程序化选中不触发重新打开文件）。</summary>
@@ -749,21 +804,34 @@ public sealed partial class TextWorkbenchPage : UserControl
         if (Shell.IsTreeMode) SyncTreeSelection();
     }
 
-    /// <summary>编辑器的文档变更：把当前文本写进编辑集（失败时明确报错，编辑集保持原状态）。</summary>
+    /// <summary>编辑器的文档变更：把当前文本写进编辑集（失败时明确报错，编辑集保持原状态）。
+    ///
+    /// <para><b>先把「不是修改」的事件挡掉</b>：<c>LoadDocument</c> 结尾必发一次
+    /// <c>DocumentChanged(IsModified=false)</c>（宿主据此刷新摘要），它不是用户改动。
+    /// 只靠 <c>_loadingDocument</c> 守卫是不够的——那次事件可能在守卫窗口之外到达
+    /// （<c>SelectPath</c> 现在是延后执行的），于是原文被 <c>SetModified</c> 塞进编辑集，
+    /// 现象就是用户反馈的「一打开文件就提示目标文件已编辑，重启后又没了」
+    /// （编辑集只在内存里，退出即丢）。</para></summary>
     private void Editor_DocumentChanged(object? sender, JsonDocumentChangedEventArgs e)
     {
         if (_loadingDocument || _selectedFile is null) return;
+        if (!e.IsModified) return;   // 载入/切页签触发的通知：不是修改，绝不写编辑集
         var relativePath = _selectedFile.RelativePath;
         try
         {
-            // 载入/切页签也会触发本事件：内容未变时不写编辑集（避免无谓地把原文塞进编辑集）。
-            if (_service.IsModified(relativePath) &&
-                string.Equals(_service.TryGetModifiedText(relativePath), e.JsonText, StringComparison.Ordinal))
+            // 先判定「真的有改动」再进编辑集：载入时登记的那条基线（vanilla == modified）
+            // 只有等这里第一次写入后才会变成真正的修改；反过来，恢复成原文的写入要
+            // 把条目移出编辑集，否则「编辑集：N 个文件已改」会一直挂着这个文件（用户反馈的
+            // 「一打开文件就提示已修改」有一半出在这种只进不出的账上）。
+            if (string.Equals(_service.TryGetModifiedText(relativePath), e.JsonText, StringComparison.Ordinal))
             {
                 RefreshEditSetState();
                 return;
             }
-            _service.SetModified(relativePath, e.JsonText);
+            if (string.Equals(_service.TryGetVanillaText(relativePath), e.JsonText, StringComparison.Ordinal))
+                _host.LangEdits.Revert(relativePath);
+            else
+                _host.LangEdits.SetModified(relativePath, e.JsonText);
         }
         catch (Exception ex)
         {
@@ -777,7 +845,9 @@ public sealed partial class TextWorkbenchPage : UserControl
     {
         if (_selectedFile is null) return;
         var relativePath = _selectedFile.RelativePath;
-        var reverted = _service.Revert(relativePath);
+        // 走宿主会话（而不是直接调服务）：会话要推进版本号并广播 Changed，
+        // 否则 Revision 恒为 0、依赖它的导出报告对不上账。
+        var reverted = _host.LangEdits.Revert(relativePath);
         Shell.SetStatus(reverted
             ? $"已还原 {relativePath}（移出编辑集；lang 目录从未被改动）。"
             : "该文件不在编辑集中。");
@@ -785,12 +855,17 @@ public sealed partial class TextWorkbenchPage : UserControl
     }
 
     /// <summary>刷新编辑集相关的 UI 状态（徽标 / 状态文案 / 列表与树上的「已修改」标记）。
-    /// 导出与直接应用两个按钮已移到侧边栏（plan-14 14.5），这里不再维护它们的可用性。</summary>
+    /// 导出与直接应用两个按钮已移到侧边栏（plan-14 14.5），这里不再维护它们的可用性。
+    ///
+    /// <para><b>「已修改」一律按「文本与官方原文不同」判定</b>（<see cref="LangTextWorkbenchService.HasRealEdits"/>），
+    /// 不是「在编辑集里」：<c>BeginEdit</c> 为了让导出拿到差分基线会把**打开过的每个文件**
+    /// 都登记进编辑集，用 <c>IsModified</c> 当「已修改」会一边看预览一边把它标成已改，
+    /// 且计数永远 ≥ 1（用户反馈的「一打开文件就提示已修改」）。</para></summary>
     private void RefreshEditSetState()
     {
-        var edited = _service.EditedFiles;
+        var edited = _service.RealEditFiles;
         var hasEdits = edited.Count > 0;
-        var selectedModified = _selectedFile is not null && _service.IsModified(_selectedFile.RelativePath);
+        var selectedModified = _selectedFile is not null && _service.HasRealEdits(_selectedFile.RelativePath);
 
         _revertFile.IsEnabled = selectedModified;
         _modifiedBadge.Visibility = selectedModified ? Visibility.Visible : Visibility.Collapsed;
@@ -798,21 +873,25 @@ public sealed partial class TextWorkbenchPage : UserControl
             ? "未选择文件"
             : (_selectedFile.IsUtf8 ? string.Empty : "⚠ ") + Path.GetFileName(_selectedFile.RelativePath);
         _editSetText.Text = hasEdits
-            ? $"编辑集：{edited.Count} 个文件已改（全部在内存里；lang 目录未被改动）——" +
-              "用左侧「② 产出模组 → 导出模组…」把它们写成多套语言格式（bus / patch / pathset）"
-            : "编辑集：空（修改只进内存；改完文本后用左侧「② 产出模组 → 导出模组…」落地）";
+            ? $"编辑集：{edited.Count} 个文件已改（只在内存里；用左侧「② 产出模组 → 导出模组…」落地）"
+            : "编辑集：空（改完文本后用左侧「② 产出模组 → 导出模组…」落地）";
 
         // 「已修改」金色标记要跟着编辑集走（列表行 + 树里的 ● 前缀）。
         var changed = false;
         for (var i = 0; i < _rows.Count; i++)
         {
-            var modified = _service.IsModified(_rows[i].RelativePath);
+            var modified = _service.HasRealEdits(_rows[i].RelativePath);
             if (_rows[i].Modified == modified) continue;
             _rows[i] = _rows[i] with { Modified = modified };
             changed = true;
         }
         if (changed) ApplyFileFilter();
         if (_treeRoot is not null) RebuildTree();
+
+        // 树 / 列表在重建后都会丢掉「选中高亮」（容器是新建的），但编辑器里的内容还在。
+        // 这里把选中同步回去，让用户看到的选中行与编辑列里的文件始终一致
+        // （同步走的是程序化路径，不会触发重新打开文件，见 _lastLoadedPath）。
+        if (_selectedFile is not null) SelectRowInViews(_selectedFile.RelativePath);
     }
 
     // ── 导出与直接应用（plan-16 S6 起已移除）──────────────────────────

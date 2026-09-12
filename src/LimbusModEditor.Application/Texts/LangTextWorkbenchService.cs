@@ -531,6 +531,27 @@ public sealed class LangTextWorkbenchService
     /// <summary>该文件是否在编辑集中。</summary>
     public bool IsModified(string relativePath) => _edits.ContainsKey(NormalizeRelativePath(relativePath));
 
+    /// <summary>
+    /// 该文件的文本是否<b>真的与官方原文不同</b>（即「有实质修改」）。
+    ///
+    /// <para><b>为什么不能拿 <see cref="IsModified"/> 当「已修改」用</b>：
+    /// <see cref="BeginEdit"/> 为了让导出能拿到 RFC6902 差分基线，会把**每个被打开过的文件**
+    /// 都登记进编辑集（<c>VanillaText == ModifiedText</c>）。编辑集因此是「打开过的文件」，
+    /// 而界面上「已修改 / 编辑集 N 个文件」要表达的是「有改动的文件」——直接把两者等同，
+    /// 现象就是「随便预览一个文件就被标成已修改」，而这个标记在重启后消失
+    /// （编辑集只在内存里）。本方法给出后者：逐字节比较当前文本与官方原文。</para></summary>
+    public bool HasRealEdits(string relativePath)
+        => _edits.TryGetValue(NormalizeRelativePath(relativePath), out var entry)
+           && !string.Equals(entry.VanillaText, entry.ModifiedText, StringComparison.Ordinal);
+
+    /// <summary>编辑集里有实质修改的条目（<see cref="HasRealEdits"/> 口径，字典序）——
+    /// 导出报告与界面计数都用它，不再数「打开过几个文件」。</summary>
+    public IReadOnlyList<string> RealEditFiles
+        => _edits.Where(x => !string.Equals(x.Value.VanillaText, x.Value.ModifiedText, StringComparison.Ordinal))
+                 .Select(x => x.Key)
+                 .OrderBy(x => x, StringComparer.Ordinal)
+                 .ToArray();
+
     /// <summary>当前修改文本；不在编辑集中时返回 null。</summary>
     public string? TryGetModifiedText(string relativePath) =>
         _edits.TryGetValue(NormalizeRelativePath(relativePath), out var entry) ? entry.ModifiedText : null;

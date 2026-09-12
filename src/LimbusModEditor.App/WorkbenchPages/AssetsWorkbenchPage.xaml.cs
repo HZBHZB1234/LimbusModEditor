@@ -626,7 +626,12 @@ public partial class AssetsWorkbenchPage : UserControl
     }
 
     /// <summary>行号 + 正文：两列都用同一字体/字号的只读 TextBox（行高天然一致），
-    /// 由外层 ScrollViewer 统一滚动。</summary>
+    /// 由外层 ScrollViewer 统一滚动。
+    ///
+    /// <para><b>不写死高度</b>：本视图由预览列的 <c>*</c> 行承载，写死 220 会让正文
+    /// 永远只有一条窄缝（用户反馈「文本预览框高度太低」）。现在高度由预览列决定，
+    /// 行号列与正文列的 <c>AcceptsReturn</c> TextBox 都随视口拉伸，滚动交给外层
+    /// ScrollViewer（它已经拿到确定高度，滚动条才会正常出现）。</para></summary>
     private static UIElement BuildNumberedText(string text)
     {
         var lineCount = 1;
@@ -676,7 +681,6 @@ public partial class AssetsWorkbenchPage : UserControl
             Background = WbBrush("WbListBrush"),
             BorderBrush = WbBrush("WbBorderBrush"),
             BorderThickness = new Thickness(1),
-            Height = 220,
             Child = new ScrollViewer
             {
                 Content = grid,
@@ -749,7 +753,6 @@ public partial class AssetsWorkbenchPage : UserControl
             Background = WbBrush("WbListBrush"),
             BorderBrush = WbBrush("WbBorderBrush"),
             BorderThickness = new Thickness(1),
-            Height = 220,
             Child = new ScrollViewer { Content = tree, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, Padding = new Thickness(4) },
         };
     }

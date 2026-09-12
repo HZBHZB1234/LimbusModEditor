@@ -13,7 +13,9 @@ namespace LimbusModEditor.Application.Texts;
 /// <see cref="LangTextWorkbenchService.ToPatchKey"/> 在写出时补回语言目录那一层。</para>
 ///
 /// <para><b>仍然只存在内存里</b>：关窗即丢（与原行为一致），lang 目录从不被本会话改动。
-/// <see cref="Revision"/> 供导出报告与调试流程记录「本次导出对应的是哪一版编辑集」。</para>
+/// <see cref="Revision"/> 供导出报告与调试流程记录「本次导出对应的是哪一版编辑集」——
+/// 它只会被本会话的 <see cref="SetModified"/> / <see cref="Revert"/> / <see cref="ClearEdits"/>
+/// 推进，<b>绕过会话直接调服务不会推进它</b>（页面曾经这样绕，于是版本号恒为 0）。</para>
 /// </summary>
 public sealed class LangEditSession
 {
@@ -51,8 +53,15 @@ public sealed class LangEditSession
     /// <summary>编辑集条目数。</summary>
     public int EditedFileCount => _service.EditedFiles.Count;
 
-    /// <summary>该条目是否在编辑集中。</summary>
+    /// <summary>该条目是否在编辑集中（= 打开过、且已为导出留下官方基线）。
+    /// <b>不等于「有修改」</b>——「有修改」看 <see cref="HasRealEdits"/>。</summary>
     public bool IsModified(string relativePath) => _service.IsModified(relativePath);
+
+    /// <summary>该条目的文本是否真的与官方原文不同（界面上的「已修改」标记用它）。</summary>
+    public bool HasRealEdits(string relativePath) => _service.HasRealEdits(relativePath);
+
+    /// <summary>编辑集里确有改动的条目（计数与导出报告用，不含「只是打开过」的文件）。</summary>
+    public IReadOnlyList<string> RealEditFiles => _service.RealEditFiles;
 
     /// <summary>vanilla 快照原文；不在编辑集中返回 null。</summary>
     public string? TryGetVanillaText(string relativePath) => _service.TryGetVanillaText(relativePath);

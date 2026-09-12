@@ -264,4 +264,37 @@ public sealed class ModExportPlanTests : IDisposable
         Assert.Equal(2, session.EntryCount); // 编辑集仍然记着两条（页面状态），快照只给有差异的
         Assert.Equal("""{"a":1}""", session.TryGetOfficialText("k1"));
     }
+
+    /// <summary>
+    /// 界面上的「已修改」必须按「文本与官方原文不同」判定，不能按「在编辑集里」——
+    /// <c>BeginEdit</c> 为了让导出拿到差分基线会把**打开过的每个文件**都登记进编辑集，
+    /// 拿 <c>IsModified</c> 当「已修改」用就会出现「随便预览一个文件就被标成已修改」
+    /// （用户反馈：重启后该标记消失，因为编辑集只在内存里）。
+    /// </summary>
+    [Fact]
+    public void Lang_session_separates_open_baseline_from_real_modification()
+    {
+        var langRoot = Path.Combine(_work, "LimbusCompany_Data", "lang");
+        Directory.CreateDirectory(Path.Combine(langRoot, "LLC_zh-CN"));
+        File.WriteAllText(Path.Combine(langRoot, "config.json"), """{"lang":"LLC_zh-CN"}""");
+        var original = """{"k":"v"}""";
+        File.WriteAllText(Path.Combine(langRoot, "LLC_zh-CN", "a.json"), original);
+
+        var session = new LangEditSession();
+        session.AttachLangRoot(langRoot);
+        session.BeginEdit("a.json");                 // 只是打开预览
+
+        Assert.True(session.IsModified("a.json"));            // 在编辑集里（导出基线）
+        Assert.False(session.HasRealEdits("a.json"));         // 但没有改过任何文本
+        Assert.Empty(session.RealEditFiles);
+
+        session.SetModified("a.json", """{"k":"w"}""");        // 真的改了
+        Assert.True(session.HasRealEdits("a.json"));
+        Assert.Equal(["a.json"], session.RealEditFiles);
+
+        session.SetModified("a.json", original);              // 又改回原文：不再算改动
+        Assert.True(session.IsModified("a.json"));
+        Assert.False(session.HasRealEdits("a.json"));
+        Assert.Empty(session.RealEditFiles);
+    }
 }

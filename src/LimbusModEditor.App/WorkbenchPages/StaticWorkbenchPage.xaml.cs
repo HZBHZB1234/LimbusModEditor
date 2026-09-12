@@ -52,7 +52,9 @@ public partial class StaticWorkbenchPage : UserControl
     private readonly DispatcherTimer _searchTimer;
     private readonly TextDiffService _diff = new();
     private readonly List<StaticTableEntry> _tables = [];
-    private readonly Dictionary<string, string> _modified = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>静态表编辑集：**宿主共享的会话**（plan-16 S3），导出 / 调试从它读全部修改。</summary>
+    private readonly StaticEditSession _edits;
+    /// <summary>官方基线正文的页面缓存（打开过的表才有；导出用的基线存在会话里）。</summary>
     private readonly Dictionary<string, string> _vanilla = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly TextBox _search;
@@ -83,6 +85,13 @@ public partial class StaticWorkbenchPage : UserControl
         InitializeComponent();
         Shell.Attach(host, WorkbenchPageKeys.Static);
         _index = new StaticIndexService(new StaticTableIndexStore(host.Env.CacheDirectory));
+        // 宿主共享的编辑集会话（页面常驻，只创建一次）：导出 / 调试看的就是它。
+        _edits = host.StaticEdits;
+        _edits.Changed += (_, _) => Dispatcher.InvokeAsync(() =>
+        {
+            RefreshActionButtons();
+            ApplyFilter();
+        });
 
         _searchTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
         _searchTimer.Tick += (_, _) => { _searchTimer.Stop(); ApplyFilter(); };
@@ -278,7 +287,7 @@ public partial class StaticWorkbenchPage : UserControl
         }
         rows = _stateFilter.SelectedIndex switch
         {
-            1 => rows.Where(x => _modified.ContainsKey(x.Key)),
+            1 => rows.Where(x => _edits.IsModified(x.Key)),
             2 => rows.Where(x => _index.Store.ReadCachedDocumentKeys().Contains(x.Key)),
             3 => rows.Where(x => !x.IsUtf8),
             _ => rows,
@@ -288,7 +297,7 @@ public partial class StaticWorkbenchPage : UserControl
             1 => rows.OrderBy(x => x.FileName, StringComparer.OrdinalIgnoreCase).ToList(),
             2 => rows.OrderByDescending(x => x.SizeBytes).ToList(),
             3 => rows.OrderBy(x => x.SizeBytes).ToList(),
-            4 => rows.OrderByDescending(x => _modified.ContainsKey(x.Key)).ThenBy(x => x.FileName, StringComparer.OrdinalIgnoreCase).ToList(),
+            4 => rows.OrderByDescending(x => _edits.IsModified(x.Key)).ThenBy(x => x.FileName, StringComparer.OrdinalIgnoreCase).ToList(),
             _ => rows.ToList(),
         };
     }
@@ -308,7 +317,7 @@ public partial class StaticWorkbenchPage : UserControl
         else if (filtered.Count == 0) Shell.SetEmptyHint("没有表匹配当前筛选条件。");
         else Shell.SetEmptyHint(null);
         Shell.SetStatus($"{filtered.Count} / {_tables.Count} 张表" +
-                        (_modified.Count > 0 ? $" · 已修改 {_modified.Count} 张" : string.Empty));
+                        (_edits.EntryCount > 0 ? $" · 已修改 {_edits.EntryCount} 张" : string.Empty));
     }
 
     private void SwitchView(StaticViewMode mode)
@@ -349,7 +358,7 @@ public partial class StaticWorkbenchPage : UserControl
         item.Items.Clear();
         foreach (var entry in FilteredEntries().Where(x => string.Equals(x.DataClass, dataClass, StringComparison.OrdinalIgnoreCase)))
         {
-            var modified = _modified.ContainsKey(entry.Key);
+            var modified = _edits.IsModified(entry.Key);
             item.Items.Add(new TreeViewItem
             {
                 Header = $"{entry.FileName}（{entry.SizeLabel}{(entry.IsUtf8 ? string.Empty : " · 非 UTF-8")}）" +
@@ -384,11 +393,13 @@ public partial class StaticWorkbenchPage : UserControl
         Shell.SetStatus($"正在读取 {entry.FileName}…");
         try
         {
-            var document = _modified.TryGetValue(entry.Key, out var modifiedText)
+            var document = _edits.TryGetModifiedText(entry.Key) is { } modifiedText
                 ? new StaticTableDocument(entry, modifiedText, false)
                 : await _index.LoadDocumentAsync(_location, entry);
             if (generation != _loadGeneration) return;
-            var vanilla = _vanilla.TryGetValue(entry.Key, out var savedVanilla) ? savedVanilla : document.Text;
+            var vanilla = _vanilla.TryGetValue(entry.Key, out var savedVanilla)
+                ? savedVanilla
+                : _edits.TryGetOfficialText(entry.Key) ?? document.Text;
             if (vanilla is not null) _vanilla[entry.Key] = vanilla;
             if (document.Text is null)
             {
@@ -421,24 +432,33 @@ public partial class StaticWorkbenchPage : UserControl
     private void SaveCurrentEdit()
     {
         if (_selected is null || !_editor.HasDocument) return;
-        _modified[_selected.Key] = _editor.CurrentJsonText;
+        var baseline = _vanilla.TryGetValue(_selected.Key, out var vanilla) ? vanilla : null;
+        if (baseline is null)
+        {
+            // 导出要生成 RFC6902 差分，必须有官方基线；没有就明确拒绝，不写一个差不出东西的条目。
+            Shell.SetStatus($"{_selected.FileName}：缺少官方基线，无法登记（重新打开该表即可拿到基线）。");
+            return;
+        }
+        _edits.Set(_selected.Key, _selected, baseline, _editor.CurrentJsonText);
         UpdateDiffInfo();
         RefreshActionButtons();
         ApplyFilter();
-        Shell.SetStatus($"{_selected.FileName} 的修改已进入编辑集（导出 .staticmod 时生成 RFC6902 补丁）。");
+        Shell.SetStatus($"{_selected.FileName} 的修改已进入编辑集（导出模组时生成 .staticmod 的 RFC6902 补丁）。");
     }
 
     private void UpdateDiffInfo()
     {
         if (_selected is null) { _diffInfo.Text = "—"; return; }
-        if (!_modified.TryGetValue(_selected.Key, out var modified))
+        if (_edits.TryGetModifiedText(_selected.Key) is not { } modified)
         {
             _diffInfo.Text = "与官方版本无差异。";
             return;
         }
         try
         {
-            var baseline = _vanilla.TryGetValue(_selected.Key, out var vanilla) ? vanilla : null;
+            var baseline = _vanilla.TryGetValue(_selected.Key, out var vanilla)
+                ? vanilla
+                : _edits.TryGetOfficialText(_selected.Key);
             if (baseline is null)
             {
                 _diffInfo.Text = "（缺少官方基线，无法计算差异）";
@@ -460,7 +480,7 @@ public partial class StaticWorkbenchPage : UserControl
     private async Task RevertTableAsync()
     {
         if (_selected is null) return;
-        _modified.Remove(_selected.Key);
+        _edits.Remove(_selected.Key);
         _vanilla.Remove(_selected.Key);
         await SelectTableAsync(_selected);
         ApplyFilter();
@@ -471,8 +491,8 @@ public partial class StaticWorkbenchPage : UserControl
     {
         var hasTable = _selected is not null;
         _saveEdit.IsEnabled = hasTable && _editor.IsModified;
-        _revertTable.IsEnabled = hasTable && _selected is not null && _modified.ContainsKey(_selected.Key);
-        _exportStaticMod.IsEnabled = _modified.Count > 0;
+        _revertTable.IsEnabled = hasTable && _selected is not null && _edits.IsModified(_selected.Key);
+        _exportStaticMod.IsEnabled = _edits.EntryCount > 0;
         _clearDocumentCache.IsEnabled = _source is not null;
     }
 
@@ -492,11 +512,17 @@ public partial class StaticWorkbenchPage : UserControl
 
     // ── 导出 .staticmod ─────────────────────────────────────────────
 
+    /// <summary>
+    /// 导出 .staticmod（S6 之前保留的手动入口；S6 起由侧边栏「导出模组」统一产出
+    /// <c>&lt;项目名&gt;_static/staticmod/</c>，本入口与按钮一并删除）。
+    /// 编辑集自 plan-16 S3 起由宿主会话持有，这里只读快照。
+    /// </summary>
     private async Task ExportStaticModAsync()
     {
-        if (_modified.Count == 0)
+        var snapshot = _edits.Snapshot();
+        if (snapshot.Count == 0)
         {
-            Shell.SetStatus("没有修改：先编辑至少一张表。");
+            Shell.SetStatus("没有修改：先编辑至少一张表并「保存修改到编辑集」。");
             return;
         }
         var project = _host.Project;
@@ -518,27 +544,20 @@ public partial class StaticWorkbenchPage : UserControl
         try
         {
             var entries = new List<(string DataClass, string File, string? Container, string OfficialJsonPath, string ModifiedJsonPath)>();
-            foreach (var table in _tables)
+            for (var index = 0; index < snapshot.Count; index++)
             {
-                if (!_modified.TryGetValue(table.Key, out var modified)) continue;
-                if (!_vanilla.TryGetValue(table.Key, out var vanilla))
-                {
-                    if (_location is null) continue;
-                    var document = await _index.LoadDocumentAsync(_location, table);
-                    vanilla = document.Text ?? string.Empty;
-                    _vanilla[table.Key] = vanilla;
-                }
-                var officialPath = Path.Combine(work, $"official-{entries.Count}.json");
-                var modifiedPath = Path.Combine(work, $"modified-{entries.Count}.json");
-                await File.WriteAllTextAsync(officialPath, vanilla, new UTF8Encoding(false));
-                await File.WriteAllTextAsync(modifiedPath, modified, new UTF8Encoding(false));
-                entries.Add((table.DataClass, table.FileName,
-                    string.IsNullOrWhiteSpace(table.ContainerEntry) ? null : table.ContainerEntry,
+                var edit = snapshot[index];
+                var officialPath = Path.Combine(work, $"official-{index}.json");
+                var modifiedPath = Path.Combine(work, $"modified-{index}.json");
+                await File.WriteAllTextAsync(officialPath, edit.OfficialText, new UTF8Encoding(false));
+                await File.WriteAllTextAsync(modifiedPath, edit.ModifiedText, new UTF8Encoding(false));
+                entries.Add((edit.Entry.DataClass, edit.Entry.FileName,
+                    string.IsNullOrWhiteSpace(edit.Entry.ContainerEntry) ? null : edit.Entry.ContainerEntry,
                     officialPath, modifiedPath));
             }
             if (entries.Count == 0)
             {
-                Shell.SetStatus("没有可导出的差异（修改的表不在当前索引里）。");
+                Shell.SetStatus("没有可导出的差异（编辑集为空）。");
                 return;
             }
             var package = _staticMods.CreateJsonPatchPackage(

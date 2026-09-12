@@ -95,7 +95,12 @@ public sealed record TextHitRow(LangTextSearchHit Hit, string DisplayPath)
 public sealed partial class TextWorkbenchPage : UserControl
 {
     private readonly IWorkbenchHost _host;
-    private readonly LangTextWorkbenchService _service = new();
+    /// <summary>
+    /// lang 服务实例：**宿主共享的那一份**（plan-16 S3）。
+    /// 编辑集随之变成宿主可见的状态（导出 / 调试都从 <see cref="IWorkbenchHost.LangEdits"/> 读），
+    /// 而枚举 / 搜索 / 差分仍由同一实例完成——不允许出现两份互不可见的服务状态。
+    /// </summary>
+    private readonly LangTextWorkbenchService _service;
     private readonly TextIndexStore _store;
     private readonly DispatcherTimer _searchTimer;
     private readonly DispatcherTimer _filterTimer;
@@ -140,6 +145,9 @@ public sealed partial class TextWorkbenchPage : UserControl
     {
         _host = host;
         InitializeComponent();
+        // 用宿主共享的会话（编辑集因此对导出 / 调试可见）；页面的常驻性保证只创建一次。
+        _service = host.LangEdits.Service;
+        _host.LangEdits.Changed += (_, _) => Dispatcher.InvokeAsync(RefreshEditSetState);
 
         _searchTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
         _searchTimer.Tick += async (_, _) => { _searchTimer.Stop(); await RunSearchAsync(); };

@@ -1,4 +1,5 @@
 using LimbusModEditor.Application.AppConfig;
+using LimbusModEditor.Application.Texts;
 using LimbusModEditor.Domain.Projects;
 
 namespace LimbusModEditor.App;
@@ -17,6 +18,15 @@ public interface IWorkbenchHost
 
     /// <summary>全局共享环境（目录配置、最近项目等）。</summary>
     AppEnvironment Env { get; }
+
+    /// <summary>
+    /// 文本（lang）编辑集会话（plan-16 S3）：由宿主持有，文本工作台注入使用，
+    /// 「导出模组 / 调试」两个入口也从它读取当前的全部文本修改。
+    /// </summary>
+    LangEditSession LangEdits { get; }
+
+    /// <summary>静态数据表编辑集会话（plan-16 S3）：与 <see cref="LangEdits"/> 同构。</summary>
+    StaticEditSession StaticEdits { get; }
 
     /// <summary>在主窗口状态栏写一条状态。</summary>
     void SetStatus(string message);

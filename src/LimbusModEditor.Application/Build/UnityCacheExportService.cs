@@ -111,7 +111,12 @@ public sealed class UnityCacheExportService
         return new ModExportResult(ModFormatKind.Carra2, outputFullPath, applied, diagnostics, statuses);
     }
 
-    private static bool IsEditedCacheAsset(AssetRecord asset)
+    /// <summary>
+    /// 该资源是否属于「Unity 缓存对象级导出」的候选（plan-16 S4 起公开：导出计划
+    /// <c>ModExportPlanService</c> 与导出执行器必须用<b>同一口径</b>判定，
+    /// 否则会出现「计划说有、导出说没有」这种自相矛盾的报告）。
+    /// </summary>
+    public static bool IsEditedCacheAsset(AssetRecord asset)
     {
         if (asset.UnityPathId is null || string.IsNullOrWhiteSpace(asset.ContainerPath)) return false;
         if (asset.SourcePath is null || !File.Exists(asset.SourcePath)) return false;

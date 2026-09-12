@@ -78,6 +78,19 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     /// <summary>全局共享环境（IWorkbenchHost）。</summary>
     public AppEnvironment Env => _env;
 
+    /// <summary>文本（lang）编辑集会话（plan-16 S3）：宿主持有，页面注入使用。
+    /// 导出模组 / 调试两个入口从它读取当前全部文本修改。</summary>
+    private readonly LimbusModEditor.Application.Texts.LangEditSession _langEdits = new();
+
+    /// <summary>静态数据表编辑集会话（plan-16 S3）。</summary>
+    private readonly LimbusModEditor.Application.Texts.StaticEditSession _staticEdits = new();
+
+    /// <summary>文本编辑集会话（IWorkbenchHost）。</summary>
+    public LimbusModEditor.Application.Texts.LangEditSession LangEdits => _langEdits;
+
+    /// <summary>静态编辑集会话（IWorkbenchHost）。</summary>
+    public LimbusModEditor.Application.Texts.StaticEditSession StaticEdits => _staticEdits;
+
     /// <summary>状态栏写入（IWorkbenchHost）。</summary>
     public void SetStatus(string message) => StatusText.Text = message;
 

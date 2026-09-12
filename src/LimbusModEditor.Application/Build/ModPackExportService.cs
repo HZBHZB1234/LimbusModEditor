@@ -1,3 +1,4 @@
+using LimbusModEditor.Application.StaticMods;
 using LimbusModEditor.Application.Texts;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Domain.Formats;
@@ -5,7 +6,9 @@ using LimbusModEditor.Domain.Projects;
 using LimbusModEditor.Formats.Abstractions;
 using LimbusModEditor.Formats.Bank;
 using LimbusModEditor.Formats.Carra;
+using LimbusModEditor.Formats.Lunartique;
 using LimbusModEditor.Formats.Rebank;
+using LimbusModEditor.Formats.Unity;
 
 namespace LimbusModEditor.Application.Build;
 
@@ -106,10 +109,10 @@ public sealed class ModPackExportService
                 ExportSlot.Bank => await ExportBankAsync(plan, item, context, progress, cancellationToken),
                 ExportSlot.Rebank => await ExportRebankAsync(plan, item, context, progress, cancellationToken),
                 ExportSlot.Carra => await ExportCarraAsync(project, projectRoot, plan, item, context, progress, cancellationToken),
-                ExportSlot.Lunartique => Skip(item, "Lunartique 包在 S8 落地"),
+                ExportSlot.Lunartique => await ExportLunartiqueAsync(project, projectRoot, plan, item, context, progress, cancellationToken),
                 ExportSlot.LangBus or ExportSlot.LangPatch or ExportSlot.LangPathset =>
                     ExportLangAsync(plan, item),
-                ExportSlot.StaticMod => Skip(item, "静态数据模组导出在 S8 落地"),
+                ExportSlot.StaticMod => ExportStaticMod(plan, item),
                 _ => Skip(item, "未实现的槽位"),
             });
         }
@@ -323,6 +326,149 @@ public sealed class ModPackExportService
         }
         return new ModPackSlotResult(item.Descriptor, outputs.Count > 0, item.Directory,
             outputs.Count, outputs, diagnostics, []);
+    }
+
+    // ── 静态数据：_static/staticmod ─────────────────────────────────
+
+    /// <summary>
+    /// 把静态表编辑集写成 LCTA 兼容的 <c>.staticmod</c>（plan-16 S8）。
+    ///
+    /// <para>复用既有能力：<see cref="StaticModService.CreateJsonPatchPackage"/> 生成
+    /// 「官方 vs 修改」的 RFC6902 补丁与 manifest（<c>dataClass/file/container/opType=jsonpatch</c>），
+    /// <see cref="StaticModService.Write"/> 打包——两者本来就是按 <c>launcher/staticmod.py</c>
+    /// 的布局写的，本轮只是把它从「静态页的按钮」搬到统一的槽位导出。</para>
+    /// </summary>
+    private static ModPackSlotResult ExportStaticMod(ModExportPlan plan, ModExportPlanItem item)
+    {
+        if (plan.StaticEntries.Count == 0)
+            return new ModPackSlotResult(item.Descriptor, false, item.Directory, 0, [], ["没有静态表修改"], []);
+        var work = Path.Combine(Path.GetTempPath(), "lme-staticmod-pack-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(work);
+        try
+        {
+            var entries = new List<(string DataClass, string File, string? Container, string OfficialJsonPath, string ModifiedJsonPath)>();
+            for (var index = 0; index < plan.StaticEntries.Count; index++)
+            {
+                var edit = plan.StaticEntries[index];
+                var officialPath = Path.Combine(work, $"official-{index}.json");
+                var modifiedPath = Path.Combine(work, $"modified-{index}.json");
+                File.WriteAllText(officialPath, edit.OfficialText, new System.Text.UTF8Encoding(false));
+                File.WriteAllText(modifiedPath, edit.ModifiedText, new System.Text.UTF8Encoding(false));
+                entries.Add((edit.Entry.DataClass, edit.Entry.FileName,
+                    string.IsNullOrWhiteSpace(edit.Entry.ContainerEntry) ? null : edit.Entry.ContainerEntry,
+                    officialPath, modifiedPath));
+            }
+            var service = new StaticModService();
+            var package = service.CreateJsonPatchPackage(plan.ModName, "1.0",
+                "由 Limbus Mod Editor 生成（静态数据表 RFC6902 补丁）", entries);
+            // 单文件归档按来源名命名（无来源时退回项目名）——但静态数据没有「源文件」概念，
+            // 因此固定用项目名（与 launcher 侧真实样本一致：一个模组一个 .staticmod）。
+            var output = Path.Combine(item.Directory, ExportLayout.Sanitize(plan.ModName) + ".staticmod");
+            Directory.CreateDirectory(item.Directory);
+            service.Write(package, output);
+            return new ModPackSlotResult(item.Descriptor, true, item.Directory, 1, [output],
+                [$"{package.Patches.Count} 个补丁条目（加载器需开启「启用静态数据 Mod」并由它重打包 bundle + 双写 catalog）"], []);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new ModPackSlotResult(item.Descriptor, false, item.Directory, 0, [], [ex.Message], []);
+        }
+        finally
+        {
+            try { Directory.Delete(work, true); } catch (Exception) { /* 临时目录 */ }
+        }
+    }
+
+    // ── 资源：_data/lunartique ──────────────────────────────────────
+
+    /// <summary>
+    /// 把对象级修改写成 Lunartique 包（plan-16 S8）。
+    ///
+    /// <para><b>加载器语义</b>（<c>launcher/compress.py</c> + <c>patch.py</c>）：zip 里要有
+    /// <c>&lt;根&gt;/Uninstallation/&lt;account&gt;/&lt;bundle&gt;/__data</c> 与
+    /// <c>&lt;根&gt;/Installation/&lt;account&gt;/&lt;bundle&gt;/__data</c> 两侧同构的条目；
+    /// 加载器把两侧 bundle 的每个对象按 pathId 比对，只把有差异的对象写进目标 bundle 缓存。</para>
+    ///
+    /// <para><b>本实现的诚实边界</b>：Uninstallation 侧需要「原版 bundle 的完整字节」。
+    /// 编辑器只在配置了 Unity 缓存目录时能拿到它；拿不到时——若把 Installation 侧填成
+    /// 「改后 bundle 全量对象」，加载器会认为所有对象都需要写回（改动面过大且与 carra 通道重复），
+    /// 因此这里<b>只做已知正确的形态</b>：两侧都从缓存原版 bundle 派生
+    /// （Uninstallation = 原版、Installation = 改后），缓存缺失则整份跳过并说明。</para>
+    /// </summary>
+    private async Task<ModPackSlotResult> ExportLunartiqueAsync(
+        ModProject project, string projectRoot, ModExportPlan plan, ModExportPlanItem item,
+        ModExportPlanContext context, IProgress<string>? progress, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(context.UnityCacheDirectory) || !Directory.Exists(context.UnityCacheDirectory))
+        {
+            return new ModPackSlotResult(item.Descriptor, false, item.Directory, 0, [],
+                ["Lunartique 包需要原版 bundle 作为 Uninstallation 侧，但没配置（或不存在）Unity 缓存目录；" +
+                 "资源改动请用 carra 格式（加载器同样支持）"], []);
+        }
+        try
+        {
+            // 先按 carra 的既有能力把「改后 bundle」重打包出来，再从它派生两侧条目。
+            var staging = Path.Combine(Path.GetTempPath(), "lme-lunartique-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(staging);
+            try
+            {
+                var carraOutput = Path.Combine(staging, "objects.carra");
+                progress?.Report("Lunartique：重打包被编辑的 bundle…");
+                var carra = await _unityExporter.ExportCarra2Async(project, projectRoot, carraOutput,
+                    context.UnityCacheDirectory, cancellationToken, progress);
+
+                CarraPackage objects;
+                using (var stream = File.OpenRead(carraOutput)) objects = CarraArchive.Read(stream);
+
+                var package = new LunartiquePackage { Root = ExportLayout.Sanitize(plan.ModName) };
+                var usedBundles = 0;
+                foreach (var group in objects.Entries.GroupBy(x => (x.Key.Account, x.Key.Bundle)))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var cacheBundle = Path.Combine(context.UnityCacheDirectory, group.Key.Account, group.Key.Bundle, "__data");
+                    if (!File.Exists(cacheBundle))
+                    {
+                        continue; // 缓存里没有原版 bundle：这一组跳过（下面按 usedBundles 报）
+                    }
+                    // 两侧同构：Uninstallation = 原版 bundle 字节，Installation = 改后对象写回后的字节。
+                    var modified = Path.Combine(staging, "mod", group.Key.Account, group.Key.Bundle, "__data");
+                    Directory.CreateDirectory(Path.GetDirectoryName(modified)!);
+                    using (var backend = new AssetsToolsBackend())
+                    {
+                        var serializedNames = backend.BundleSerializedFileNames(cacheBundle);
+                        var replacements = group.ToDictionary(x => x.Key.PathId, x => x.ReadData());
+                        foreach (var serializedName in serializedNames)
+                            backend.ReplaceBundleSerializedAssets(cacheBundle, serializedName, replacements, modified);
+                    }
+                    if (!File.Exists(modified)) continue;
+                    package.Resources.Add(new LunartiqueResource(
+                        $"{group.Key.Account}/{group.Key.Bundle}/__data",
+                        await File.ReadAllBytesAsync(cacheBundle, cancellationToken),
+                        await File.ReadAllBytesAsync(modified, cancellationToken)));
+                    usedBundles++;
+                }
+                if (usedBundles == 0)
+                {
+                    return new ModPackSlotResult(item.Descriptor, false, item.Directory, 0, [],
+                        ["缓存里找不到任何被编辑对象所属的原版 bundle（游戏可能已更新），未生成 Lunartique 包"], []);
+                }
+
+                var output = Path.Combine(item.Directory, ExportLayout.Sanitize(plan.ModName) + ".zip");
+                Directory.CreateDirectory(item.Directory);
+                await using (var stream = File.Create(output))
+                    LunartiqueArchive.Write(package, stream, preserveUnknownFiles: true);
+                return new ModPackSlotResult(item.Descriptor, true, item.Directory, 1, [output],
+                    carra.Diagnostics.ToArray(), carra.AssetStatuses);
+            }
+            finally
+            {
+                try { Directory.Delete(staging, true); } catch (Exception) { /* 临时目录 */ }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new ModPackSlotResult(item.Descriptor, false, item.Directory, 0, [], [ex.Message], []);
+        }
     }
 
     // ── 资源：_data/carra ───────────────────────────────────────────

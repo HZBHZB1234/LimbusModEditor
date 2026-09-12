@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using LimbusModEditor.Application.Build;
+using LimbusModEditor.Application.StaticMods;
 using LimbusModEditor.Domain.Formats;
 using LimbusModEditor.Domain.Projects;
 using LimbusModEditor.Formats.Abstractions;
@@ -157,6 +158,11 @@ public sealed class ModApplyService
                         foreach (var file in slot.OutputPaths)
                             await ApplyLangPatchAsync(file, game, backup, steps, diagnostics, cancellationToken);
                         break;
+                    case ExportSlot.StaticMod:
+                        progress?.Report("应用静态数据模组（重打包 bundle + 双写 catalog）…");
+                        foreach (var file in slot.OutputPaths)
+                            await ApplyStaticModAsync(file, game, cache, backup, steps, skipped, diagnostics, cancellationToken);
+                        break;
                     default:
                         skipped.Add($"{slot.Descriptor.DisplayName}：{DebugSkipReason(slot.Descriptor.Slot)}");
                         break;
@@ -179,9 +185,114 @@ public sealed class ModApplyService
     {
         ExportSlot.LangBus => "这是给文本美化引擎（fancy bus）用的规则集，加载器不直接消费；文本改动已由 patch 槽位应用",
         ExportSlot.LangPathset => "这是可读的改动清单，当前加载器不消费；文本改动已由 patch 槽位应用",
-        ExportSlot.StaticMod => "静态数据模组需要写 catalog（S7b 落地），本次调试未应用",
         _ => "该格式不在调试应用范围内",
     };
+
+    // ── 静态数据：catalog 双写（S7b）────────────────────────────────
+
+    /// <summary>
+    /// 应用 <c>.staticmod</c>：定位当前 catalog 里的 static 条目 → 从缓存取官方 bundle →
+    /// 改 TextAsset 并重打包 → 算解压块 CRC32 → 双写缓存 <c>__data</c>/<c>__info</c> 与 catalog。
+    /// 关闭时由还原清单把 catalog 与缓存条目一起还原（两者都在备份里）。
+    /// </summary>
+    private static async Task ApplyStaticModAsync(
+        string staticModPath, string game, string? cacheDirectory, string backup,
+        List<ModApplyStep> steps, List<string> skipped, List<string> diagnostics, CancellationToken cancellationToken)
+    {
+        var name = Path.GetFileName(staticModPath);
+        if (string.IsNullOrWhiteSpace(cacheDirectory) || !Directory.Exists(cacheDirectory))
+        {
+            skipped.Add($"{name}：缺少可用的 Unity 缓存根，无法定位静态 bundle 与 catalog");
+            return;
+        }
+
+        // catalog 候选：运行时 catalog（缓存根推导）优先，其次游戏安装目录里那份。
+        var candidates = StaticBundleLocator.FindCatalogCandidates(game, [cacheDirectory]);
+        if (candidates.Count == 0)
+        {
+            skipped.Add($"{name}：找不到 catalog（com.unity.addressables/catalog_S1.bin），静态模组未应用");
+            return;
+        }
+
+        var service = new StaticModApplyService();
+        foreach (var catalogPath in candidates)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            StaticModApplyService.StaticCatalogSlot slot;
+            try
+            {
+                slot = service.Locate(catalogPath);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                diagnostics.Add($"{name}：catalog {Path.GetFileName(catalogPath)} 定位失败（{ex.Message}）");
+                continue;
+            }
+
+            // 缓存命中：外层键优先用 catalog 记录，滞后时按「任意外层键下存在该内层键」兜底。
+            var location = StaticBundleLocator.LocateInCache(
+                new StaticBundleLocation(slot.BundleName, slot.InnerHash, slot.OuterKey, null, CatalogPath: catalogPath),
+                [cacheDirectory]);
+            if (location.DataPath is null || !File.Exists(location.DataPath))
+            {
+                diagnostics.Add($"{name}：catalog {Path.GetFileName(catalogPath)} 对应的官方 static bundle 不在缓存里" +
+                                "（启动一次游戏让它下载缓存后重试），跳过");
+                continue;
+            }
+
+            try
+            {
+                var cacheEntryDirectory = Path.GetDirectoryName(location.DataPath)!;
+                var infoPath = Path.Combine(cacheEntryDirectory, "__info");
+                var infoContent = File.Exists(infoPath) ? await File.ReadAllTextAsync(infoPath, cancellationToken) : string.Empty;
+
+                // ① 改写前先备份：catalog 与缓存条目 __data/__info（三者任一没还原都是脏状态）。
+                var catalogBackup = await BackupOriginalAsync(catalogPath, backup, "catalog 原字节（还原时写回，crc/size 随之复位）", cancellationToken);
+                var dataBackup = await BackupOriginalAsync(location.DataPath, backup, "静态 bundle 缓存 __data 原字节", cancellationToken);
+                var infoBackup = await BackupOriginalAsync(infoPath, backup, "静态 bundle 缓存 __info 原字节", cancellationToken);
+
+                // ② 应用：改 TextAsset → 重打包 → 算 CRC → 双写缓存条目与 catalog 字段。
+                var (crc, size, applied) = await service.ApplyAsync(
+                    staticModPath, slot, location.DataPath, cacheEntryDirectory, infoContent, cancellationToken);
+
+                // ③ 写入成功后才登记（还原清单里的记录必须代表「真的改过」，否则会把没改的文件也还原一遍）。
+                steps.Add(catalogBackup with { AppliedHash = await Sha256Async(catalogPath, cancellationToken), Note = "catalog 双写（crc/size）" });
+                steps.Add(dataBackup with { AppliedHash = await Sha256Async(location.DataPath, cancellationToken), Note = "静态 bundle 重打包写回" });
+                if (infoBackup.ExistedBefore)
+                    steps.Add(infoBackup with { AppliedHash = await Sha256Async(infoPath, cancellationToken), Note = "静态 bundle 缓存 __info 刷新" });
+                diagnostics.Add($"{name}：已应用 {applied.Count} 个静态表（{slot.BundleName}，crc 0x{crc:X8} / size {size}）");
+                return;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                diagnostics.Add($"{name}：应用失败（{ex.Message}）；改动会被整体回滚，静态模组本次未生效");
+                return;
+            }
+        }
+        skipped.Add($"{name}：所有候选 catalog 都无法应用（详见诊断）");
+    }
+
+    /// <summary>
+    /// 改写前备份一个文件的原始字节（catalog / 缓存条目这类「就地改写」的对象）。
+    /// 返回的记录 <c>AppliedHash</c> 为空，调用方在<b>确认写成功</b>后再补上写入后的哈希
+    /// ——只有真改过的文件才该进还原清单。
+    /// </summary>
+    private static async Task<ModApplyStep> BackupOriginalAsync(
+        string target, string backup, string note, CancellationToken cancellationToken)
+    {
+        var existed = File.Exists(target);
+        string? backupPath = null;
+        string? beforeHash = null;
+        if (existed)
+        {
+            Directory.CreateDirectory(backup);
+            backupPath = Path.Combine(backup, StableName(target));
+            File.Copy(target, backupPath, overwrite: true);
+            beforeHash = await Sha256Async(target, cancellationToken);
+        }
+        return new ModApplyStep(ModApplyKind.InPlaceRewrite, target, backupPath, existed, beforeHash,
+            AppliedHash: null, note);
+    }
 
     // ── 音频整包：备份 → 覆盖 ────────────────────────────────────────
 

@@ -218,6 +218,68 @@ public sealed class ModPackExportTests : IDisposable
         }
     }
 
+    // ── 资源 / 静态：缺前置条件时必须「说明原因」而不是产出半吊子包 ──────
+
+    [Fact]
+    public async Task Lunartique_slot_skips_with_a_reason_when_the_cache_is_missing()
+    {
+        // 有 Unity 对象修改、但没有可用的缓存目录：Lunartique 需要原版 bundle 作为
+        // Uninstallation 侧，拿不到就整份跳过并说明（建议改用 carra）。
+        var project = new ModProject { Name = "LunartiqueGate" };
+        Directory.CreateDirectory(_out);
+        var plan = new ModExportPlanService().Plan(project, _out, new LangEditSession(), new StaticEditSession(),
+            new ModExportPlanContext());
+        var item = plan.Items.Single(x => x.Descriptor.Slot == ExportSlot.Lunartique);
+        var planned = plan with
+        {
+            Items = plan.Items.Select(x => x.Descriptor.Slot == ExportSlot.Lunartique
+                ? x with { Planned = true, SkipReason = null }
+                : x).ToArray(),
+        };
+
+        var result = await new ModPackExportService().ExportAsync(project, _work, planned, new ModExportPlanContext());
+        var slot = result.Slots.Single(x => x.Descriptor.Slot == ExportSlot.Lunartique);
+        Assert.False(slot.Written);
+        Assert.Contains(slot.Diagnostics, x => x.Contains("缓存", StringComparison.Ordinal));
+        Assert.False(Directory.Exists(Path.Combine(_out, "LunartiqueGate_data", "lunartique")));
+        _ = item;
+    }
+
+    [Fact]
+    public async Task Staticmod_slot_writes_a_loader_compatible_package()
+    {
+        var project = new ModProject { Name = "StaticGate" };
+        var session = new StaticEditSession();
+        var entry = new LimbusModEditor.Application.StaticMods.StaticTableEntry(
+            "assets/static/walpu8-mission.json", "walpu8-mission", "mission", "walpu8-mission.json",
+            "static_s1_0_assets_all_x", 42, 128, true);
+        session.Set(entry.Key, entry, """{"dataList":[{"id":1,"targetNum":3}]}""",
+            """{"dataList":[{"id":1,"targetNum":9}]}""");
+
+        var plan = new ModExportPlanService().Plan(project, _out, new LangEditSession(), session);
+        Assert.True(plan.Items.Single(x => x.Descriptor.Slot == ExportSlot.StaticMod).Planned);
+        var result = await new ModPackExportService().ExportAsync(project, _work, plan, new ModExportPlanContext());
+
+        var slot = result.Slots.Single(x => x.Descriptor.Slot == ExportSlot.StaticMod);
+        Assert.True(slot.Written, string.Join("；", slot.Diagnostics));
+        var file = Assert.Single(slot.OutputPaths);
+        Assert.Equal(Path.Combine(_out, "StaticGate_static", "staticmod", "StaticGate.staticmod"), file);
+
+        // 包结构必须是加载器认得的 manifest + patches/*.json
+        using var zip = System.IO.Compression.ZipFile.OpenRead(file);
+        var manifest = zip.GetEntry("manifest.json");
+        Assert.NotNull(manifest);
+        using var reader = new StreamReader(manifest!.Open());
+        var json = System.Text.Json.Nodes.JsonNode.Parse(reader.ReadToEnd())!;
+        Assert.Equal("staticmod/v1", json["format"]!.GetValue<string>());
+        var patch = json["patches"]!.AsArray()[0]!;
+        Assert.Equal("mission", patch["dataClass"]!.GetValue<string>());
+        Assert.Equal("walpu8-mission.json", patch["file"]!.GetValue<string>());
+        Assert.Equal("jsonpatch", patch["opType"]!.GetValue<string>());
+        Assert.Equal("assets/static/walpu8-mission.json", patch["container"]!.GetValue<string>());
+        Assert.NotNull(zip.GetEntry(patch["source"]!.GetValue<string>()));
+    }
+
     // ── 汇总 ─────────────────────────────────────────────────────────
 
     [Fact]

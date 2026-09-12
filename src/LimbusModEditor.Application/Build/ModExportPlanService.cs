@@ -93,10 +93,18 @@ public sealed record ModExportPlan(
 }
 
 /// <summary>计划阶段需要的环境事实（由 UI 层传入，保持本层可测试）。</summary>
+/// <param name="UnityCacheDirectory">Unity 缓存目录（Carra 外层键对齐核对用）。</param>
+/// <param name="FmodDirectory">FMOD DLL 目录：给出后 rebank 槽位可解码逐样本 WAV
+/// （加载器按「FSB 序号 + 样本名」匹配，必须有真实样本名），
+/// 为空时 rebank 槽位会明确跳过而不是写出一个加载器匹配不上的包。</param>
 public sealed record ModExportPlanContext(
     string? UnityCacheDirectory = null,
-    bool FmodCodecAvailable = false,
-    bool FmodCodecHasEncode = false);
+    string? FmodDirectory = null)
+{
+    /// <summary>FMOD 目录是否可用（存在且有 DLL）。</summary>
+    public bool FmodCodecAvailable =>
+        !string.IsNullOrWhiteSpace(FmodDirectory) && Directory.Exists(FmodDirectory);
+}
 
 /// <summary>
 /// plan-16 S3：<b>把「当前项目的全部修改」分析成槽位计划</b>。
@@ -182,7 +190,7 @@ public sealed class ModExportPlanService
             return new ModExportPlanItem(descriptor, false, directory, 0, "没有音频修改（bank 工作台里替换过样本才会有）");
         var warnings = new List<string>();
         if (!context.FmodCodecAvailable)
-            warnings.Add("没找到 FMOD DLL：能替换的只有已经是 FSB5 的样本；WAV 替换会明确报错，不会静默写出错包。");
+            warnings.Add("没找到 FMOD DLL：只能替换本来就是 FSB5 的样本；WAV 替换会明确报错，不会静默写出错包。");
         return new ModExportPlanItem(descriptor, true, directory, banks.Count, null, warnings);
     }
 
@@ -193,6 +201,10 @@ public sealed class ModExportPlanService
         var directory = Path.Combine(root, ExportLayout.GroupFolder(descriptor.Group, modName), descriptor.FolderName);
         if (banks.Count == 0)
             return new ModExportPlanItem(descriptor, false, directory, 0, "没有音频修改（差分包的输入就是被改的 bank）");
+        if (!context.FmodCodecAvailable)
+            return new ModExportPlanItem(descriptor, false, directory, 0,
+                "缺少 FMOD DLL：差分包的条目名必须是**真实样本名**（加载器按 FSB 序号 + 样本名匹配），" +
+                "拿不到样本名就写不出可用的 .rebank（宁可不写，也不产出加载器匹配不上的包）。");
         return new ModExportPlanItem(descriptor, true, directory, banks.Count);
     }
 

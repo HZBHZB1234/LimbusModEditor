@@ -3,7 +3,11 @@ using System.Text;
 using System.Text.Json.Nodes;
 using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Application.Assets.Preview;
+using LimbusModEditor.Application.Build;
 using LimbusModEditor.Application.Texts;
+using LimbusModEditor.Domain.Assets;
+using LimbusModEditor.Domain.Formats;
+using LimbusModEditor.Domain.Projects;
 using LimbusModEditor.Formats.Bank;
 using LimbusModEditor.Formats.Rebank;
 
@@ -199,6 +203,112 @@ public class RealWorkbenchGateTests
         finally
         {
             try { File.Delete(patchPath); } catch (Exception) { /* 临时文件 */ }
+        }
+    }
+
+    // ── plan-16 S4：真实 bank 上的 rebank 槽位必须按「FSB 序号 + 真实样本名」写出 ──
+
+    /// <summary>
+    /// 真实数据门（无游戏目录 / 无 FMOD DLL 自动跳过）：挑一个音频 bank 的单个样本做
+    /// <b>FSB 级替换</b>（把同一个 FSB 再写回去，内容不变），跑完整的「计划 → 导出」，
+    /// 断言写出的 <c>.rebank</c>：
+    /// ① 文件名 = 目标 bank 基名（加载器按 <c>base_bank</c> 定位）；
+    /// ② 每个条目是 <c>&lt;FSB序号&gt;/&lt;真实样本名&gt;.wav</c> —— 这正是 plan-16 §2.3.1
+    /// 指出的旧实现缺陷（旧实现写 <c>{i}.fsb</c>，加载器一条都匹配不上）；
+    /// ③ 条目 WAV 能被 RIFF 头部校验（加载器 <c>read_wav_info</c> 会拒收非 WAV）。
+    /// </summary>
+    [Fact]
+    public async Task Real_bank_exports_a_rebank_with_real_sample_names()
+    {
+        var bankDirectory = new BankDirectoryService().ResolveBankDirectory(GameDirectory);
+        if (bankDirectory is null) return;
+        var fmodDirectory = FmodDirectory();
+        if (fmodDirectory is null) return; // 差分必须有 FMOD 解码逐样本 WAV
+
+        var audioBank = new BankDirectoryService().ScanDirectory(bankDirectory)
+            .Where(x => x.Kind == BankKind.Audio)
+            .OrderBy(x => x.FileSizeBytes)
+            .FirstOrDefault();
+        if (audioBank is null) return;
+
+        var work = Path.Combine(Path.GetTempPath(), "lme-rebank-gate-" + Guid.NewGuid().ToString("N"));
+        var output = Path.Combine(work, "out");
+        Directory.CreateDirectory(work);
+        try
+        {
+            // 项目里登记一条「样本 0 被替换」的音频修改：替换内容 = 该 FSB 本身（内容相同也算改动，
+            // 这里验证的是**包结构与命名**，不是音频差异）。
+            var bankCopy = Path.Combine(work, "sources", "banks", audioBank.FileName);
+            Directory.CreateDirectory(Path.GetDirectoryName(bankCopy)!);
+            File.Copy(audioBank.FullPath, bankCopy, overwrite: true);
+            var data = File.ReadAllBytes(bankCopy);
+            var info = BankParser.TryParse(data)!;
+            var fsbIndex = 0;
+            var fsb = data.AsSpan((int)info.FsbOffsets[fsbIndex], (int)info.FsbSizes[fsbIndex]).ToArray();
+            var parsed = Fsb5Parser.TryParse(fsb);
+            if (parsed is null || parsed.Samples.Count == 0) return;              // 无法解析：跳过
+            if (parsed.Samples.Any(x => string.IsNullOrWhiteSpace(x.Name))) return; // 没有真实样本名：跳过（本测试要验的就是它）
+            var replacement = Path.Combine(work, "replacement.fsb5");
+            File.WriteAllBytes(replacement, fsb);
+
+            var project = new ModProject { Name = "RebankGate" };
+            project.Assets.Add(new AssetRecord
+            {
+                LogicalPath = $"fsb/{fsbIndex}",
+                SourcePath = bankCopy,
+                Type = AssetType.Audio,
+                Bundle = audioBank.FileName,
+                Metadata = { ["bankSource"] = audioBank.FileName, ["replacementPath"] = replacement },
+            });
+
+            var context = new ModExportPlanContext(FmodDirectory: fmodDirectory);
+            var plan = new ModExportPlanService().Plan(project, output, new LangEditSession(), new StaticEditSession(), context);
+            var result = await new ModPackExportService().ExportAsync(project, work, plan, context);
+
+            var slot = result.Slots.Single(x => x.Descriptor.Slot == ExportSlot.Rebank);
+            if (!slot.Written)
+            {
+                // 真实数据上不满足条件时必须给出中文原因，不许静默。
+                Assert.NotEmpty(slot.Diagnostics);
+                return;
+            }
+
+            var file = Assert.Single(slot.OutputPaths);
+            Assert.Equal(Path.GetFileNameWithoutExtension(audioBank.FileName) + ".rebank", Path.GetFileName(file));
+            using var zip = ZipFile.OpenRead(file);
+            var config = zip.GetEntry("rebank.json");
+            Assert.NotNull(config);
+            using (var reader = new StreamReader(config!.Open()))
+            {
+                var json = JsonNode.Parse(reader.ReadToEnd())!;
+                var baseBank = json["base_bank"]!.GetValue<string>();
+                Assert.Equal(Path.GetFileName(baseBank), baseBank); // 加载器只接受纯文件名（防穿越）
+                Assert.Contains(Path.GetFileNameWithoutExtension(audioBank.FileName), baseBank, StringComparison.OrdinalIgnoreCase);
+            }
+
+            var entries = zip.Entries.Where(x => x.FullName != "rebank.json").ToList();
+            Assert.NotEmpty(entries);
+            foreach (var entry in entries)
+            {
+                var parts = entry.FullName.Replace('\\', '/').Split('/');
+                Assert.Equal(2, parts.Length);
+                Assert.True(int.TryParse(parts[0], out var index) && index == fsbIndex, $"条目必须挂在被改的 FSB 序号下: {entry.FullName}");
+                Assert.EndsWith(".wav", parts[1], StringComparison.OrdinalIgnoreCase);
+                // 条目名必须是真实样本名（与 FSB5 里解析出的一致）
+                var sampleName = parts[1][..^4];
+                Assert.Contains(parsed.Samples, x => string.Equals(x.Name, sampleName, StringComparison.Ordinal));
+                using var stream = entry.Open();
+                using var buffer = new MemoryStream();
+                stream.CopyTo(buffer);
+                var bytes = buffer.ToArray();
+                Assert.True(bytes.Length > 44, $"条目 WAV 太小: {entry.FullName}");
+                Assert.Equal("RIFF"u8.ToArray(), bytes[..4]);
+                Assert.Equal("WAVE"u8.ToArray(), bytes.AsSpan(8, 4).ToArray());
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(work, true); } catch (Exception) { /* 临时目录 */ }
         }
     }
 

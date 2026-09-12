@@ -121,7 +121,11 @@ public sealed class ModExportPlanTests : IDisposable
             },
         });
 
-        var plan = new ModExportPlanService().Plan(project, _work, new LangEditSession(), new StaticEditSession());
+        // rebank 槽位需要 FMOD 解码逐样本 WAV（加载器按样本名匹配）：给一个存在的目录即可通过计划门。
+        var fmodDirectory = Path.Combine(_work, "fmod");
+        Directory.CreateDirectory(fmodDirectory);
+        var plan = new ModExportPlanService().Plan(project, _work, new LangEditSession(), new StaticEditSession(),
+            new ModExportPlanContext(FmodDirectory: fmodDirectory));
 
         var bank = plan.Items.Single(x => x.Descriptor.Slot == ExportSlot.Bank);
         var rebank = plan.Items.Single(x => x.Descriptor.Slot == ExportSlot.Rebank);

@@ -346,6 +346,42 @@ public sealed class UnityCacheSqliteIndexStore
         return grouped;
     }
 
+    /// <summary>一条「有容器路径」的资源行（<c>m_Container</c> 非空）—— 资源关联分析用。</summary>
+    /// <param name="ContainerEntry">游戏内资源路径（用户可读口径）。</param>
+    /// <param name="Type">资产类型。</param>
+    /// <param name="Size">资产字节数。</param>
+    public sealed record UnityCacheContainerRow(string ContainerEntry, AssetType Type, long Size);
+
+    /// <summary>
+    /// 只读「有容器路径」的资产行（资源关联分析用）。
+    ///
+    /// <para><b>为什么不能复用 <see cref="ReadAllRowsGrouped"/></b>：真实规模 127 万行里只有
+    /// 约 5.1 万行带 <c>container_entry</c>（实测），而整表读出会把百万级<b>无路径的行</b>
+    /// 全部实例化并按 bundle 聚合成字典（数百 MB 级），对一个只关心「有路径资源」的
+    /// 派生分析完全没必要。这里直接在 SQL 里过滤，并<b>不读</b> baseline / path_id 等
+    /// 分析用不到的列。</para>
+    /// </summary>
+    public IReadOnlyList<UnityCacheContainerRow> ReadContainerRows()
+    {
+        var watch = Stopwatch.StartNew();
+        using var connection = OpenEnsured();
+        EnsureContainerEntryColumn(connection);
+        var rows = new List<UnityCacheContainerRow>();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT container_entry, type, size
+            FROM assets
+            WHERE container_entry IS NOT NULL AND container_entry <> ''
+            """;
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+            rows.Add(new UnityCacheContainerRow(reader.GetString(0), (AssetType)reader.GetInt32(1), reader.GetInt64(2)));
+        watch.Stop();
+        Log.Debug("读资源索引「有容器路径」的资产行：{0} 行 · 用时 {1:0.0} 秒 · db={2}",
+            rows.Count, watch.Elapsed.TotalSeconds, Path.GetFileName(_dbFile));
+        return rows;
+    }
+
     /// <summary>整库读出（回灌用）： bundles 全表 + assets 按 data_path 聚合，
     /// 不带 ORDER BY（省掉 119 万行排序；组内顺序无关紧要，bundle_index 随行
     /// 存储，聚合按键分组不依赖物理顺序）。调用方逐 bundle 重建 AssetRecord。</summary>

@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using LimbusModEditor.Application.AppConfig;
+using LimbusModEditor.Application.Caching;
 using LimbusModEditor.Application.Projects;
+using LimbusModEditor.Application.Relations;
 using LimbusModEditor.Application.Scanning;
 using Xunit.Abstractions;
 
@@ -85,8 +87,9 @@ public class RealStartupScanSmokeTests
         foreach (var path in StartupScanService.CacheDatabasePaths(env.CacheDirectory))
             _output.WriteLine($"  [后] {Path.GetFileName(path)}：{(File.Exists(path) ? new FileInfo(path).Length : -1)} 字节");
 
-        // 断言：五步齐全、没有一步失败、四个库都非空（缓存只影响速度，但「建不起来」要暴露）。
-        Assert.Equal(5, report.Steps.Count);
+        // 断言：六步齐全（四张表 + 资源扫描 + 派生关联分析）、没有一步失败、四个库都非空
+        // （缓存只影响速度，但「建不起来」要暴露）。
+        Assert.Equal(6, report.Steps.Count);
         Assert.Equal(0, report.FailedCount);
         Assert.DoesNotContain(report.Steps, x => x.Status == StartupScanStepStatus.Skipped);
         foreach (var path in StartupScanService.CacheDatabasePaths(env.CacheDirectory))
@@ -94,5 +97,14 @@ public class RealStartupScanSmokeTests
             Assert.True(File.Exists(path), $"缓存库不存在：{path}");
             Assert.True(new FileInfo(path).Length > 0, $"缓存库是空的：{path}");
         }
+
+        // 派生库：关联图（第五个库，不在「四张表」清单里，但启动扫描后必须已落盘）。
+        var relationDb = WorkbenchCachePaths.DatabasePath(WorkbenchCacheKind.ResourceRelations, env.CacheDirectory);
+        Assert.True(File.Exists(relationDb), $"关联图缓存不存在：{relationDb}");
+        Assert.True(new FileInfo(relationDb).Length > 0, $"关联图缓存是空的：{relationDb}");
+        var relationStore = new RelationStore(env.CacheDirectory);
+        var relationSubjects = relationStore.ReadSubjectCount();
+        _output.WriteLine($"关联图：{relationSubjects} 个人格 · {relationStore.ReadLinkCount()} 条关联");
+        Assert.True(relationSubjects > 0, "真实数据下关联图不应为空（人格身份来自 lang 语音文件名与 SD 人格预制体）。");
     }
 }

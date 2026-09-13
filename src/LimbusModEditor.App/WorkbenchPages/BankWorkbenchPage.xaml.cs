@@ -40,8 +40,16 @@ namespace LimbusModEditor.App;
 /// <para><b>索引是加速旁路</b>：删掉 <c>cache/bank-index.db</c> 后两个视图的数据与筛选结果
 /// 完全一致，只是每次进页面要重新解析 1531 个 bank（冷建 ~19s，热读 ~0.9s）。</para>
 /// </summary>
-public partial class BankWorkbenchPage : UserControl
+public partial class BankWorkbenchPage : UserControl, ISearchableWorkbench
 {
+    /// <summary>宿主跳转过来的关键词过滤（<see cref="ISearchableWorkbench"/>）。</summary>
+    public void ApplySearchKeyword(string keyword)
+    {
+        var text = keyword ?? string.Empty;
+        _search.Text = text;
+        _search.CaretIndex = text.Length;
+    }
+
     private static readonly Logger Log = LogManager.GetCurrentClassLogger();
 
     /// <summary>浏览列的两种呈现形态（与壳的列表/树切换对一一对应）。</summary>

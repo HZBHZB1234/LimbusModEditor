@@ -117,7 +117,7 @@ public sealed class StartupScanServiceTests : IDisposable
     {
         var report = await _service.ScanAllAsync(Project());
 
-        Assert.Equal(5, report.Steps.Count);
+        Assert.Equal(6, report.Steps.Count);
         Assert.Equal(
             [
                 StartupScanService.CacheDatabaseStep,
@@ -125,16 +125,18 @@ public sealed class StartupScanServiceTests : IDisposable
                 StartupScanService.BankIndexStep,
                 StartupScanService.StaticTablesStep,
                 StartupScanService.TextIndexStep,
+                StartupScanService.RelationIndexStep,
             ],
             report.Steps.Select(x => x.Key).ToArray());
 
         // 没配游戏目录 / 缓存目录：资源 + 音频 + 静态表 + lang 四个步骤全部跳过（不是失败），
-        // 只有缓存库步骤是新建。
+        // 「缓存库」是新建，最后一步「资源关联」是**派生**步骤（照跑，本次输入为空 → 空图落缓存）。
         Assert.Equal(0, report.FailedCount);
         Assert.Equal(4, report.SkippedCount);
-        Assert.Equal(1, report.ScannedCount);
+        Assert.Equal(2, report.ScannedCount);
         Assert.Equal(StartupScanStepStatus.Scanned, report.Steps[0].Status);
-        Assert.All(report.Steps.Skip(1), x => Assert.Equal(StartupScanStepStatus.Skipped, x.Status));
+        Assert.All(report.Steps.Skip(1).Take(4), x => Assert.Equal(StartupScanStepStatus.Skipped, x.Status));
+        Assert.Equal(StartupScanStepStatus.Scanned, report.Steps[^1].Status);
         Assert.Contains("启动扫描完成", report.Describe());
         Assert.Contains("缓存库", report.Describe());
         Assert.Contains("游戏资源", report.DescribeSteps());
@@ -247,13 +249,20 @@ public sealed class StartupScanServiceTests : IDisposable
         var steps = await _service.ScanWorkbenchIndexesAsync(Project());
 
         Assert.Equal(
-            [StartupScanService.BankIndexStep, StartupScanService.StaticTablesStep, StartupScanService.TextIndexStep],
+            [
+                StartupScanService.BankIndexStep, StartupScanService.StaticTablesStep,
+                StartupScanService.TextIndexStep, StartupScanService.RelationIndexStep,
+            ],
             steps.Select(x => x.Key).ToArray());
         Assert.Equal(
-            [WorkbenchCacheKind.BankIndex, WorkbenchCacheKind.StaticTables, WorkbenchCacheKind.TextIndex],
+            [
+                WorkbenchCacheKind.BankIndex, WorkbenchCacheKind.StaticTables,
+                WorkbenchCacheKind.TextIndex, WorkbenchCacheKind.ResourceRelations,
+            ],
             steps.Select(x => x.CacheDatabase).ToArray());
-        // 没配游戏目录：三库各自跳过并给出中文原因，绝不抛异常（失败隔离）。
-        Assert.All(steps, x => Assert.Equal(StartupScanStepStatus.Skipped, x.Status));
+        // 没配游戏目录：三个工作台索引各自跳过并给出中文原因，绝不抛异常（失败隔离）；
+        // 派生步骤「资源关联」照跑（输入变少 → 产出空图），它是缓存旁路、失败也不影响别的步骤。
+        Assert.All(steps.Take(3), x => Assert.Equal(StartupScanStepStatus.Skipped, x.Status));
         Assert.All(steps, x => Assert.False(string.IsNullOrWhiteSpace(x.Detail)));
     }
 

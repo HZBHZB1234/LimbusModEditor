@@ -8,7 +8,8 @@ namespace LimbusModEditor.Domain.Tests;
 /// plan-11：音频索引的真实环境门控测试（无游戏目录的机器自动跳过）。
 ///
 /// <para>验证三件事：① 全量 1531 个 bank 能被完整索引；② 二次进页面<b>不重新解析任何 bank 文件</b>
-/// 且在 1.5 秒内读完（这是「表缓存」带来的实际收益）；③ 缓存里的样本行与<b>现读</b>
+/// 且读库耗时不到冷建索引的 1/5（这是「表缓存」带来的实际收益；实测约 0.4s vs 13.5s，
+/// 这里用相对判据是为了不在慢盘上误报）；③ 缓存里的样本行与<b>现读</b>
 /// <c>BankDirectoryService.ReadSampleTable</c> 的结果<b>逐字段一致</b>
 /// （缓存只影响速度，不影响正确性——本计划最重要的不变量）。</para>
 /// </summary>
@@ -98,8 +99,11 @@ public sealed class RealBankIndexSmokeTests : IDisposable
         var snapshot = store.ReadSnapshot(source.BankDirectory);
         readWatch.Stop();
         Assert.Equal(entries.Count, snapshot.Entries.Count);
-        Assert.True(readWatch.Elapsed < TimeSpan.FromSeconds(1.5),
-            $"读索引耗时 {readWatch.Elapsed.TotalMilliseconds:F0}ms，超出 1.5s 预算");
+        // 读库必须明显快于冷建（这才是「表缓存」的收益）。绝对毫秒数受机器 / 磁盘负载影响很大，
+        // 因此判据取「冷建的五分之一」这个相对量，避免在慢盘上误报。
+        Assert.True(readWatch.Elapsed < cold.Elapsed / 5,
+            $"读索引耗时 {readWatch.Elapsed.TotalMilliseconds:F0}ms，冷建 {cold.Elapsed.TotalMilliseconds:F0}ms，"
+            + "未达到「读库远快于重建」的预期");
 
         // ③ 缓存 vs 现读逐字段一致：抽 3 个音频 bank（优先样本多的）。
         var sample = entries.Where(x => x.Kind == BankKind.Audio)

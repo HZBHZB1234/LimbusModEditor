@@ -75,6 +75,7 @@ public class SqliteTableCacheTests : IDisposable
     [InlineData(WorkbenchCacheKind.BankIndex, "banks", "samples")]
     [InlineData(WorkbenchCacheKind.StaticTables, "tables", "documents")]
     [InlineData(WorkbenchCacheKind.TextIndex, "files", "hits")]
+    [InlineData(WorkbenchCacheKind.ResourceRelations, "subjects", "links")]
     public void Each_cache_kind_creates_its_documented_tables(WorkbenchCacheKind kind, string table1, string table2)
     {
         var cacheDirectory = WorkbenchCachePaths.CacheDirectory(_root);
@@ -127,7 +128,16 @@ public class SqliteTableCacheTests : IDisposable
             ColumnsOf(text, "files"));
         Assert.Equal(new[] { "rel_path", "kind", "key_path", "snip", "seq" }, ColumnsOf(text, "hits"));
 
-        // 三个库都落在程序目录的 cache/ 下
+        // relation-index.db：subjects / links / subjects_by_ref（派生关联图）
+        var relations = SqliteTableCache.Create(WorkbenchCacheKind.ResourceRelations, cacheDirectory);
+        relations.EnsureSchema();
+        Assert.Equal(new[] { "subject_id", "subject_kind", "display_name", "subtitle", "character", "sort_key" },
+            ColumnsOf(relations, "subjects"));
+        Assert.Equal(new[] { "subject_id", "category", "kind", "ref_key", "display", "detail", "size_bytes" },
+            ColumnsOf(relations, "links"));
+        Assert.Equal(new[] { "ref_key", "subject_id", "category" }, ColumnsOf(relations, "subjects_by_ref"));
+
+        // 四个工作台缓存库都落在程序目录的 cache/ 下
         foreach (var path in WorkbenchCachePaths.AllDatabasePaths(cacheDirectory))
         {
             Assert.True(File.Exists(path), $"缓存库应已建好：{path}");

@@ -19,7 +19,8 @@
 
 Limbus Mod Editor 是一个 **Windows-only 的 C#/.NET 8 + WPF 桌面工作台**，
 用于给《Limbus Company》做模组：读取真实游戏数据（Unity 缓存 bundle / FMOD bank /
-lang 文本 / 静态数据表）→ 在四个工作台里浏览与编辑 → 一键导出加载器可消费的
+lang 文本 / 静态数据表）→ 在五个工作台里浏览与编辑（资源 / 音频 / 文本 / 静态数据 / **人格卡片流**）
+→ 一键导出加载器可消费的
 模组包（`.carra` / `.bank` / `.rebank` / `.staticmod` / lang 补丁）→ 或直接铺到游戏
 目录做调试（带逐文件备份与还原）。
 
@@ -82,7 +83,7 @@ Windows 下默认 `RuntimeIdentifier=win-x64`、`CopyLocalLockFileAssemblies=tru
 
 ---
 
-## 3. 目录地图（先记这 8 条）
+## 3. 目录地图（先记这 10 条）
 
 | 想看什么 | 去哪里 |
 |---|---|
@@ -91,7 +92,9 @@ Windows 下默认 `RuntimeIdentifier=win-x64`、`CopyLocalLockFileAssemblies=tru
 | 业务编排（扫描、索引、搜索、预览、编辑、导出、调试） | `src/LimbusModEditor.Application/`（按功能分子目录） |
 | 界面与页面 | `src/LimbusModEditor.App/`（`MainWindow` + `WorkbenchPages/` + 对话框） |
 | 格式包（Carra/Bank/Rebank/Lunartique） | `src/LimbusModEditor.Formats.*/` |
-| 缓存库（四个 SQLite） | `src/LimbusModEditor.Application/Caching/` + `Scanning/` + `Texts/` + `StaticMods/` + `Assets/BankIndex*` |
+| 缓存库（五个 SQLite：四源 + 一派生） | `src/LimbusModEditor.Application/Caching/` + `Scanning/` + `Texts/` + `StaticMods/` + `Assets/BankIndex*` + `Relations/` |
+| 跨资源关联（人格 ↔ 资源） | `src/LimbusModEditor.Application/Relations/`（分析器 / 派生缓存 / 查询门面 / 卡片流展示层） |
+| Spine 文本（骨架 / 图集）解析、预览、导出 | `src/LimbusModEditor.Application/Spine/`（`SpineModels.cs` 纯解析 → `SpinePreviewService` 结构+布局叠加图 → `SpineExportService` 导出三件套；**没有 Spine 运行时，不播放动画**） |
 | 导出流水线 | `Domain/Formats/ExportLayout.cs` + `Application/Build/ModExportPlanService.cs` + `ModPackExportService.cs` |
 | 调试应用（写游戏目录） | `Application/Debugging/ModApplyService.cs` + `StaticModApplyService.cs` + `DebugApplyService.cs` |
 
@@ -103,37 +106,43 @@ Windows 下默认 `RuntimeIdentifier=win-x64`、`CopyLocalLockFileAssemblies=tru
 
 ```
 [48px 活动栏] [220px 共享侧边栏] [* 页面宿主 PageHost]
-   6 个 RadioButton         项目工作区 + ① 获取资源 / ② 产出模组 / 更多      ContentControl
+   7 个 RadioButton         项目工作区 + ① 获取资源 / ② 产出模组 / 更多      ContentControl
 ```
 
-- **页面宿主与注册表**：`MainWindow.xaml.cs:43` 的 `PageOrder = ["assets","bank","text","static","help","settings"]`；
-  `ShowPage(string key):124` 惰性创建并**常驻**（切换不销毁，保住各页的搜索/选中/预览状态）；
-  工厂是 `CreatePage(key):140` 的 switch。新增页面的标准做法 =
-  在 `CreatePage` 注册 key + 在 `MainWindow.xaml` 活动栏加一个 `RadioButton` + `SyncActivityBar:161` 补映射。
+- **页面宿主与注册表**：`MainWindow.xaml.cs:48` 的
+  `PageOrder = ["assets","bank","text","static","presets","help","settings"]`；
+  `ShowPage(string key):133` 惰性创建并**常驻**（切换不销毁，保住各页的搜索/选中/预览状态）；
+  工厂是 `CreatePage(key):174` 的 switch。新增页面的标准做法 =
+  在 `CreatePage` 注册 key + 在 `MainWindow.xaml` 活动栏加一个 `RadioButton` + `SyncActivityBar:196` 补映射
+  + `NeedsProject:213` 决定是否要项目。
+- **跨页搜索跳转**：`ShowWorkbenchSearch(pageKey, keyword):159` 切页后，若目标页实现
+  `ISearchableWorkbench` 就把关键词送进去自动过滤（卡片流详情里的「打开」按钮靠这条链路；
+  目标页不支持时只在状态栏说明，不报错）。
 - **宿主契约**：`App/WorkbenchPages/IWorkbenchHost.cs`。页面通过构造函数拿 `IWorkbenchHost`
   （项目、项目文件、`AppEnvironment`、`LangEdits`/`StaticEdits` 编辑集会话、状态栏、
-  刷新、保存、`ShowPage`），**不允许反向依赖 `MainWindow` 具体类型**。
-- **无项目遮罩**：`NoProjectOverlay`（`MainWindow.xaml:149`）只遮页面宿主；
-  `NeedsProject(key)`（`MainWindow.xaml.cs:177`）决定哪些页面需要项目，设置/教程页始终可用。
+  刷新、保存、`ShowPage`/`ShowWorkbenchSearch`），**不允许反向依赖 `MainWindow` 具体类型**。
+- **无项目遮罩**：`NoProjectOverlay`（`MainWindow.xaml:152`）只遮页面宿主；
+  `NeedsProject(key)`（`MainWindow.xaml.cs:213`）决定哪些页面需要项目，设置/教程页始终可用。
 - **启动顺序**（性能敏感）：构造函数只做 `InitializeComponent` + 建资源页；
   所有磁盘动作（目录定位、启动扫描、模态窗）排在 `Loaded` 且
-  `DispatcherPriority.Background` 之后（`MainWindow.xaml.cs:111-118`），
+  `DispatcherPriority.Background` 之后（`MainWindow.xaml.cs:117-126`），
   并有 `StartupTrace`（`App/StartupTrace.cs`）埋点。**不要把秒级工作提前到窗口出现之前**。
 - **共享侧边栏**是设计约束：`① 获取资源`（自动加载游戏资源 = 启动扫描入口）与
   `② 产出模组`（**只有两个按钮**：`导出模组…`、`使用当前修改启动游戏进行调试`）在
-  `MainWindow.xaml:117-142`。lang 的独立导出按钮已删除，导出统一走「导出模组…」。
+  `MainWindow.xaml:109-146`。lang 的独立导出按钮已删除，导出统一走「导出模组…」。
 - **UI 状态持久化**：`Application/AppConfig/UiStateService.cs` 把每页的预览列宽写
   `<程序目录>/config/ui-state.json`（页面 key 见 `WorkbenchPageKeys`），
   与 `shared-config.json` 同风格（原子写 + 损坏回退）。**UI 状态绝不写进 `.lmeproj`**。
 
-### 四个工作台页与公共骨架
+### 五个工作台页与公共骨架
 
 | 页面 | 文件 | 职责 |
 |---|---|---|
-| 资源 | `App/WorkbenchPages/AssetsWorkbenchPage.xaml(.cs)` | 容器路径树/列表 + 搜索筛选排序 + 七形态预览 + 属性编辑 + 替换/导入 |
+| 资源 | `App/WorkbenchPages/AssetsWorkbenchPage.xaml(.cs)` | 容器路径树/列表 + 搜索筛选排序 + 八形态预览（含 Spine）+ 属性编辑 + **关联资源区** + 替换/导入 |
 | 音频 | `WorkbenchPages/BankWorkbenchPage.xaml(.cs)` | bank 树 + 跨 bank 样本总表 + 试听 + FSB 替换 + bank 导出 |
 | 文本 | `WorkbenchPages/TextWorkbenchPage.xaml(.cs)` | lang 文件树 + 键值树（就地编辑）+ 源文本预览 + 搜索 |
 | 静态 | `WorkbenchPages/StaticWorkbenchPage.xaml(.cs)` | 静态数据表索引/搜索 + JSON 文档编辑 + staticmod 产物 |
+| 卡片流 | `WorkbenchPages/PresetWorkbenchPage.xaml(.cs)` | **人格下滑卡片流**（预设视图）：卡片封面 + 点进详情按类别看全部关联资源、逐行跳工作台、Spine 行可导出。挑选/排序全在 `Application/Relations/PersonaPresetService.cs` |
 
 公共骨架：`WorkbenchPages/WorkbenchShell.xaml(.cs)`（列宽/视图模式/分节/滚轮接线）、
 `WorkbenchPages/TreeExpansionState.cs`（**树展开态回放**，四页共用）、
@@ -141,8 +150,8 @@ Windows 下默认 `RuntimeIdentifier=win-x64`、`CopyLocalLockFileAssemblies=tru
 `Themes/Theme.xaml` 与 `Themes/WorkbenchStyles.xaml`（**设计色只允许出现在这两个文件**：
 `WorkbenchPages/` 下不得出现硬编码 `#RRGGBB` 或 `Color.FromRgb(0x`，这是收口验收门）。
 
-**改页面前必读第五章后的不变量 §6-17 ~ §6-24**：页面的线程口径、预览规模闸门、
-树展开态保持、`Loaded` 守卫、刷新去重都在这几条里。
+**改页面前必读第五章后的不变量 §6-17 ~ §6-29**：页面的线程口径、预览规模闸门、
+树展开态保持、`Loaded` 守卫、刷新去重、Spine 的边界（不播动画 / 靠容器目录定位 / 导出不是槽位）都在这几条里。
 
 ---
 
@@ -156,14 +165,16 @@ MainWindow ctor
 Loaded → OnWindowLoadedAsync()
   ├─ UpdateHint() / 恢复上次项目（AppEnvironment.Config.LastProjectFile）
   ├─ RunStartupScanAsync()   ← 统一模态 StartupScanDialog（打开即扫、不可取消）
-  │    └─ StartupScanService.RunAsync()           Application/Scanning/StartupScanService.cs（680 行）
-  │         ├─ 步骤 ①：建库/校表四个 SQLite（cache/，幂等；库在表不在也会补建）
+  │    └─ StartupScanService.RunAsync()           Application/Scanning/StartupScanService.cs
+  │         ├─ 步骤 ①：建库/校表五个 SQLite（cache/，幂等；库在表不在也会补建）
   │         ├─ 步骤 ②：Unity 缓存增量扫描 → UnityCacheScanService（530 行）
-  │         │     └─ UnityCacheSqliteIndexStore（279 行）读写 cache/unity-cache-index.db
+  │         │     └─ UnityCacheSqliteIndexStore 读写 cache/unity-cache-index.db
   │         ├─ 步骤 ③：音频索引 → BankIndexService → BankIndexStore（cache/bank-index.db）
   │         ├─ 步骤 ④：静态表索引 → StaticIndexService → StaticTableIndexStore（cache/static-tables.db）
-  │         └─ 步骤 ⑤：文本索引 → LangTextWorkbenchService + TextIndexStore（cache/text-index.db）
-  └─ 预热四个工作台（CreatePage 全部 key），不依赖切页懒加载
+  │         ├─ 步骤 ⑤：文本索引 → LangTextWorkbenchService + TextIndexStore（cache/text-index.db）
+  │         └─ 步骤 ⑥：关联图（派生）→ PersonaRelationIndexService → RelationStore（cache/relation-index.db）
+  │               └─ 读上面四库的**语义签名**判新鲜度；四个库都就绪后分析「人格 ↔ 资源」并落库
+  └─ 预热各工作台（CreatePage 全部 key：资源/音频/文本/静态数据/卡片流），不依赖切页懒加载
 ```
 
 - **引用模式**：扫描只枚举磁盘并把事实写进索引库，**不复制任何游戏文件**。
@@ -186,6 +197,7 @@ ProjectService.LoadAsync(.lmeproj)     Application/Projects/ProjectService.cs
     → AssetDisplay                           显示路径/名称/中文类型与状态标签（容器视图口径）
     → AssetTreeBuilder                       按显示路径逐段惰性建树
     → AssetPreviewRegistry → IAssetPreviewProvider  七形态预览（图像/文本/JSON行/音频/摘要/脚本/十六进制）
+    → RelationQueryService.DescribeSubjectsForAsset  关联资源板块（反查「这资源属于哪些人格」，走 relation-index.db 反向索引）
 ```
 
 **关键口径区分**（曾出错，务必分清）：
@@ -262,7 +274,7 @@ ProjectService.LoadAsync(.lmeproj)     Application/Projects/ProjectService.cs
 | 5 | `.rebank` 条目名必须是**真实样本名**（`{fsbIndex}/{sampleName}.wav`），不是 `{i}.fsb` | `Formats.Bank/Fsb5Models.cs` + `ModPackExportService` rebank 槽位 | 加载器按「替换数 0」报错回滚 |
 | 6 | lang 索引条目口径 = **相对活动语言目录**；加载器口径 = 相对 lang 根 | `Application/Texts/TextIndexStore.cs`（+`index_meta.language_prefix`）与 `LangTextWorkbenchService.ToPatchKey` | 补丁键错位；`LangEntryCaliberTests` 会红 |
 | 7 | `IsModified` ≠ 有修改；界面一切「已修改」标记用 `HasRealEdits` | `LangEditSession` / `LangTextWorkbenchService` | 打开即显示「已修改」（历史缺陷） |
-| 8 | 四个缓存库位置固定 `<程序目录>/cache/`，绝不写游戏目录/catalog | `Application/Caching/WorkbenchCachePaths.cs` | 污染用户游戏数据 |
+| 8 | 五个缓存库位置固定 `<程序目录>/cache/`，绝不写游戏目录/catalog | `Application/Caching/WorkbenchCachePaths.cs` | 污染用户游戏数据 |
 | 9 | 导出目录布局由 `ExportLayout` 唯一决定；`Sanitize` 同时影响目录名与文件名 | `Domain/Formats/ExportLayout.cs` | 输出树与加载器匹配口径不一致 |
 | 10 | `AssetRecord.Metadata` 字典是**大小写不敏感**，且是扩展槽 | `Domain/Assets/AssetModels.cs` | 已有工程读不到数据 |
 | 11 | `AssetType`/`AssetEditState` 枚举**隐式数值被 UI 当筛选值下发** | `Domain/Assets/AssetModels.cs` + `AssetsWorkbenchPage` | 筛选语义整体偏移；新成员只能追加末尾 |
@@ -270,7 +282,7 @@ ProjectService.LoadAsync(.lmeproj)     Application/Projects/ProjectService.cs
 | 13 | 设计色只允许在 `Themes/*.xaml`；`WorkbenchPages/` 不得硬编码色值 | `App/Themes/`、收口验收门 | 违反工作台一致化验收 |
 | 14 | 磁盘写入统一走 `AtomicOutput`（临时文件 + 替换） | `Application/Build/AtomicOutput.cs` | 中断留下半个文件 |
 | 15 | 未知负载/压缩/字段一律 **fail fast + 中文错误**，不猜测、不静默降级 | 全仓库（各 handler 的 `ValidateAsync`/异常路径） | 产物「看起来成功」实则无效 |
-| 16 | **缓存只影响速度，不影响正确性**：任何损坏一律删库重建，且「删库」不得改变功能结果 | 四个 Store 的类注释 + `SqliteTableCache.RecreateOrThrow`；由「有缓存 vs 删库」对照测试钉死 | 缓存变成事实来源，删库即出错 |
+| 16 | **缓存只影响速度，不影响正确性**：任何损坏一律删库重建，且「删库」不得改变功能结果 | 各 Store 的类注释 + `SqliteTableCache.RecreateOrThrow`；由「有缓存 vs 删库」对照测试钉死 | 缓存变成事实来源，删库即出错 |
 | 17 | **`await` 一个「同步完成」的 Task 会原地继续执行，不切线程**：声明 `async` 但体内没有真异步点的服务，其重活跑在调用线程上（从 WPF 调就是 UI 线程） | `Application/Build/UnityBundleBuildService.BuildAsync`（自己 `Task.Run`）、`App/MainWindow.ExportMod_Click` / `PrepareExportPlanAsync`（整体 `Task.Run`） | 模态窗口弹出后软件「未响应且不恢复」（历史报障）；导出链上新加同步重活必须同时确认线程口径 |
 | 18 | 导出链必须可**协作式取消**：写盘走 `AtomicOutput`、槽位/对象之间检查令牌、进度窗口关窗即取消 | `App/ExportProgressWindow.cs` + `ModPackExportService` / `UnityCacheExportService` / `UnityBundleBuildService` 的 `CancellationToken` 形参 | 用户无法中断长导出；只能杀进程，产物半途而废 |
 | 19 | 进度上报必须**节流**（逐资源/逐对象可达十万级，UI 侧每条都 Post 到消息队列） | `Application/Build/ThrottledProgress.cs`；各服务的逐条上报走它 | UI 队列被淹，导出期间界面假死 |
@@ -281,6 +293,9 @@ ProjectService.LoadAsync(.lmeproj)     Application/Projects/ProjectService.cs
 | 24 | 编辑集自身的 `Changed` 已驱动刷新，调用方**不得再手动刷新一次** | 四个页面 + `LangEditSession`/`StaticEditSession` | 同一次保存重建两遍树（历史缺陷） |
 | 25 | **全表谓词里不许把 `File.Exists` 排在廉价判据之前**，且惰性 `GroupBy` 链**必须先物化再计数** | `Application/Build/UnityCacheExportService.IsEditedCacheAsset`、`UnityBundleBuildService.Build`、`UnitySerializedFileBuildService.BuildAsync` | 回灌后项目有 127 万条资产：一次全表 `File.Exists` ≈ 44 s，同一条谓词被跑 4 遍 → 导出 7 分钟（实测，见 `STATUS.md` §6.2.1） |
 | 26 | **内置编辑器只吃松散文件**：bundle 内对象的 `SourcePath` 是整个 AssetBundle 容器，不能当正文读 | `Application/Assets/AssetEditService.ReadCurrentBytesAsync`、`TextAssetEditService.CanEditText`（App 侧按钮置灰 + 中文说明） | 双击 bundle 内 TextAsset → 2.26 MB 二进制进 `TextBox`，排版 26.5 秒 → 界面「未响应」被强杀（历史报障，且**没有** crash 日志） |
+| 27 | **Spine 只做文本解析与静态预览，不播放动画**：能确证的是骨架结构、动画清单（名字/时长/关键帧数）、图集页与区域，外加「图集页 + 区域框」叠加图 | `Application/Spine/SpineModels.cs`（纯解析）、`SpinePreviewService.cs` | 有人以为「Spine 预览可以播动画」而去接一个不存在的运行时；真正播放需要完整蒙皮/网格变形/动画混合/约束求值 |
+| 28 | **Spine 三件套靠「容器路径的目录」定位**（骨架 + `.atlas.txt` + 页贴图同目录）；索引只收**带容器路径**的资源 | `Application/Spine/SpinePreviewService.cs`（`SpineSiblingIndex`） | 拼不出同目录就既看不到图集布局图、也导出不齐三件套 |
+| 29 | **Spine 导出不是 `ExportSlot`**：模组导出只装「被修改过的资源」，给外部工具查看属独立动作 | `Application/Spine/SpineExportService.cs`、`Build/ModExportPlanService.cs`（槽位定义） | 把「导出查看」混进模组产物，破坏「只装改动」的语义 |
 
 ---
 
@@ -294,6 +309,7 @@ ProjectService.LoadAsync(.lmeproj)     Application/Projects/ProjectService.cs
 | `<程序目录>/cache/bank-index.db` | bank 头信息 + 逐样本行 | `Application/Assets/BankIndexStore.cs` |
 | `<程序目录>/cache/text-index.db` | lang 文件级索引 + 命中（`index_meta.language_prefix`） | `Application/Texts/TextIndexStore.cs` |
 | `<程序目录>/cache/static-tables.db` | 静态表元数据 + 按需有界正文缓存 | `Application/StaticMods/StaticTableIndexStore.cs` |
+| `<程序目录>/cache/relation-index.db` | **派生**关联图（人格 ↔ 跨资源链接 + 反向索引） | `Application/Relations/RelationStore.cs`（由 `PersonaRelationIndexService` 从上面四个库派生） |
 | `<程序目录>/projects/<名>/` | 新建项目的默认位置 | `Application/Build/NewModTemplateService.cs` |
 | `<项目>/<名>.lmeproj` | 项目文档（`ModProject` JSON） | `Application/Projects/ProjectService.cs` |
 | `<项目>/sources/cache/<外>_<内>.bundle` | 编辑过的缓存 bundle 实体化副本 | `Application/Scanning/UnityCacheMaterializationService.cs` |
@@ -302,7 +318,7 @@ ProjectService.LoadAsync(.lmeproj)     Application/Projects/ProjectService.cs
 
 **游戏目录、Unity 缓存、catalog 一律只读**，唯一例外是 §5.4 的调试应用。
 
-### 7.1 四个缓存库的失效规则与「口径版本」
+### 7.1 五个缓存库的失效规则与「口径版本」
 
 | 库 | 源签名 | 失效粒度 | 口径/结构版本 |
 |---|---|---|---|
@@ -310,13 +326,17 @@ ProjectService.LoadAsync(.lmeproj)     Application/Projects/ProjectService.cs
 | `bank-index.db` | 目录签名 `0:mtimeTicks`（源键 = 目录全路径小写） | 逐 bank 文件 `(size_bytes, mtime_ticks)`，只删该 bank 的 `samples` 行；行集对账删已消失文件 | `WorkbenchCacheSchema` 建表脚本 |
 | `static-tables.db` | **内层内容哈希**（小写） | 源变即整库重建；正文缓存 LRU 淘汰（上限 64MB，淘汰到 80%） | 同上 |
 | `text-index.db` | 内容口径版本 + 活动语言目录签名 + **`config.json` 内容哈希**（切语言必须用内容哈希，size/mtime 不可靠） | 整库 / 单文件 `(size,mtime_ticks)` / 行集不一致整表重建 | `TextIndexStore.IndexFormatVersion = "v4"`（v1 首版 → v2 不收录根级 `config.json` → v3 口径去根文件夹 → v4 并入活动语言目录名 + `language_prefix`） |
+| `relation-index.db`（**派生**） | 上面**四个库的语义签名拼接**（`RelationIndexSource.From`）：unity=bundles 计数+最大 mtime+总字节；bank=目录签名；static=内层内容哈希；text=内容口径版本+目录签名+config 哈希+语言目录 | 任一上游签名变 → **整库重建**（关联图整体由四库决定） | `RelationIndexSource.FormatVersion = "v1"`（**改「抽哪些事实 / 怎么算关联」时必须 +1**，否则旧派生库会被当成新鲜的） |
 
-四库共用的底座能力（`Caching/SqliteTableCache.cs`）：幂等建表、`EnsureColumn` 轻量迁移、
+> **派生库的源签名不用库文件 mtime**：WAL 下写事务未必改主库 mtime（只写 `-wal`），拿它判「源变没变」会漏判；
+> 四个上游的语义签名才是各自服务真实使用的判据。
+
+各库共用的底座能力（`Caching/SqliteTableCache.cs`）：幂等建表、`EnsureColumn` 轻量迁移、
 `Write` 单事务批量写（WAL + `synchronous=NORMAL`）、`EnsureSource(sourceKey, signature, languagePrefix)`
 （源/签名/前缀任一不一致 → 清空业务表 + `index_meta` 并返回 true）、
 损坏判定只认 SQLITE_CORRUPT(11)/SQLITE_NOTADB(26) → 删库重建。
 **「文件在但表不在」（0 字节库 / 上次建库被打断）是 `no such table: index_meta` 的直接来源**，
-四个库的读路径都内置缺表自愈，启动扫描的 `EnsureCacheDatabases` 也会补建。
+各库的读路径都内置缺表自愈，启动扫描的 `EnsureCacheDatabases` 也会补建。
 
 ### 7.2 中间产物与工作目录（排查「文件去哪了」用）
 
@@ -376,6 +396,10 @@ ProjectService.LoadAsync(.lmeproj)     Application/Projects/ProjectService.cs
 | **预览卡死 / 预览看不到下面** | `Application/Assets/Preview/AssetPreviewProviders.cs`（截断闸门） | `App/WorkbenchPages/AssetsWorkbenchPage.xaml.cs`（JSON 树闸门、`WrapPreview`）、`Assets/AssetPropertyService.cs`（会再读一次正文）、不变量 §6-21 |
 | **资源工作台又出现 static-data** | `Application/Scanning/UnityCacheScanService.cs`（标记补写/清除规则） | `Application/Assets/AssetSearchService.cs`（三道判据）、`StaticMods/StaticBundleLocator.cs`（`LooksLikeStaticBundle` + `LooksLikeStaticTablePath`）、不变量 §6-20 |
 | **树突然折叠回初始形态** | `App/WorkbenchPages/TreeExpansionState.cs`（key 回放） | 四页的 `RebuildTree` 与 `_expandedTreeKeys`、`Loaded` 守卫、不变量 §6-22~24 |
+| **改「资源之间怎么关联 / 新增预设类别（EGO、异常…）」** | `Application/Relations/PersonaRelationAnalyzer.cs`（抽取事实 + 建链接；`RelationCategories` 加类别） | 改完把 `RelationIndexSource.FormatVersion` +1；`RelationQueryService`（查询门面）、`Relations/RelationStore.cs`（表结构）、`Scanning/StartupScanService`（第 6 步） |
+| **改卡片流页的卡片/详情展示（封面挑哪张、分组顺序、「打开」跳哪页）** | `Application/Relations/PersonaPresetService.cs`（**纯逻辑，改这里而不是页面**） | `App/WorkbenchPages/PresetWorkbenchPage.xaml.cs`（只做装配与并发/代际守卫）、`PersonaPresetServiceTests.cs` |
+| **Spine 预览/导出异常（不显示预览、没有布局图、导不出文件）** | `Application/Spine/SpinePreviewService.cs`、`SpineExportService.cs` | `SpineModels.cs`（内容判定）、`RelationDisplayRules.IsSpinePath`（路径粗筛）、`AssetPreviewRegistry.CreateDefault`（是否注册了 provider）、不变量 §6-27~29 |
+| **新增/修改预览形态** | `Application/Assets/Preview/AssetPreview.cs`（`AssetPreviewKind` + `AssetPreviewRegistry.CreateDefault` 注册顺序） | `AssetsWorkbenchPage.BuildPreviewView`（App 侧 switch 也要加分支）、不变量 §6-21 |
 
 ---
 
@@ -390,6 +414,9 @@ ProjectService.LoadAsync(.lmeproj)     Application/Projects/ProjectService.cs
 - **mipmap 只到「布局与切片」**：`Editing/Images/UnityTextureCodec.cs` 的 `ToImage`/`FromPng`
   只处理 level 0。
 - **`App` 项目没有测试工程**：任何需要被测试覆盖的逻辑都应下沉到 `Application`。
+  （卡片流的封面挑选与分组顺序就是按这条沉到 `Relations/PersonaPresetService.cs` 的。）
+- **仓库里没有 Spine 运行时**：`Application/Spine/` 只做**文本解析 + 静态结构预览 + 原样导出**，
+  不播放动画、不做蒙皮/网格变形/约束求值。要「真正预览动画」等于引入一整套运行时，属于新工程。
 - **不要**：手写完整 Unity 解析器、伪造/分发 FMOD 专有 DLL、把未知对象静默转成「成功输出」、
   在无真实样本时宣称格式兼容、用宽泛递归删除或跳过备份去写用户游戏目录。
 
@@ -400,6 +427,9 @@ ProjectService.LoadAsync(.lmeproj)     Application/Projects/ProjectService.cs
 ```text
 dotnet build LimbusModEditor.slnx --no-restore --nologo
 dotnet test  LimbusModEditor.slnx --no-build --nologo
+# 建议按工程分开跑（并行时两个工程互相抢磁盘，墙钟断言最先受影响）
+dotnet test tests/LimbusModEditor.Domain.Tests  -c Debug --no-build --nologo
+dotnet test tests/LimbusModEditor.Format.Tests  -c Debug --no-build --nologo
 dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r win-x64 --self-contained false -o artifacts/publish-win-x64 --no-restore
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/publish.ps1
 ```

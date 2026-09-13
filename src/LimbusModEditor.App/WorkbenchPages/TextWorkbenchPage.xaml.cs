@@ -94,8 +94,17 @@ public sealed record TextHitRow(LangTextSearchHit Hit, string DisplayPath)
 /// <para><b>缓存只是加速旁路</b>：删掉 <c>cache/text-index.db</c> 功能完全不受影响，
 /// 只是每次进页面要重新读全部 lang 文件。</para>
 /// </summary>
-public sealed partial class TextWorkbenchPage : UserControl
+public sealed partial class TextWorkbenchPage : UserControl, ISearchableWorkbench
 {
+    /// <summary>宿主跳转过来的关键词过滤（<see cref="ISearchableWorkbench"/>）：
+    /// 填进搜索框即可，后续防抖 + 后台搜索由既有的 TextChanged 链路负责。</summary>
+    public void ApplySearchKeyword(string keyword)
+    {
+        var text = keyword ?? string.Empty;
+        _search.Text = text;
+        _search.CaretIndex = text.Length;
+    }
+
     private static readonly Logger Log = LogManager.GetCurrentClassLogger();
 
     private readonly IWorkbenchHost _host;

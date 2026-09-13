@@ -9,6 +9,9 @@ public enum WorkbenchCacheKind
     StaticTables,
     /// <summary><c>cache/text-index.db</c>：lang 文件键数/大小 + 搜索命中（plan-10）。</summary>
     TextIndex,
+    /// <summary><c>cache/relation-index.db</c>：资源关联图（预设对象 ⇄ 文本/静态数据/音频/图像/动画/Spine）。
+    /// 由前四个库派生，只存派生事实；源签名 = 四个源签名的拼接。</summary>
+    ResourceRelations,
 }
 
 /// <summary>
@@ -35,6 +38,9 @@ public static class WorkbenchCachePaths
     /// <summary>lang 文本索引库。</summary>
     public const string TextIndexFileName = "text-index.db";
 
+    /// <summary>资源关联图缓存库。</summary>
+    public const string RelationIndexFileName = "relation-index.db";
+
     /// <summary>程序目录下的缓存目录（= <c>AppEnvironment.CacheDirectory</c>）。</summary>
     public static string CacheDirectory(string programDirectory)
     {
@@ -48,6 +54,7 @@ public static class WorkbenchCachePaths
         WorkbenchCacheKind.BankIndex => BankIndexFileName,
         WorkbenchCacheKind.StaticTables => StaticTablesFileName,
         WorkbenchCacheKind.TextIndex => TextIndexFileName,
+        WorkbenchCacheKind.ResourceRelations => RelationIndexFileName,
         _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "未知的缓存库种类。"),
     };
 
@@ -59,9 +66,10 @@ public static class WorkbenchCachePaths
         return Path.Combine(Path.GetFullPath(cacheDirectory), FileName(kind));
     }
 
-    /// <summary>三个工作台缓存库的全部路径（清理/诊断入口用）。</summary>
+    /// <summary>全部工作台缓存库路径（清理/诊断入口用）。</summary>
     public static IReadOnlyList<string> AllDatabasePaths(string cacheDirectory)
         => [DatabasePath(WorkbenchCacheKind.BankIndex, cacheDirectory),
             DatabasePath(WorkbenchCacheKind.StaticTables, cacheDirectory),
-            DatabasePath(WorkbenchCacheKind.TextIndex, cacheDirectory)];
+            DatabasePath(WorkbenchCacheKind.TextIndex, cacheDirectory),
+            DatabasePath(WorkbenchCacheKind.ResourceRelations, cacheDirectory)];
 }

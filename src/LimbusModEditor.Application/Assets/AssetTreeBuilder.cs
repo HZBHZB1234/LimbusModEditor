@@ -47,9 +47,12 @@ public sealed class AssetTreeNode
         var leaves = new List<(string Name, AssetRecord Asset)>();
         foreach (var asset in Assets)
         {
-            var segment = SegmentAt(asset, segmentIndex);
-            if (segment is null) continue;
-            var remaining = segmentIndex + 1 >= SegmentCount(asset);
+            // 每条资源只解析一次显示路径分段（原先 SegmentAt 与 SegmentCount
+            // 各自 SplitTreePath 一次；全展开时这一项是树构建的主要开销）。
+            var segments = AssetDisplay.SplitTreePath(AssetDisplay.TreePath(asset));
+            if (segmentIndex >= segments.Length) continue;
+            var segment = segments[segmentIndex];
+            var remaining = segmentIndex + 1 >= segments.Length;
             if (remaining) leaves.Add((segment, asset));
             else
             {
@@ -108,15 +111,6 @@ public sealed class AssetTreeNode
             leaves[i] = (name + AssetDisplay.LeafDisambiguatorSeparator + label, asset);
         }
         return leaves;
-    }
-
-    private static int SegmentCount(AssetRecord asset) =>
-        AssetDisplay.SplitTreePath(AssetDisplay.TreePath(asset)).Length;
-
-    private static string? SegmentAt(AssetRecord asset, int depth)
-    {
-        var segments = AssetDisplay.SplitTreePath(AssetDisplay.TreePath(asset));
-        return depth < segments.Length ? segments[depth] : null;
     }
 }
 

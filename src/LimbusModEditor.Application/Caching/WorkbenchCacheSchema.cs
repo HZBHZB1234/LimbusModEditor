@@ -112,6 +112,46 @@ public static class WorkbenchCacheSchema
         CREATE INDEX IF NOT EXISTS ix_hits_path ON hits(rel_path, kind);
         """;
 
+    /// <summary><c>cache/relation-index.db</c>：资源关联图。由前四个缓存库派生 ——
+    /// 从 lang 文本、static-data 静态表、bank 音频样本、Unity 资源索引里抽取
+    /// 「预设对象 id」（当前实现为人格 id）并把命中该 id 的资源按类别归到一起，
+    /// 供「关联资源」板块与预设卡片流页面 O(1) 取用。
+    ///
+    /// <para>表：<c>subjects</c> = 预设对象（人格）；<c>links</c> = 对象 → 关联资源；
+    /// <c>subjects_by_ref</c> = 反向索引（资源键 → 对象，资源预览的「关联资源」用它）。</para>
+    ///
+    /// <para>失效规则：源签名 = 四个源签名的拼接（任一源变 → 整库重建）。
+    /// 与其它库一样，<b>只存原版事实</b>，编辑集绝不落这里。</para>
+    /// </summary>
+    public const string RelationIndexSql = """
+        CREATE TABLE IF NOT EXISTS subjects (
+            subject_id   TEXT PRIMARY KEY,
+            subject_kind TEXT NOT NULL,
+            display_name TEXT,
+            subtitle     TEXT,
+            character    TEXT,
+            sort_key     TEXT
+        );
+        CREATE TABLE IF NOT EXISTS links (
+            subject_id TEXT NOT NULL,
+            category   TEXT NOT NULL,
+            kind       TEXT NOT NULL,
+            ref_key    TEXT NOT NULL,
+            display    TEXT,
+            detail     TEXT,
+            size_bytes INTEGER NOT NULL,
+            PRIMARY KEY (subject_id, kind, ref_key)
+        );
+        CREATE INDEX IF NOT EXISTS ix_links_subject ON links(subject_id, category, kind);
+        CREATE TABLE IF NOT EXISTS subjects_by_ref (
+            ref_key    TEXT NOT NULL,
+            subject_id TEXT NOT NULL,
+            category   TEXT,
+            PRIMARY KEY (ref_key, subject_id)
+        );
+        CREATE INDEX IF NOT EXISTS ix_subjects_by_ref ON subjects_by_ref(subject_id);
+        """;
+
     /// <summary>某库的完整建表脚本（index_meta + 业务表）。</summary>
     public static string For(WorkbenchCacheKind kind)
     {
@@ -120,6 +160,7 @@ public static class WorkbenchCacheSchema
             WorkbenchCacheKind.BankIndex => BankIndexSql,
             WorkbenchCacheKind.StaticTables => StaticTablesSql,
             WorkbenchCacheKind.TextIndex => TextIndexSql,
+            WorkbenchCacheKind.ResourceRelations => RelationIndexSql,
             _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "未知的缓存库种类。"),
         };
         return IndexMetaSql + "\n" + business;
@@ -131,6 +172,7 @@ public static class WorkbenchCacheSchema
         WorkbenchCacheKind.BankIndex => ["banks", "samples"],
         WorkbenchCacheKind.StaticTables => ["tables", "documents"],
         WorkbenchCacheKind.TextIndex => ["files", "hits"],
+        WorkbenchCacheKind.ResourceRelations => ["subjects", "links", "subjects_by_ref"],
         _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "未知的缓存库种类。"),
     };
 }

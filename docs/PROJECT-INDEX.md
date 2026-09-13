@@ -238,7 +238,7 @@
 |---|---|
 | `AppEnvironment.cs` ★ | 进程级环境单例：程序目录/配置目录/缓存目录/项目目录；有效目录解析（共享 → 项目 → 自动发现）；旧项目值迁移；最近项目；FMOD DLL 发现 |
 | `SharedAppConfig.cs` | `config/shared-config.json` 读写（原子写 + 损坏时备份回退） |
-| `UiStateService.cs` | `config/ui-state.json`：每页预览列宽（钳制 260–2000）；旧字段双向兼容 |
+| `UiStateService.cs` | `config/ui-state.json`：每页预览列宽（钳制 260–2000）；旧字段双向兼容。`WorkbenchPageKeys` 是**页面 key 的唯一来源**（`assets`/`bank`/`text`/`static`/`presets`，新增页面必须加进 `All`，`UiStateServiceTests` 会断言唯一性） |
 
 - **目录解析优先级**：共享配置（手动值）→ 项目旧字段 → 自动发现。自动配置**只填空位**，永不覆盖手动值。
 - **FMOD DLL 发现顺序**：`<程序目录>/fmod` → 程序目录 → 游戏 `LimbusCompany_Data/Plugins/x86_64` → 游戏目录；
@@ -287,7 +287,7 @@
 
 | 文件 | 功能 |
 |---|---|
-| `StartupScanService.cs` ★ | **启动扫描总编排**：四库建库校表 → 游戏资源 → 音频 → 静态表 → 文本（逐步容错、进度、报告）；缓存清单与诊断的唯一来源 |
+| `StartupScanService.cs` ★ | **启动扫描总编排**：五库建库校表 → 游戏资源 → 音频 → 静态表 → 文本 → **关联图（派生，六步）**（逐步容错、进度、报告）；缓存清单与诊断的唯一来源。`ScanWorkbenchIndexesAsync` 可只跑后四步（bank/static/text/relations）而不扫资源 |
 | `UnityCacheScanService.cs` ★ | Unity 缓存**引用模式**增量扫描（不复制文件）；容器条目与 catalog 基线写进索引；**静态标记的补写/清除规则在这里**（见要点） |
 | `UnityCacheSqliteIndexStore.cs` | `cache/unity-cache-index.db` 读写（不用 `index_meta`，新鲜度落在 bundle 行；容器条目/静态标记按列轻量迁移） |
 | `UnityCacheMaterializationService.cs` | 编辑过的引用资源所属 bundle 实体化到项目 `sources/cache/<外>_<内>.bundle` |
@@ -303,8 +303,8 @@
 
 | 文件 | 功能 |
 |---|---|
-| `WorkbenchCachePaths.cs` | 三个工作台缓存库路径集中定义（+ 既有 unity 索引库名） |
-| `WorkbenchCacheSchema.cs` ★ | 三库表结构唯一定义（`index_meta` 共同契约 + bank/static/text 业务表） |
+| `WorkbenchCachePaths.cs` | 工作台缓存库路径集中定义（unity 索引库 + bank/static/text 三库 + **relation 派生库**） |
+| `WorkbenchCacheSchema.cs` ★ | 各库表结构唯一定义（`index_meta` 共同契约 + bank/static/text 业务表 + relation 的 `subjects`/`links`/`subjects_by_ref`） |
 | `SqliteTableCache.cs` | SQLite 通用底座：事务/WAL/源签名比对即整库重建/加列轻量迁移/缺表自愈/损坏删库重建 |
 | `CacheSignature.cs` | 源签名 `"length:mtimeTicks"` 口径（目录签名长度恒 0） |
 
@@ -401,6 +401,45 @@
 |---|---|
 | `Diagnostics/NLogBootstrap.cs` ★ | NLog 装配（宿主在**最早时机**调一次）：日志目录判定（`LME_LOG_DIR` → `<程序目录>/logs` → `%TEMP%/LimbusModEditor-logs`，逐级探测可写）、`nlog.config` 加载（缺失时从内嵌副本还原到程序目录）、`LME_LOG_LEVEL`/`LME_LOG_OFF`/`LME_LOG_CONSOLE` 环境变量覆盖、会话头部（版本/运行时/进程/目录/级别）、`RecentLines/RecentText`（读 `memory` target 的内存快照）、`Flush/Shutdown`。**任何失败都降级为内存日志，绝不阻断宿主** |
 
+### §8.14 `Relations/`（跨资源关联：派生索引 + 查询门面）
+
+> 一句话：**游戏里的资源是按「人格 id」互相关联的**——lang 里的人格语音文件名、static-data 里的
+> 人格数值表、bank 里的语音样本名、Unity 里的立绘/技能图标/CG/Spine/视频路径，全都带同一个
+> 5 位 id（真实数据 `10101`–`11216`）。本目录把这张关系图**从四个索引库派生**成
+> `cache/relation-index.db`，供资源预览的「关联资源」板块与预设卡片流页面查询。
+
+| 文件 | 功能 |
+|---|---|
+| `RelationModels.cs` ★ | 关联图模型：`RelationKind`（文本/静态数据/音频/图像/视频/Spine/动画/Prefab/网格/其它）、`RelationSubject`（人格）、`RelationLink`（对象→资源）、`RelationInputs`（四份事实输入）、`RelationGraph`（含 `LinksOf`）、`RelationIndexSource`（**派生源签名 = `FormatVersion` + 四个上游源签名拼接**） |
+| `PersonaRelationAnalyzer.cs` ★ | 纯函数分析器：四份事实 → 关联图。含 `RelationDisplayRules`（中文类别标签 + 立绘排序规则）；**角色名拼写归一**（游戏文件名里的 `Heathclif`/`Meursalut`/`Ishmeal` 合并到规范拼写，否则同角色被拆成多组）；lang 无 5 位 id 命中时回落到 `AbDlg_<角色>.json` 的**角色归属**规则（比「只认 `personalityid` 值」完整得多：真实数据只有 12 个 AbDlg 文件有该值） |
+| `RelationStore.cs` ★ | `cache/relation-index.db` 读写（`SqliteTableCache` 底座）：`subjects` / `links` / `subjects_by_ref`（**反向索引**：资源定位键 → 对象 id）+ `index_meta`；`EnsureSource`/`PersistGraph`（单事务）/`ReadSubjects`/`ReadLinks`/`ReadSubjectIdsByRef` |
+| `PersonaRelationIndexService.cs` ★ | 编排：算四个上游源签名 → 决定是否重建 → 读四份事实（**只读有容器路径的 Unity 行**，1.27M 行里只有约 5.1 万行有容器路径）→ 分析 → 落库。**失败隔离**：任一上游缺失就少一份输入，不抛异常 |
+| `RelationQueryService.cs` ★ | 查询门面（UI 直接用，**绝不抛异常**）：资源→对象（`DescribeSubjectsForAsset`，走反向索引 O(1)）/ 对象→资源（`Links`/`CountByKind`）；库没建好返回空 + 中文原因 |
+| `PersonaPresetService.cs` ★ | 预设卡片流 / 详情的**展示层**服务（纯逻辑、无 IO）：把「关联图 + 项目资源索引」整理成 UI 直接绑定的卡片与分组。`BuildCards`（封面挑选：`RelationDisplayRules.PortraitRank` 升序 + **能渲染的胜过不能渲染的** + 定位键稳定排序）、`IndexByContainerEntry`（**关联图的资源侧口径 = 容器路径**，同一路径多行时优先可渲染）→ `AssetRecord`、`BuildDetail`（分组按用户视角排序：静态数据→文本→音频→图像→视频→Spine→动画→Prefab→网格→其它）、`WorkbenchKeyFor`/`SearchKeywordFor`（每行「打开」跳哪页 / 用什么关键词）。**放在 Application 而不是页面**：App 层没有测试工程，而封面挑选与分组顺序最容易写错 |
+
+- **缓存铁律同样适用**：派生库只是加速，损坏就删库重建；源变没变由**四个上游的语义签名**判定，
+  **不拿库文件 mtime**（WAL 下写事务未必改主库 mtime，会漏判）。
+- **改动「抽哪些事实 / 怎么算关联」时必须把 `RelationIndexSource.FormatVersion` +1**，否则旧派生库会被当成新鲜的。
+
+### §8.15 `Spine/`（Spine 文本解析 / 预览 / 导出）
+
+> 一句话：**仓库里没有任何 Spine 运行时**。游戏里的 Spine 数据就是可读文本
+> （骨架 `<name>.json`、图集 `<name>.atlas.txt`、页贴图 `.png`），所以本目录自己解析这三样，
+> 给出「结构 + 图集布局」预览，并把三件套**导出**给外部 Spine 工具查看。
+> **不做骨骼动画播放**——那需要完整蒙皮 / 网格变形 / 动画混合 / 约束求值，不是「加个预览 provider」的量级。
+
+| 文件 | 功能 |
+|---|---|
+| `SpineModels.cs` ★ | 数据模型 + `SpineTextParser`（**纯函数、无 IO**）：`SpineBone`/`SpineSlot`/`SpineRegionAttachment`/`SpineKey`/`SpineAnimation`/`SpineSkeleton`/`SpineAtlas(Page/Region)`/`SpineParseResult`。骨架按 **Spine 4.0 口径**解析：`skins` 是数组（3.8 是对象，两种都认）、动画按 `bones`/`slots` 分组、**第一条关键帧没有 `time` 即 0**。关键帧是「按目标类型取用字段」的联合记录：骨骼时间线用 `rotate`/`translate`/`scale` 按时间合并（旋转/缩放落在单值位），槽位时间线用 `attachment`（换装 / 显隐）+ `rgba`（只取 alpha，淡入淡出）。**只收 `region` 附件**，网格 / 包围盒 / 路径 / 裁剪 / 点附件计入 `UnsupportedAttachmentCount` 并跳过。图集支持多页 + `scale:` / `filter:` / `pma:` / `repeat:` 头 + `bounds`/`xy`/`orig`/`offsets`/`rotate:90`。结构不符返回 `SpineParseResult.None`（**不猜格式**，交回普通文本预览）；容忍 BOM；有病态文件闸门（动画数 / 单时间线键数 / 附件数） |
+| `SpinePreviewService.cs` ★ | 预览构建 + `SpineSiblingIndex`：**Spine 三件套靠「容器路径的目录」定位**（真实数据 `Assets/Resources_moved/Story/CG/Ep9_3/StorySpine_Sinclair/` 下的 `cg_40.json` / `cg_40.atlas.txt` / `cg_40.png`），因此只索引**带容器路径**的资源（127 万行里约 5.1 万行），按目录一次建表 O(1) 取。索引缓存三道失效条件（引用相等 + 数量变化 + 15 s 超时，因为资源集合会被就地增删）。`Build`：骨架资源找同目录 `.atlas.txt` 与页贴图 → 结构行 + 布局叠加图；`DrawRegionBoxes`（ImageSharp：**长边超 `MaxLayoutDimension=1024` 等比缩小**，区域内半透明蓝填充 + 红框，区域外一个像素都不动）。`LooksLikeSpineText` 只按路径 / 类型粗筛（不读盘） |
+| `SpinePreviewProvider.cs` | `IAssetPreviewProvider`（`Name = "Spine 预览"`）：`CanPreview` = 路径粗筛；`PreviewAsync` 交给 `SpinePreviewService.Build`，**不像 Spine 就返回 null**，交回后面的文本预览 provider |
+| `SpineExportService.cs` | 把三件套导出到 `<目标>/<目录名>/`（目录名取容器路径的末级目录，取不到用 `spine`）；**复用 `SpinePreviewService` 的同目录索引**，不重复扫。**刻意不是 `ExportSlot`**：模组导出只装「被修改过的资源」，把「给外部工具查看」混进去会破坏这个语义，因此做成独立动作。绝不抛异常 |
+
+- **真实数据口径（2026-09-12 实测）**：骨架 `spine: 4.0.64`；图集页头 `scale:0.333`；
+  关系图里 Spine 类 122 条、动画类 25 条。
+- **新增判定规则不要只改 `LooksLikeSpineText`**：真正的「是不是 Spine」由 `SpineTextParser` 按内容判定，
+  路径粗筛只是省一次读盘的门。
+
 ---
 
 ## §9 `src/LimbusModEditor.App`（WPF 界面层）
@@ -412,7 +451,7 @@
 | 文件 | 功能 |
 |---|---|
 | `App.xaml` / `App.xaml.cs` | 应用启动**与日志装配入口**（构造函数里 `LogHost.Initialize`，早于主窗与任何磁盘动作）、`OnExit` 冲刷日志、全局异常与主题初始化 |
-| `MainWindow.xaml` ★ | 三列布局：活动栏 6 入口、共享侧边栏（① 获取资源 / ② 产出模组 / 更多）、页面宿主、无项目遮罩 |
+| `MainWindow.xaml` ★ | 三列布局：活动栏 7 入口（资源 / 音频 / 文本 / 静态数据 / **人格卡片流** / 教程 / 设置）、共享侧边栏（① 获取资源 / ② 产出模组 / 更多）、页面宿主、无项目遮罩 |
 | `MainWindow.xaml.cs` ★ | 页面注册表/切换、启动编排、项目打开保存、扫描、导出、调试、目录状态、提示条；宿主契约实现 |
 | `Logging/LogHost.cs` ★ | 日志装配 + **报错收集**：`DispatcherUnhandledException`/`AppDomain.UnhandledException`/`TaskScheduler.UnobservedTaskException` 三个钩子 + 崩溃快照 `logs/crash-<时间>.log`（异常 + 最近 400 条日志）；`DumpRecentTo` 导出最近日志。**默认不设 `Handled`**（保持改动前的崩溃行为，只是现在一定留证据） |
 | `Logging/UiHeartbeat.cs` ★ | UI 线程心跳：每秒 1 跳，**阻塞 ≥2 s 立刻记 Warn**（定位「界面未响应」：最后一条心跳之后只剩工作线程日志即为卡死点） |
@@ -442,14 +481,16 @@
 
 | 文件 | 功能 |
 |---|---|
-| `IWorkbenchHost.cs` ★ | 页面宿主契约：页面能拿到的东西全在这里，越界即设计问题 |
+| `IWorkbenchHost.cs` ★ | 页面宿主契约：页面能拿到的东西全在这里，越界即设计问题；含 `ShowWorkbenchSearch(pageKey, keyword)`（跨页跳转 + 自动过滤） |
+| `ISearchableWorkbench.cs` | 页面可被跨页搜索跳转的契约（`ApplySearchKeyword`）：资源 / 音频 / 文本 / 静态数据四页实现，卡片流点「打开」靠它把关键词送进目标页 |
 | `WorkbenchShell.xaml(.cs)` | 三列页面骨架：列宽持久化、列表↔树切换、搜索/筛选/状态/空态构件工厂、滚轮滚动接线 |
 | `TreeExpansionState.cs` ★ | **树展开态保持**：重建前按稳定 key 收下已展开节点，重建后逐层物化并回放；四个工作台的树共用 |
 | `JsonTreeEditor.xaml(.cs)` | 键值树编辑器：树/原文双 Tab、**行内就地改值**、右键菜单与删除键、RFC6902 差异摘要 |
-| `AssetsWorkbenchPage.xaml(.cs)` ★ | 资源工作台：筛选栏 + 列表/容器树 + 预览列 + 属性区 + 替换/批处理/撤销 |
+| `AssetsWorkbenchPage.xaml(.cs)` ★ | 资源工作台：筛选栏 + 列表/容器树 + 预览列 + 属性区 + **关联资源区**（反查「这个资源属于哪些人格」，数据来自 `cache/relation-index.db`，点「查看」按人格 id 过滤资源）+ 替换/批处理/撤销 |
 | `BankWorkbenchPage.xaml(.cs)` ★ | 音频工作台：全部音频总表 / bank 树双视图、试听与进度条、FSB 替换、bank 导出 |
 | `TextWorkbenchPage.xaml(.cs)` ★ | 文本工作台：lang 文件树 + 键值树 + 源文本预览 + 搜索命中跳转 |
 | `StaticWorkbenchPage.xaml(.cs)` ★ | 静态数据工作台：dataClass 树 / 表列表 + JSON 编辑 + 差异视图 |
+| `PresetWorkbenchPage.xaml(.cs)` ★ | **人格卡片流页**（预设视图）：左栏 `WrapPanel` + `ScrollViewer` 的下滑卡片流（每张卡 = 一张立绘封面 + 标题 + 类别条数摘要，封面走 `PersonaPresetService` 的挑图规则，解码宽度固定 176、**并发闸门 4**、带 generation 守卫），点卡片进右栏详情：按类别分组的全部关联资源，每行「打开」→ 跳对应工作台并按文件名过滤，Spine 行多一个「导出…」→ `SpineExportService`（`SaveFileDialog` 选目标目录）。顶部搜索框（250 ms 防抖）+「↻ 重新分析」+「关联库尚未就绪」空态。**卡片与详情的挑选 / 排序逻辑全在 `PersonaPresetService` 里**，页面只做装配 |
 | `SettingsPage.cs` | 设置页（共享目录 + 项目元数据），无项目也可用 |
 | `HelpPage.cs` | 内置教程（`docs/USAGE.md` 的精简版），无项目也可用 |
 
@@ -501,9 +542,9 @@
 
 ## §11 `tests/`
 
-两个测试工程：`LimbusModEditor.Domain.Tests`（551 例，引用 Domain/Editing/Application/Formats.Unity）
+两个测试工程：`LimbusModEditor.Domain.Tests`（616 例，引用 Domain/Editing/Application/Formats.Unity）
 与 `LimbusModEditor.Format.Tests`（74 例，引用各 Formats.*）。
-**625 例全绿**（2026-09-12 实测，`dotnet test LimbusModEditor.slnx`）。
+**690 例全绿、0 警告 0 错误**（2026-09-13 实测；建议两个工程**分开跑**，见 §11.6）。
 
 ### §11.1 真实数据门控（重要：门控失败是「静默 return」，不是 Skip）
 
@@ -541,7 +582,8 @@
   40 个 class id 清单（`UnityCacheScanServiceTests`）、51 条 class id 映射（`UnityClassIdFormatMappingTests`）、
   9 条官方表值（`Format.Tests/UnityClassIdMappingTests`）、默认列宽 360 / 钳制 260–2000、
   三库表列名清单（`SqliteTableCacheTests`、`TextIndexStoreTests` 直接断言 `PRAGMA table_info`）。
-- **墙钟断言（慢机易 flake）**：`RealBankIndexSmokeTests` 读索引 < 1.5s（已知 flake，整包并行偶发，单独跑通过）、
+- **墙钟断言（慢机易 flake）**：`RealBankIndexSmokeTests` 读索引 **< 冷建索引耗时的 1/5**（原先是硬编码 1.5 s，
+  慢盘 / 并行时实测 1.6–1.9 s 会误报；实测比值约 32×，用相对量才稳）、
   `RealStaticIndexSmokeTests` 热读 < 1.5s 且 < 直接枚举耗时/2、`BankDirectoryServiceTests` 扫 1531 bank < 60s、
   `PerformanceBaselineTests` 断言资产数 > 10 万（缩小缓存场景会失败）。
 
@@ -550,7 +592,7 @@
 - **两个测试工程都不引用 `LimbusModEditor.App`**：页面行为只被「镜像约定」测试间接守住——
   `AssetFilterComboSentinelTests` ↔ `AssetsWorkbenchPage` 的筛选哨兵（防下拉空白）、
   `BankTreeRulesTests` ↔ `BankWorkbenchPage.RebuildTree`（防空树）、
-  `UiStateServiceTests` 的四页列宽合并 ↔ `WorkbenchShell.SavePreviewWidth`。
+  `UiStateServiceTests` 的列宽合并 ↔ `WorkbenchShell.SavePreviewWidth`。
   要改行为就改页面的约定，**不要改这些测试**。
 - `Domain.Tests/UnitTest1.cs`（空 `Test1`，无断言）与 `Format.Tests/UnitTest1.cs`（类名 `FormatTests`，**4 条真测试**）
   **含义完全不同**，删「看起来是模板」的文件会删掉真实覆盖。
@@ -559,7 +601,7 @@
 - SQLite 表/列名断言在测试里，schema 迁移必须同步改测试，不能只改产品代码。
 - 全仓测试**没有一处 xunit `Skip`**：所有门控都是测试体内 `return`（见 §11.1）。
 
-### §11.4 `LimbusModEditor.Domain.Tests/`（按被测对象分组，551 例）
+### §11.4 `LimbusModEditor.Domain.Tests/`（按被测对象分组，616 例）
 
 | 覆盖对象（源码） | 测试文件 |
 |---|---|
@@ -584,6 +626,9 @@
 | 导入 | `ModImportServiceTests.cs`、`SourceImportTests.cs`、`GenericZipImportTests.cs` |
 | 项目持久化 | `ProjectPersistenceTests.cs`、`ProjectFileSlimmingTests.cs`、`ProjectBuildServiceTests.cs`、`ProjectAutoConfigureTests.cs`、`NewModTemplateServiceTests.cs` |
 | 扫描与索引 | `StartupScanServiceTests.cs`、`UnityCacheScanServiceTests.cs`、`CacheSignatureTests.cs`、`SqliteTableCacheTests.cs`、`RealFullScanSmokeTests.cs`、`RealStartupScanSmokeTests.cs`、`PerformanceBaselineTests.cs` |
+| 关联图（派生） | `PersonaRelationAnalyzerTests.cs`（含「游戏侧角色名拼写错误合并为一组」）、`RelationStoreTests.cs`（持久化 + 反向索引 + `LinksOf`）、`RealRelationIndexSmokeTests.cs`（真实数据门控 `LME_RELATION_SMOKE=1`） |
+| 预设卡片流（展示层） | `PersonaPresetServiceTests.cs`（封面挑立绘优先级 + **能渲染的胜过不能渲染的**、定位键→`AssetRecord` 还原、详情分组用户视角顺序、每行「打开」跳哪页 / 用什么关键词） |
+| Spine 解析 / 预览 / 导出 | `SpineTests.cs`（骨架 4.0 口径：`skins` 数组、动画分组、**首帧无 `time` = 0**、`rotate`/`translate`/`scale` 合帧、槽位 `attachment`+`rgba` 淡入淡出、只收 region 附件且 mesh 计入不支持；图集多页 + `scale`/`orig`/`offsets`/`rotate`；BOM 容忍；同目录索引；布局叠加图**区域外像素不动** + 超长边等比缩小；导出目录名取容器目录末级） |
 | 目录定位与配置 | `GameDirectoryLocatorTests.cs`、`UnityCacheLocatorTests.cs`、`RealLocatorTests.cs`、`SharedConfigTests.cs`、`UiStateServiceTests.cs` |
 | 调试与启动 | `ModApplyServiceTests.cs`、`DebugApplyTests.cs`、`ModInstallServiceTests.cs`、`GameLaunchServiceTests.cs` |
 | catalog | `CatalogBaselineTests.cs` |
@@ -610,8 +655,11 @@
 
 ### §11.6 测试维护注意事项
 
-- **墙钟预算断言是既有 flake**：`RealBankIndexSmokeTests` 的「读索引 < 1.5s」在两测试工程并行时偶发超时，
-  单独跑通过；与业务改动无关（详见 §11.2）。
+- **墙钟预算断言是既有 flake**：`RealBankIndexSmokeTests` 的读库耗时断言在两测试工程并行时偶发超时
+  （慢机上单跑也见过 1.9 s）。**已改成相对判据**（`< 冷建耗时/5`，实测比值约 32×），
+  不要再改回硬编码秒数（详见 §11.2）。
+- **两个测试工程建议分开跑**：并行时两者互相抢磁盘，墙钟断言最先受影响；分开跑也更利于排错
+  （`dotnet test <单个 csproj> -c Debug --no-build`）。
 - **不要写死活动语言**：真实 lang 门控测试必须跟随 `lang/config.json`（本机为汉化组目录 `LLc-CN-LCTA`）。
 - 需要真实数据的测试用环境变量或路径存在性门控，新增同类测试请沿用同一风格（§11.1）。
 
@@ -667,6 +715,13 @@
 | **双击文本资源后界面卡死（且无 crash 日志）** | `Application/Assets/AssetEditService.ReadCurrentBytesAsync`（**必须**拒绝 bundle 容器）/ `TextAssetEditService.CanEditText`（二进制、超长闸门） | `AssetsWorkbenchPage.EditTextAsset_Click` + `TextAssetEditorWindow`（`TextBox` 装载规模）、`PreviewRead.IsBundleAsset`（判「正文在容器里」） |
 | 预览看不到下面、窗口缩小后没法上下滑动 | `App/WorkbenchPages/AssetsWorkbenchPage.xaml.cs`(`WrapPreview`, `PreviewMaxHeight`) | `WorkbenchShell.xaml` 的 `EditHost`（各页自带的 `ScrollViewer` 才是滚动入口）、`AssetsWorkbenchPage.xaml` 右栏两行的 `Height`（**必须是星号行**：`Auto` 行会让 `ScrollViewer` 永不滚动、并把预览行挤成 0） |
 | **资源工作台仍列出 static-data** | `Application/Scanning/UnityCacheScanService.cs`（`isStaticBundle` / `mayClearStatic`：catalog 不可用时不得清标记） | `AssetSearchService.IsStaticBundleAsset`（bundle 名兜底 + `containerEntry` 路径判据）、`StaticBundleLocator.LooksLikeStaticBundle` / `LooksLikeStaticTablePath` |
+| **资源预览「关联资源」为空 / 显示「关联图还没建立」** | `Application/Relations/PersonaRelationIndexService.cs`（四源签名比对是否触发重建）、`RelationQueryService.DescribeSubjectsForAsset`（库没建好时返回中文原因，正常不是 bug） | `Scanning/StartupScanService`（第 6 步 `relations` 是否跑过）、`cache/relation-index.db` 是否存在且非空；资源没有 `containerEntry` 时无法定位（属预期） |
+| **同一个人格在关联图里被拆成多组** | `Relations/PersonaRelationAnalyzer.cs` 的 `CharacterAliases`/`NormalizeCharacter`（游戏文件名有拼写错误） | 新增角色别名时同改 `PersonaRelationAnalyzerTests` 的拼写合并用例 |
+| **卡片流页空白 / 点卡片没有内容** | `Relations/PersonaPresetService.cs`（`Subjects()` 是否为空 = 关联库没建好）、`App/WorkbenchPages/PresetWorkbenchPage.xaml.cs` 的 `RebuildCards`/generation 守卫（换项目后旧结果被丢弃是**预期**） | `MainWindow.RefreshProjectState` 是否调了 `OnProjectRefreshed()`、`cache/relation-index.db` 是否存在且非空 |
+| **卡片有标题但没有立绘封面** | `PersonaPresetService.BuildCard`（封面要「能定位到资源」且资源可渲染：源文件存在 + `UnityPathId`） | 该人格的 image 链接是否命中 `containerEntry`；目标类型是否 Sprite/Texture/SpriteAtlas |
+| **Spine 资源不显示 Spine 预览、退回普通文本** | `Relations/PersonaRelationAnalyzer.RelationDisplayRules.IsSpinePath`（路径粗筛，真实口径 `Prefab/SpineIllustPrefab/`、`.psb`、`SkeletonData`、`/Story/Spine/`） | 内容判定的真正入口是 `Spine/SpineTextParser`（**不像骨架/图集就返回 `None`**，属预期）；`AssetPreviewRegistry.CreateDefault` 是否传了 `SpinePreviewService` |
+| **Spine 预览有结构但看不到图集布局图** | `Spine/SpinePreviewService.TryBuildLayoutImage`（按图集页名在同目录找同名贴图） | 页贴图是否与 `.atlas.txt` **同一目录**且文件名与页名一致、是否有 `UnityPathId` |
+| **Spine「导出…」写不出文件** | `Spine/SpineExportService.ExportAsync`（写 `<目标>/<目录名>/`，只写骨架/图集文本 + PNG 页贴图） | 目标目录是否可选；该资源是否有容器路径（取不到末级目录时落到 `spine/`） |
 | **导出几分钟不出产物** | `Build/UnityCacheExportService.IsEditedCacheAsset` 与 `Build/UnityBundleBuildService.Build` 的候选谓词（`File.Exists` 是否前置、惰性链是否物化） | `ModExportPlanService.Plan`、`Application/Scanning/UnityCacheScanService.RehydrateFromIndexAsync`（项目为何有 127 万条资产） |
 | **树形视图突然折叠回初始形态** | `App/WorkbenchPages/TreeExpansionState.cs`（key 回放） | 各页 `RebuildTree` + `_expandedTreeKeys`；`Loaded` 是否有 `_loaded` 守卫（Static/Bank 早先没有） |
 | **导出模态弹出后软件未响应、无产物** | `App/MainWindow.xaml.cs`(`ExportMod_Click`/`PrepareExportPlanAsync` 的 `Task.Run`) | `Build/UnityBundleBuildService.BuildAsync`（必须整体在后台线程）、`ModPackExportService` 各槽位、`CarraArchive`/`XzCodec`（同步 XZ 全在调用线程上跑） |

@@ -13,9 +13,11 @@ public static class WorkbenchPageKeys
     public const string Text = "text";
     /// <summary>静态数据工作台。</summary>
     public const string Static = "static";
+    /// <summary>预设卡片流页面（人格 / 关联资源）。</summary>
+    public const string Presets = "presets";
 
     /// <summary>四个工作台的 key（顺序与侧边栏一致）。</summary>
-    public static readonly string[] All = [Assets, Bank, Text, Static];
+    public static readonly string[] All = [Assets, Bank, Text, Static, Presets];
 }
 
 /// <summary>

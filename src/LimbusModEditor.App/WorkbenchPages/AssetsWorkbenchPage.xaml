@@ -227,6 +227,35 @@
                             </ItemsControl>
                         </StackPanel>
                     </Expander>
+                    <!--
+                        关联资源（跨资源定位）：反查出「这个资源属于哪些人格」。
+                        数据来自 cache/relation-index.db（启动扫描后由四个索引库派生），
+                        点「查看」就在资源列表里搜索该人格 id —— 人格资源路径里都带这个 id。
+                    -->
+                    <Expander x:Name="RelationExpander" Header="关联资源" Foreground="{StaticResource WbTextMutedBrush}" Margin="0,0,0,10">
+                        <StackPanel>
+                            <TextBlock x:Name="RelationInfoText" Text="—" Foreground="{StaticResource WbTextFaintBrush}" FontSize="10.5" TextWrapping="Wrap" Margin="0,4,0,6"/>
+                            <ItemsControl x:Name="RelationList">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Margin="0,2,0,2">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel>
+                                                <TextBlock Text="{Binding Title}" TextWrapping="Wrap"/>
+                                                <TextBlock Text="{Binding Summary}" Foreground="{StaticResource WbTextFaintBrush}" FontSize="10.5" TextWrapping="Wrap"/>
+                                            </StackPanel>
+                                            <Button Grid.Column="1" Content="查看" Padding="8,2" Margin="6,0,0,0"
+                                                    Tag="{Binding SubjectId}" Click="RelationView_Click"
+                                                    ToolTip="在资源列表里搜索该人格 id（它的资源路径里都带这个 id）。"/>
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
+                    </Expander>
                     <Separator Margin="0,0,0,12"/>
                     <TextBlock Text="选中资源" FontWeight="SemiBold" Margin="0,0,0,8"/>
                     <Grid>

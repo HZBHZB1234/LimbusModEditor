@@ -10,6 +10,8 @@ using System.Windows.Threading;
 using LimbusModEditor.Application.AppConfig;
 using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Application.Assets.Preview;
+using LimbusModEditor.Application.Relations;
+using LimbusModEditor.Application.Spine;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Domain.Diagnostics;
 using LimbusModEditor.Editing.Images;
@@ -24,7 +26,7 @@ namespace LimbusModEditor.App;
 /// <see cref="OnProjectRefreshed"/> 驱动。plan-03 已移除手动导入入口，plan-04
 /// 加入可拖拽的预览列与占比持久化。
 /// </summary>
-public partial class AssetsWorkbenchPage : UserControl
+public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench
 {
     private static readonly Logger Log = LogManager.GetCurrentClassLogger();
 
@@ -35,6 +37,9 @@ public partial class AssetsWorkbenchPage : UserControl
     private readonly SpriteMetadataEditService _spriteEdits = new();
     private readonly UnityFieldEditService _unityFieldEdits = new();
     private readonly AssetPreviewRegistry _previewRegistry;
+    // 关联资源反查门面（plan-11 派生库）：只读 cache/relation-index.db，缺库时返回空 + 原因，
+    // 绝不抛异常 —— 关联是旁路信息，缺了不该把资源预览搞崩。
+    private readonly RelationQueryService _relations;
     private readonly DispatcherTimer _searchTimer;
     // ③ 布局实测日志的合并去抖（只观测，不参与布局）。
     private readonly DispatcherTimer _layoutLogTimer;
@@ -88,8 +93,14 @@ public partial class AssetsWorkbenchPage : UserControl
         PreviewHost.MinHeight = PreviewRowFloor;
         PreviewColumnHost.MinHeight = PreviewColumnMinHeight;
         // plan-05：预览提供者管线（FMOD 目录每次现取，设置改动后立即生效）。
+        // plan-11：再挂一个 Spine 预览服务（资源列表每次现取，项目换了自动失效）。
         _previewRegistry = AssetPreviewRegistry.CreateDefault(
-            () => host.Env.EffectiveFmodLibraryDirectory(host.Project));
+            () => host.Env.EffectiveFmodLibraryDirectory(host.Project),
+            new SpinePreviewService(() =>
+                (IReadOnlyList<AssetRecord>?)host.Project?.Assets ?? Array.Empty<AssetRecord>()));
+        // 关联资源板块的数据源：库路径与启动扫描用的同一份（cache/relation-index.db）。
+        // 构造 RelationStore 只建目录、不开连接；真正读库在选中资源后按需发生。
+        _relations = new RelationQueryService(new RelationStore(host.Env.CacheDirectory));
         // ③ 高度/裁切诊断：页面尺寸变化只做合并观测（不改布局）。
         _layoutLogTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
         _layoutLogTimer.Tick += (_, _) => { _layoutLogTimer.Stop(); LogLayoutMetrics("页面尺寸变化后"); };
@@ -516,15 +527,19 @@ public partial class AssetsWorkbenchPage : UserControl
         Log.Debug("搜索开始：代际={0}，快照={1} 条资产，视图={2}", generation, snapshot.Length, _treeMode ? "树形" : "列表");
         IReadOnlyList<AssetRecord> results;
         IReadOnlyList<AssetRow> rows;
+        IReadOnlyList<AssetTreeNode>? roots = null;
         try
         {
             // 过滤 + 排序 + 百万级 AssetRow 构造全部在后台线程完成，
             // UI 线程只做最终的 ItemsSource 赋值（ListView 虚拟化按需实例化）。
-            (results, rows) = await Task.Run(() =>
+            (results, rows, roots) = await Task.Run(() =>
             {
                 var filtered = _search.Search(snapshot, query);
                 var rowList = filtered.Select(a => new AssetRow(a)).ToList();
-                return (filtered, (IReadOnlyList<AssetRow>)rowList);
+                // 目录树根层构建也是逐条解析显示路径 + 分组（真实规模下约 0.5 s），
+                // 一并放到后台；UI 线程只做 TreeViewItem 映射（根节点数量级很小）。
+                var rootList = _treeMode ? AssetTreeBuilder.BuildRoots(filtered) : null;
+                return (filtered, (IReadOnlyList<AssetRow>)rowList, rootList);
             });
         }
         catch (ArgumentException ex) { Log.Error(ex, "搜索参数被拒绝（语义原样：结果丢弃）：代际={0}，快照={1} 条", generation, snapshot.Length); return; }
@@ -548,7 +563,8 @@ public partial class AssetsWorkbenchPage : UserControl
         Log.Debug("搜索完成：代际={0}，命中 {1} / 全量 {2} 条，行视图模型={3} 个",
             generation, results.Count, project.Assets.Count, rows.Count);
         // 目录树视图：按最新搜索结果重建根层（展开仍是惰性的）。
-        if (_treeMode) RebuildTree();
+        // 根层已在后台线程构建好（见上面的 Task.Run），这里只做 UI 映射。
+        if (_treeMode) RebuildTree(roots);
     }
 
     // ── 选中与预览 ───────────────────────────────────────────────────
@@ -608,6 +624,9 @@ public partial class AssetsWorkbenchPage : UserControl
     {
         var project = _host.Project;
         var hasProjectFile = _host.ProjectFile is not null;
+        // File.Exists 是系统调用：同一个选中项原先最多查 5 次（每个按钮各一次），
+        // 统一算一次复用。
+        var sourceExists = asset is not null && !string.IsNullOrWhiteSpace(asset.SourcePath) && File.Exists(asset.SourcePath);
         ReplaceAssetButton.IsEnabled = asset is not null && hasProjectFile;
         EditTextButton.IsEnabled = asset is not null && TextAssetEditService.CanEditText(asset) && hasProjectFile;
         // bundle 内对象的正文在 AssetBundle 容器里，内置编辑器不支持 —— 置灰并说明原因，
@@ -620,24 +639,22 @@ public partial class AssetsWorkbenchPage : UserControl
         HexPreviewButton.IsEnabled = asset is not null;
         ClearEditsButton.IsEnabled = asset is not null && AssetEditService.HasEdits(asset);
         SpriteMetadataButton.IsEnabled = asset?.Type == AssetType.Sprite &&
-            asset.UnityPathId.HasValue && !string.IsNullOrWhiteSpace(asset.SourcePath) &&
-            File.Exists(asset.SourcePath) && hasProjectFile;
+            asset.UnityPathId.HasValue && sourceExists && hasProjectFile;
+        var unityBacked = asset is not null &&
+            (asset.Metadata.ContainsKey("unityBundle") || asset.Metadata.ContainsKey("unitySerializedFile"));
         UnityFieldsButton.IsEnabled = asset?.UnityPathId.HasValue == true &&
-            (asset.Metadata.ContainsKey("unityBundle") || asset.Metadata.ContainsKey("unitySerializedFile")) &&
-            !string.IsNullOrWhiteSpace(asset.SourcePath) && File.Exists(asset.SourcePath) && hasProjectFile;
+            unityBacked && sourceExists && hasProjectFile;
         ReferencersButton.IsEnabled = UnityFieldsButton.IsEnabled;
         ObjectSummaryButton.IsEnabled = asset?.UnityPathId.HasValue == true &&
-            asset.Type is AssetType.Mesh or AssetType.Animation or AssetType.Font &&
-            (asset.Metadata.ContainsKey("unityBundle") || asset.Metadata.ContainsKey("unitySerializedFile")) &&
-            !string.IsNullOrWhiteSpace(asset.SourcePath) && File.Exists(asset.SourcePath) && hasProjectFile;
+            (asset.Type is AssetType.Mesh or AssetType.Animation or AssetType.Font) &&
+            unityBacked && sourceExists && hasProjectFile;
         var fmodDirectory = _host.Env.EffectiveFmodLibraryDirectory(project);
-        DecodeAudioButton.IsEnabled = asset?.Type == AssetType.Audio &&
-            asset.LogicalPath.StartsWith("fsb/", StringComparison.OrdinalIgnoreCase) &&
+        var isFsbAudio = asset?.Type == AssetType.Audio &&
+            asset.LogicalPath.StartsWith("fsb/", StringComparison.OrdinalIgnoreCase);
+        DecodeAudioButton.IsEnabled = isFsbAudio &&
             !string.IsNullOrWhiteSpace(fmodDirectory) &&
             Directory.Exists(fmodDirectory) && hasProjectFile;
-        FsbInspectButton.IsEnabled = asset?.Type == AssetType.Audio &&
-            asset.LogicalPath.StartsWith("fsb/", StringComparison.OrdinalIgnoreCase) &&
-            !string.IsNullOrWhiteSpace(asset.SourcePath) && File.Exists(asset.SourcePath) && hasProjectFile;
+        FsbInspectButton.IsEnabled = isFsbAudio && sourceExists && hasProjectFile;
         var isImage = asset?.Type is AssetType.Texture or AssetType.Sprite;
         AtlasPanel.Visibility = isImage ? Visibility.Visible : Visibility.Collapsed;
         SplitAtlasButton.IsEnabled = isImage && hasProjectFile;
@@ -700,6 +717,9 @@ public partial class AssetsWorkbenchPage : UserControl
             _previewWindow is null ? "右栏" : "放大窗口",
             PreviewHost.ActualHeight, ActualHeight);
         _ = UpdatePropertiesAsync(asset, generation);
+        // 关联资源板块：与属性区同样「后台读 + 代际守卫」，但走另一条异步链，
+        // 互不阻塞（属性失败不影响关联，反之亦然）。
+        _ = UpdateRelatedResourcesAsync(asset, generation);
     }
 
     /// <summary>预览内容的落点（plan-13）：打开「放大预览」窗口时改投到该窗口，
@@ -764,6 +784,71 @@ public partial class AssetsWorkbenchPage : UserControl
         }
     }
 
+    /// <summary>
+    /// 「关联资源」板块（plan-11）：反查「当前资源属于哪些人格」。
+    ///
+    /// <para>数据全部来自派生库 <c>cache/relation-index.db</c>（启动扫描在四个索引库就绪后
+    /// 生成，见 <c>PersonaRelationIndexService</c>）—— 这里只做只读反查，不做分析、不建库。
+    /// 库没建好时 <see cref="RelationQueryService.DescribeSubjectsForAsset"/> 返回空 + 中文原因，
+    /// 面板照常显示原因（而不是空白或异常）。</para>
+    ///
+    /// <para>与属性区共用同一个 <c>generation</c>（<see cref="_previewGeneration"/>）：
+    /// 快速连点不同资源时，过期结果一律丢弃，避免「A 的关联」贴到 B 的面板上。</para>
+    /// </summary>
+    private async Task UpdateRelatedResourcesAsync(AssetRecord asset, int generation)
+    {
+        RelationInfoText.Text = "正在查询关联…";
+        RelationList.ItemsSource = null;
+        try
+        {
+            var lookup = await Task.Run(() => _relations.DescribeSubjectsForAsset(asset)).ConfigureAwait(true);
+            if (generation != _previewGeneration) return;
+            RelationList.ItemsSource = lookup.Rows;
+            RelationInfoText.Text = lookup.Info;
+            if (Log.IsDebugEnabled) Log.Debug("关联资源查询完成：代际={0}，资源={1}，命中对象={2}，说明={3}",
+                generation, AssetDisplay.DisplayPath(asset), lookup.Rows.Count, lookup.Info);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "关联资源查询失败：代际={0}，资源={1}", generation, AssetDisplay.DisplayPath(asset));
+            if (generation == _previewGeneration)
+                RelationInfoText.Text = $"关联资源查询失败：{ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// 「关联资源」行里的「查看」：把该人格 id 填进搜索框并立刻过滤资源列表。
+    ///
+    /// <para>为什么按 id 搜就能定位全部资源：人格相关的资源路径里都带这个 5 位 id
+    /// （<c>PersonalityVideo/10201.mp4</c>、<c>Sprite/Unit/CG/10201_normal.png</c>、
+    /// 语音样本名 <c>voice_faust_10201_1</c> …），所以「按 id 过滤」是这个人格资源的并集，
+    /// 不需要为每条链接单独造一个跳转目标。</para>
+    /// </summary>
+    private void RelationView_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: string subjectId } || string.IsNullOrWhiteSpace(subjectId))
+        {
+            Log.Debug("关联资源「查看」：按钮未携带对象 id，忽略");
+            return;
+        }
+        Log.Info("关联资源「查看」：按人格 id 过滤资源列表，id={0}", subjectId);
+        // 统一走宿主跳转（等价于「切到资源页 + 用该关键词过滤」），避免页面自己拼搜索时序。
+        _host.ShowWorkbenchSearch(WorkbenchPageKeys.Assets, subjectId);
+    }
+
+    /// <summary>
+    /// 宿主跳转过来时的过滤入口（<see cref="ISearchableWorkbench"/>）：填搜索框 + 立刻搜。
+    /// 不走 300ms 防抖 —— 用户点了「查看」期望立刻看到结果。
+    /// </summary>
+    public void ApplySearchKeyword(string keyword)
+    {
+        var text = keyword ?? string.Empty;
+        Log.Debug("资源页接受外部关键词过滤：长度={0}", text.Length);
+        SearchBox.Text = text;
+        _searchTimer.Stop();
+        _ = RunSearchAsync();
+    }
+
     // ── 预览视图构建（按 Kind 切换；全部只读，plan-05）──────────────────
 
     /// <summary>JSON 树预览的行数上限（超过就只给纯文本，见
@@ -777,6 +862,7 @@ public partial class AssetsWorkbenchPage : UserControl
         AssetPreviewKind.Json => BuildTextView(preview.Text, jsonTree: true),
         AssetPreviewKind.Audio => BuildAudioView(preview.Audio),
         AssetPreviewKind.Rows => BuildRowsView(preview.Rows),
+        AssetPreviewKind.Spine => BuildSpineView(preview),
         AssetPreviewKind.Hex => BuildHexView(preview.Text),
         AssetPreviewKind.Message => BuildMessageView(preview.Text),
         _ => null,
@@ -1284,6 +1370,42 @@ public partial class AssetsWorkbenchPage : UserControl
         };
     }
 
+    /// <summary>
+    /// Spine 预览（plan-11）：上面放「图集页 + 区域框」叠加图（有就放），下面放结构行
+    /// （骨架版本 / 画布 / 动画清单 / 图集页区域 / 骨骼表）。
+    ///
+    /// <para><b>为什么不是动画播放</b>：仓库里没有 Spine 运行时，播动画要自己实现蒙皮 /
+    /// 网格变形 / 动画混合 / 约束求值；这里给的是能确证的事实 + 图集怎么切的可视化，
+    /// 导出走「Spine 资源导出」（卡片流页 / 关联资源区），交给外部 Spine 工具看。</para>
+    /// </summary>
+    private UIElement BuildSpineView(AssetPreview preview)
+    {
+        var panel = new StackPanel();
+        if (preview.ImagePng is not null)
+        {
+            var bitmap = LoadBitmap(preview.ImagePng);
+            Log.Debug("构建 Spine 预览：叠加图 {0}×{1}，结构行 {2} 条",
+                bitmap?.PixelWidth ?? -1, bitmap?.PixelHeight ?? -1, preview.Rows?.Count ?? -1);
+            panel.Children.Add(new Border
+            {
+                Background = TryFindResource("Checkerboard") as Brush ?? WbBrush("WbListBrush"),
+                BorderBrush = WbBrush("WbBorderBrush"),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(2),
+                Margin = new Thickness(0, 0, 0, 6),
+                Child = new Image
+                {
+                    Source = bitmap,
+                    Stretch = Stretch.Uniform,
+                    MaxHeight = 360,
+                    HorizontalAlignment = HorizontalAlignment.Left,
+                },
+            });
+        }
+        panel.Children.Add(BuildRowsView(preview.Rows));
+        return panel;
+    }
+
     private static UIElement BuildHexView(string? text)
     {
         Log.Debug("构建十六进制预览：字符数={0}，固定 Height=200", text?.Length ?? -1);
@@ -1354,6 +1476,9 @@ public partial class AssetsWorkbenchPage : UserControl
         }
         PropertyList.ItemsSource = null;
         PropertyInfoText.Text = "—";
+        // 关联资源板块也随选中项清空（异步结果按代际守卫丢弃，见 UpdateRelatedResourcesAsync）。
+        RelationList.ItemsSource = null;
+        RelationInfoText.Text = "—";
         _currentAudio = null;
         StopAudioPreview();
     }
@@ -1976,7 +2101,9 @@ public partial class AssetsWorkbenchPage : UserControl
         if (_treeMode) RebuildTree();
     }
 
-    private void RebuildTree()
+    /// <param name="prebuiltRoots">调用方已在后台线程构建好的根层模型（搜索路径会传，
+    /// 避免在 UI 线程上对百万级结果做路径解析）；为 null 时就地构建（切视图模式等）。</param>
+    private void RebuildTree(IReadOnlyList<AssetTreeNode>? prebuiltRoots = null)
     {
         using var scope = Log.Scope("RebuildTree");
         if (_lastResults is null)
@@ -1995,7 +2122,7 @@ public partial class AssetsWorkbenchPage : UserControl
         var selectedAssetId = (AssetTree.SelectedItem as TreeViewItem)?.Tag is AssetTreeNode { Asset: { } selected }
             ? selected.AssetId
             : (Guid?)null;
-        var roots = AssetTreeBuilder.BuildRoots(_lastResults).Select(MakeTreeItem).ToList();
+        var roots = (prebuiltRoots ?? AssetTreeBuilder.BuildRoots(_lastResults)).Select(MakeTreeItem).ToList();
         AssetTree.ItemsSource = roots;
         Log.Debug("重建目录树：结果 {0} 条 → 根节点 {1} 个；捕获展开键 {2} → {3}；重建前选中 AssetId={4}（④ 若展开键数量骤减即折叠）",
             _lastResults.Count, roots.Count, keysBefore, capturedKeys, selectedAssetId?.ToString() ?? "(无)");

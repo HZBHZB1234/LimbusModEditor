@@ -2,6 +2,7 @@ using System.Diagnostics;
 using LimbusModEditor.Application.AppConfig;
 using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Application.Caching;
+using LimbusModEditor.Application.Relations;
 using LimbusModEditor.Application.StaticMods;
 using LimbusModEditor.Application.Texts;
 using LimbusModEditor.Domain.Projects;
@@ -226,6 +227,8 @@ public sealed class StartupScanService
     public const string StaticTablesStep = "static-tables";
     /// <summary>步骤标识：lang 文本索引。</summary>
     public const string TextIndexStep = "text-index";
+    /// <summary>步骤标识：人格关联分析（<b>派生</b>步骤，必须在四个索引库就绪之后跑）。</summary>
+    public const string RelationIndexStep = "relations";
 
     private readonly AppEnvironment _env;
     private readonly UnityCacheScanService _cacheScan;
@@ -482,6 +485,8 @@ public sealed class StartupScanService
         steps.Add(await TimedAsync(() => ScanBankIndexAsync(project, progress, cancellationToken)).ConfigureAwait(false));
         steps.Add(await TimedAsync(() => ScanStaticTablesAsync(project, progress, cancellationToken)).ConfigureAwait(false));
         steps.Add(await TimedAsync(() => ScanTextIndexAsync(project, progress, cancellationToken)).ConfigureAwait(false));
+        // 派生步骤：关联分析读的正是上面刚落定的四个索引库，必须排在它们之后。
+        steps.Add(await TimedAsync(() => ScanRelationIndexAsync(project, progress, cancellationToken)).ConfigureAwait(false));
 
         watch.Stop();
         Log.Info("启动扫描结束：共 {0} 步 · 用时 {1:0.0} 秒 · {2}", steps.Count, watch.Elapsed.TotalSeconds,
@@ -550,8 +555,9 @@ public sealed class StartupScanService
         => TimedAsync(() => ScanUnityAssetsAsync(project, progress, projectMatchesIndex, cancellationToken));
 
     /// <summary>
-    /// 步骤 ③④⑤ 一起跑（可单独调用，plan-15）：音频 / 静态表 / lang 三个工作台索引。
-    /// 顺序固定（音频 → 静态表 → 文本），逐步骤失败隔离。
+    /// 步骤 ③④⑤ 一起跑（可单独调用，plan-15）：音频 / 静态表 / lang 三个工作台索引，
+    /// 之后接着跑<b>派生</b>的资源关联分析（它读的正是这三个库 + 资源索引）。
+    /// 顺序固定（音频 → 静态表 → 文本 → 关联），逐步骤失败隔离。
     /// </summary>
     /// <param name="project">当前项目（决定游戏目录 / 缓存目录的生效值）。</param>
     /// <param name="progress">进度回调（后台线程调用）。</param>
@@ -562,12 +568,13 @@ public sealed class StartupScanService
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(project);
-        Log.Info("工作台索引刷新开始：音频 → 静态表 → 文本 · 项目={0}", project.Name);
+        Log.Info("工作台索引刷新开始：音频 → 静态表 → 文本 → 资源关联 · 项目={0}", project.Name);
         var steps = new List<StartupScanStepResult>
         {
             await TimedAsync(() => ScanBankIndexAsync(project, progress, cancellationToken)).ConfigureAwait(false),
             await TimedAsync(() => ScanStaticTablesAsync(project, progress, cancellationToken)).ConfigureAwait(false),
             await TimedAsync(() => ScanTextIndexAsync(project, progress, cancellationToken)).ConfigureAwait(false),
+            await TimedAsync(() => ScanRelationIndexAsync(project, progress, cancellationToken)).ConfigureAwait(false),
         };
         Log.Info("工作台索引刷新结束：{0}", string.Join(" | ",
             steps.Select(s => $"{s.Key}={s.Status}({s.Elapsed.TotalSeconds:0.0}s)")));
@@ -899,6 +906,41 @@ public sealed class StartupScanService
             Log.Error(ex, "lang 文本索引失败：lang={0}", langRoot ?? "-");
             return Task.FromResult(new StartupScanStepResult(TextIndexStep, "lang 文本索引", StartupScanStepStatus.Failed,
                 ex.Message, CacheDatabase: WorkbenchCacheKind.TextIndex));
+        }
+    }
+
+    /// <summary>
+    /// 派生步骤 ⑥：人格关联分析 —— <b>在四个索引库都落定之后</b>，把它们的原版事实抽成
+    /// 「人格 id ⇄ 文本 / 静态数据 / 音频 / 图像 / 动画 / Spine」关联图，落
+    /// <c>cache/relation-index.db</c>（缓存语义与其它库一致：源一致即直接复用）。
+    ///
+    /// <para><b>为什么是独立一步而不是并进文本索引</b>：它的输入是<b>四个</b>库，
+    /// 放在「四张表」全部处理完之后跑才能保证「看到的资源都已登记」；
+    /// 失败也<b>不</b>影响前面任何一步（关联图是派生旁路，删掉只是下次重算）。</para>
+    /// </summary>
+    private async Task<StartupScanStepResult> ScanRelationIndexAsync(
+        ModProject project, IProgress<StartupScanProgress>? progress, CancellationToken cancellationToken)
+    {
+        progress?.Report(new StartupScanProgress("分析资源关联", "正在从四个索引库抽取人格关联…"));
+        try
+        {
+            var service = new PersonaRelationIndexService(_env);
+            var result = await service.RefreshAsync(project, cancellationToken).ConfigureAwait(false);
+            Log.Info("资源关联分析结束：{0}", result.Describe());
+            return new StartupScanStepResult(RelationIndexStep, "资源关联",
+                result.Rebuilt ? StartupScanStepStatus.Scanned : StartupScanStepStatus.AlreadyFresh,
+                result.Describe(),
+                CacheDatabase: WorkbenchCacheKind.ResourceRelations, RowCount: result.SubjectCount);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "资源关联分析失败（派生缓存：前面的索引步骤不受影响，稍后重进页面会自动重算）");
+            return new StartupScanStepResult(RelationIndexStep, "资源关联", StartupScanStepStatus.Failed,
+                ex.Message, CacheDatabase: WorkbenchCacheKind.ResourceRelations);
         }
     }
 }

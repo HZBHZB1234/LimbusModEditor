@@ -91,6 +91,9 @@
                     <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivityStatic" ToolTip="静态数据工作台" Click="ActivityStatic_Click">
                         <TextBlock Text="&#xE71D;" FontFamily="Segoe MDL2 Assets" FontSize="18"/>
                     </RadioButton>
+                    <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivityPresets" ToolTip="人格卡片流（按人格看它关联的全部资源）" Click="ActivityPresets_Click">
+                        <TextBlock Text="&#xE77B;" FontFamily="Segoe MDL2 Assets" FontSize="18"/>
+                    </RadioButton>
                     <RadioButton Style="{StaticResource ActivityButton}" GroupName="ActivityBar" x:Name="ActivityHelp" ToolTip="使用教程" Click="ActivityHelp_Click">
                         <TextBlock Text="&#xE897;" FontFamily="Segoe MDL2 Assets" FontSize="18"/>
                     </RadioButton>

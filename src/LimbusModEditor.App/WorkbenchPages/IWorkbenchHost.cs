@@ -42,4 +42,13 @@ public interface IWorkbenchHost
 
     /// <summary>页面间跳转（如「去扫描」→ assets）。</summary>
     void ShowPage(string key);
+
+    /// <summary>
+    /// 跳到某个工作台并<b>按关键词过滤</b>（plan-11）：预设卡片流 / 关联资源「查看」用。
+    /// 实现方负责切页，并在目标页实现了 <see cref="ISearchableWorkbench"/> 时把关键词填进它的搜索框；
+    /// 目标页不支持搜索时只切页 + 写状态栏（不抛异常）。
+    /// </summary>
+    /// <param name="pageKey">目标页 key（<c>assets</c> / <c>bank</c> / <c>text</c> / <c>static</c>）。</param>
+    /// <param name="keyword">过滤关键词（容器路径 / 文件名 / 样本名 / 人格 id）。</param>
+    void ShowWorkbenchSearch(string pageKey, string keyword);
 }

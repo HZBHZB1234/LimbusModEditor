@@ -44,8 +44,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     private ModProject? _project;
     private string? _projectFile;
 
-    // ── 页面宿主（plan-02）：6 个 key 的常驻页面，惰性创建、切换不销毁 ──────
-    private static readonly string[] PageOrder = ["assets", "bank", "text", "static", "help", "settings"];
+    // ── 页面宿主（plan-02）：常驻页面，惰性创建、切换不销毁 ──────
+    private static readonly string[] PageOrder = ["assets", "bank", "text", "static", "presets", "help", "settings"];
     private readonly Dictionary<string, UserControl> _pages = [];
     private AssetsWorkbenchPage? _assetsPage;
     private string _currentPageKey = "assets";
@@ -152,12 +152,32 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
             key, createdNew, _pages.Count, Math.Round(ActualWidth), Math.Round(ActualHeight));
     }
 
+    /// <summary>
+    /// 切到某页并按关键词过滤（IWorkbenchHost，plan-11）：预设卡片流 / 关联资源「查看」用。
+    /// 页面实现了 <see cref="ISearchableWorkbench"/> 就把关键词交给它；否则只切页 + 状态栏提示。
+    /// </summary>
+    public void ShowWorkbenchSearch(string pageKey, string keyword)
+    {
+        if (string.IsNullOrWhiteSpace(pageKey)) return;
+        ShowPage(pageKey);
+        if (_pages.TryGetValue(pageKey, out var page) && page is ISearchableWorkbench searchable)
+        {
+            searchable.ApplySearchKeyword(keyword ?? string.Empty);
+            SetStatus($"已切到 {pageKey} 工作台并按「{keyword}」过滤。");
+            Log.Debug("页面间搜索跳转：pageKey={0}，关键词={1}", pageKey, keyword ?? "-");
+            return;
+        }
+        SetStatus($"已切到 {pageKey} 工作台；该页不支持自动过滤，请在搜索框输入「{keyword}」。");
+        Log.Debug("页面间搜索跳转（目标页不支持搜索）：pageKey={0}，关键词={1}", pageKey, keyword ?? "-");
+    }
+
     private UserControl? CreatePage(string key) => key switch
     {
         "assets" => CreateAssetsPage(),
         "bank" => new BankWorkbenchPage(this),
         "text" => new TextWorkbenchPage(this),
         "static" => new StaticWorkbenchPage(this),
+        "presets" => new PresetWorkbenchPage(this),
         "help" => new HelpPage(),
         "settings" => new SettingsPage(this),
         _ => null,
@@ -181,6 +201,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
             "bank" => ActivityBank,
             "text" => ActivityText,
             "static" => ActivityStatic,
+            "presets" => ActivityPresets,
             "help" => ActivityHelp,
             "settings" => ActivitySettings,
             _ => null,
@@ -189,12 +210,13 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     }
 
     /// <summary>需要项目的页面（无项目时被引导覆盖层遮住）；设置/教程始终可用。</summary>
-    private static bool NeedsProject(string key) => key is "assets" or "bank" or "text" or "static";
+    private static bool NeedsProject(string key) => key is "assets" or "bank" or "text" or "static" or "presets";
 
     private void ActivityAssets_Click(object sender, RoutedEventArgs e) => ShowPage("assets");
     private void ActivityBank_Click(object sender, RoutedEventArgs e) => ShowPage("bank");
     private void ActivityText_Click(object sender, RoutedEventArgs e) => ShowPage("text");
     private void ActivityStatic_Click(object sender, RoutedEventArgs e) => ShowPage("static");
+    private void ActivityPresets_Click(object sender, RoutedEventArgs e) => ShowPage("presets");
     private void ActivityHelp_Click(object sender, RoutedEventArgs e) => ShowPage("help");
     private void ActivitySettings_Click(object sender, RoutedEventArgs e) => ShowPage("settings");
 
@@ -386,6 +408,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
                     case BankWorkbenchPage bank: await bank.ReloadFromIndexAsync(); break;
                     case StaticWorkbenchPage tables: await tables.ReloadFromIndexAsync(); break;
                     case TextWorkbenchPage texts: await texts.ReloadFromIndexAsync(); break;
+                    case PresetWorkbenchPage presets: presets.OnProjectRefreshed(); break;
                     case SettingsPage settings: settings.Reload(); break;
                 }
                 Log.Debug("工作台预热：{0} 完成，耗时 {1} ms", key, pageWatch.ElapsedMilliseconds);
@@ -1026,6 +1049,9 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     {
         ProjectNameText.Text = _project?.Name ?? "未打开项目";
         _assetsPage?.OnProjectRefreshed();
+        // 卡片流页是惰性创建的：没建过就不用管（下次显示时自己会建）。
+        if (_pages.TryGetValue("presets", out var presets) && presets is PresetWorkbenchPage presetPage)
+            presetPage.OnProjectRefreshed();
         UpdateHint();
         if (status is not null) StatusText.Text = $"{status}：{_project?.Name}";
     }

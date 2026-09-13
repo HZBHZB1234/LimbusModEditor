@@ -398,8 +398,11 @@ public sealed class TextIndexStore
             .ToList();
         // 库里一条行都没有（首次使用 / 刚被 EnsureSource 清空 / 上次没建成）→ 整表重建。
         // 有行时：文件被删掉就要重建（不依赖目录 mtime 是否可靠），否则只补变过的行。
-        var rebuild = files.Count == 0 || stored.Count == 0
-            || stored.Keys.Any(x => !files.Any(f => string.Equals(f.RelativePath, x, StringComparison.OrdinalIgnoreCase)));
+        // 「文件是否还在」原先写成 stored.Keys.Any(x => files.Any(...))：嵌套线性扫描是
+        // O(n²)（真实规模 2048 文件 × 362k 命中行时，这一条会成为落盘热点）。
+        var present = new HashSet<string>(files.Count, StringComparer.OrdinalIgnoreCase);
+        foreach (var file in files) present.Add(file.RelativePath);
+        var rebuild = files.Count == 0 || stored.Count == 0 || stored.Keys.Any(x => !present.Contains(x));
 
         _cache.Write((connection, transaction) =>
         {

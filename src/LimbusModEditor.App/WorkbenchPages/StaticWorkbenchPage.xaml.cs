@@ -29,8 +29,16 @@ namespace LimbusModEditor.App;
 /// 不再有 5000 行截断；另有「与官方版本差异」页显示 RFC6902 摘要。</item>
 /// </list>
 /// </summary>
-public partial class StaticWorkbenchPage : UserControl
+public partial class StaticWorkbenchPage : UserControl, ISearchableWorkbench
 {
+    /// <summary>宿主跳转过来的关键词过滤（<see cref="ISearchableWorkbench"/>）。</summary>
+    public void ApplySearchKeyword(string keyword)
+    {
+        var text = keyword ?? string.Empty;
+        _search.Text = text;
+        _search.CaretIndex = text.Length;
+    }
+
     private static readonly Logger Log = LogManager.GetCurrentClassLogger();
 
     /// <summary>浏览列视图（树 / 列表）。</summary>

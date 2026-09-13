@@ -203,12 +203,19 @@ public static class AssetDisplay
     };
 
     /// <summary>自然名称比较：段内数字按数值比（icon2 &lt; icon10），
-    /// 其余按当前文化不区分大小写。</summary>
+    /// 其余按当前文化不区分大小写。string 重载与 span 重载是同一份实现
+    /// （前者只做 null 归一），排序热路径可走 span 版本避免子串分配。</summary>
     public static int CompareNames(string? a, string? b)
     {
         if (ReferenceEquals(a, b)) return 0;
         if (a is null) return -1;
         if (b is null) return 1;
+        return CompareNames(a.AsSpan(), b.AsSpan());
+    }
+
+    /// <summary><see cref="CompareNames(string?, string?)"/> 的零分配重载。</summary>
+    public static int CompareNames(ReadOnlySpan<char> a, ReadOnlySpan<char> b)
+    {
         var ia = 0;
         var ib = 0;
         while (ia < a.Length && ib < b.Length)
@@ -225,7 +232,7 @@ public static class AssetDisplay
                 var runB = b[startB..ib].TrimStart('0');
                 var byLength = runA.Length.CompareTo(runB.Length);
                 if (byLength != 0) return byLength;
-                var byValue = string.CompareOrdinal(runA, runB);
+                var byValue = runA.SequenceCompareTo(runB);
                 if (byValue != 0) return byValue;
             }
             else
@@ -237,6 +244,45 @@ public static class AssetDisplay
             }
         }
         return (a.Length - ia).CompareTo(b.Length - ib);
+    }
+
+    /// <summary>显示路径的逐段比较（<see cref="SplitTreePath"/> 结果的字典序语义），
+    /// 但**不分配任何子串**：空段跳过、段数少者在前、段全部相同则视为相等。
+    /// 与「<c>SplitTreePath(a)</c> 逐段 <see cref="CompareNames(string?, string?)"/>
+    /// 再比长度」在行为上完全一致 —— 列表/树排序的比较器每次比较都会被调用
+    /// （40 万条资产时约 2×10⁷ 次），这是搜索热路径上最大的一处分配源。</summary>
+    public static int ComparePaths(string? a, string? b)
+    {
+        var spanA = (a ?? string.Empty).AsSpan();
+        var spanB = (b ?? string.Empty).AsSpan();
+        while (true)
+        {
+            var segmentA = NextSegment(ref spanA);
+            var segmentB = NextSegment(ref spanB);
+            if (segmentA.IsEmpty && segmentB.IsEmpty) return 0;
+            if (segmentA.IsEmpty) return -1;
+            if (segmentB.IsEmpty) return 1;
+            var bySegment = CompareNames(segmentA, segmentB);
+            if (bySegment != 0) return bySegment;
+        }
+    }
+
+    /// <summary>取下一个非空路径段（跳过多余分隔符），并把剩余部分写回。</summary>
+    private static ReadOnlySpan<char> NextSegment(ref ReadOnlySpan<char> remaining)
+    {
+        while (true)
+        {
+            var index = remaining.IndexOf('/');
+            if (index < 0)
+            {
+                var tail = remaining;
+                remaining = default;
+                return tail;
+            }
+            var segment = remaining[..index];
+            remaining = remaining[(index + 1)..];
+            if (segment.Length > 0) return segment;
+        }
     }
 
     /// <summary><see cref="CompareNames"/> 的比较器实例（树 / 列表排序共用）。</summary>

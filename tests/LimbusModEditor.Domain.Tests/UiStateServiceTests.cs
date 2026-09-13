@@ -135,6 +135,41 @@ public class UiStateServiceTests : IDisposable
         Assert.True(state.WorkbenchPreviewWidths.ContainsKey("text"));
     }
 
+    // ── plan-13：预览块高度（WorkbenchPreviewHeights） ──────────────────
+
+    [Fact]
+    public void Preview_height_round_trips_and_defaults_when_unrecorded()
+    {
+        var state = new UiStateService();
+        Assert.False(state.TryGetPreviewHeight(WorkbenchPageKeys.Assets, out _));
+        Assert.Equal(UiStateService.DefaultPreviewEditorHeight, state.GetPreviewHeight(WorkbenchPageKeys.Assets));
+        // 未知 / 空 key 不抛，返回默认值。
+        Assert.Equal(UiStateService.DefaultPreviewEditorHeight, state.GetPreviewHeight("未知页"));
+        Assert.Equal(UiStateService.DefaultPreviewEditorHeight, state.GetPreviewHeight(string.Empty));
+
+        state.SetPreviewHeight(WorkbenchPageKeys.Assets, 620);
+        UiStateService.Save(state, StateFile);
+        var reloaded = UiStateService.Load(StateFile);
+        Assert.Equal(620, reloaded.GetPreviewHeight(WorkbenchPageKeys.Assets));
+    }
+
+    [Fact]
+    public void Preview_heights_are_clamped_on_load_and_on_set()
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(StateFile)!);
+        File.WriteAllText(StateFile,
+            "{\"workbenchPreviewHeights\":{\"assets\":10,\"text\":99999},\"workbenchPreviewWidths\":{}}");
+        var state = UiStateService.Load(StateFile);
+        Assert.Equal(UiStateService.MinPreviewEditorHeight, state.GetPreviewHeight(WorkbenchPageKeys.Assets));
+        Assert.Equal(UiStateService.MaxPreviewEditorHeight, state.GetPreviewHeight(WorkbenchPageKeys.Text));
+        // NaN / Infinity 回默认值；空 key 直接忽略。
+        state.SetPreviewHeight(WorkbenchPageKeys.Static, double.NaN);
+        Assert.Equal(UiStateService.DefaultPreviewEditorHeight, state.GetPreviewHeight(WorkbenchPageKeys.Static));
+        state.SetPreviewHeight("  ", 500);
+        // assets / text（来自配置）+ static（显式写入），空 key 不产生条目。
+        Assert.Equal(3, state.WorkbenchPreviewHeights.Count);
+    }
+
     [Fact]
     public void Page_keys_are_disjoint()
     {

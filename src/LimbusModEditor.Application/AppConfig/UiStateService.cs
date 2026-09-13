@@ -35,6 +35,13 @@ public sealed class UiStateService
     /// <summary>预览/编辑列的最大宽度（px）：防止手改配置文件把浏览列挤没。</summary>
     public const double MaxPreviewColumnWidth = 2000;
 
+    /// <summary>资源工作台「预览块」的默认高度（px，plan-13）。</summary>
+    public const double DefaultPreviewEditorHeight = 380;
+    /// <summary>预览块最小高度（px）：再小就只能看见一条缝（plan-13）。</summary>
+    public const double MinPreviewEditorHeight = 140;
+    /// <summary>预览块最大高度（px）：超高的窗口下也不让预览吃掉整个右栏（plan-13）。</summary>
+    public const double MaxPreviewEditorHeight = 2000;
+
     /// <summary>资源工作台预览列宽（px）。旧字段（plan-04）：仍然读写并始终与
     /// <see cref="WorkbenchPreviewWidths"/> 里 <c>assets</c> 那一项保持同值，
     /// 这样旧版本编辑器读同一份配置也不会丢宽度。</summary>
@@ -43,6 +50,11 @@ public sealed class UiStateService
     /// <summary>各工作台的预览/编辑列宽（px），key = <see cref="WorkbenchPageKeys"/>。
     /// plan-09 引入：四个工作台各自记住自己的列宽，列宽变化互不影响。</summary>
     public Dictionary<string, double> WorkbenchPreviewWidths { get; set; } =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>各工作台「预览块」的高度（px，plan-13），key = <see cref="WorkbenchPageKeys"/>。
+    /// 用户拖右栏里的水平分隔条即改写它：预览块够大才看得清、改得动。</summary>
+    public Dictionary<string, double> WorkbenchPreviewHeights { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>取某页的预览列宽：缺省 <see cref="DefaultPreviewColumnWidth"/>，并钳制到
@@ -74,6 +86,35 @@ public sealed class UiStateService
         => double.IsNaN(width) || double.IsInfinity(width)
             ? DefaultPreviewColumnWidth
             : Math.Clamp(width, MinPreviewColumnWidth, MaxPreviewColumnWidth);
+
+    /// <summary>取某页的预览块高度（plan-13）：缺省 <see cref="DefaultPreviewEditorHeight"/>，
+    /// 钳制到 [<see cref="MinPreviewEditorHeight"/>, <see cref="MaxPreviewEditorHeight"/>]。</summary>
+    public double GetPreviewHeight(string pageKey)
+        => TryGetPreviewHeight(pageKey, out var height) ? height : DefaultPreviewEditorHeight;
+
+    /// <summary>某页是否有显式持久化的预览块高度。</summary>
+    public bool TryGetPreviewHeight(string pageKey, out double height)
+    {
+        height = DefaultPreviewEditorHeight;
+        if (string.IsNullOrWhiteSpace(pageKey) || WorkbenchPreviewHeights is null) return false;
+        if (!WorkbenchPreviewHeights.TryGetValue(pageKey.Trim(), out var stored)) return false;
+        height = ClampPreviewHeight(stored);
+        return true;
+    }
+
+    /// <summary>写某页的预览块高度（钳制后写入）。</summary>
+    public void SetPreviewHeight(string pageKey, double height)
+    {
+        if (string.IsNullOrWhiteSpace(pageKey)) return;
+        WorkbenchPreviewHeights ??= new(StringComparer.OrdinalIgnoreCase);
+        WorkbenchPreviewHeights[pageKey.Trim()] = ClampPreviewHeight(height);
+    }
+
+    /// <summary>预览块高度钳制：NaN/Infinity 回默认值，其余夹到 [140, 2000]。</summary>
+    public static double ClampPreviewHeight(double height)
+        => double.IsNaN(height) || double.IsInfinity(height)
+            ? DefaultPreviewEditorHeight
+            : Math.Clamp(height, MinPreviewEditorHeight, MaxPreviewEditorHeight);
 
     /// <summary>加载 UI 状态；文件缺失/损坏时回退默认值（不阻塞启动）。</summary>
     public static UiStateService Load(string configFile)
@@ -136,6 +177,15 @@ public sealed class UiStateService
 
         state.WorkbenchPreviewWidths = widths;
         state.AssetsPreviewColumnWidth = assetsWidth;
+
+        // 预览块高度（plan-13）：与列宽同样的规整策略（键去空白、值钳制、丢弃空键）。
+        var heights = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (key, value) in state.WorkbenchPreviewHeights ?? [])
+        {
+            if (string.IsNullOrWhiteSpace(key)) continue;
+            heights[key.Trim()] = ClampPreviewHeight(value);
+        }
+        state.WorkbenchPreviewHeights = heights;
         return state;
     }
 

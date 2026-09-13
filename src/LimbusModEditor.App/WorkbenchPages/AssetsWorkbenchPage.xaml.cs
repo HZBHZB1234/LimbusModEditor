@@ -55,6 +55,19 @@ public partial class AssetsWorkbenchPage : UserControl
     // 默认以「容器目录树」呈现：用户看到的是类文件夹结构，而不是扁平技术路径。
     private bool _treeMode = true;
     private bool _filtersInitialized;
+    // plan-13：右栏行高下限。整栏高度不够时由外层 ScrollViewer 兜底滚动，
+    // 而不是把预览或创作状态裁掉（用户反馈：「窗口较小时预览看不全 / 滑不动」）。
+    private const double MinStatusPaneHeight = 240;
+    private const double PreviewColumnMinHeight = 240;
+    private const double PreviewRowFloor = UiStateService.MinPreviewEditorHeight;
+    // 预览块默认占右栏可视高的比例（首次使用；用户拖过之后就以用户值为准）。
+    private const double PreviewRowDefaultShare = 0.55;
+    // 预览块最大占右栏可视高的比例：再大就把「创作状态」挤到看不见。
+    private const double PreviewRowMaxShare = 0.72;
+    // plan-13：独立「放大预览」窗口（主窗很小时也能大尺寸查看/编辑）。
+    private PreviewWindow? _previewWindow;
+    // 用户手动定位过预览高度（拖拽/双击）后就别再自动收敛，免得跟用户抢把手。
+    private bool _previewHeightUserSet;
 
     public AssetsWorkbenchPage(IWorkbenchHost host)
     {
@@ -68,6 +81,12 @@ public partial class AssetsWorkbenchPage : UserControl
         _uiStateFile = Path.Combine(host.Env.ConfigDirectory, "ui-state.json");
         _uiState = UiStateService.Load(_uiStateFile);
         PreviewColumn.Width = new GridLength(_uiState.AssetsPreviewColumnWidth);
+        // plan-13：预览块高度（可拖、可复位、持久化）—— 用户的「预览太小」诉求从这里解。
+        PreviewRow.Height = new GridLength(_uiState.GetPreviewHeight(WorkbenchPageKeys.Assets));
+        // 下限与 UiStateService 的钳制区间共用一套常量（XAML 里不再写死数字）。
+        PreviewRow.MinHeight = PreviewRowFloor;
+        PreviewHost.MinHeight = PreviewRowFloor;
+        PreviewColumnHost.MinHeight = PreviewColumnMinHeight;
         // plan-05：预览提供者管线（FMOD 目录每次现取，设置改动后立即生效）。
         _previewRegistry = AssetPreviewRegistry.CreateDefault(
             () => host.Env.EffectiveFmodLibraryDirectory(host.Project));
@@ -77,8 +96,8 @@ public partial class AssetsWorkbenchPage : UserControl
         SizeChanged += OnPageSizeChanged;
         Loaded += OnPageLoaded;
         Unloaded += OnPageUnloaded;
-        Log.Info("资源工作台页面构造完成：默认视图={0}，预览列宽={1}，ui-state={2}",
-            _treeMode ? "树形" : "列表", PreviewColumn.Width, _uiStateFile);
+        Log.Info("资源工作台页面构造完成：默认视图={0}，预览列宽={1}，预览块高={2}，ui-state={3}",
+            _treeMode ? "树形" : "列表", PreviewColumn.Width, PreviewRow.Height, _uiStateFile);
     }
 
     /// <summary>当前选中的资源（宿主拖放判定用）。</summary>
@@ -126,7 +145,11 @@ public partial class AssetsWorkbenchPage : UserControl
     }
 
     /// <summary>关窗时持久化布局占比。</summary>
-    public void PersistUiState() => SavePreviewWidth();
+    public void PersistUiState()
+    {
+        SavePreviewWidth();
+        SavePreviewHeight();
+    }
 
     // ── plan-04：预览列拖拽与占比持久化 ─────────────────────────────
 
@@ -153,54 +176,127 @@ public partial class AssetsWorkbenchPage : UserControl
         Log.Debug("预览列宽持久化：{0} → {1}", _uiState.AssetsPreviewColumnWidth, _uiStateFile);
     }
 
+    // ── plan-13：预览块高度（拖拽 / 复位 / 持久化 / 按可用高度收敛） ──
+
+    /// <summary>用户在右栏拖完水平把手：记下新高度并持久化。</summary>
+    private void PreviewHeightSplitter_DragCompleted(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        _previewHeightUserSet = true;
+        Log.Info("用户拖拽预览高度分隔条完成：预览块高={0}", PreviewRow.ActualHeight);
+        SavePreviewHeight();
+        LogLayoutMetrics("拖拽预览高度后");
+    }
+
+    /// <summary>双击水平把手：复位默认高度并持久化。</summary>
+    private void PreviewHeightSplitter_DoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        var before = PreviewRow.ActualHeight;
+        PreviewRow.Height = new GridLength(UiStateService.DefaultPreviewEditorHeight);
+        _previewHeightUserSet = true;
+        ApplyPreviewRowHeight();
+        SavePreviewHeight();
+        Log.Info("用户双击预览高度分隔条：复位为默认 {0}（原 {1:0}）",
+            UiStateService.DefaultPreviewEditorHeight, before);
+        LogLayoutMetrics("复位预览高度后");
+    }
+
+    private void SavePreviewHeight()
+    {
+        var height = PreviewRow.Height.IsAbsolute ? PreviewRow.Height.Value : PreviewRow.ActualHeight;
+        _uiState.SetPreviewHeight(WorkbenchPageKeys.Assets, height);
+        UiStateService.Save(_uiState, _uiStateFile);
+        Log.Debug("预览块高度持久化：{0:0} → {1}", height, _uiStateFile);
+    }
+
+    /// <summary>
+    /// 按右栏可用高度落定预览行高（每次布局变化都跑，不写死比例）。
+    ///
+    /// <para>规则：用户拖过就完全听用户的（只保证不低于 <see cref="PreviewRowFloor"/>），
+    /// 没拖过则取「可用高 × <see cref="PreviewRowDefaultShare"/>」（首次使用时的合理占比）。
+    /// 「创作状态」那一行是 <c>*</c>，随剩余高度伸缩；它的自然高由
+    /// <see cref="SyncStatusPanelFloor"/> 兜底。整栏内容一旦超过可视高，
+    /// 外层 <c>PreviewColumnScroller</c> 就出现滚动条 —— 窗口再矮也能把下面滑出来
+    /// （这修的就是用户反馈的「窗口小时滑不动」）。</para>
+    /// </summary>
+    private void ApplyPreviewRowHeight()
+    {
+        var available = PreviewColumnScroller.ViewportHeight;
+        if (available <= 1) available = ActualHeight - 48; // 首帧尚无视口：按页面高估算
+        if (available <= 1) return;
+        var splitter = PreviewHeightSplitter.ActualHeight > 1 ? PreviewHeightSplitter.ActualHeight : 6;
+        var maxPreview = Math.Max(PreviewRowFloor, available * PreviewRowMaxShare);
+        var minHost = Math.Max(PreviewColumnMinHeight, Math.Max(available, PreviewRowFloor + splitter + MinStatusPaneHeight));
+        // 已持久化的用户高度优先；没有记录（新安装 / 旧配置）时按可用高取默认占比，
+        // 这样 1400 高的窗口不会只给预览 380 的固定值。
+        var persisted = _uiState.TryGetPreviewHeight(WorkbenchPageKeys.Assets, out var stored)
+            ? stored
+            : available * PreviewRowDefaultShare;
+        var applied = Math.Clamp(persisted, PreviewRowFloor, maxPreview);
+
+        if (Math.Abs(PreviewColumnHost.MinHeight - minHost) > 0.5) PreviewColumnHost.MinHeight = minHost;
+        // 创作状态内容实测高 → 作为它的 MinHeight：行有余量时铺满整行，行被挤小时把整栏
+        // 顶高、外层滚动条随即出现（内容永远滑得到；这里不再有第二层滚动器抢滚轮）。
+        SyncStatusPanelFloor();
+        // 用户已经手动定位过高度就只更新 MinHeight（保证滑得到），不再改行高。
+        if (_previewHeightUserSet) return;
+        var current = PreviewRow.Height.IsAbsolute ? PreviewRow.Height.Value : -1;
+        if (current < 0 || Math.Abs(current - applied) > 0.5)
+        {
+            PreviewRow.Height = new GridLength(applied);
+            if (Log.IsDebugEnabled) Log.Debug(
+                "预览行高落定：可用高={0:0}，偏好值={1:0}（有记录={2}），落定值={3:0}，上限={4:0}，右栏 MinHeight={5:0}",
+                available, persisted, _uiState.TryGetPreviewHeight(WorkbenchPageKeys.Assets, out _), applied, maxPreview, minHost);
+        }
+    }
+
+    /// <summary>把「创作状态」内容的实测高写进 ScrollViewer 的 MinHeight（见 ApplyPreviewRowHeight）：
+    /// StatusScroll 用 <c>ScrollBarVisibility="Disabled"</c> 量内容自然高（ExtentHeight），
+    /// 写回 MinHeight 后行有余量时铺满整行、行被挤小时把整栏顶高，外层滚动条随即出现。</summary>
+    private void SyncStatusPanelFloor()
+    {
+        if (StatusPanel.Children.Count == 0) return;
+        var contentHeight = StatusScroll.ExtentHeight;
+        if (!double.IsFinite(contentHeight) || contentHeight <= 1) return;
+        var target = Math.Max(MinStatusPaneHeight, contentHeight);
+        if (Math.Abs(StatusScroll.MinHeight - target) > 0.5) StatusScroll.MinHeight = target;
+    }
+
     // ── ③ 高度/滚动诊断：只读测量，不参与布局决策 ────────────────────
     // 用户报障「预览区（最顶栏『创作状态』整块）在窗口变矮时不能上下滑动、内容被裁」。
     // 这里只把布局实测值记下来（页面总高、右栏两行高度、预览块与「创作状态」滚动区的
     // 实测高度），不改任何布局。
 
-    /// <summary>走到页面根 Grid（右栏两行布局的宿主）。取不到时返回 null（调用点自行降级）。</summary>
-    private Grid? FindRootGrid()
-    {
-        System.Windows.DependencyObject? node = PreviewHost;
-        for (var depth = 0; depth < 12 && node is not null; depth++)
-        {
-            if (node is Grid g && g.Parent is Border) return g;
-            node = System.Windows.Media.VisualTreeHelper.GetParent(node);
-        }
-        return null;
-    }
-
     /// <summary>记录一次布局实测值（Debug）。<paramref name="reason"/> 说明触发场景。</summary>
     private void LogLayoutMetrics(string reason)
     {
-        var root = FindRootGrid();
-        if (root is null) { Log.Debug("布局实测（{0}）：尚未接入可视化树，跳过", reason); return; }
-        var previewRow = root.RowDefinitions.Count > 0 ? root.RowDefinitions[0] : null;
-        var statusRow = root.RowDefinitions.Count > 1 ? root.RowDefinitions[1] : null;
-        var statusScroll = root.Children.Count > 1 ? root.Children[1] as ScrollViewer : null;
-        var previewGrid = PreviewHost.Parent as Grid;
+        var previewGrid = PreviewHost.Parent as Grid;          // 预览块三行（标题/内容/信息）
+        var hostGrid = previewGrid?.Parent as Grid;            // 右栏三行（预览/把手/创作状态）
         Log.Debug(
-            "布局实测（{0}）：页面 Actual={1}x{2}；右栏 Grid Actual={3}x{4}；行0(预览)={5}/{6}，行1(创作状态)={7}/{8}；"
-            + "预览块 Actual={9}x{10}（行0:{11}/行1:{12}/行2:{13}），PreviewHost Actual={14}x{15}，"
-            + "创作状态区(ScrollViewer) Actual={16}x{17} 可视高={18} 可滚高={19} 滚动条={20}，PreviewMaxHeight={21}",
+            "布局实测（{0}）：页面 Actual={1}x{2}；右栏可视高(外层滚动器)={3:0}，可滚高={4:0}，滚动条={5}；"
+            + "预览行 Actual={6:0}/{7}，把手={8:0}，状态行 Actual={9:0}/{10}；"
+            + "预览块 Actual={11:0}x{12:0}（标题{13:0}/内容{14:0}/信息{15:0}），PreviewHost Actual={16:0}x{17:0}；"
+            + "创作状态自然高={18:0}（MinHeight={20:0}）；右栏 MinHeight={19:0}",
             reason, ActualWidth, ActualHeight,
-            root.ActualWidth, root.ActualHeight,
-            previewRow?.ActualHeight ?? -1, previewRow?.Height.ToString() ?? "-",
-            statusRow?.ActualHeight ?? -1, statusRow?.Height.ToString() ?? "-",
+            PreviewColumnScroller.ViewportHeight, PreviewColumnScroller.ExtentHeight,
+            PreviewColumnScroller.ComputedVerticalScrollBarVisibility,
+            PreviewRow.ActualHeight, PreviewRow.Height,
+            PreviewHeightSplitter.ActualHeight,
+            StatusRow.ActualHeight, StatusRow.Height,
             previewGrid?.ActualWidth ?? -1, previewGrid?.ActualHeight ?? -1,
             previewGrid is { RowDefinitions.Count: > 0 } ? previewGrid.RowDefinitions[0].ActualHeight : -1,
             previewGrid is { RowDefinitions.Count: > 1 } ? previewGrid.RowDefinitions[1].ActualHeight : -1,
             previewGrid is { RowDefinitions.Count: > 2 } ? previewGrid.RowDefinitions[2].ActualHeight : -1,
             PreviewHost.ActualWidth, PreviewHost.ActualHeight,
-            statusScroll?.ActualWidth ?? -1, statusScroll?.ActualHeight ?? -1,
-            statusScroll?.ViewportHeight ?? -1, statusScroll?.ExtentHeight ?? -1,
-            statusScroll?.ComputedVerticalScrollBarVisibility.ToString() ?? "-",
-            PreviewMaxHeight);
+            StatusScroll.ExtentHeight,
+            hostGrid?.MinHeight ?? -1,
+            StatusScroll.MinHeight);
     }
 
     /// <summary>页面尺寸变化的合并观测（500 ms 去抖，避免拖拽窗口时刷屏）。</summary>
     private void OnPageSizeChanged(object sender, SizeChangedEventArgs e)
     {
+        // plan-13：尺寸变化即按新可用高度收敛预览行高（保证「预览吃满、状态保底」）。
+        ApplyPreviewRowHeight();
         _layoutLogTimer.Stop();
         _layoutLogTimer.Start();
     }
@@ -209,11 +305,22 @@ public partial class AssetsWorkbenchPage : UserControl
     {
         Log.Info("资源工作台页面 Loaded：页面尺寸={0}x{1}，视图={2}，预览列宽={3}",
             ActualWidth, ActualHeight, _treeMode ? "树形" : "列表", PreviewColumn.Width);
+        ApplyPreviewRowHeight();
         LogLayoutMetrics("页面 Loaded");
     }
 
     private void OnPageUnloaded(object sender, RoutedEventArgs e)
-        => Log.Info("资源工作台页面 Unloaded：页面尺寸={0}x{1}", ActualWidth, ActualHeight);
+    {
+        Log.Info("资源工作台页面 Unloaded：页面尺寸={0}x{1}", ActualWidth, ActualHeight);
+        // plan-13：放大预览窗口不是页面的可视化子级，页面卸载时要自己收掉，
+        // 否则关项目/关窗后它会孤零零留在桌面上。
+        if (_previewWindow is { } window)
+        {
+            _previewWindow = null;
+            try { window.Close(); }
+            catch (Exception ex) { Log.Warn(ex, "关闭放大预览窗口失败（忽略）"); }
+        }
+    }
 
     // ── plan-03：拖放收窄为「单张图片拖到选中的图像资源上替换」──────────
 
@@ -471,6 +578,7 @@ public partial class AssetsWorkbenchPage : UserControl
             : new HumanSizeConverter().Convert(asset.Size, typeof(string), null, System.Globalization.CultureInfo.CurrentCulture) as string;
         SelectedStateText.Text = asset is null ? "—" : AssetDisplay.StateLabel(asset.EditState);
         RefreshSelectionButtons(asset);
+        PreviewExpandButton.IsEnabled = asset is not null;
         UpdatePreview(asset);
     }
 
@@ -559,7 +667,8 @@ public partial class AssetsWorkbenchPage : UserControl
             if (generation != _previewGeneration) { Log.Error(ex, "预览失败（结果已过期丢弃）：资源={0}", AssetDisplay.DisplayPath(asset)); return; }
             Log.Error(ex, "预览失败：资源={0}，类型={1}，LogicalPath={2}",
                 AssetDisplay.DisplayPath(asset), asset.Type, asset.LogicalPath ?? "-");
-            PreviewInfoText.Text = $"预览失败：{ex.Message}";
+            ApplyPreview(null, $"预览失败：{ex.Message}");
+            ClosePreviewWindowAfterRebuild();
             return;
         }
         if (generation != _previewGeneration)
@@ -569,16 +678,52 @@ public partial class AssetsWorkbenchPage : UserControl
             return;
         }
         _currentAudio = preview.Audio;
-        PreviewInfoText.Text = preview.InfoLine;
         LogPreviewResult(generation, asset, preview);
+        Log.Debug("预览进入构建阶段：代际={0}，形态={1}，窗口宿主={2}", generation, preview.Kind, _previewWindow is null ? "右栏" : "放大窗口");
         var buildTimer = System.Diagnostics.Stopwatch.StartNew();
-        var view = WrapPreview(BuildPreviewView(preview), preview.Kind);
-        PreviewHost.Content = view;
+        // plan-13：预览构建失败不能只留个空白区（用户看到「预览是空的」却没有任何线索）。
+        UIElement? view;
+        try
+        {
+            view = WrapPreview(BuildPreviewView(preview), preview.Kind);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "预览视图构建失败：代际={0}，资源={1}，形态={2}", generation, AssetDisplay.DisplayPath(asset), preview.Kind);
+            ApplyPreview(null, $"预览显示失败：{ex.Message}");
+            return;
+        }
+        ApplyPreview(view, preview.InfoLine);
         buildTimer.Stop();
-        Log.Debug("预览视图已挂载：代际={0}，形态={1}，构建耗时={2} ms，PreviewHost ActualHeight={3}（可用高={4}）",
+        Log.Debug("预览视图已挂载：代际={0}，形态={1}，构建耗时={2} ms，目标={3}，PreviewHost ActualHeight={4}（可用高={5}）",
             generation, preview.Kind, buildTimer.ElapsedMilliseconds,
+            _previewWindow is null ? "右栏" : "放大窗口",
             PreviewHost.ActualHeight, ActualHeight);
         _ = UpdatePropertiesAsync(asset, generation);
+    }
+
+    /// <summary>预览内容的落点（plan-13）：打开「放大预览」窗口时改投到该窗口，
+    /// 关窗后自动回到右栏。这样「同一份预览」有两个宿主，不用维护两套构建逻辑。</summary>
+    private ContentControl PreviewSurface => _previewWindow?.Surface ?? PreviewHost;
+
+    /// <summary>把预览内容与信息行投到当前宿主（右栏，或「放大预览」窗口）。</summary>
+    private void ApplyPreview(UIElement? view, string infoLine)
+    {
+        if (_previewWindow is { } window)
+        {
+            window.Surface.Content = view;
+            window.InfoText.Text = infoLine;
+            return;
+        }
+        PreviewHost.Content = view;
+        PreviewInfoText.Text = infoLine;
+    }
+
+    /// <summary>放大窗口打开期间换了资源：先关掉旧内容的窗口再按右栏形态重建，
+    /// 否则会留下上一份内容的幽灵窗口。</summary>
+    private void ClosePreviewWindowAfterRebuild()
+    {
+        if (_previewWindow is { } window) window.Close();
     }
 
     /// <summary>② 预览链路结果留痕：Kind + 内容规模 + 是否截断（不记内容本身）。</summary>
@@ -621,17 +766,6 @@ public partial class AssetsWorkbenchPage : UserControl
 
     // ── 预览视图构建（按 Kind 切换；全部只读，plan-05）──────────────────
 
-    /// <summary>
-    /// 预览区最大高度：超过就滚动而不是无限撑高。
-    ///
-    /// <para><b>为什么必须有上限</b>：预览内容高度由内容自身决定（行号正文 /
-    /// 键值行 / 说明文字），窗口不够高时它会被裁掉且**外层没有滚动入口**
-    /// （预览列的 Row0 是 <c>*</c>，滚动器只包着下面的属性区）。用户反馈的
-    /// 「窗口缩小时预览看不到下面、也没法上下滑动」就是它。给一个上限 +
-    /// 可滚动容器后，内容再长也能滚。</para>
-    /// </summary>
-    private const double PreviewMaxHeight = 520;
-
     /// <summary>JSON 树预览的行数上限（超过就只给纯文本，见
     /// <see cref="IsJsonTreeWorthBuilding"/>）。</summary>
     private const int JsonTreeMaxSourceLines = 1500;
@@ -649,44 +783,29 @@ public partial class AssetsWorkbenchPage : UserControl
     };
 
     /// <summary>
-    /// 把预览内容包进「可滚动 + 有最大高度」的容器。
+    /// 预览内容的包装（plan-13：<b>不再外包第二层滚动器</b>）。
     ///
-    /// <para>图像预览自带固定视口（<see cref="ImagePreviewViewportHeight"/>）、
-    /// 音频是交互控件，两者都不再包一层，否则会出现双滚动条。</para>
+    /// <para>旧实现把预览包进「<c>ScrollViewer MaxHeight=520</c>」，于是：可滚动窗口比外层
+    /// 预览行还矮时，外层行只给内容一小条高度、内层滚动器又按 520 撑高 → 内容被裁、滚动条
+    /// 也点不到（用户反馈「窗口小的时候看不全、滑不动」）。现在预览宿主
+    /// <see cref="PreviewHost"/> 所在的行高由用户拖拽决定（见
+    /// <see cref="ApplyPreviewRowHeight"/>），内容自己撑满这一行；各 Kind 自带的滚动器
+    /// （文本 / JSON 树 / 键值行 / 十六进制）因此拿到确定视口，一条滚动条就够用。</para>
     /// </summary>
     private UIElement? WrapPreview(UIElement? content, AssetPreviewKind kind)
     {
         if (content is null) { Log.Debug("预览包装：内容为空（Kind={0}），PreviewHost 将保持空", kind); return null; }
-        if (kind is AssetPreviewKind.Image or AssetPreviewKind.Audio)
-        {
-            Log.Debug("预览包装：Kind={0} 自带滚动/固定视口，不再外包（图像视口高={1}，音频控件）",
-                kind, ImagePreviewViewportHeight);
-            return content;
-        }
-        var scroller = new ScrollViewer
-        {
-            Content = content,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            MaxHeight = PreviewMaxHeight,
-        };
-        // ③ 关键数值：内容实际需求高度 vs 设定的 MaxHeight vs 可用高度
-        // （可用高度取自 PreviewHost 所在行的实测高度；外层 Row0 是 *，窗口变矮时会被压缩）。
-        var kindName = kind;
-        scroller.Loaded += (_, _) => Log.Debug(
-            "预览滚动容器实测：Kind={0}，MaxHeight={1}，Actual={2}x{3}，可滚高 ExtentHeight={4}，"
-            + "可视高 ViewportHeight={5}，滚动条={6}，PreviewHost 可用高={7}，页面高={8}",
-            kindName, PreviewMaxHeight, scroller.ActualWidth, scroller.ActualHeight,
-            scroller.ExtentHeight, scroller.ViewportHeight,
-            scroller.ComputedVerticalScrollBarVisibility, PreviewHost.ActualHeight, ActualHeight);
-        Log.Debug("预览包装：Kind={0}，MaxHeight={1}，内容类型={2}（③ 若内容需求高 > MaxHeight 且窗口更矮则会被裁）",
-            kind, PreviewMaxHeight, content.GetType().Name);
-        return scroller;
+        Log.Debug("预览包装：Kind={0}，内容类型={1}，PreviewHost 可用高={2:0}（内容自行撑满该行，不再外包滚动器）",
+            kind, content.GetType().Name, PreviewHost.ActualHeight);
+        return content;
     }
 
-    /// <summary>图像预览的视口高度（固定高度才能让 ScrollViewer 有确定的可视区，
-    /// 「适应窗口」比例也才有意义）。</summary>
+    /// <summary>图像预览的视口高度兜底（未接入可视化树时的初值；实测高优先）：
+    /// 固定高度才能让 ScrollViewer 有确定的可视区，「适应窗口」比例也才有意义。</summary>
     private const double ImagePreviewViewportHeight = 260;
+
+    /// <summary>图像预览视口的最小高度（行很矮时仍然看得见图像）。</summary>
+    private const double ImagePreviewViewportFloor = 160;
 
     /// <summary>小图默认最多放大到几倍（再大就只是糊；用户仍可滚轮继续放大）。</summary>
     private const double ImagePreviewMaxFitScale = 2.0;
@@ -731,7 +850,9 @@ public partial class AssetsWorkbenchPage : UserControl
             Background = TryFindResource("Checkerboard") as Brush ?? WbBrush("WbListBrush"),
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            Height = ImagePreviewViewportHeight,
+            // plan-13：视口不再写死 260 —— 撑满预览行（行高由用户拖拽决定），
+            // 只留一个下限保证行很矮时图像仍看得见。
+            MinHeight = ImagePreviewViewportFloor,
             Content = image,
         };
 
@@ -1214,17 +1335,64 @@ public partial class AssetsWorkbenchPage : UserControl
 
     private static readonly FontFamily MonoFont = new("Consolas");
 
-    /// <summary>清空预览区（切换选中项 / 无选中时调用），并停止正在播放的试听。</summary>
+    /// <summary>清空预览区（切换选中项 / 无选中时调用），并停止正在播放的试听。
+    /// plan-13：右栏与「放大预览」窗口两个宿主一起清（否则关窗后会留下上一份内容）。</summary>
     private void ResetPreview()
     {
-        if (Log.IsDebugEnabled) Log.Debug("清空预览区：原 PreviewHost 内容={0}，代际={1}",
-            PreviewHost.Content?.GetType().Name ?? "(空)", _previewGeneration);
+        if (Log.IsDebugEnabled) Log.Debug("清空预览区：原 PreviewHost 内容={0}，窗口内容={1}，代际={2}",
+            PreviewHost.Content?.GetType().Name ?? "(空)",
+            _previewWindow?.Surface.Content?.GetType().Name ?? "(无窗口)", _previewGeneration);
         PreviewHost.Content = null;
-        PreviewInfoText.Text = "无预览";
+        if (_previewWindow is not null)
+        {
+            // 窗口已打开：只在窗口内重建（信息行也在窗口里更新），避免把内容投回右栏。
+            ApplyPreview(null, "无预览");
+        }
+        else
+        {
+            PreviewInfoText.Text = "无预览";
+        }
         PropertyList.ItemsSource = null;
         PropertyInfoText.Text = "—";
         _currentAudio = null;
         StopAudioPreview();
+    }
+
+    // ── plan-13：「放大预览」独立窗口（主窗小也能大尺寸查看/编辑） ──────
+
+    /// <summary>「⤢ 放大」：把预览投到大窗口。同一份预览视图，不复制构建逻辑；
+    /// 关窗后自动回到右栏。已打开时只激活。</summary>
+    private void PreviewExpand_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedAsset is null) { Log.Debug("放大预览：当前没有选中资源，忽略"); return; }
+        if (_previewWindow is { } existing)
+        {
+            existing.Activate();
+            Log.Debug("放大预览：窗口已存在，仅激活（资源={0}）", AssetDisplay.DisplayPath(_selectedAsset));
+            return;
+        }
+        var window = new PreviewWindow(OwnerWindow, AssetDisplay.DisplayPath(_selectedAsset));
+        window.Closed += (_, _) => OnPreviewWindowClosed(window);
+        window.Closing += (_, _) =>
+        {
+            // 窗口自己的预览元素随窗口销毁：声音与控件在这里收干净，再让右栏接管。
+            window.Surface.Content = null;
+            StopAudioPreview();
+        };
+        _previewWindow = window;
+        Log.Info("打开放大预览窗口：资源={0}", AssetDisplay.DisplayPath(_selectedAsset));
+        window.Show();                    // 非模态：主窗仍可继续浏览/选择
+        UpdatePreview(_selectedAsset);    // 立刻把当前预览投到窗口
+    }
+
+    private void OnPreviewWindowClosed(PreviewWindow window)
+    {
+        if (!ReferenceEquals(_previewWindow, window)) return;
+        _previewWindow = null;
+        // 试听的声音跟着窗口走（窗口关了就不该还在响）。
+        StopAudioPreview();
+        Log.Info("关闭放大预览窗口：预览回到右栏");
+        UpdatePreview(_selectedAsset);    // 右栏重新接管预览（原内容随窗口一起销毁了）
     }
 
     /// <summary>试听当前预览的音频：把已解码的 WAV 写成临时文件交给 MediaPlayer；

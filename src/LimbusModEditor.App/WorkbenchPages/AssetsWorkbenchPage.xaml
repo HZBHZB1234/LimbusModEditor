@@ -137,40 +137,69 @@
         <!-- 右栏：预览与选中资源操作 -->
         <Border Grid.Column="2" Background="{StaticResource WbPanelBrush}" BorderBrush="{StaticResource WbBorderBrush}" BorderThickness="1" Padding="12">
             <!--
-                预览必须「撑满剩余高度」，不能塞在 StackPanel + ScrollViewer 里：
-                ScrollViewer 以无限高度测量子元素，预览区只能吃自己的固定高度
-                （旧实现是写死 220），下面的状态/属性/操作一多就把预览挤成一条。
-                因此拆两行：Row0 = 预览，Row1 = 创作状态（自带滚动）。
-
-                行高必须是「有界」的（2026-09 修）：Row1 原来是 Auto —— Auto 行按内容的
-                期望高度测量，ScrollViewer 拿到的是无限高，于是它的可滚高恒等于可视高
-                （日志实测：创作状态区 可视高=643 可滚高=643 滚动条=Collapsed），
-                永远不出现滚动条；窗口缩小后该行仍索要 643，把 Row0 的 * 挤到 0，
-                自身又被父容器裁掉下半截 —— 底部的按钮既看不见也滚不到
-                （用户反馈：「窗口缩放较小时右侧无法上下滑动」）。
-                改成有界的两行后：ScrollViewer 拿到确定高度，内容放不下就真的滚动；
-                Row0 有 MinHeight 兜底，不会再被挤成一条。
-                权重 1 : 2.4 复现原视觉（898 高时 264 / 634 ≈ 原来的 255 / 643），
-                图像预览自己还有一个固定视口常量（「适应窗口」算法依赖确定视口），不受影响。
+                plan-13：预览不够实用的两个根因都在这块布局里：
+                ① 预览块高度是常量（旧实现 Row0=* 权重 1:2.4 的硬编码比例）→ 用户既看不见
+                   也改不了；现在 Row0 是「用户拖拽决定的像素高」+ 水平 GridSplitter，
+                   拖动即改、双击复位，高度经 UiStateService 持久化。
+                ② 整列不滚动 → 窗口变矮时下方「创作状态」被父容器裁掉且滚不到；
+                   现在整列包了一层 ScrollViewer 作为兜底，任何尺寸下都能上下滑动。
+                行高由 ApplyPreviewRowHeight() 按可用高度算出（预览优先、状态保底），
+                写死比例会让两者互相挤压 —— 那正是用户反馈的「挤成一条」。
             -->
-            <Grid>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="*" MinHeight="170"/>
-                    <RowDefinition Height="2.4*" MinHeight="120"/>
-                </Grid.RowDefinitions>
-                <Grid Grid.Row="0">
+            <ScrollViewer x:Name="PreviewColumnScroller" VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+                <Grid x:Name="PreviewColumnHost" MinHeight="240">
                     <Grid.RowDefinitions>
+                        <RowDefinition x:Name="PreviewRow" Height="380" MinHeight="140"/>
                         <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="*"/>
-                        <RowDefinition Height="Auto"/>
+                        <RowDefinition x:Name="StatusRow" Height="*" MinHeight="0"/>
                     </Grid.RowDefinitions>
-                    <TextBlock Grid.Row="0" Text="预览" FontWeight="SemiBold" Margin="0,0,0,6"/>
-                    <!-- plan-05：预览区按 Kind 切换（图像/文本/JSON/音频/行/十六进制/说明） -->
-                    <ContentControl Grid.Row="1" x:Name="PreviewHost" MinHeight="150"/>
-                    <TextBlock Grid.Row="2" x:Name="PreviewInfoText" Text="无预览" Foreground="{StaticResource WbTextMutedBrush}" TextWrapping="Wrap" Margin="0,6,0,10"/>
-                </Grid>
-                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" MinHeight="0">
-                <StackPanel>
+                    <!-- 预览块：标题行（含「放大」按钮）→ 预览内容（吃满本行高度）→ 信息行 -->
+                    <Grid x:Name="PreviewPane" Grid.Row="0">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <DockPanel Grid.Row="0" Margin="0,0,0,6">
+                            <Button x:Name="PreviewExpandButton" DockPanel.Dock="Right" Content="⤢ 放大"
+                                    Padding="8,2" FontSize="11" IsEnabled="False" Click="PreviewExpand_Click"
+                                    ToolTip="在独立大窗口里查看/编辑预览（可自由缩放，不占右栏空间）。"/>
+                            <TextBlock Text="预览" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                        </DockPanel>
+                        <!-- plan-05：预览区按 Kind 切换（图像/文本/JSON/音频/行/十六进制/说明） -->
+                        <ContentControl Grid.Row="1" x:Name="PreviewHost" MinHeight="140"/>
+                        <TextBlock Grid.Row="2" x:Name="PreviewInfoText" Text="无预览" Foreground="{StaticResource WbTextMutedBrush}" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                    </Grid>
+                    <!-- 水平拖拽把手：拖动调整预览块高度；双击复位默认并持久化 -->
+                    <GridSplitter x:Name="PreviewHeightSplitter" Grid.Row="1" Height="6"
+                                  HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                                  ResizeBehavior="PreviousAndNext" ResizeDirection="Rows" ShowsPreview="True"
+                                  Background="Transparent" Cursor="SizeNS"
+                                  PreviewMouseLeftButtonUp="PreviewHeightSplitter_DragCompleted"
+                                  MouseDoubleClick="PreviewHeightSplitter_DoubleClick"
+                                  ToolTip="拖拽调整预览块高度（可拉高到接近整栏）；双击复位默认高度。">
+                        <GridSplitter.Template>
+                            <ControlTemplate TargetType="GridSplitter">
+                                <Border x:Name="Handle" Height="1" VerticalAlignment="Center" Background="{StaticResource WbBorderBrush}"/>
+                                <ControlTemplate.Triggers>
+                                    <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter TargetName="Handle" Property="Background" Value="{StaticResource WbAccentBrush}"/>
+                                    </Trigger>
+                                </ControlTemplate.Triggers>
+                            </ControlTemplate>
+                        </GridSplitter.Template>
+                    </GridSplitter>
+                    <!--
+                        「创作状态」不再自带 ScrollViewer（plan-13）：整栏已由外层
+                        PreviewColumnScroller 统一滚动，两层滚动只会互相抢滚轮。
+                        StatusPanel 的 MinHeight 由代码按内容实测高设定 —— 行有余量时
+                        它铺满整行（按钮就在原地，无需滚动），行被预览挤小时 MinHeight
+                        把整栏顶高、外层滚动条随即出现，下面的按钮永远滑得到。
+                    -->
+                    <ScrollViewer x:Name="StatusScroll" Grid.Row="2"
+                                  VerticalScrollBarVisibility="Disabled" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel x:Name="StatusPanel">
                     <TextBlock Text="创作状态" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,14"/>
                     <TextBlock Text="资源" Foreground="{StaticResource WbTextMutedBrush}"/>
                     <TextBlock x:Name="AssetCountText" Text="0" FontSize="24" Margin="0,2,0,14"/>
@@ -241,8 +270,9 @@
                         </StackPanel>
                     </Expander>
                 </StackPanel>
-                </ScrollViewer>
-            </Grid>
+                    </ScrollViewer>
+                </Grid>
+            </ScrollViewer>
         </Border>
     </Grid>
 </UserControl>

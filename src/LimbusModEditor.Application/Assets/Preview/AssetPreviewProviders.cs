@@ -1,33 +1,65 @@
 using System.Text.Json;
+using LimbusModEditor.Application.Scanning;
+using LimbusModEditor.Application.StaticMods;
 using LimbusModEditor.Domain.Assets;
+using LimbusModEditor.Domain.Diagnostics;
 using LimbusModEditor.Editing.Images;
 using LimbusModEditor.Formats.Bank;
 using LimbusModEditor.Formats.Unity;
+using NLog;
 
 namespace LimbusModEditor.Application.Assets.Preview;
 
 /// <summary>提供者共用的读取工具（只读，失败返回 null 交下一个提供者）。</summary>
 internal static class PreviewRead
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     public static bool IsBundleAsset(AssetRecord asset)
-        => asset.Metadata.GetValueOrDefault("unityBundle") == "true"
+    {
+        var result = asset.Metadata.GetValueOrDefault("unityBundle") == "true"
            && asset.UnityPathId is not null
            && !string.IsNullOrWhiteSpace(asset.SourcePath)
            && File.Exists(asset.SourcePath);
+        if (Log.IsTraceEnabled)
+            Log.Trace("bundle 判定：元数据 unityBundle={0}，PathId={1}，文件「{2}」存在={3} → 结论：{4}",
+                asset.Metadata.GetValueOrDefault("unityBundle") ?? "-",
+                asset.UnityPathId?.ToString() ?? "-",
+                asset.SourcePath ?? "-",
+                asset.SourcePath is { Length: > 0 } && File.Exists(asset.SourcePath),
+                result ? "是 bundle 资源" : "不是 bundle 资源");
+        return result;
+    }
 
     public static bool TryGetReplacement(AssetRecord asset, out string path)
     {
         path = string.Empty;
-        if (!asset.Metadata.TryGetValue("replacementPath", out var candidate) || string.IsNullOrWhiteSpace(candidate)) return false;
-        if (!File.Exists(candidate)) return false;
+        if (!asset.Metadata.TryGetValue("replacementPath", out var candidate) || string.IsNullOrWhiteSpace(candidate))
+        {
+            if (Log.IsTraceEnabled)
+                Log.Trace("替换文件判定：资源「{0}」没有 replacementPath 元数据 → 无替换。", asset.LogicalPath ?? "-");
+            return false;
+        }
+        if (!File.Exists(candidate))
+        {
+            Log.Debug("替换文件判定：元数据 replacementPath「{0}」指向的文件不存在（资源「{1}」）→ 按无替换处理。",
+                candidate, asset.LogicalPath ?? "-");
+            return false;
+        }
         path = candidate;
+        if (Log.IsTraceEnabled)
+            Log.Trace("替换文件判定：资源「{0}」使用替换文件「{1}」。", asset.LogicalPath ?? "-", candidate);
         return true;
     }
 
     public static string? ReadableFile(AssetRecord asset)
     {
         if (TryGetReplacement(asset, out var replacement)) return replacement;
-        return !string.IsNullOrWhiteSpace(asset.SourcePath) && File.Exists(asset.SourcePath) ? asset.SourcePath : null;
+        var readable = !string.IsNullOrWhiteSpace(asset.SourcePath) && File.Exists(asset.SourcePath) ? asset.SourcePath : null;
+        if (readable is null && Log.IsDebugEnabled)
+            Log.Debug("可读文件判定：资源「{0}」的 SourcePath「{1}」不存在或为空 → 交给后续 provider。",
+                asset.LogicalPath ?? "-", asset.SourcePath ?? "-");
+        return readable;
     }
 
     /// <summary>把字段树展平为可显示的行（限制深度与数量，防大对象卡 UI）。</summary>
@@ -46,7 +78,12 @@ internal static class PreviewRead
             foreach (var child in current.Children) Walk(child, depth + 1);
         }
         Walk(node, 0);
-        if (rows.Count >= maxRows) rows.Add(new AssetPreviewRow("…", $"字段过多，只显示前 {maxRows} 行（完整字段树见「Unity 字段编辑」）", 0));
+        var truncated = rows.Count >= maxRows;
+        if (truncated) rows.Add(new AssetPreviewRow("…", $"字段过多，只显示前 {maxRows} 行（完整字段树见「Unity 字段编辑」）", 0));
+        // 字段树节点可能是十万级：只在 Trace 打开时才拼这条消息。
+        if (Log.IsTraceEnabled)
+            Log.Trace("字段树展平：根「{0}」→ {1} 行（maxDepth={2}，maxRows={3}，被截断={4}）。",
+                node.Name ?? "-", rows.Count, maxDepth, maxRows, truncated);
         return rows;
     }
 
@@ -77,6 +114,8 @@ internal static class PreviewRead
 /// 备选图显示缓存原图（plan-05「原图 ↔ 替换图」切换）。</summary>
 public sealed class TexturePreviewProvider : IAssetPreviewProvider
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     public string Name => "纹理预览";
 
     public bool CanPreview(AssetRecord asset) => asset.Type == AssetType.Texture;
@@ -84,7 +123,10 @@ public sealed class TexturePreviewProvider : IAssetPreviewProvider
     public Task<AssetPreview?> PreviewAsync(AssetRecord asset, IProgress<string>? progress, CancellationToken cancellationToken)
         => Task.Run<AssetPreview?>(() =>
         {
+            using var scope = Log.Scope("纹理预览");
             var hasReplacement = PreviewRead.TryGetReplacement(asset, out var replacement);
+            Log.Debug("纹理预览：资源「{0}」，替换文件={1}，bundle 资源={2}。",
+                asset.LogicalPath ?? "-", replacement ?? "-", PreviewRead.IsBundleAsset(asset));
             byte[]? bundlePng = null;
             string? info = null;
             if (PreviewRead.IsBundleAsset(asset))
@@ -95,8 +137,16 @@ public sealed class TexturePreviewProvider : IAssetPreviewProvider
                     bundlePng = service.ReadTexturePng(asset.SourcePath!, asset.UnityPathId!.Value, cancellationToken);
                     if (bundlePng is not null)
                         info = service.ReadTextureSummary(asset.SourcePath!, asset.UnityPathId.Value, cancellationToken)?.Describe();
+                    Log.Debug("纹理预览：bundle 解码 {0}（PathId {1}），摘要「{2}」。",
+                        bundlePng is null ? "无结果" : $"{bundlePng.Length:N0} 字节 PNG",
+                        asset.UnityPathId?.ToString() ?? "-", info ?? "-");
                 }
-                catch (Exception ex) { info = $"纹理读取失败：{ex.Message}"; }
+                catch (Exception ex)
+                {
+                    info = $"纹理读取失败：{ex.Message}";
+                    Log.Error(ex, "纹理预览失败：bundle {0}，PathId {1}（回退为失败说明卡）",
+                        asset.SourcePath ?? "-", asset.UnityPathId?.ToString() ?? "-");
+                }
             }
 
             // 替换优先：与既有行为一致（替换后预览显示替换后的内容）。
@@ -104,19 +154,24 @@ public sealed class TexturePreviewProvider : IAssetPreviewProvider
             {
                 try
                 {
-                    var preview = new ImagePreviewService().CreatePreviewFromFile(replacement);
+                    var preview = new ImagePreviewService().CreatePreviewFromFile(replacement!);
+                    Log.Info("纹理预览：使用替换图 {0}×{1}（{2}），源「{3}」", preview.Width, preview.Height, preview.Format, replacement ?? "-");
                     return new AssetPreview(AssetPreviewKind.Image,
                         $"{preview.Width} × {preview.Height} · {preview.Format}（替换后）" + (info is null ? string.Empty : $" · 原图 {info}"),
                         ImagePng: preview.ThumbnailPng, AlternateImagePng: bundlePng, AlternateLabel: "原图（缓存）");
                 }
                 catch (Exception ex)
                 {
+                    Log.Error(ex, "替换图预览失败，改用 bundle 原图或说明卡：{0}", replacement ?? "-");
                     if (bundlePng is null) return new AssetPreview(AssetPreviewKind.Message, $"替换图预览失败：{ex.Message}");
                 }
             }
 
             if (bundlePng is not null)
+            {
+                Log.Info("纹理预览完成：形态 Image，PNG {0:N0} 字节，来源 bundle。", bundlePng.Length);
                 return new AssetPreview(AssetPreviewKind.Image, info ?? "Unity Texture2D 预览", ImagePng: bundlePng);
+            }
 
             // 导入的独立图片文件（非 bundle）。
             var file = PreviewRead.ReadableFile(asset);
@@ -125,10 +180,16 @@ public sealed class TexturePreviewProvider : IAssetPreviewProvider
                 try
                 {
                     var preview = new ImagePreviewService().CreatePreviewFromFile(file);
+                    Log.Info("纹理预览完成：形态 Image，独立文件 {0} → {1}×{2}（{3}）。", file, preview.Width, preview.Height, preview.Format);
                     return new AssetPreview(AssetPreviewKind.Image, $"{preview.Width} × {preview.Height} · {preview.Format}", ImagePng: preview.ThumbnailPng);
                 }
-                catch (Exception ex) { return new AssetPreview(AssetPreviewKind.Message, $"预览失败：{ex.Message}"); }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, "独立图片文件预览失败：{0}", file);
+                    return new AssetPreview(AssetPreviewKind.Message, $"预览失败：{ex.Message}");
+                }
             }
+            Log.Debug("纹理预览不处理该资源（无可读文件或不支持的扩展名），交给后续 provider：{0}", asset.LogicalPath ?? "-");
             return null; // 交给后续提供者（十六进制兜底）
         }, cancellationToken);
 }
@@ -136,6 +197,8 @@ public sealed class TexturePreviewProvider : IAssetPreviewProvider
 /// <summary>Sprite 预览：被引用 Texture2D 解码后按图集裁剪区域合成子图。</summary>
 public sealed class SpritePreviewProvider : IAssetPreviewProvider
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     public string Name => "Sprite 合成预览";
 
     public bool CanPreview(AssetRecord asset) => asset.Type == AssetType.Sprite;
@@ -143,6 +206,7 @@ public sealed class SpritePreviewProvider : IAssetPreviewProvider
     public Task<AssetPreview?> PreviewAsync(AssetRecord asset, IProgress<string>? progress, CancellationToken cancellationToken)
         => Task.Run<AssetPreview?>(() =>
         {
+            using var scope = Log.Scope("Sprite 合成预览");
             byte[]? compositePng = null;
             string? info = null;
             if (PreviewRead.IsBundleAsset(asset))
@@ -156,8 +220,16 @@ public sealed class SpritePreviewProvider : IAssetPreviewProvider
                            $" · 逻辑 rect {composite.SpriteRect.Width:0.#}×{composite.SpriteRect.Height:0.#}" +
                            $" · 纹理 {composite.TextureWidth}×{composite.TextureHeight}（{composite.TextureName}）" +
                            $" · pivot ({composite.Pivot.X:0.##},{composite.Pivot.Y:0.##})";
+                    Log.Debug("Sprite 合成：bundle {0}，PathId {1}，合成 PNG {2}，{3}",
+                        asset.SourcePath ?? "-", asset.UnityPathId.Value.ToString(),
+                        compositePng is null ? "无" : $"{compositePng.Length:N0} 字节", info ?? "-");
                 }
-                catch (Exception ex) { info = $"Sprite 合成失败：{ex.Message}"; }
+                catch (Exception ex)
+                {
+                    info = $"Sprite 合成失败：{ex.Message}";
+                    Log.Error(ex, "Sprite 合成失败：bundle {0}，容器 {1}，PathId {2}（回退为说明卡）",
+                        asset.SourcePath ?? "-", asset.ContainerPath ?? "-", asset.UnityPathId?.ToString() ?? "-");
+                }
             }
 
             if (PreviewRead.TryGetReplacement(asset, out var replacement) &&
@@ -165,19 +237,30 @@ public sealed class SpritePreviewProvider : IAssetPreviewProvider
             {
                 try
                 {
-                    var preview = new ImagePreviewService().CreatePreviewFromFile(replacement);
+                    var preview = new ImagePreviewService().CreatePreviewFromFile(replacement!);
+                    Log.Info("Sprite 预览：使用替换图 {0}×{1}（{2}），源「{3}」", preview.Width, preview.Height, preview.Format, replacement ?? "-");
                     return new AssetPreview(AssetPreviewKind.Image,
                         $"{preview.Width} × {preview.Height} · {preview.Format}（替换后）" + (info is null ? string.Empty : $" · {info}"),
                         ImagePng: preview.ThumbnailPng, AlternateImagePng: compositePng, AlternateLabel: "原图（图集裁剪）");
                 }
                 catch (Exception ex)
                 {
+                    Log.Error(ex, "Sprite 替换图预览失败，改用图集合成原图或说明卡：{0}", replacement ?? "-");
                     if (compositePng is null) return new AssetPreview(AssetPreviewKind.Message, $"替换图预览失败：{ex.Message}");
                 }
             }
 
-            if (compositePng is not null) return new AssetPreview(AssetPreviewKind.Image, info ?? "Sprite 预览", ImagePng: compositePng);
-            if (info is not null) return new AssetPreview(AssetPreviewKind.Message, info);
+            if (compositePng is not null)
+            {
+                Log.Info("Sprite 预览完成：形态 Image，合成 PNG {0:N0} 字节。", compositePng.Length);
+                return new AssetPreview(AssetPreviewKind.Image, info ?? "Sprite 预览", ImagePng: compositePng);
+            }
+            if (info is not null)
+            {
+                Log.Warn("Sprite 预览没有图像，只有失败说明（形态 Message）：{0}", info);
+                return new AssetPreview(AssetPreviewKind.Message, info);
+            }
+            Log.Debug("Sprite 预览不处理该资源（既无替换图也无合成结果），交给后续 provider：{0}", asset.LogicalPath ?? "-");
             return null;
         }, cancellationToken);
 }
@@ -189,6 +272,8 @@ public sealed class SpritePreviewProvider : IAssetPreviewProvider
 /// </summary>
 public sealed class AudioPreviewProvider : IAssetPreviewProvider
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     private readonly Func<string?> _fmodDirectory;
 
     public AudioPreviewProvider(Func<string?>? fmodDirectory = null)
@@ -201,13 +286,20 @@ public sealed class AudioPreviewProvider : IAssetPreviewProvider
     public Task<AssetPreview?> PreviewAsync(AssetRecord asset, IProgress<string>? progress, CancellationToken cancellationToken)
         => Task.Run<AssetPreview?>(() =>
         {
+            using var scope = Log.Scope("音频预览");
             var isBankFsb = asset.LogicalPath.StartsWith("fsb/", StringComparison.OrdinalIgnoreCase);
+            Log.Debug("音频预览：资源「{0}」，Bank FSB 路径={1}，bundle 资源={2}。",
+                asset.LogicalPath ?? "-", isBankFsb, PreviewRead.IsBundleAsset(asset));
             byte[]? fsb = null;
             string sourceLabel;
             if (isBankFsb)
             {
                 try { fsb = new BankAudioService().ReadFsbAsync(asset, cancellationToken).GetAwaiter().GetResult(); }
-                catch (Exception ex) { return new AssetPreview(AssetPreviewKind.Message, $"读取 Bank 音频失败：{ex.Message}"); }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, "读取 Bank 音频失败，返回说明卡：资源「{0}」", asset.LogicalPath ?? "-");
+                    return new AssetPreview(AssetPreviewKind.Message, $"读取 Bank 音频失败：{ex.Message}");
+                }
                 sourceLabel = "Bank FSB";
             }
             else if (PreviewRead.IsBundleAsset(asset))
@@ -218,11 +310,19 @@ public sealed class AudioPreviewProvider : IAssetPreviewProvider
                         asset.SourcePath!, asset.ContainerPath!, asset.UnityPathId!.Value, cancellationToken);
                     fsb = clip.Data;
                     sourceLabel = $"Unity AudioClip（{clip.Name}，format={clip.Format}，{clip.Channels} 声道，{clip.Frequency} Hz）";
+                    Log.Debug("音频预览：Unity AudioClip 负载 {0}，来源「{1}」。",
+                        fsb is null ? "无" : $"{fsb.Length:N0} 字节", sourceLabel);
                 }
-                catch (Exception ex) { return new AssetPreview(AssetPreviewKind.Message, $"读取 Unity 音频负载失败：{ex.Message}"); }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, "读取 Unity 音频负载失败，返回说明卡：bundle {0}，PathId {1}",
+                        asset.SourcePath ?? "-", asset.UnityPathId?.ToString() ?? "-");
+                    return new AssetPreview(AssetPreviewKind.Message, $"读取 Unity 音频负载失败：{ex.Message}");
+                }
             }
             else
             {
+                Log.Debug("音频预览不处理该资源（既非 fsb/ 路径也非可读 bundle），交给后续 provider：{0}", asset.LogicalPath ?? "-");
                 return null;
             }
 
@@ -230,10 +330,15 @@ public sealed class AudioPreviewProvider : IAssetPreviewProvider
             var structureInfo = structure is null
                 ? "负载不是可解析的 FSB5"
                 : $"FSB5 codec={structure.CodecName} 样本 {structure.SampleCount} 个";
+            if (structure is null)
+                Log.Warn("音频负载不是可解析的 FSB5（负载 {0}），只给出结构说明、不试听：{1}",
+                    fsb is null ? "无" : $"{fsb.Length:N0} 字节", asset.LogicalPath ?? "-");
 
             var fmodDirectory = _fmodDirectory();
             if (string.IsNullOrWhiteSpace(fmodDirectory) || !Directory.Exists(fmodDirectory))
             {
+                Log.Warn("音频预览降级为「仅结构说明」：FMOD DLL 目录不可用「{0}」（资源「{1}」，{2}）。",
+                    fmodDirectory ?? "-", asset.LogicalPath ?? "-", structureInfo);
                 return new AssetPreview(AssetPreviewKind.Audio,
                     $"{sourceLabel} · {structureInfo}",
                     Audio: new AssetPreviewAudio(fsb, null,
@@ -252,12 +357,15 @@ public sealed class AudioPreviewProvider : IAssetPreviewProvider
                     : structure?.Samples.Sum(s => s.SampleRate > 0 ? (double)s.SampleCount / s.SampleRate : 0) ?? 0;
                 var info = $"{sourceLabel} · {structureInfo} · WAV {wave.Length / 1024} KB";
                 if (duration > 0) info += $" · 约 {duration:0.##} 秒";
+                Log.Info("音频预览完成：WAV {0:N0} 字节 / {1:0.##} 秒 / {2} 声道，来源「{3}」。",
+                    wave.Length, duration, envelope.Channels, sourceLabel);
                 return new AssetPreview(AssetPreviewKind.Audio, info,
                     Audio: new AssetPreviewAudio(fsb, wave, null,
                         envelope.SampleRate, envelope.Channels, duration, envelope.Envelope));
             }
             catch (Exception ex)
             {
+                Log.Error(ex, "音频解码失败，降级为「仅结构说明」：资源「{0}」，{1}", asset.LogicalPath ?? "-", structureInfo);
                 return new AssetPreview(AssetPreviewKind.Audio,
                     $"{sourceLabel} · {structureInfo}",
                     Audio: new AssetPreviewAudio(fsb, null, $"解码失败：{ex.Message}",
@@ -271,7 +379,21 @@ public sealed class AudioPreviewProvider : IAssetPreviewProvider
 /// TextPreviewService；JSON 可解析时给出树视图标记（UI 侧切换）。</summary>
 public sealed class TextPreviewProvider : IAssetPreviewProvider
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     public string Name => "文本预览";
+
+    /// <summary>
+    /// 预览正文的字符上限。
+    ///
+    /// <para><b>为什么从 20 万降到 2 万</b>：UI 侧要拿这段字符串建控件
+    /// （行号 + 正文两个 TextBox，或 JSON 树 + 2000 个 TreeViewItem），
+    /// 20 万字符的静态表（实测 1392 张里 1338 张是合法 JSON、最大 3.4 MB）
+    /// 会在 **UI 线程**上做整段文本布局 / 上万次控件构造 —— 点一下预览就
+    /// 「未响应」。2 万字符足够看清结构，完整正文请用静态数据工作台或
+    /// 「文本内容编辑」窗口。</para>
+    /// </summary>
+    public const int PreviewCharLimit = 20_000;
 
     public bool CanPreview(AssetRecord asset)
         => asset.Type is AssetType.Text or AssetType.Json || TextPreviewService.LooksTextual(asset);
@@ -279,6 +401,10 @@ public sealed class TextPreviewProvider : IAssetPreviewProvider
     public Task<AssetPreview?> PreviewAsync(AssetRecord asset, IProgress<string>? progress, CancellationToken cancellationToken)
         => Task.Run<AssetPreview?>(() =>
         {
+            using var scope = Log.Scope("文本预览");
+            Log.Debug("文本预览：资源「{0}」，类型 {1}，bundle 资源={2}，内容上限 {3:N0} 字符。",
+                AssetDisplay.DisplayPath(asset), AssetDisplay.TypeLabel(asset.Type),
+                PreviewRead.IsBundleAsset(asset), PreviewCharLimit);
             if (PreviewRead.IsBundleAsset(asset) && asset.Type is AssetType.Text or AssetType.Json)
             {
                 try
@@ -287,45 +413,141 @@ public sealed class TextPreviewProvider : IAssetPreviewProvider
                         asset.SourcePath!, asset.ContainerPath!, asset.UnityPathId!.Value, cancellationToken);
                     var decoded = textAsset.TryDecodeUtf8();
                     if (decoded is null)
+                    {
+                        Log.Warn("TextAsset 不是可读 UTF-8，返回说明卡：{0}（{1:N0} 字节），资源「{2}」",
+                            textAsset.Name ?? "-", textAsset.Data.Length, AssetDisplay.DisplayPath(asset));
                         return new AssetPreview(AssetPreviewKind.Message,
                             $"TextAsset {textAsset.Name} 不是可读文本（{textAsset.Data.Length:N0} 字节，非 UTF-8）。",
                             "可用「十六进制预览」查看原始字节。");
-                    // 静态表可能达 MB 级：截断到 20 万字符保护 UI（信息行注明）。
-                    const int maxChars = 200_000;
-                    var truncated = decoded.Length > maxChars;
-                    var shown = truncated ? decoded[..maxChars] : decoded;
-                    var kind = IsJson(shown) ? AssetPreviewKind.Json : AssetPreviewKind.Text;
+                    }
+                    var truncated = decoded.Length > PreviewCharLimit;
+                    var shown = truncated ? decoded[..PreviewCharLimit] : decoded;
+                    Log.Debug("TextAsset 解码：名称「{0}」，{1:N0} 字符 / {2:N0} 字节，是否截断={3}（上限 {4:N0}，实际给出 {5:N0} 字符）。",
+                        textAsset.Name ?? "-", decoded.Length, textAsset.Data.Length, truncated, PreviewCharLimit, shown.Length);
+                    // 静态数据表（static_s1_0_assets_all_*）本来就是「大表」：这里只给摘要 +
+                    // 前若干行，并明确指路静态数据工作台（那里有惰性树 / 差异视图 / 有界正文缓存）。
+                    if (IsStaticTableAsset(asset))
+                    {
+                        var head = HeadText(shown, 40);
+                        Log.Info("文本预览走静态数据表分支（形态 Message，不返回正文）：资源「{0}」，正文 {1:N0} 字符 / {2:N0} 字节，摘要 {3:N0} 字符，截断={4}。",
+                            AssetDisplay.DisplayPath(asset), decoded.Length, textAsset.Data.Length, head.Length, truncated);
+                        return new AssetPreview(AssetPreviewKind.Message,
+                            $"静态数据表 {textAsset.Name} · UTF-8 · {decoded.Length:N0} 字符 / {textAsset.Data.Length:N0} 字节" +
+                            " · 资源工作台只给开头摘要。",
+                            "这是静态数据 bundle 里的表：请到「🧩 静态数据工作台」编辑（树形浏览 / 差异视图 / JSON 编辑器），" +
+                            "那里不会把整张表塞进预览。\n\n" + head);
+                    }
+                    var kind = IsJson(shown) && !truncated ? AssetPreviewKind.Json : AssetPreviewKind.Text;
+                    if (truncated)
+                        Log.Info("文本预览已按 PreviewCharLimit 截断：原始 {0:N0} 字符 → 只给前 {1:N0} 字符（原始 {2:N0} 字节），形态 {3}，资源「{4}」。",
+                            decoded.Length, PreviewCharLimit, textAsset.Data.Length, kind, AssetDisplay.DisplayPath(asset));
+                    else
+                        Log.Debug("文本预览完成：形态 {0}，正文 {1:N0} 字符，资源「{2}」。", kind, shown.Length, AssetDisplay.DisplayPath(asset));
                     return new AssetPreview(kind,
                         $"TextAsset {textAsset.Name} · UTF-8 · {decoded.Length:N0} 字符 / {textAsset.Data.Length:N0} 字节" +
-                        (truncated ? $" · 仅显示前 {maxChars:N0} 字符" : string.Empty),
+                        (truncated ? $" · 仅显示前 {PreviewCharLimit:N0} 字符" : string.Empty),
                         Text: shown);
                 }
-                catch (Exception ex) { return new AssetPreview(AssetPreviewKind.Message, $"TextAsset 读取失败：{ex.Message}"); }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, "TextAsset 读取失败，返回说明卡：bundle {0}，容器 {1}，PathId {2}",
+                        asset.SourcePath ?? "-", asset.ContainerPath ?? "-", asset.UnityPathId?.ToString() ?? "-");
+                    return new AssetPreview(AssetPreviewKind.Message, $"TextAsset 读取失败：{ex.Message}");
+                }
             }
 
             var preview = TextPreviewService.TryPreview(asset);
             if (preview is null)
+            {
+                Log.Warn("文本预览落空（TryPreview 返回 null），返回说明卡：资源「{0}」，类型 {1}",
+                    AssetDisplay.DisplayPath(asset), AssetDisplay.TypeLabel(asset.Type));
                 return new AssetPreview(AssetPreviewKind.Message,
                     "这个文件不是可读文本（非 UTF-8 / UTF-16，或含二进制内容）。",
                     "可用「十六进制预览」查看原始字节。");
+            }
             var textKind = IsJson(preview.Text) ? AssetPreviewKind.Json : AssetPreviewKind.Text;
+            Log.Info("文本预览完成（独立文件）：形态 {0}，编码 {1}，{2:N0} 字节，正文 {3:N0} 字符，内部截断={4}，资源「{5}」。",
+                textKind, preview.EncodingName ?? "-", preview.TotalBytes, preview.Text?.Length ?? 0, preview.Truncated,
+                AssetDisplay.DisplayPath(asset));
             return new AssetPreview(textKind,
                 $"{preview.EncodingName} · {preview.TotalBytes:N0} 字节" + (preview.Truncated ? " · 仅显示开头部分" : string.Empty),
                 Text: preview.Text);
         }, cancellationToken);
 
+    /// <summary>是否为静态数据 bundle 里的表（元数据标记 + bundle 名兜底，与
+    /// <c>AssetSearchService.IsStaticBundleAsset</c> 同一口径）。</summary>
+    private static bool IsStaticTableAsset(AssetRecord asset)
+    {
+        var hasMetadata = asset.Metadata.TryGetValue(UnityCacheScanService.StaticBundleMetadataKey, out var flag);
+        var metadataHit = hasMetadata && string.Equals(flag, "true", StringComparison.OrdinalIgnoreCase);
+        Log.Debug("静态表判定（元数据标记）：键 {0} 存在={1}，值「{2}」→ {3}；输入：bundle「{4}」，SourcePath「{5}」，资源「{6}」",
+            UnityCacheScanService.StaticBundleMetadataKey, hasMetadata, flag ?? "-",
+            metadataHit ? "命中，判定为静态数据" : "未命中",
+            asset.Bundle ?? "-", asset.SourcePath ?? "-", AssetDisplay.DisplayPath(asset));
+        if (metadataHit) return true;
+        if (StaticBundleLocator.LooksLikeStaticBundle(asset.Bundle))
+        {
+            Log.Warn("静态表判定：元数据标记未命中，由 bundle 名兜底判定为静态数据（bundle「{0}」），资源「{1}」——catalog 可能缺失/版本不符/旧索引缺列。",
+                asset.Bundle ?? "-", AssetDisplay.DisplayPath(asset));
+            return true;
+        }
+        var fileName = asset.SourcePath is { Length: > 0 } path ? Path.GetFileName(path) : null;
+        if (StaticBundleLocator.LooksLikeStaticBundle(fileName))
+        {
+            Log.Warn("静态表判定：元数据标记未命中，由 SourcePath 文件名兜底判定为静态数据（文件名「{0}」，完整路径「{1}」），资源「{2}」。",
+                fileName ?? "-", asset.SourcePath ?? "-", AssetDisplay.DisplayPath(asset));
+            return true;
+        }
+        // 第三道判据与 AssetSearchService.IsStaticBundleAsset 保持一致：容器路径前缀。
+        // 缓存里旧版本静态 bundle 只有裸哈希目录名，前两道判据会同时失效。
+        var containerEntry = AssetDisplay.ContainerEntryPath(asset);
+        if (StaticBundleLocator.LooksLikeStaticTablePath(containerEntry))
+        {
+            Log.Warn("静态表判定：元数据与 bundle 名均未命中，由资源路径兜底判定为静态数据（容器路径「{0}」），资源「{1}」——缓存里存在旧版本静态 bundle。",
+                containerEntry, AssetDisplay.DisplayPath(asset));
+            return true;
+        }
+        Log.Debug("静态表判定结论：非静态数据（元数据未命中，bundle 名「{0}」、文件名「{1}」、容器路径「{2}」均不匹配），资源「{3}」。",
+            asset.Bundle ?? "-", fileName ?? "-", containerEntry, AssetDisplay.DisplayPath(asset));
+        return false;
+    }
+
+    /// <summary>取正文开头的若干行（按行截断，避免半个字符 / 半个 JSON 词）。</summary>
+    private static string HeadText(string text, int maxLines)
+    {
+        var lines = 0;
+        for (var i = 0; i < text.Length; i++)
+        {
+            if (text[i] != '\n') continue;
+            if (++lines < maxLines) continue;
+            return text[..(i + 1)] + $"\n…（只显示前 {maxLines} 行）";
+        }
+        return text;
+    }
+
     private static bool IsJson(string text)
     {
         var trimmed = text.TrimStart();
-        if (trimmed.Length == 0 || (trimmed[0] != '{' && trimmed[0] != '[')) return false;
+        if (trimmed.Length == 0 || (trimmed[0] != '{' && trimmed[0] != '['))
+        {
+            if (Log.IsTraceEnabled)
+                Log.Trace("JSON 判定：首字符不是 {{ 或 [（{0:N0} 字符）→ 非 JSON，按纯文本预览。", text.Length);
+            return false;
+        }
         try { using var _ = JsonDocument.Parse(text); return true; }
-        catch (JsonException) { return false; }
+        catch (JsonException ex)
+        {
+            Log.Debug("JSON 判定：解析失败（{0:N0} 字符），按纯文本形态预览（不做 JSON 树）。原因：{1}", text.Length, ex.Message);
+            return false;
+        }
     }
 }
 
 /// <summary>MonoBehaviour / MonoScript：只读字段树 + 脚本来源信息。</summary>
 public sealed class ScriptPreviewProvider : IAssetPreviewProvider
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     public string Name => "脚本字段树";
 
     public bool CanPreview(AssetRecord asset)
@@ -334,10 +556,16 @@ public sealed class ScriptPreviewProvider : IAssetPreviewProvider
     public Task<AssetPreview?> PreviewAsync(AssetRecord asset, IProgress<string>? progress, CancellationToken cancellationToken)
         => Task.Run<AssetPreview?>(() =>
         {
+            using var scope = Log.Scope("脚本字段树预览");
             var service = new UnityAssetService();
             var pathId = asset.UnityPathId!.Value;
             var fields = service.ReadBundleObjectFields(asset.SourcePath!, asset.ContainerPath!, pathId, cancellationToken);
-            if (fields.Count == 0) return null;
+            if (fields.Count == 0)
+            {
+                Log.Debug("脚本字段树预览：读不到对象字段（PathId {0}），交给后续 provider：bundle {1}，容器 {2}",
+                    pathId, asset.SourcePath ?? "-", asset.ContainerPath ?? "-");
+                return null;
+            }
             var rows = new List<AssetPreviewRow>();
             try
             {
@@ -352,9 +580,14 @@ public sealed class ScriptPreviewProvider : IAssetPreviewProvider
                     if (script.TypeTreeMissingReason is not null)
                         rows.Add(new AssetPreviewRow("类型树", script.TypeTreeMissingReason, 0, Highlight: true));
                 }
+                Log.Debug("脚本字段树预览：脚本信息 {0}，PathId {1}，已加 {2} 行元信息。",
+                    script is null ? "不可读" : $"可读（{script.ClassName ?? "-"}）", pathId, rows.Count);
             }
-            catch (Exception) { /* 脚本信息尽力而为 */ }
+            catch (Exception ex) { /* 脚本信息尽力而为 */
+                Log.Warn(ex, "脚本信息读取失败，仅显示字段树（尽力而为分支）：bundle {0}，PathId {1}", asset.SourcePath ?? "-", pathId);
+            }
             rows.AddRange(PreviewRead.Flatten(fields[0]));
+            Log.Info("脚本字段树预览完成：形态 Rows，字段树行 {0} 条，资源「{1}」。", rows.Count, AssetDisplay.DisplayPath(asset));
             return new AssetPreview(AssetPreviewKind.Rows,
                 $"只读字段树 · {AssetDisplay.TypeLabel(asset.Type)} · Path {pathId}（编辑请用「Unity 字段编辑」）",
                 Rows: rows);
@@ -364,6 +597,8 @@ public sealed class ScriptPreviewProvider : IAssetPreviewProvider
 /// <summary>Mesh / AnimationClip / Font：结构摘要卡。</summary>
 public sealed class SummaryPreviewProvider : IAssetPreviewProvider
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     public string Name => "对象摘要";
 
     public bool CanPreview(AssetRecord asset)
@@ -372,13 +607,25 @@ public sealed class SummaryPreviewProvider : IAssetPreviewProvider
     public Task<AssetPreview?> PreviewAsync(AssetRecord asset, IProgress<string>? progress, CancellationToken cancellationToken)
         => Task.Run<AssetPreview?>(() =>
         {
-            if (!PreviewRead.IsBundleAsset(asset)) return null;
+            using var scope = Log.Scope("对象摘要预览");
+            if (!PreviewRead.IsBundleAsset(asset))
+            {
+                Log.Debug("对象摘要预览不处理该资源（不是可读 bundle），交给后续 provider：{0}", AssetDisplay.DisplayPath(asset));
+                return null;
+            }
             var service = new UnityAssetService();
             var summary = service.ReadBundleObjectSummary(
                 asset.SourcePath!, asset.ContainerPath!, asset.UnityPathId!.Value, cancellationToken);
-            if (summary is null) return null;
+            if (summary is null)
+            {
+                Log.Debug("对象摘要预览：读不到对象摘要（PathId {0}），交给后续 provider：bundle {1}",
+                    asset.UnityPathId.Value.ToString(), asset.SourcePath ?? "-");
+                return null;
+            }
             var rows = summary.Fields.Select(f => new AssetPreviewRow(f.Label, f.Value)).ToList();
             rows.AddRange(summary.Notes.Select(n => new AssetPreviewRow("⚠", n, 0, Highlight: true)));
+            Log.Info("对象摘要预览完成：形态 Rows，{0}（Path {1}），行 {2} 条（含 {3} 条提示），资源「{4}」。",
+                summary.TypeName ?? "-", summary.PathId, rows.Count, summary.Notes.Count, AssetDisplay.DisplayPath(asset));
             return new AssetPreview(AssetPreviewKind.Rows,
                 $"{summary.TypeName}（Path {summary.PathId}）{summary.ObjectName ?? string.Empty} · 只读摘要",
                 Rows: rows);
@@ -388,6 +635,8 @@ public sealed class SummaryPreviewProvider : IAssetPreviewProvider
 /// <summary>Material（class 21）只读预览：名称、引用的 Shader、属性表统计与字段树。</summary>
 public sealed class MaterialPreviewProvider : IAssetPreviewProvider
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     public string Name => "材质预览";
 
     public bool CanPreview(AssetRecord asset) => asset.Type == AssetType.Material;
@@ -395,11 +644,20 @@ public sealed class MaterialPreviewProvider : IAssetPreviewProvider
     public Task<AssetPreview?> PreviewAsync(AssetRecord asset, IProgress<string>? progress, CancellationToken cancellationToken)
         => Task.Run<AssetPreview?>(() =>
         {
-            if (!PreviewRead.IsBundleAsset(asset)) return null;
+            using var scope = Log.Scope("材质预览");
+            if (!PreviewRead.IsBundleAsset(asset))
+            {
+                Log.Debug("材质预览不处理该资源（不是可读 bundle），交给后续 provider：{0}", AssetDisplay.DisplayPath(asset));
+                return null;
+            }
             var service = new UnityAssetService();
             var pathId = asset.UnityPathId!.Value;
             var fields = service.ReadBundleObjectFields(asset.SourcePath!, asset.ContainerPath!, pathId, cancellationToken);
-            if (fields.Count == 0) return null;
+            if (fields.Count == 0)
+            {
+                Log.Debug("材质预览：读不到对象字段（PathId {0}），交给后续 provider：bundle {1}", pathId, asset.SourcePath ?? "-");
+                return null;
+            }
             var root = fields[0];
             var rows = new List<AssetPreviewRow>();
             var name = PreviewRead.FindNode(root, "m_Name", "name")?.Value;
@@ -415,6 +673,8 @@ public sealed class MaterialPreviewProvider : IAssetPreviewProvider
                 }
             }
             rows.AddRange(PreviewRead.Flatten(root, maxDepth: 3, maxRows: 200));
+            Log.Info("材质预览完成：形态 Rows，Path {0}，名称「{1}」，行 {2} 条，资源「{3}」。",
+                pathId, name ?? "-", rows.Count, AssetDisplay.DisplayPath(asset));
             return new AssetPreview(AssetPreviewKind.Rows,
                 $"材质（Material）· Path {pathId}（只读字段树）", Rows: rows);
         }, cancellationToken);
@@ -439,7 +699,9 @@ public sealed class MaterialPreviewProvider : IAssetPreviewProvider
                 if (!string.IsNullOrWhiteSpace(shaderName)) return $"{shaderName}（Path {shader.PPtrPathId}）";
             }
         }
-        catch (Exception) { /* 着色器对象不可读时退回坐标显示 */ }
+        catch (Exception ex) { /* 着色器对象不可读时退回坐标显示 */
+            Log.Warn(ex, "着色器对象不可读，退回引用坐标显示：bundle {0}，Shader PathId {1}", asset.SourcePath ?? "-", shader.PPtrPathId);
+        }
         return $"Path {shader.PPtrPathId}";
     }
 }
@@ -447,6 +709,8 @@ public sealed class MaterialPreviewProvider : IAssetPreviewProvider
 /// <summary>Shader（class 48）只读预览：名称 + 字段树（.shadergraph 等）。</summary>
 public sealed class ShaderPreviewProvider : IAssetPreviewProvider
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     public string Name => "着色器预览";
 
     public bool CanPreview(AssetRecord asset) => asset.Type == AssetType.Shader;
@@ -454,15 +718,26 @@ public sealed class ShaderPreviewProvider : IAssetPreviewProvider
     public Task<AssetPreview?> PreviewAsync(AssetRecord asset, IProgress<string>? progress, CancellationToken cancellationToken)
         => Task.Run<AssetPreview?>(() =>
         {
-            if (!PreviewRead.IsBundleAsset(asset)) return null;
+            using var scope = Log.Scope("着色器预览");
+            if (!PreviewRead.IsBundleAsset(asset))
+            {
+                Log.Debug("着色器预览不处理该资源（不是可读 bundle），交给后续 provider：{0}", AssetDisplay.DisplayPath(asset));
+                return null;
+            }
             var service = new UnityAssetService();
             var pathId = asset.UnityPathId!.Value;
             var fields = service.ReadBundleObjectFields(asset.SourcePath!, asset.ContainerPath!, pathId, cancellationToken);
-            if (fields.Count == 0) return null;
+            if (fields.Count == 0)
+            {
+                Log.Debug("着色器预览：读不到对象字段（PathId {0}），交给后续 provider：bundle {1}", pathId, asset.SourcePath ?? "-");
+                return null;
+            }
             var rows = new List<AssetPreviewRow>();
             var name = PreviewRead.FindNode(fields[0], "m_Name", "name")?.Value;
             if (!string.IsNullOrWhiteSpace(name)) rows.Add(new AssetPreviewRow("名称", name, 0, Highlight: true));
             rows.AddRange(PreviewRead.FlattenTail(fields[0], 200));
+            Log.Info("着色器预览完成：形态 Rows，Path {0}，名称「{1}」，行 {2} 条，资源「{3}」。",
+                pathId, name ?? "-", rows.Count, AssetDisplay.DisplayPath(asset));
             return new AssetPreview(AssetPreviewKind.Rows,
                 $"着色器（Shader）· Path {pathId}（只读字段树）", Rows: rows);
         }, cancellationToken);
@@ -472,6 +747,8 @@ public sealed class ShaderPreviewProvider : IAssetPreviewProvider
 /// 视频字节可能位于内联数组或 .resS 流；本提供者只读元数据，不尝试解码播放。</summary>
 public sealed class VideoClipPreviewProvider : IAssetPreviewProvider
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     public string Name => "视频元数据预览";
 
     public bool CanPreview(AssetRecord asset) => asset.Type == AssetType.Video;
@@ -479,11 +756,20 @@ public sealed class VideoClipPreviewProvider : IAssetPreviewProvider
     public Task<AssetPreview?> PreviewAsync(AssetRecord asset, IProgress<string>? progress, CancellationToken cancellationToken)
         => Task.Run<AssetPreview?>(() =>
         {
-            if (!PreviewRead.IsBundleAsset(asset)) return null;
+            using var scope = Log.Scope("视频元数据预览");
+            if (!PreviewRead.IsBundleAsset(asset))
+            {
+                Log.Debug("视频元数据预览不处理该资源（不是可读 bundle），交给后续 provider：{0}", AssetDisplay.DisplayPath(asset));
+                return null;
+            }
             var service = new UnityAssetService();
             var pathId = asset.UnityPathId!.Value;
             var fields = service.ReadBundleObjectFields(asset.SourcePath!, asset.ContainerPath!, pathId, cancellationToken);
-            if (fields.Count == 0) return null;
+            if (fields.Count == 0)
+            {
+                Log.Debug("视频元数据预览：读不到对象字段（PathId {0}），交给后续 provider：bundle {1}", pathId, asset.SourcePath ?? "-");
+                return null;
+            }
             var root = fields[0];
             var rows = new List<AssetPreviewRow>();
             var name = PreviewRead.FindNode(root, "m_Name", "name")?.Value;
@@ -505,6 +791,8 @@ public sealed class VideoClipPreviewProvider : IAssetPreviewProvider
             rows.Add(new AssetPreviewRow("负载大小", DescribePayload(root), 0));
             rows.Add(new AssetPreviewRow("提示", "只读元数据预览；播放/导出需要视频解码器（可后续引入 FFmpeg）。", 0, Highlight: true));
             rows.AddRange(PreviewRead.FlattenTail(root, 150));
+            Log.Info("视频元数据预览完成：形态 Rows，Path {0}，名称「{1}」，行 {2} 条，资源「{3}」。",
+                pathId, name ?? "-", rows.Count, AssetDisplay.DisplayPath(asset));
             return new AssetPreview(AssetPreviewKind.Rows,
                 $"视频（VideoClip）· Path {pathId} · 只读元数据", Rows: rows);
         }, cancellationToken);
@@ -553,6 +841,8 @@ public sealed class VideoClipPreviewProvider : IAssetPreviewProvider
 /// <summary>SpriteAtlas（ref-type 687078895）只读预览：名称、打包精灵数、字段树。</summary>
 public sealed class SpriteAtlasPreviewProvider : IAssetPreviewProvider
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     public string Name => "图集预览";
 
     public bool CanPreview(AssetRecord asset) => asset.Type == AssetType.SpriteAtlas;
@@ -560,11 +850,20 @@ public sealed class SpriteAtlasPreviewProvider : IAssetPreviewProvider
     public Task<AssetPreview?> PreviewAsync(AssetRecord asset, IProgress<string>? progress, CancellationToken cancellationToken)
         => Task.Run<AssetPreview?>(() =>
         {
-            if (!PreviewRead.IsBundleAsset(asset)) return null;
+            using var scope = Log.Scope("图集预览");
+            if (!PreviewRead.IsBundleAsset(asset))
+            {
+                Log.Debug("图集预览不处理该资源（不是可读 bundle），交给后续 provider：{0}", AssetDisplay.DisplayPath(asset));
+                return null;
+            }
             var service = new UnityAssetService();
             var pathId = asset.UnityPathId!.Value;
             var fields = service.ReadBundleObjectFields(asset.SourcePath!, asset.ContainerPath!, pathId, cancellationToken);
-            if (fields.Count == 0) return null;
+            if (fields.Count == 0)
+            {
+                Log.Debug("图集预览：读不到对象字段（PathId {0}），交给后续 provider：bundle {1}", pathId, asset.SourcePath ?? "-");
+                return null;
+            }
             var root = fields[0];
             var rows = new List<AssetPreviewRow>();
             var name = PreviewRead.FindNode(root, "m_Name", "name")?.Value;
@@ -574,6 +873,8 @@ public sealed class SpriteAtlasPreviewProvider : IAssetPreviewProvider
             var packables = PreviewRead.FindNode(root, "m_Packables", "m_PackablesData");
             if (packables is { IsArray: true }) rows.Add(new AssetPreviewRow("可打包对象", $"{packables.ArraySize:N0} 个", 0));
             rows.AddRange(PreviewRead.FlattenTail(root, 200));
+            Log.Info("图集预览完成：形态 Rows，Path {0}，名称「{1}」，行 {2} 条，资源「{3}」。",
+                pathId, name ?? "-", rows.Count, AssetDisplay.DisplayPath(asset));
             return new AssetPreview(AssetPreviewKind.Rows,
                 $"图集（SpriteAtlas）· Path {pathId} · 只读字段树", Rows: rows);
         }, cancellationToken);
@@ -583,6 +884,8 @@ public sealed class SpriteAtlasPreviewProvider : IAssetPreviewProvider
 /// 未知类型不空白）。</summary>
 public sealed class HexPreviewProvider : IAssetPreviewProvider
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     public string Name => "十六进制兜底";
 
     public bool CanPreview(AssetRecord asset) => PreviewRead.ReadableFile(asset) is not null;
@@ -590,11 +893,22 @@ public sealed class HexPreviewProvider : IAssetPreviewProvider
     public Task<AssetPreview?> PreviewAsync(AssetRecord asset, IProgress<string>? progress, CancellationToken cancellationToken)
         => Task.Run<AssetPreview?>(() =>
         {
+            using var scope = Log.Scope("十六进制兜底预览");
             var file = PreviewRead.ReadableFile(asset);
-            if (file is null) return null;
+            if (file is null)
+            {
+                Log.Debug("十六进制兜底：无可读文件，返回 null（交由注册表给出说明性 Message）：{0}", AssetDisplay.DisplayPath(asset));
+                return null;
+            }
             var dump = HexDumpService.DumpFile(file);
-            if (dump is null) return null;
+            if (dump is null)
+            {
+                Log.Warn("十六进制兜底：DumpFile 返回 null（文件不可读或为空），返回 null：{0}", file);
+                return null;
+            }
             var explanation = $"没有专用预览形态（{AssetDisplay.TypeLabel(asset.Type)}），显示十六进制转储。";
+            Log.Info("十六进制兜底预览：文件「{0}」，{1}，转储文本 {2:N0} 字符，资源「{3}」。",
+                file, dump.Describe() ?? "-", dump.Text?.Length ?? 0, AssetDisplay.DisplayPath(asset));
             return new AssetPreview(AssetPreviewKind.Hex,
                 $"{explanation} {dump.Describe()}",
                 Text: dump.Text);

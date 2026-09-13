@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -17,7 +17,13 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="NLog" Version="6.2.0" />
     <PackageReference Include="WPF-UI" Version="4.3.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 日志配置随程序发布：autoReload 生效时可在运行中直接改级别（见 docs/LOGGING.md）。 -->
+    <None Include="..\..\nlog.config" Link="nlog.config" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

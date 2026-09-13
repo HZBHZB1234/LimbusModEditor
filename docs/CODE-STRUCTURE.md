@@ -50,25 +50,31 @@ lang 文本 / 静态数据表）→ 在四个工作台里浏览与编辑 → 一
                                         Formats.Abstractions
                                                      │
                                                      ▼
-                                                  Domain（零 NuGet）
+                                                  Domain（共享基础：模型 + 日志约定）
 ```
 
 | 项目 | TFM | 关键 NuGet | 角色 |
 |---|---|---|---|
-| `LimbusModEditor.Domain` | net8.0 | 无 | 全仓库共享数据模型与纯数据规则（资产、编辑、格式枚举、导出布局、项目文档） |
+| `LimbusModEditor.Domain` | net8.0 | NLog 6.2.0 | 全仓库共享数据模型与纯数据规则（资产、编辑、格式枚举、导出布局、项目文档）+ 日志调用约定（`Diagnostics/LoggerExtensions.cs`，见 §5.4） |
 | `LimbusModEditor.Formats.Abstractions` | net8.0 | 无 | 格式插件唯一接口契约 `IModFormatHandler` |
 | `LimbusModEditor.Infrastructure` | net8.0 | 无 | 基础实现（当前只有 `SafePathService`，且**未被调用**，见 §9） |
-| `LimbusModEditor.Editing` | net8.0 | ImageSharp 3.1.11 | Unity 纹理 ↔ PNG 编解码、图集切分/回填、缩略图 |
-| `LimbusModEditor.Formats.Unity` | net8.0 | AssetsTools.NET 3.0.5 | Unity bundle/SerializedFile 唯一后端（不手写解析器） |
-| `LimbusModEditor.Formats.Carra` | net8.0 | Joveler.Compression.XZ 5.0.2 + SharpCompress 0.38.0 | Carra/Carra2 容器 |
-| `LimbusModEditor.Formats.Bank` | net8.0 | 无（P/Invoke 运行时绑 FMOD C ABI） | FMOD bank/FSB5 索引层 + 音频编解码抽象 |
-| `LimbusModEditor.Formats.Rebank` | net8.0 | 无 | .rebank 差分包 |
-| `LimbusModEditor.Formats.Lunartique` | net8.0 | SharpCompress 0.38.0 | Lunartique 安装/卸载配对包 |
-| `LimbusModEditor.Application` | net8.0 | Microsoft.Data.Sqlite 8.0.11 + ImageSharp | WPF 无关的服务编排层（**能被直接单测**） |
-| `LimbusModEditor.App` | net8.0-windows | WPF-UI 4.3.0 | 界面（**没有测试工程**，逻辑要下沉到 Application 才能测） |
-| `LimbusModEditor.Cli` | net8.0 | 无 | 三个子命令的命令行入口 |
+| `LimbusModEditor.Editing` | net8.0 | ImageSharp 3.1.11 + NLog | Unity 纹理 ↔ PNG 编解码、图集切分/回填、缩略图 |
+| `LimbusModEditor.Formats.Unity` | net8.0 | AssetsTools.NET 3.0.5 + NLog | Unity bundle/SerializedFile 唯一后端（不手写解析器） |
+| `LimbusModEditor.Formats.Carra` | net8.0 | Joveler.Compression.XZ 5.0.2 + SharpCompress 0.38.0 + NLog | Carra/Carra2 容器 |
+| `LimbusModEditor.Formats.Bank` | net8.0 | NLog（P/Invoke 运行时绑 FMOD C ABI） | FMOD bank/FSB5 索引层 + 音频编解码抽象 |
+| `LimbusModEditor.Formats.Rebank` | net8.0 | NLog | .rebank 差分包 |
+| `LimbusModEditor.Formats.Lunartique` | net8.0 | SharpCompress 0.38.0 + NLog | Lunartique 安装/卸载配对包 |
+| `LimbusModEditor.Application` | net8.0 | Microsoft.Data.Sqlite 8.0.11 + ImageSharp + NLog | WPF 无关的服务编排层（**能被直接单测**） |
+| `LimbusModEditor.App` | net8.0-windows | WPF-UI 4.3.0 + NLog | 界面（**没有测试工程**，逻辑要下沉到 Application 才能测） |
+| `LimbusModEditor.Cli` | net8.0 | NLog | 三个子命令的命令行入口 |
 | `tests/LimbusModEditor.Domain.Tests` | net8.0 | xunit 2.9.3 | 行为测试主战场（引用 Domain/Editing/Application/Formats.Unity） |
 | `tests/LimbusModEditor.Format.Tests` | net8.0 | xunit 2.9.3 + AssetsTools.NET | 格式层与真实样本测试 |
+
+**依赖原则：优先用成熟第三方库，分层不构成拒绝引库的理由**（铁律 §3-12）。通用能力
+（日志、压缩、图像、Unity 解析、SQLite）一律用库；自研只留「本工具特有编排」。
+`Domain` 因此不再是「零 NuGet」：它现在是**唯一被全仓库引用的叶子程序集**，
+日志调用约定（NLog 的 `Logger` 扩展）放在这里，Formats.*/Editing 这些底层项目才能直接用；
+这条依赖是**刻意登记**的，不是漏网。
 
 构建约定（`Directory.Build.props`）：`net8.0`（WPF 项目覆盖为 `net8.0-windows`）、
 `Nullable=enable`、`TreatWarningsAsErrors=true`（**任何警告即失败**）、
@@ -124,15 +130,19 @@ Windows 下默认 `RuntimeIdentifier=win-x64`、`CopyLocalLockFileAssemblies=tru
 
 | 页面 | 文件 | 职责 |
 |---|---|---|
-| 资源 | `App/WorkbenchPages/AssetsWorkbenchPage.xaml(.cs)`（1336 行） | 容器路径树/列表 + 搜索筛选排序 + 七形态预览 + 属性编辑 + 替换/导入 |
-| 音频 | `WorkbenchPages/BankWorkbenchPage.xaml(.cs)`（1040 行） | bank 树 + 跨 bank 样本总表 + 试听 + FSB 替换 + 静态/占位 |
-| 文本 | `WorkbenchPages/TextWorkbenchPage.xaml(.cs)`（744 行） | lang 文件树 + 键值树（就地编辑）+ 源文本预览 + 搜索 |
-| 静态 | `WorkbenchPages/StaticWorkbenchPage.xaml(.cs)`（523 行） | 静态数据表索引/搜索 + JSON 文档编辑 + staticmod 产物 |
+| 资源 | `App/WorkbenchPages/AssetsWorkbenchPage.xaml(.cs)` | 容器路径树/列表 + 搜索筛选排序 + 七形态预览 + 属性编辑 + 替换/导入 |
+| 音频 | `WorkbenchPages/BankWorkbenchPage.xaml(.cs)` | bank 树 + 跨 bank 样本总表 + 试听 + FSB 替换 + bank 导出 |
+| 文本 | `WorkbenchPages/TextWorkbenchPage.xaml(.cs)` | lang 文件树 + 键值树（就地编辑）+ 源文本预览 + 搜索 |
+| 静态 | `WorkbenchPages/StaticWorkbenchPage.xaml(.cs)` | 静态数据表索引/搜索 + JSON 文档编辑 + staticmod 产物 |
 
-公共骨架：`WorkbenchPages/WorkbenchShell.xaml(.cs)`（列宽/视图模式/分节）、
+公共骨架：`WorkbenchPages/WorkbenchShell.xaml(.cs)`（列宽/视图模式/分节/滚轮接线）、
+`WorkbenchPages/TreeExpansionState.cs`（**树展开态回放**，四页共用）、
 `WorkbenchPages/JsonTreeEditor.xaml(.cs)`（键值树 + 行内编辑 + 右键菜单）、
 `Themes/Theme.xaml` 与 `Themes/WorkbenchStyles.xaml`（**设计色只允许出现在这两个文件**：
 `WorkbenchPages/` 下不得出现硬编码 `#RRGGBB` 或 `Color.FromRgb(0x`，这是收口验收门）。
+
+**改页面前必读第五章后的不变量 §6-17 ~ §6-24**：页面的线程口径、预览规模闸门、
+树展开态保持、`Loaded` 守卫、刷新去重都在这几条里。
 
 ---
 
@@ -194,17 +204,19 @@ ProjectService.LoadAsync(.lmeproj)     Application/Projects/ProjectService.cs
 
 导出：
   ExportMod_Click（侧边栏「导出模组…」，先选目标目录；SaveFileDialog 的「选择此文件夹」惯例）
+  → ExportProgressWindow（Show 非模态 + 取消令牌；主窗在导出期间禁用输入）
   → MainWindow.PrepareExportPlanAsync()   导出/调试**共用前奏**（两条链路必须同一份分析与上下文）
-      ├─ MaterializeEditedAssetsAsync    已编辑的缓存资源实体化进项目
-      ├─ SaveProjectQuietlyAsync         存项目
-      └─ ModExportPlanService.BuildAsync()  分析修改 → 点亮哪些槽位（S1）
+      ├─ MaterializeEditedAssetsAsync    已编辑的缓存资源实体化进项目（UI 线程：会改写 ObservableCollection）
+      ├─ SaveProjectQuietlyAsync         存项目（Task.Run：序列化是 119 万行级重活）
+      └─ ModExportPlanService.Plan(...)  分析修改 → 点亮哪些槽位（Task.Run）
           └─ ExportLayout（Domain）      <目标>/<项目名>_<种类>/<格式>/<产物>
-  → ModPackExportService.ExportAsync()                       按槽位执行（S4）
+  → Task.Run(ModPackExportService.ExportAsync)               按槽位执行（整体后台线程）
       ├─ Bank/Rebank   → Formats.Bank / Formats.Rebank
       ├─ Carra         → UnityBundleBuildService + UnitySerializedFileBuildService
       │                  + UnityCacheMaterializationService（先把引用 bundle 复制进项目）
       │                  + Formats.Carra
       ├─ Lunartique    → LunartiqueCarraConversionService + Formats.Lunartique
+      │                  （复用 Carra 槽位已生成的对象包，不重跑流水线）
       ├─ Lang bus/patch/pathset → LangExportFormatter（带「可表达性门」：表达不了则整份不产出）
       └─ StaticMod     → StaticModService
   → ModExportReportWindow                                    报告（含空槽位说明）
@@ -212,6 +224,13 @@ ProjectService.LoadAsync(.lmeproj)     Application/Projects/ProjectService.cs
 
 - `plan.PlannedSlotCount == 0` 时直接给「没有可导出的修改」引导，不写任何文件。
 
+- **线程口径（不变量 §6-17）**：`await` 一个「同步完成」的 Task 不会切线程 —— 所以导出链上
+  所有同步重活必须自己 `Task.Run`（`UnityBundleBuildService.BuildAsync`）或由调用方整体包一层
+  （`ExportMod_Click` / `PrepareExportPlanAsync`），两者都做是刻意的双保险；
+  逐资源/逐对象上报必须经 `ThrottledProgress` 节流，否则 UI 消息队列会被淹掉。
+- **取消（不变量 §6-18）**：`ExportProgressWindow.Token` 一路传到各槽位与逐对象循环；
+  写盘走 `AtomicOutput`（临时文件 + 原子替换），取消只停在检查点，不留下半成品；
+  用户关掉进度窗口即视为取消，宿主必须恢复主窗并说明，不能出现「窗口没了、主窗还禁用」的观感。
 - 槽位是**闭集合**：`ExportLayout.All` 是唯一清单，`For` 遇到未登记值直接抛异常。
 - `ExportAdvisor`（`Application/Build/ExportAdvisor.cs`）是给用户的「出口建议」，
   与 `ModExportPlanService` 是两套：前者出文案、后者出执行计划。
@@ -252,6 +271,16 @@ ProjectService.LoadAsync(.lmeproj)     Application/Projects/ProjectService.cs
 | 14 | 磁盘写入统一走 `AtomicOutput`（临时文件 + 替换） | `Application/Build/AtomicOutput.cs` | 中断留下半个文件 |
 | 15 | 未知负载/压缩/字段一律 **fail fast + 中文错误**，不猜测、不静默降级 | 全仓库（各 handler 的 `ValidateAsync`/异常路径） | 产物「看起来成功」实则无效 |
 | 16 | **缓存只影响速度，不影响正确性**：任何损坏一律删库重建，且「删库」不得改变功能结果 | 四个 Store 的类注释 + `SqliteTableCache.RecreateOrThrow`；由「有缓存 vs 删库」对照测试钉死 | 缓存变成事实来源，删库即出错 |
+| 17 | **`await` 一个「同步完成」的 Task 会原地继续执行，不切线程**：声明 `async` 但体内没有真异步点的服务，其重活跑在调用线程上（从 WPF 调就是 UI 线程） | `Application/Build/UnityBundleBuildService.BuildAsync`（自己 `Task.Run`）、`App/MainWindow.ExportMod_Click` / `PrepareExportPlanAsync`（整体 `Task.Run`） | 模态窗口弹出后软件「未响应且不恢复」（历史报障）；导出链上新加同步重活必须同时确认线程口径 |
+| 18 | 导出链必须可**协作式取消**：写盘走 `AtomicOutput`、槽位/对象之间检查令牌、进度窗口关窗即取消 | `App/ExportProgressWindow.cs` + `ModPackExportService` / `UnityCacheExportService` / `UnityBundleBuildService` 的 `CancellationToken` 形参 | 用户无法中断长导出；只能杀进程，产物半途而废 |
+| 19 | 进度上报必须**节流**（逐资源/逐对象可达十万级，UI 侧每条都 Post 到消息队列） | `Application/Build/ThrottledProgress.cs`；各服务的逐条上报走它 | UI 队列被淹，导出期间界面假死 |
+| 20 | **静态数据默认隐藏有三道判据**：元数据标记 **或** bundle 名兜底 **或** 容器路径前缀（`Assets/Resources_moved/StaticData/static-data/`）；且 catalog 不可用时**不得清除**标记 | `Application/Assets/AssetSearchService.cs`、`Application/Scanning/UnityCacheScanService.cs`、`StaticMods/StaticBundleLocator.LooksLikeStaticBundle` / `LooksLikeStaticTablePath` | 资源工作台又把 static-data 全列出来（历史报障；游戏更新换键后缓存里会留旧版本静态 bundle，只有路径判据认得出） |
+| 21 | **预览规模必须先在 provider 侧截断**，且预览内容要包在「有最大高度 + 可滚动」的容器里 | `Application/Assets/Preview/AssetPreviewProviders.cs`（文本预览字符上限）、`App/WorkbenchPages/AssetsWorkbenchPage.xaml.cs`（`WrapPreview`） | UI 线程为超长内容造几千个控件 → 点预览即未响应；窗口变矮时内容被裁且无法滚动 |
+| 22 | **树重建必须回放展开态**（节点模型是只读纯数据，承载不了展开态）；集合跨重建累积 | `App/WorkbenchPages/TreeExpansionState.cs` + 四页的 `_expandedTreeKeys` | 搜索/筛选/编辑/切页后树突然折叠回初始形态（历史报障） |
+| 23 | 常驻页面的 `Loaded` **会重复触发**（宿主反复换内容），载入逻辑必须有「已载入」守卫 | `App/WorkbenchPages/`（Static/Bank/Text 的 `_loaded`；`MainWindow.ShowPage`） | 「离开再回来」重跑索引并重建树 |
+| 24 | 编辑集自身的 `Changed` 已驱动刷新，调用方**不得再手动刷新一次** | 四个页面 + `LangEditSession`/`StaticEditSession` | 同一次保存重建两遍树（历史缺陷） |
+| 25 | **全表谓词里不许把 `File.Exists` 排在廉价判据之前**，且惰性 `GroupBy` 链**必须先物化再计数** | `Application/Build/UnityCacheExportService.IsEditedCacheAsset`、`UnityBundleBuildService.Build`、`UnitySerializedFileBuildService.BuildAsync` | 回灌后项目有 127 万条资产：一次全表 `File.Exists` ≈ 44 s，同一条谓词被跑 4 遍 → 导出 7 分钟（实测，见 `STATUS.md` §6.2.1） |
+| 26 | **内置编辑器只吃松散文件**：bundle 内对象的 `SourcePath` 是整个 AssetBundle 容器，不能当正文读 | `Application/Assets/AssetEditService.ReadCurrentBytesAsync`、`TextAssetEditService.CanEditText`（App 侧按钮置灰 + 中文说明） | 双击 bundle 内 TextAsset → 2.26 MB 二进制进 `TextBox`，排版 26.5 秒 → 界面「未响应」被强杀（历史报障，且**没有** crash 日志） |
 
 ---
 
@@ -343,6 +372,10 @@ ProjectService.LoadAsync(.lmeproj)     Application/Projects/ProjectService.cs
 | 启动变慢 / 弹窗时序 | `App/MainWindow.xaml.cs`（`Loaded` 路径）、`App/StartupTrace.cs`、`Application/Scanning/StartupScanService.cs` | `StartupScanDialog.cs` |
 | 项目文件变大 / 打开慢 | `Application/Projects/ProjectService.cs`（`SkipReferenceAssetsConverter`、回灌） | `Domain/Projects/ModProject.cs` |
 | CLI 行为 | `src/LimbusModEditor.Cli/Program.cs` | `Application/Build/ModExportService.cs`、`Assets/ModImportService.cs` |
+| **导出/调试卡住界面、无法中断** | `App/MainWindow.xaml.cs`（`ExportMod_Click`/`DebugMod_Click`/`PrepareExportPlanAsync` 的 `Task.Run` 与令牌） | `Build/UnityBundleBuildService.cs`（必须自己切线程池）、`Build/ThrottledProgress.cs`、`App/ExportProgressWindow.cs`、不变量 §6-17~19 |
+| **预览卡死 / 预览看不到下面** | `Application/Assets/Preview/AssetPreviewProviders.cs`（截断闸门） | `App/WorkbenchPages/AssetsWorkbenchPage.xaml.cs`（JSON 树闸门、`WrapPreview`）、`Assets/AssetPropertyService.cs`（会再读一次正文）、不变量 §6-21 |
+| **资源工作台又出现 static-data** | `Application/Scanning/UnityCacheScanService.cs`（标记补写/清除规则） | `Application/Assets/AssetSearchService.cs`（三道判据）、`StaticMods/StaticBundleLocator.cs`（`LooksLikeStaticBundle` + `LooksLikeStaticTablePath`）、不变量 §6-20 |
+| **树突然折叠回初始形态** | `App/WorkbenchPages/TreeExpansionState.cs`（key 回放） | 四页的 `RebuildTree` 与 `_expandedTreeKeys`、`Loaded` 守卫、不变量 §6-22~24 |
 
 ---
 

@@ -1,7 +1,9 @@
 using System.Security.Cryptography;
+using LimbusModEditor.Application.Assets.Preview;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Domain.Edits;
 using LimbusModEditor.Domain.Projects;
+using NLog;
 
 namespace LimbusModEditor.Application.Assets;
 
@@ -26,6 +28,21 @@ public sealed record BatchReplacementReport(
 /// </summary>
 public sealed class AssetEditService
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
+    /// <summary>资源是否存在「可用的替换文件」：元数据记了 replacementPath 且文件还在。
+    /// 替换文件是用户自己的松散文件，优先级高于资源自身来源。</summary>
+    public static bool TryGetReplacementFile(AssetRecord asset, out string path)
+    {
+        ArgumentNullException.ThrowIfNull(asset);
+        path = string.Empty;
+        if (!asset.Metadata.TryGetValue("replacementPath", out var candidate) || string.IsNullOrWhiteSpace(candidate))
+            return false;
+        if (!File.Exists(candidate)) return false;
+        path = candidate;
+        return true;
+    }
+
     /// <summary>批量登记替换：matches files in a folder to project assets by
     /// file name (case-insensitive) and registers every match through the same
     /// reversible pipeline as single replacement.</summary>
@@ -86,10 +103,30 @@ public sealed class AssetEditService
         ArgumentNullException.ThrowIfNull(project);
         var asset = project.Assets.FirstOrDefault(x => x.AssetId == assetId)
             ?? throw new KeyNotFoundException($"未找到资源: {assetId}");
-        var path = asset.Metadata.TryGetValue("replacementPath", out var replacement) && File.Exists(replacement)
-            ? replacement : asset.SourcePath;
+        if (TryGetReplacementFile(asset, out var replacement))
+        {
+            Log.Debug("读取资源当前内容（替换文件）：资源={0}，替换文件={1}（{2} 字节）",
+                asset.LogicalPath ?? "-", replacement, new FileInfo(replacement).Length);
+            return await File.ReadAllBytesAsync(replacement, cancellationToken);
+        }
+        // 关键防线（2026-09 卡死事故）：bundle 内对象的 SourcePath 是**整个 AssetBundle
+        // 容器**（<外层键>/<内层键>/__data），不是这个对象自己的正文。把容器字节当正文
+        // 返回，下游就会把几百 KB~MB 级二进制塞进 WPF 文本框（实测 2.26 MB → 排版
+        // 26.5 秒 → 界面被 Windows 判「停止交互」后强杀）。这里必须拦住，不允许
+        // 「退化成读容器」这种兜底。
+        if (PreviewRead.IsBundleAsset(asset))
+        {
+            Log.Warn("拒绝按文件读取容器字节：资源「{0}」的正文在 AssetBundle 容器里（SourcePath「{1}」，pathId {2}）——容器 ≠ 资源正文。",
+                asset.LogicalPath ?? "-", asset.SourcePath ?? "-", asset.UnityPathId?.ToString() ?? "-");
+            throw new NotSupportedException(
+                "该资源的内容在 AssetBundle 容器里，不能按文件直接读取："
+                + "请用预览查看内容，或用「替换选中资源…」登记自己的文件。");
+        }
+        var path = asset.SourcePath;
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
             throw new FileNotFoundException("资源没有可读取的本地文件。", path);
+        Log.Debug("读取资源当前内容（松散文件）：资源={0}，文件={1}（{2} 字节）",
+            asset.LogicalPath ?? "-", path, new FileInfo(path).Length);
         return await File.ReadAllBytesAsync(path, cancellationToken);
     }
 

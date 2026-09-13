@@ -2,8 +2,10 @@ using LimbusModEditor.Application.AppConfig;
 using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Application.Texts;
 using LimbusModEditor.Domain.Assets;
+using LimbusModEditor.Domain.Diagnostics;
 using LimbusModEditor.Domain.Formats;
 using LimbusModEditor.Domain.Projects;
+using NLog;
 
 namespace LimbusModEditor.Application.Build;
 
@@ -120,6 +122,8 @@ public sealed record ModExportPlanContext(
 /// </summary>
 public sealed class ModExportPlanService
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     /// <summary>生成计划。<paramref name="rootDirectory"/> 是用户选定的目标目录。</summary>
     public ModExportPlan Plan(
         ModProject project,
@@ -133,13 +137,19 @@ public sealed class ModExportPlanService
         ArgumentNullException.ThrowIfNull(langEdits);
         ArgumentNullException.ThrowIfNull(staticEdits);
         context ??= new ModExportPlanContext();
+        using var scope = Log.Scope("生成导出计划");
 
         var root = Path.GetFullPath(rootDirectory);
         var modName = ExportLayout.Sanitize(project.Name);
+        Log.Info("生成导出计划开始：项目 {0}，输出根目录 {1}，资源 {2} 个，Unity 缓存目录 {3}，FMOD 目录 {4}",
+            project.Name ?? "-", root, project.Assets.Count,
+            context.UnityCacheDirectory ?? "-", context.FmodDirectory ?? "-");
         var banks = CollectBankEdits(project);
         var unityObjects = project.Assets.Where(UnityCacheExportService.IsEditedCacheAsset).ToArray();
         var langEntries = langEdits.Snapshot();
         var staticEntries = staticEdits.Snapshot();
+        Log.Debug("计划输入统计：音频槽位分组 {0} 个，Unity 缓存对象 {1} 个，文本条目 {2} 个，静态条目 {3} 个",
+            banks.Count, unityObjects.Length, langEntries.Count, staticEntries.Count);
 
         var items = new List<ModExportPlanItem>
         {
@@ -153,7 +163,19 @@ public sealed class ModExportPlanService
             PlanStaticMod(staticEntries, root, modName),
         };
 
-        return new ModExportPlan(root, modName, banks, unityObjects, langEntries, staticEntries, items);
+        foreach (var item in items)
+        {
+            if (item.Planned)
+                Log.Debug("槽位 {0}：计划写出 {1} 个产物 → {2}，警告 {3} 条",
+                    item.Descriptor.DisplayName, item.ArtifactCount, item.Directory, item.Warnings?.Count ?? 0);
+            else
+                Log.Debug("槽位 {0}：不写出，跳过原因 {1}，目录 {2}",
+                    item.Descriptor.DisplayName, item.SkipReason ?? "-", item.Directory);
+        }
+        var plan = new ModExportPlan(root, modName, banks, unityObjects, langEntries, staticEntries, items);
+        Log.Info("生成导出计划完成：槽位 {0} 个，其中写出 {1} 个，产物合计 {2} 个",
+            items.Count, plan.PlannedSlotCount, plan.PlannedArtifactCount);
+        return plan;
     }
 
     /// <summary>
@@ -170,15 +192,43 @@ public sealed class ModExportPlanService
             .GroupBy(x => x.Metadata["bankSource"], StringComparer.OrdinalIgnoreCase);
         foreach (var group in groups)
         {
-            var assets = group.Where(x => BankEdit.ParseFsbIndex(x.LogicalPath) >= 0).OrderBy(x => x.LogicalPath, StringComparer.Ordinal).ToArray();
-            if (assets.Length == 0) continue;
+            var bankName = Path.GetFileName(group.Key);
+            var groupAssets = group.ToArray();
+            var assets = groupAssets.Where(x => BankEdit.ParseFsbIndex(x.LogicalPath) >= 0).OrderBy(x => x.LogicalPath, StringComparer.Ordinal).ToArray();
+            if (assets.Length == 0)
+            {
+                Log.Warn("音频槽位分组 {0} 被排除：该组 {1} 个音频资源没有一个是 fsb/<序号> 形式的 LogicalPath，无法定位要替换的 FSB 样本",
+                    bankName ?? "-", groupAssets.Length);
+                continue;
+            }
             var original = assets
                 .Select(x => x.SourcePath)
                 .FirstOrDefault(path => !string.IsNullOrWhiteSpace(path) && File.Exists(path));
-            if (original is null) continue;
-            edits.Add(new BankEdit(Path.GetFileName(group.Key), original, assets));
+            if (original is null)
+            {
+                Log.Warn("音频槽位分组 {0} 被排除：目标 bank「{1}」的原版 bank 副本不在磁盘上（候选路径 {2}），无法作为导出骨架",
+                    group.Key ?? "-", bankName ?? "-", DescribeSourcePaths(assets));
+                continue;
+            }
+            Log.Debug("音频槽位分组 {0}：可导出资源 {1} 个（原始组 {2} 个），原版 bank {3}",
+                bankName ?? "-", assets.Length, groupAssets.Length, original);
+            edits.Add(new BankEdit(bankName!, original, assets));
         }
-        return edits.OrderBy(x => x.TargetBankFileName, StringComparer.Ordinal).ToArray();
+        var result = edits.OrderBy(x => x.TargetBankFileName, StringComparer.Ordinal).ToArray();
+        Log.Debug("音频修改收集完成：可导出 bank {0} 个（{1}）", result.Length,
+            result.Length == 0 ? "没有任何音频修改能定位到目标 bank" : string.Join(", ", result.Select(x => x.TargetBankFileName)));
+        return result;
+    }
+
+    /// <summary>把候选源路径压成一行可读文本（只给日志用，不改任何导出行为）。</summary>
+    private static string DescribeSourcePaths(IReadOnlyList<AssetRecord> assets)
+    {
+        var paths = assets
+            .Select(x => string.IsNullOrWhiteSpace(x.SourcePath) ? "<空>" : x.SourcePath)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(3)
+            .ToArray();
+        return paths.Length == 0 ? "<无>" : string.Join(" | ", paths);
     }
 
     private static ModExportPlanItem PlanBank(
@@ -187,10 +237,17 @@ public sealed class ModExportPlanService
         var descriptor = ExportLayout.For(ExportSlot.Bank);
         var directory = Path.Combine(root, ExportLayout.GroupFolder(descriptor.Group, modName), descriptor.FolderName);
         if (banks.Count == 0)
+        {
+            Log.Debug("槽位 {0}：跳过（没有任何分好组的音频修改），目录 {1}", descriptor.DisplayName, directory);
             return new ModExportPlanItem(descriptor, false, directory, 0, "没有音频修改（bank 工作台里替换过样本才会有）");
+        }
         var warnings = new List<string>();
         if (!context.FmodCodecAvailable)
+        {
             warnings.Add("没找到 FMOD DLL：只能替换本来就是 FSB5 的样本；WAV 替换会明确报错，不会静默写出错包。");
+            Log.Warn("槽位 {0}：FMOD DLL 目录不可用（{1}），降级为只支持原本就是 FSB5 的样本，WAV 替换会报错",
+                descriptor.DisplayName, context.FmodDirectory ?? "-");
+        }
         return new ModExportPlanItem(descriptor, true, directory, banks.Count, null, warnings);
     }
 
@@ -200,11 +257,18 @@ public sealed class ModExportPlanService
         var descriptor = ExportLayout.For(ExportSlot.Rebank);
         var directory = Path.Combine(root, ExportLayout.GroupFolder(descriptor.Group, modName), descriptor.FolderName);
         if (banks.Count == 0)
+        {
+            Log.Debug("槽位 {0}：跳过（没有任何分好组的音频修改），目录 {1}", descriptor.DisplayName, directory);
             return new ModExportPlanItem(descriptor, false, directory, 0, "没有音频修改（差分包的输入就是被改的 bank）");
+        }
         if (!context.FmodCodecAvailable)
+        {
+            Log.Warn("槽位 {0}：缺少 FMOD DLL（{1}），拿不到真实样本名，整个 rebank 槽位跳过（宁可不写，也不产出加载器匹配不上的包）",
+                descriptor.DisplayName, context.FmodDirectory ?? "-");
             return new ModExportPlanItem(descriptor, false, directory, 0,
                 "缺少 FMOD DLL：差分包的条目名必须是**真实样本名**（加载器按 FSB 序号 + 样本名匹配），" +
                 "拿不到样本名就写不出可用的 .rebank（宁可不写，也不产出加载器匹配不上的包）。");
+        }
         return new ModExportPlanItem(descriptor, true, directory, banks.Count);
     }
 
@@ -215,10 +279,17 @@ public sealed class ModExportPlanService
         var descriptor = ExportLayout.For(ExportSlot.Carra);
         var directory = Path.Combine(root, ExportLayout.GroupFolder(descriptor.Group, modName), descriptor.FolderName);
         if (unityObjects.Count == 0)
+        {
+            Log.Debug("槽位 {0}：跳过（没有 Unity 资源修改），目录 {1}", descriptor.DisplayName, directory);
             return new ModExportPlanItem(descriptor, false, directory, 0, "没有 Unity 资源修改（替换图片 / 编辑字段后才会有）");
+        }
         var warnings = new List<string>();
         if (string.IsNullOrWhiteSpace(context.UnityCacheDirectory) || !Directory.Exists(context.UnityCacheDirectory))
+        {
             warnings.Add("没配置 Unity 缓存目录，跳过「外层键是否仍在缓存中」的对齐核对（游戏更新后旧键的模组会被加载器静默跳过）。");
+            Log.Warn("槽位 {0}：Unity 缓存目录不可用（{1}），跳过外层键对齐核对（游戏更新后旧键的模组会被加载器静默跳过）",
+                descriptor.DisplayName, context.UnityCacheDirectory ?? "-");
+        }
         return new ModExportPlanItem(descriptor, true, directory, 1, null, warnings);
     }
 
@@ -228,7 +299,10 @@ public sealed class ModExportPlanService
         var descriptor = ExportLayout.For(ExportSlot.Lunartique);
         var directory = Path.Combine(root, ExportLayout.GroupFolder(descriptor.Group, modName), descriptor.FolderName);
         if (unityObjects.Count == 0)
+        {
+            Log.Debug("槽位 {0}：跳过（没有 Unity 资源修改，Lunartique 包由对象级改动构成），目录 {1}", descriptor.DisplayName, directory);
             return new ModExportPlanItem(descriptor, false, directory, 0, "没有 Unity 资源修改（Lunartique 包由对象级改动构成）");
+        }
         return new ModExportPlanItem(descriptor, true, directory, 1);
     }
 
@@ -238,7 +312,10 @@ public sealed class ModExportPlanService
         var descriptor = ExportLayout.For(slot);
         var directory = Path.Combine(root, ExportLayout.GroupFolder(descriptor.Group, modName), descriptor.FolderName);
         if (langEntries.Count == 0)
+        {
+            Log.Debug("槽位 {0}：跳过（没有文本修改），目录 {1}", descriptor.DisplayName, directory);
             return new ModExportPlanItem(descriptor, false, directory, 0, "没有文本修改（文本工作台里改过并保存到编辑集才会有）");
+        }
         return new ModExportPlanItem(descriptor, true, directory, langEntries.Count);
     }
 
@@ -248,7 +325,10 @@ public sealed class ModExportPlanService
         var descriptor = ExportLayout.For(ExportSlot.StaticMod);
         var directory = Path.Combine(root, ExportLayout.GroupFolder(descriptor.Group, modName), descriptor.FolderName);
         if (staticEntries.Count == 0)
+        {
+            Log.Debug("槽位 {0}：跳过（没有静态数据表修改），目录 {1}", descriptor.DisplayName, directory);
             return new ModExportPlanItem(descriptor, false, directory, 0, "没有静态数据表修改（静态工作台里改过并保存到编辑集才会有）");
+        }
         return new ModExportPlanItem(descriptor, true, directory, 1);
     }
 }

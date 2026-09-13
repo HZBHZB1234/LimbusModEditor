@@ -1,7 +1,9 @@
 using AssetsTools.NET.Extra;
 using AssetsTools.NET;
+using NLog;
 using System.Text;
 using LimbusModEditor.Domain.Assets;
+using LimbusModEditor.Domain.Diagnostics;
 using LimbusModEditor.Editing.Images;
 
 namespace LimbusModEditor.Formats.Unity;
@@ -100,6 +102,8 @@ public sealed record UnitySpriteComposite(
 /// </summary>
 public sealed class AssetsToolsBackend : IDisposable
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     private readonly AssetsManager _manager = new() { UseQuickLookup = true, UseTemplateFieldCache = true };
     private readonly List<BundleFileInstance> _bundles = [];
 
@@ -107,8 +111,14 @@ public sealed class AssetsToolsBackend : IDisposable
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (Log.IsTraceEnabled) Log.Trace("读取字段树：{0} pathId={1}", serializedFilePath, pathId);
+        var loadWatch = System.Diagnostics.Stopwatch.StartNew();
         var file = _manager.LoadAssetsFile(serializedFilePath, loadDeps: false)
             ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFilePath}");
+        if (Log.IsDebugEnabled)
+            Log.Debug("加载 SerializedFile：{0}（{1} 字节，对象 {2} 个，耗时 {3} ms）",
+                serializedFilePath, File.Exists(serializedFilePath) ? new FileInfo(serializedFilePath).Length : -1L,
+                file.file.AssetInfos.Count, loadWatch.ElapsedMilliseconds);
         var info = file.file.GetAssetInfo(pathId)
             ?? throw new KeyNotFoundException($"SerializedFile 中不存在 Path ID: {pathId}");
         var template = LoadTemplate(file, info);
@@ -120,11 +130,17 @@ public sealed class AssetsToolsBackend : IDisposable
         long pathId, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (Log.IsTraceEnabled) Log.Trace("读取 bundle 内字段树：{0}::{1} pathId={2}", bundlePath, serializedFileName, pathId);
+        var loadWatch = System.Diagnostics.Stopwatch.StartNew();
         var bundle = _manager.LoadBundleFile(bundlePath, unpackIfPacked: true)
             ?? throw new InvalidDataException($"无法读取 Unity Bundle: {bundlePath}");
         _bundles.Add(bundle);
         var index = bundle.file.GetFileIndex(serializedFileName);
         if (index < 0 || !bundle.file.IsAssetsFile(index)) throw new KeyNotFoundException($"Bundle 中不存在 SerializedFile: {serializedFileName}");
+        if (Log.IsDebugEnabled)
+            Log.Debug("加载 Bundle（本后端第 {0} 次）：{1}（{2} 字节，内含 {3} 个文件），耗时 {4} ms",
+                _bundles.Count, bundlePath, File.Exists(bundlePath) ? new FileInfo(bundlePath).Length : -1L,
+                bundle.file.GetAllFileNames().Count(), loadWatch.ElapsedMilliseconds);
         var file = _manager.LoadAssetsFileFromBundle(bundle, serializedFileName, loadDeps: false)
             ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFileName}");
         var info = file.file.GetAssetInfo(pathId)
@@ -142,8 +158,14 @@ public sealed class AssetsToolsBackend : IDisposable
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (Log.IsTraceEnabled) Log.Trace("读取脚本信息：{0} pathId={1}", serializedFilePath, pathId);
+        var loadWatch = System.Diagnostics.Stopwatch.StartNew();
         var file = _manager.LoadAssetsFile(serializedFilePath, loadDeps: false)
             ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFilePath}");
+        if (Log.IsDebugEnabled)
+            Log.Debug("加载 SerializedFile：{0}（{1} 字节，对象 {2} 个，耗时 {3} ms）",
+                serializedFilePath, File.Exists(serializedFilePath) ? new FileInfo(serializedFilePath).Length : -1L,
+                file.file.AssetInfos.Count, loadWatch.ElapsedMilliseconds);
         var info = file.file.GetAssetInfo(pathId)
             ?? throw new KeyNotFoundException($"SerializedFile 中不存在 Path ID: {pathId}");
         return ReadScriptInfoCore(file, info);
@@ -154,11 +176,17 @@ public sealed class AssetsToolsBackend : IDisposable
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (Log.IsTraceEnabled) Log.Trace("读取 bundle 内脚本信息：{0}::{1} pathId={2}", bundlePath, serializedFileName, pathId);
+        var loadWatch = System.Diagnostics.Stopwatch.StartNew();
         var bundle = _manager.LoadBundleFile(bundlePath, unpackIfPacked: true)
             ?? throw new InvalidDataException($"无法读取 Unity Bundle: {bundlePath}");
         _bundles.Add(bundle);
         var index = bundle.file.GetFileIndex(serializedFileName);
         if (index < 0 || !bundle.file.IsAssetsFile(index)) throw new KeyNotFoundException($"Bundle 中不存在 SerializedFile: {serializedFileName}");
+        if (Log.IsDebugEnabled)
+            Log.Debug("加载 Bundle（本后端第 {0} 次）：{1}（{2} 字节，内含 {3} 个文件），耗时 {4} ms",
+                _bundles.Count, bundlePath, File.Exists(bundlePath) ? new FileInfo(bundlePath).Length : -1L,
+                bundle.file.GetAllFileNames().Count(), loadWatch.ElapsedMilliseconds);
         var file = _manager.LoadAssetsFileFromBundle(bundle, serializedFileName, loadDeps: false)
             ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFileName}");
         var info = file.file.GetAssetInfo(pathId)
@@ -175,8 +203,14 @@ public sealed class AssetsToolsBackend : IDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(serializedFilePath);
         ArgumentNullException.ThrowIfNull(edits);
         if (edits.Count == 0) throw new ArgumentException("至少需要一个字段修改。", nameof(edits));
+        Log.Debug("校验字段修改：{0} pathId={1}，{2} 处修改", serializedFilePath, pathId, edits.Count);
+        var loadWatch = System.Diagnostics.Stopwatch.StartNew();
         var file = _manager.LoadAssetsFile(serializedFilePath, loadDeps: false)
             ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFilePath}");
+        if (Log.IsDebugEnabled)
+            Log.Debug("加载 SerializedFile：{0}（{1} 字节，对象 {2} 个，耗时 {3} ms）",
+                serializedFilePath, File.Exists(serializedFilePath) ? new FileInfo(serializedFilePath).Length : -1L,
+                file.file.AssetInfos.Count, loadWatch.ElapsedMilliseconds);
         var info = file.file.GetAssetInfo(pathId)
             ?? throw new KeyNotFoundException($"SerializedFile 中不存在 Path ID: {pathId}");
         var template = LoadTemplate(file, info);
@@ -194,6 +228,7 @@ public sealed class AssetsToolsBackend : IDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(serializedFileName);
         ArgumentNullException.ThrowIfNull(edits);
         if (edits.Count == 0) throw new ArgumentException("至少需要一个字段修改。", nameof(edits));
+        Log.Debug("校验 bundle 内字段修改：{0}::{1} pathId={2}，{3} 处修改", bundlePath, serializedFileName, pathId, edits.Count);
         var file = LoadBundleAssetsFile(bundlePath, serializedFileName);
         var info = file.file.GetAssetInfo(pathId)
             ?? throw new KeyNotFoundException($"SerializedFile 中不存在 Path ID: {pathId}");
@@ -206,13 +241,20 @@ public sealed class AssetsToolsBackend : IDisposable
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (Log.IsTraceEnabled) Log.Trace("读取对象引用：{0} pathId={1}", serializedFilePath, pathId);
+        var loadWatch = System.Diagnostics.Stopwatch.StartNew();
         var file = _manager.LoadAssetsFile(serializedFilePath, loadDeps: false)
             ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFilePath}");
+        if (Log.IsDebugEnabled)
+            Log.Debug("加载 SerializedFile：{0}（{1} 字节，对象 {2} 个，耗时 {3} ms）",
+                serializedFilePath, File.Exists(serializedFilePath) ? new FileInfo(serializedFilePath).Length : -1L,
+                file.file.AssetInfos.Count, loadWatch.ElapsedMilliseconds);
         var info = file.file.GetAssetInfo(pathId)
             ?? throw new KeyNotFoundException($"SerializedFile 中不存在 Path ID: {pathId}");
         var fields = _manager.GetBaseField(file, info, AssetReadFlags.None);
         var result = new List<UnityObjectReference>();
         CollectReferences(fields, fields.FieldName, result);
+        if (Log.IsTraceEnabled) Log.Trace("对象引用读取完成：pathId={0}，{1} 条", pathId, result.Count);
         return result;
     }
 
@@ -220,11 +262,17 @@ public sealed class AssetsToolsBackend : IDisposable
         long pathId, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (Log.IsTraceEnabled) Log.Trace("读取 bundle 内对象引用：{0}::{1} pathId={2}", bundlePath, serializedFileName, pathId);
+        var loadWatch = System.Diagnostics.Stopwatch.StartNew();
         var bundle = _manager.LoadBundleFile(bundlePath, unpackIfPacked: true)
             ?? throw new InvalidDataException($"无法读取 Unity Bundle: {bundlePath}");
         _bundles.Add(bundle);
         var index = bundle.file.GetFileIndex(serializedFileName);
         if (index < 0 || !bundle.file.IsAssetsFile(index)) throw new KeyNotFoundException($"Bundle 中不存在 SerializedFile: {serializedFileName}");
+        if (Log.IsDebugEnabled)
+            Log.Debug("加载 Bundle（本后端第 {0} 次）：{1}（{2} 字节，内含 {3} 个文件），耗时 {4} ms",
+                _bundles.Count, bundlePath, File.Exists(bundlePath) ? new FileInfo(bundlePath).Length : -1L,
+                bundle.file.GetAllFileNames().Count(), loadWatch.ElapsedMilliseconds);
         var file = _manager.LoadAssetsFileFromBundle(bundle, serializedFileName, loadDeps: false)
             ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFileName}");
         var info = file.file.GetAssetInfo(pathId)
@@ -232,6 +280,7 @@ public sealed class AssetsToolsBackend : IDisposable
         var fields = _manager.GetBaseField(file, info, AssetReadFlags.None);
         var result = new List<UnityObjectReference>();
         CollectReferences(fields, fields.FieldName, result);
+        if (Log.IsTraceEnabled) Log.Trace("对象引用读取完成：pathId={0}，{1} 条", pathId, result.Count);
         return result;
     }
 
@@ -241,13 +290,20 @@ public sealed class AssetsToolsBackend : IDisposable
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (Log.IsTraceEnabled) Log.Trace("读取对象依赖：{0} pathId={1}", serializedFilePath, pathId);
+        var loadWatch = System.Diagnostics.Stopwatch.StartNew();
         var file = _manager.LoadAssetsFile(serializedFilePath, loadDeps: false)
             ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFilePath}");
+        if (Log.IsDebugEnabled)
+            Log.Debug("加载 SerializedFile：{0}（{1} 字节，对象 {2} 个，耗时 {3} ms）",
+                serializedFilePath, File.Exists(serializedFilePath) ? new FileInfo(serializedFilePath).Length : -1L,
+                file.file.AssetInfos.Count, loadWatch.ElapsedMilliseconds);
         var info = file.file.GetAssetInfo(pathId)
             ?? throw new KeyNotFoundException($"SerializedFile 中不存在 Path ID: {pathId}");
         var fields = _manager.GetBaseField(file, info, AssetReadFlags.None);
         var result = new List<UnityDependency>();
         CollectDependencyInfos(fields, fields.FieldName, file, result);
+        if (Log.IsTraceEnabled) Log.Trace("对象依赖读取完成：pathId={0}，{1} 条", pathId, result.Count);
         return result;
     }
 
@@ -256,12 +312,14 @@ public sealed class AssetsToolsBackend : IDisposable
         long pathId, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (Log.IsTraceEnabled) Log.Trace("读取 bundle 内对象依赖：{0}::{1} pathId={2}", bundlePath, serializedFileName, pathId);
         var file = LoadBundleAssetsFile(bundlePath, serializedFileName);
         var info = file.file.GetAssetInfo(pathId)
             ?? throw new KeyNotFoundException($"SerializedFile 中不存在 Path ID: {pathId}");
         var fields = _manager.GetBaseField(file, info, AssetReadFlags.None);
         var result = new List<UnityDependency>();
         CollectDependencyInfos(fields, fields.FieldName, file, result);
+        if (Log.IsTraceEnabled) Log.Trace("对象依赖读取完成：pathId={0}，{1} 条", pathId, result.Count);
         return result;
     }
 
@@ -271,9 +329,17 @@ public sealed class AssetsToolsBackend : IDisposable
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        var referencerWatch = System.Diagnostics.Stopwatch.StartNew();
         var file = _manager.LoadAssetsFile(serializedFilePath, loadDeps: false)
             ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFilePath}");
-        return FindReferencersCore(file, targetPathId, fileName: null, crossFileTargetPathId: 0, cancellationToken);
+        if (Log.IsDebugEnabled)
+            Log.Debug("加载 SerializedFile（查找引用者）：{0}（{1} 字节，对象 {2} 个）",
+                serializedFilePath, File.Exists(serializedFilePath) ? new FileInfo(serializedFilePath).Length : -1L,
+                file.file.AssetInfos.Count);
+        var referencers = FindReferencersCore(file, targetPathId, fileName: null, crossFileTargetPathId: 0, cancellationToken);
+        Log.Debug("查找同文件引用者完成：{0} targetPathId={1}，命中 {2} 条，耗时 {3} ms",
+            serializedFilePath, targetPathId, referencers.Count, referencerWatch.ElapsedMilliseconds);
+        return referencers;
     }
 
     /// <summary>Finds every object in the bundle (including other SerializedFiles
@@ -283,13 +349,19 @@ public sealed class AssetsToolsBackend : IDisposable
         long targetPathId, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        var referencerWatch = System.Diagnostics.Stopwatch.StartNew();
         var bundle = _manager.LoadBundleFile(bundlePath, unpackIfPacked: true)
             ?? throw new InvalidDataException($"无法读取 Unity Bundle: {bundlePath}");
         _bundles.Add(bundle);
+        if (Log.IsDebugEnabled)
+            Log.Debug("加载 Bundle（查找 bundle 内引用者，本后端第 {0} 次）：{1}（{2} 字节，内含 {3} 个文件）",
+                _bundles.Count, bundlePath, File.Exists(bundlePath) ? new FileInfo(bundlePath).Length : -1L,
+                bundle.file.GetAllFileNames().Count());
         var result = new List<UnityReferencer>();
         foreach (var fileName in bundle.file.GetAllFileNames())
         {
             if (!bundle.file.IsAssetsFile(bundle.file.GetFileIndex(fileName))) continue;
+            if (Log.IsTraceEnabled) Log.Trace("扫描 bundle 内文件查找引用者：{0}::{1}", bundlePath, fileName);
             var file = _manager.LoadAssetsFileFromBundle(bundle, fileName, loadDeps: false);
             if (file is null) continue;
             var isTargetFile = fileName.Equals(serializedFileName, StringComparison.OrdinalIgnoreCase);
@@ -300,6 +372,8 @@ public sealed class AssetsToolsBackend : IDisposable
                 cancellationToken,
                 crossFileTargetName: isTargetFile ? null : serializedFileName));
         }
+        Log.Debug("查找 bundle 内引用者完成：{0} targetPathId={1} 目标文件 {2}，命中 {3} 条，耗时 {4} ms",
+            bundlePath, targetPathId, serializedFileName, result.Count, referencerWatch.ElapsedMilliseconds);
         return result;
     }
 
@@ -307,12 +381,22 @@ public sealed class AssetsToolsBackend : IDisposable
         string? fileName, long crossFileTargetPathId, CancellationToken cancellationToken, string? crossFileTargetName = null)
     {
         var result = new List<UnityReferencer>();
+        var scanned = 0;
+        var skipped = 0;
         foreach (var info in file.file.AssetInfos)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            scanned++;
             AssetTypeValueField fields;
             try { fields = _manager.GetBaseField(file, info, AssetReadFlags.None); }
-            catch (Exception) { continue; }
+            catch (Exception ex)
+            {
+                if (skipped == 0) Log.Warn(ex, "引用者扫描：字段树读取失败，跳过对象 pathId={0}（文件 {1}）", info.PathId, fileName ?? "-");
+                else Log.Every(skipped, 500, LogLevel.Warn, () => $"引用者扫描：字段树读取失败已累计 {skipped} 个对象（最近 pathId={info.PathId}，{ex.GetType().Name}）");
+                skipped++;
+                continue;
+            }
+            Log.Every(scanned, 500, LogLevel.Trace, () => $"引用者扫描进度：第 {scanned} 个对象 pathId={info.PathId}（文件 {fileName ?? "-"}）");
             var sourceType = MapType(info.GetTypeId(file.file)).ToString();
             CollectReferencerNodes(fields, fields.FieldName, file, info.PathId, sourceType,
                 sameFileTargetPathId, crossFileTargetPathId, crossFileTargetName, fileName, result);
@@ -328,10 +412,14 @@ public sealed class AssetsToolsBackend : IDisposable
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        var verifyWatch = System.Diagnostics.Stopwatch.StartNew();
+        Log.Debug("校验 SerializedFile 引用完整性：原始 {0} → 修改后 {1}", originalPath, modifiedPath);
         using var reader = new AssetsToolsBackend();
         var before = reader.CollectAllObjectDependencies(originalPath, cancellationToken);
         var after = reader.CollectAllObjectDependencies(modifiedPath, cancellationToken);
         var changes = DiffDependencies(Path.GetFileName(originalPath), before, after);
+        Log.Debug("校验 SerializedFile 引用完整性完成：原始 {0} 个对象 / 修改后 {1} 个对象，{2} 处变化，回退 {3} 处，耗时 {4} ms",
+            before.Count, after.Count, changes.Count, changes.Count(c => c.IsRegression), verifyWatch.ElapsedMilliseconds);
         return new UnityReferenceVerifyReport(changes.All(c => !c.IsRegression), changes);
     }
 
@@ -341,6 +429,8 @@ public sealed class AssetsToolsBackend : IDisposable
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        var verifyWatch = System.Diagnostics.Stopwatch.StartNew();
+        Log.Debug("校验 Bundle 引用完整性：原始 {0} → 修改后 {1}", originalBundle, modifiedBundle);
         using var reader = new AssetsToolsBackend();
         var before = reader.CollectAllBundleObjectDependencies(originalBundle, cancellationToken);
         var after = reader.CollectAllBundleObjectDependencies(modifiedBundle, cancellationToken);
@@ -357,41 +447,66 @@ public sealed class AssetsToolsBackend : IDisposable
             }
             changes.AddRange(DiffDependencies(fileName, beforeObjects, afterObjects));
         }
+        Log.Debug("校验 Bundle 引用完整性完成：原始 {0} 个 SerializedFile / 修改后 {1} 个，{2} 处变化，回退 {3} 处，耗时 {4} ms",
+            before.Count, after.Count, changes.Count, changes.Count(c => c.IsRegression), verifyWatch.ElapsedMilliseconds);
         return new UnityReferenceVerifyReport(changes.All(c => !c.IsRegression), changes);
     }
 
     private Dictionary<long, List<UnityDependency>> CollectAllObjectDependencies(string path, CancellationToken cancellationToken)
     {
+        var collectWatch = System.Diagnostics.Stopwatch.StartNew();
         var file = _manager.LoadAssetsFile(path, loadDeps: false)
             ?? throw new InvalidDataException($"无法读取 SerializedFile: {path}");
+        if (Log.IsDebugEnabled)
+            Log.Debug("加载 SerializedFile（全量依赖收集）：{0}（{1} 字节，对象 {2} 个，耗时 {3} ms）",
+                path, File.Exists(path) ? new FileInfo(path).Length : -1L,
+                file.file.AssetInfos.Count, collectWatch.ElapsedMilliseconds);
         return CollectAllObjectDependenciesCore(file, cancellationToken);
     }
 
     private Dictionary<string, Dictionary<long, List<UnityDependency>>> CollectAllBundleObjectDependencies(string bundlePath, CancellationToken cancellationToken)
     {
+        var collectWatch = System.Diagnostics.Stopwatch.StartNew();
         var bundle = _manager.LoadBundleFile(bundlePath, unpackIfPacked: true)
             ?? throw new InvalidDataException($"无法读取 Unity Bundle: {bundlePath}");
         _bundles.Add(bundle);
+        if (Log.IsDebugEnabled)
+            Log.Debug("加载 Bundle（全量依赖收集，本后端第 {0} 次）：{1}（{2} 字节，内含 {3} 个文件，耗时 {4} ms）",
+                _bundles.Count, bundlePath, File.Exists(bundlePath) ? new FileInfo(bundlePath).Length : -1L,
+                bundle.file.GetAllFileNames().Count(), collectWatch.ElapsedMilliseconds);
         var result = new Dictionary<string, Dictionary<long, List<UnityDependency>>>(StringComparer.OrdinalIgnoreCase);
         foreach (var fileName in bundle.file.GetAllFileNames())
         {
             if (!bundle.file.IsAssetsFile(bundle.file.GetFileIndex(fileName))) continue;
+            if (Log.IsTraceEnabled) Log.Trace("全量依赖收集：读取 bundle 内文件 {0}::{1}", bundlePath, fileName);
             var file = _manager.LoadAssetsFileFromBundle(bundle, fileName, loadDeps: false);
             if (file is null) continue;
             result[fileName] = CollectAllObjectDependenciesCore(file, cancellationToken);
         }
+        Log.Debug("全量依赖收集完成：{0}，{1} 个 SerializedFile，耗时 {2} ms",
+            bundlePath, result.Count, collectWatch.ElapsedMilliseconds);
         return result;
     }
 
     private Dictionary<long, List<UnityDependency>> CollectAllObjectDependenciesCore(AssetsFileInstance file, CancellationToken cancellationToken)
     {
         var result = new Dictionary<long, List<UnityDependency>>();
+        var scanned = 0;
+        var skipped = 0;
         foreach (var info in file.file.AssetInfos)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            scanned++;
             AssetTypeValueField fields;
             try { fields = _manager.GetBaseField(file, info, AssetReadFlags.None); }
-            catch (Exception) { continue; }
+            catch (Exception ex)
+            {
+                if (skipped == 0) Log.Warn(ex, "全量依赖收集：字段树读取失败，跳过对象 pathId={0}", info.PathId);
+                else Log.Every(skipped, 500, LogLevel.Warn, () => $"全量依赖收集：字段树读取失败已累计 {skipped} 个对象（最近 pathId={info.PathId}，{ex.GetType().Name}）");
+                skipped++;
+                continue;
+            }
+            Log.Every(scanned, 500, LogLevel.Trace, () => $"全量依赖收集进度：第 {scanned} 个对象 pathId={info.PathId}");
             var deps = new List<UnityDependency>();
             CollectDependencyInfos(fields, fields.FieldName, file, deps);
             result[info.PathId] = deps;
@@ -439,7 +554,10 @@ public sealed class AssetsToolsBackend : IDisposable
         var pathIdField = field.Children.FirstOrDefault(x => x.FieldName.Equals("m_PathID", StringComparison.OrdinalIgnoreCase) || x.FieldName.Equals("pathID", StringComparison.OrdinalIgnoreCase));
         if (fileIdField is not null && pathIdField is not null
             && TryReadLong(fileIdField, out var fileIdValue) && TryReadLong(pathIdField, out var pathIdValue))
+        {
+            if (Log.IsTraceEnabled) Log.Trace("发现 PPtr 依赖：{0} → fileId={1} pathId={2}", path, fileIdValue, pathIdValue);
             result.Add(ResolveDependency(file, path, fileIdValue, pathIdValue, field.TypeName));
+        }
         var isArray = field.TemplateField?.IsArray == true || field.Value?.ValueType == AssetValueType.Array;
         for (var i = 0; i < field.Children.Count; i++)
         {
@@ -469,7 +587,11 @@ public sealed class AssetsToolsBackend : IDisposable
             var isCrossFileRef = crossFileTargetName is not null && fileIdValue > 0 && pathIdValue == crossFileTargetPathId
                 && ExternalMatchesFileName(file, fileIdValue, crossFileTargetName);
             if (isSameFileRef || isCrossFileRef)
+            {
+                if (Log.IsTraceEnabled) Log.Trace("发现引用者：pathId={0} 的字段 {1} → fileId={2} pathId={3}（文件 {4}）",
+                    sourcePathId, path, fileIdValue, pathIdValue, originatingFile ?? "-");
                 result.Add(new UnityReferencer(sourcePathId, sourceType, path, fileIdValue, originatingFile));
+            }
         }
         var isArray = field.TemplateField?.IsArray == true || field.Value?.ValueType == AssetValueType.Array;
         for (var i = 0; i < field.Children.Count; i++)
@@ -532,23 +654,38 @@ public sealed class AssetsToolsBackend : IDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         try
         {
+            var listWatch = System.Diagnostics.Stopwatch.StartNew();
             var bundle = _manager.LoadBundleFile(path, unpackIfPacked: true);
-            if (bundle is null) return [];
+            if (bundle is null)
+            {
+                Log.Warn("枚举 bundle 内 SerializedFile 失败（loadBundle 返回 null）：{0}", path);
+                return [];
+            }
             _bundles.Add(bundle);
-            return bundle.file.GetAllFileNames()
+            var names = bundle.file.GetAllFileNames()
                 .Where(name => bundle.file.IsAssetsFile(bundle.file.GetFileIndex(name)))
                 .ToArray();
+            if (Log.IsDebugEnabled)
+                Log.Debug("枚举 bundle 内 SerializedFile：{0}，命中 {1} 个（本后端第 {2} 次加载该 bundle），耗时 {3} ms",
+                    path, names.Length, _bundles.Count, listWatch.ElapsedMilliseconds);
+            return names;
         }
         catch (Exception ex) when (ex is InvalidDataException or IOException or NotSupportedException or EndOfStreamException)
         {
+            Log.Warn(ex, "枚举 bundle 内 SerializedFile 失败，返回空列表：{0}", path);
             return [];
         }
     }
 
     public IReadOnlyList<UnityAssetDescriptor> InspectBundle(string path)
     {
+        var inspectWatch = System.Diagnostics.Stopwatch.StartNew();
         var bundle = _manager.LoadBundleFile(path, unpackIfPacked: true) ?? throw new InvalidDataException($"无法读取 Unity Bundle: {path}");
         _bundles.Add(bundle);
+        if (Log.IsDebugEnabled)
+            Log.Debug("勘察 Bundle（本后端第 {0} 次加载）：{1}（{2} 字节，内含 {3} 个文件）",
+                _bundles.Count, path, File.Exists(path) ? new FileInfo(path).Length : -1L,
+                bundle.file.GetAllFileNames().Count());
         var assets = new List<UnityAssetDescriptor>();
         foreach (var fileName in bundle.file.GetAllFileNames())
         {
@@ -570,6 +707,7 @@ public sealed class AssetsToolsBackend : IDisposable
                     info.PathId, typeId, info.ByteSize, MapType(typeId, typeName), typeName));
             }
         }
+        Log.Debug("勘察 Bundle 完成：{0}，{1} 个对象，耗时 {2} ms", path, assets.Count, inspectWatch.ElapsedMilliseconds);
         return assets;
     }
 
@@ -604,7 +742,11 @@ public sealed class AssetsToolsBackend : IDisposable
             if (info.GetTypeId(file.file) != UnityClassId.AssetBundle) continue;
             AssetTypeValueField fields;
             try { fields = _manager.GetBaseField(file, info, AssetReadFlags.None); }
-            catch (Exception) { continue; }
+            catch (Exception ex)
+            {
+                Log.Warn(ex, "读取容器映射：AssetBundle 对象 pathId={0} 的字段树读取失败，跳过该对象", info.PathId);
+                continue;
+            }
             var container = FindField(fields, "m_Container", "container");
             if (container is null) continue;
             // 真实样本：条目挂在嵌套的 "Array"/"data" 子节点下；旧版直接是条目。
@@ -631,6 +773,7 @@ public sealed class AssetsToolsBackend : IDisposable
                 map[id] = path;
             }
         }
+        if (Log.IsTraceEnabled) Log.Trace("容器映射读取完成：{0} 条「容器路径 → PathId」", map.Count);
         return map;
     }
 
@@ -642,6 +785,8 @@ public sealed class AssetsToolsBackend : IDisposable
     {
         var bundle = _manager.LoadBundleFile(path, unpackIfPacked: true) ?? throw new InvalidDataException($"无法读取 Unity Bundle: {path}");
         _bundles.Add(bundle);
+        if (Log.IsDebugEnabled)
+            Log.Debug("勘察 Bundle 类型树（本后端第 {0} 次加载）：{1}", _bundles.Count, path);
         var results = new List<(bool, string, int)>();
         foreach (var fileName in bundle.file.GetAllFileNames())
         {
@@ -650,7 +795,12 @@ public sealed class AssetsToolsBackend : IDisposable
             if (file is null) continue;
             results.Add((file.file.Metadata.TypeTreeEnabled, file.file.Metadata.UnityVersion ?? string.Empty,
                 file.file.Metadata.TypeTreeTypes.Count));
+            if (Log.IsTraceEnabled)
+                Log.Trace("类型树勘察：{0}::{1}，embedTypeTree={2}，Unity {3}，类型 {4} 项",
+                    path, fileName, file.file.Metadata.TypeTreeEnabled, file.file.Metadata.UnityVersion ?? "-",
+                    file.file.Metadata.TypeTreeTypes.Count);
         }
+        if (Log.IsDebugEnabled) Log.Debug("勘察 Bundle 类型树完成：{0}，{1} 个 SerializedFile", path, results.Count);
         return results;
     }
 
@@ -659,10 +809,16 @@ public sealed class AssetsToolsBackend : IDisposable
     public IReadOnlyList<UnitySerializedObject> ReadSerializedObjects(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        var readWatch = System.Diagnostics.Stopwatch.StartNew();
         var file = _manager.LoadAssetsFile(path, loadDeps: false)
             ?? throw new InvalidDataException($"无法读取 SerializedFile: {path}");
+        if (Log.IsDebugEnabled)
+            Log.Debug("加载 SerializedFile（枚举原始对象）：{0}（{1} 字节，对象 {2} 个，耗时 {3} ms）",
+                path, File.Exists(path) ? new FileInfo(path).Length : -1L,
+                file.file.AssetInfos.Count, readWatch.ElapsedMilliseconds);
         var typeNames = CollectTypeNames(file.file);
         var result = new List<UnitySerializedObject>();
+        long totalBytes = 0;
         foreach (var info in file.file.AssetInfos)
         {
             var offset = info.GetAbsoluteByteOffset(file.file);
@@ -679,8 +835,13 @@ public sealed class AssetsToolsBackend : IDisposable
             }
             var typeId = info.GetTypeId(file.file);
             var typeName = typeNames.TryGetValue(typeId, out var resolved) ? resolved : string.Empty;
+            if (Log.IsTraceEnabled)
+                Log.Trace("读取原始对象：pathId={0} type={1}（class {2}），{3} 字节", info.PathId, typeName, typeId, data.Length);
+            totalBytes += data.Length;
             result.Add(new UnitySerializedObject(info.PathId, typeId, data, typeName));
         }
+        Log.Debug("枚举原始对象完成：{0}，{1} 个对象 / 共 {2} 字节，耗时 {3} ms",
+            path, result.Count, totalBytes, readWatch.ElapsedMilliseconds);
         return result;
     }
 
@@ -693,13 +854,22 @@ public sealed class AssetsToolsBackend : IDisposable
         try
         {
             var bundle = _manager.LoadBundleFile(bundlePath, unpackIfPacked: true);
-            if (bundle is null) { decompressed = Stream.Null; return false; }
+            if (bundle is null)
+            {
+                Log.Warn("读取 bundle 解压流失败（loadBundle 返回 null）：{0}", bundlePath);
+                decompressed = Stream.Null;
+                return false;
+            }
             _bundles.Add(bundle);
             decompressed = bundle.DataStream;
+            if (Log.IsDebugEnabled)
+                Log.Debug("读取 bundle 解压流（CRC 基线，本后端第 {0} 次加载）：{1}，{2} 字节",
+                    _bundles.Count, bundlePath, decompressed.Length);
             return true;
         }
         catch (Exception ex) when (ex is InvalidDataException or IOException or NotSupportedException or EndOfStreamException)
         {
+            Log.Warn(ex, "读取 bundle 解压流失败，返回 false：{0}", bundlePath);
             decompressed = Stream.Null;
             return false;
         }
@@ -712,11 +882,17 @@ public sealed class AssetsToolsBackend : IDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(bundlePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(serializedFileName);
+        if (Log.IsTraceEnabled) Log.Trace("读取 bundle 内对象原始字节：{0}::{1} pathId={2}", bundlePath, serializedFileName, pathId);
+        var loadWatch = System.Diagnostics.Stopwatch.StartNew();
         var bundle = _manager.LoadBundleFile(bundlePath, unpackIfPacked: true)
             ?? throw new InvalidDataException($"无法读取 Unity Bundle: {bundlePath}");
         _bundles.Add(bundle);
         var index = bundle.file.GetFileIndex(serializedFileName);
         if (index < 0 || !bundle.file.IsAssetsFile(index)) throw new KeyNotFoundException($"Bundle 中不存在 SerializedFile: {serializedFileName}");
+        if (Log.IsDebugEnabled)
+            Log.Debug("加载 Bundle（读取对象原始字节，本后端第 {0} 次）：{1}（{2} 字节，内含 {3} 个文件），耗时 {4} ms",
+                _bundles.Count, bundlePath, File.Exists(bundlePath) ? new FileInfo(bundlePath).Length : -1L,
+                bundle.file.GetAllFileNames().Count(), loadWatch.ElapsedMilliseconds);
         var instance = _manager.LoadAssetsFileFromBundle(bundle, serializedFileName, loadDeps: false)
             ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFileName}");
         var info = instance.file.GetAssetInfo(pathId)
@@ -737,19 +913,29 @@ public sealed class AssetsToolsBackend : IDisposable
             if (count == 0) throw new EndOfStreamException($"SerializedFile 对象数据不完整: {info.PathId}");
             read += count;
         }
+        if (Log.IsDebugEnabled)
+            Log.Debug("读取 bundle 内对象原始字节完成：{0}::{1} pathId={2}，类型表索引 {3}（class {4}），{5} 字节，耗时 {6} ms",
+                bundlePath, serializedFileName, info.PathId, typeIndex, types[typeIndex].TypeId, data.Length, loadWatch.ElapsedMilliseconds);
         return new(serializedFileName, info.PathId, typeIndex, types[typeIndex].TypeId, types.Count, data);
     }
 
     public UnityTextureObject? ReadTexture(string path, long pathId, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (Log.IsTraceEnabled) Log.Trace("读取纹理：{0} pathId={1}", path, pathId);
+        var textureWatch = System.Diagnostics.Stopwatch.StartNew();
         var bundle = _manager.LoadBundleFile(path, unpackIfPacked: true) ?? throw new InvalidDataException($"无法读取 Unity Bundle: {path}");
         _bundles.Add(bundle);
+        if (Log.IsDebugEnabled)
+            Log.Debug("读取纹理：加载 Bundle（本后端第 {0} 次）：{1}（{2} 字节，内含 {3} 个文件）",
+                _bundles.Count, path, File.Exists(path) ? new FileInfo(path).Length : -1L,
+                bundle.file.GetAllFileNames().Count());
         foreach (var fileName in bundle.file.GetAllFileNames())
         {
             cancellationToken.ThrowIfCancellationRequested();
             var index = bundle.file.GetFileIndex(fileName);
             if (!bundle.file.IsAssetsFile(index)) continue;
+            if (Log.IsTraceEnabled) Log.Trace("纹理候选扫描：{0} 内文件 {1}", path, fileName);
             var file = _manager.LoadAssetsFileFromBundle(bundle, fileName, loadDeps: false);
             if (file is null) continue;
             var info = file.file.GetAssetInfo(pathId);
@@ -759,9 +945,18 @@ public sealed class AssetsToolsBackend : IDisposable
             var height = ReadInt(fields, "m_Height", "height");
             var format = ReadInt(fields, "m_TextureFormat", "textureFormat");
             var pixels = ReadTexturePixelData(bundle, fields, pathId);
-            if (width <= 0 || height <= 0 || format < 0 || pixels is null || pixels.Length == 0) return null;
+            if (width <= 0 || height <= 0 || format < 0 || pixels is null || pixels.Length == 0)
+            {
+                Log.Warn("读取纹理失败（尺寸/格式/像素数据无效）：{0} pathId={1}，{2}x{3} format={4}，像素 {5} 字节",
+                    path, pathId, width, height, format, pixels?.Length ?? 0);
+                return null;
+            }
+            if (Log.IsDebugEnabled)
+                Log.Debug("读取纹理完成：{0}::{1} pathId={2}，{3}x{4} format={5}，{6} 字节像素，耗时 {7} ms",
+                    path, fileName, pathId, width, height, format, pixels.Length, textureWatch.ElapsedMilliseconds);
             return new UnityTextureObject(fileName, pathId, width, height, format, pixels);
         }
+        Log.Debug("读取纹理未命中：{0} 内没有 pathId={1} 的 Texture2D，耗时 {2} ms", path, pathId, textureWatch.ElapsedMilliseconds);
         return null;
     }
 
@@ -773,15 +968,31 @@ public sealed class AssetsToolsBackend : IDisposable
     private byte[]? ReadTexturePixelData(BundleFileInstance bundle, AssetTypeValueField fields, long pathId)
     {
         var direct = FindField(fields, "m_TextureData", "m_ImageData", "image data", "data")?.AsByteArray;
-        if (direct is { Length: > 0 }) return direct;
+        if (direct is { Length: > 0 })
+        {
+            if (Log.IsTraceEnabled) Log.Trace("纹理像素来自内联字节数组：pathId={0}，{1} 字节", pathId, direct.Length);
+            return direct;
+        }
 
         var streamData = FindField(fields, "m_StreamData");
-        if (streamData is null) return null;
+        if (streamData is null)
+        {
+            if (Log.IsTraceEnabled) Log.Trace("纹理既无内联像素也无 m_StreamData：pathId={0}", pathId);
+            return null;
+        }
         var resPath = FindField(streamData, "path")?.Value?.AsString;
-        if (string.IsNullOrEmpty(resPath)) return null;
+        if (string.IsNullOrEmpty(resPath))
+        {
+            if (Log.IsTraceEnabled) Log.Trace("纹理 m_StreamData.path 为空：pathId={0}", pathId);
+            return null;
+        }
         var offset = FindField(streamData, "offset")?.Value?.AsLong ?? 0;
         var size = FindField(streamData, "size")?.Value?.AsLong ?? 0;
-        if (offset < 0 || size <= 0) return null;
+        if (offset < 0 || size <= 0)
+        {
+            if (Log.IsTraceEnabled) Log.Trace("纹理 m_StreamData 范围无效：pathId={0} offset={1} size={2} path={3}", pathId, offset, size, resPath);
+            return null;
+        }
         return ReadStreamData(bundle, resPath, offset, size, pathId, "纹理流数据");
     }
 
@@ -815,13 +1026,20 @@ public sealed class AssetsToolsBackend : IDisposable
                         read += count;
                     }
                 }
+                if (Log.IsTraceEnabled)
+                    Log.Trace("读取 bundle 内流数据：{0}（Path {1}），块 {2} 偏移 {3} 取 {4} 字节", resPath, ownerPathId, name, rangeOffset + offset, data.Length);
                 return data;
             }
+            Log.Warn("{0} 未在 bundle 内找到存档内条目：{1}（Path {2}），返回 null", label, resPath, ownerPathId);
             return null;
         }
 
         var external = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(bundle.path))!, resPath);
-        if (!File.Exists(external)) return null;
+        if (!File.Exists(external))
+        {
+            Log.Warn("{0} 的外部文件不存在：{1}（Path {2}），返回 null", label, external, ownerPathId);
+            return null;
+        }
         using var source = File.OpenRead(external);
         if (offset + size > source.Length)
             throw new InvalidDataException($"{label}越界（Path {ownerPathId}）: {resPath} 范围 {offset}+{size} 超过文件大小 {source.Length}");
@@ -834,6 +1052,8 @@ public sealed class AssetsToolsBackend : IDisposable
             if (count == 0) throw new EndOfStreamException($"{label}不完整（Path {ownerPathId}）: {resPath}");
             total += count;
         }
+        if (Log.IsTraceEnabled)
+            Log.Trace("读取 bundle 外部流数据：{0}（Path {1}），偏移 {2} 取 {3} 字节", external, ownerPathId, offset, externalData.Length);
         return externalData;
     }
 
@@ -858,21 +1078,30 @@ public sealed class AssetsToolsBackend : IDisposable
     public UnitySpriteObject? ReadSprite(string path, long pathId, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (Log.IsTraceEnabled) Log.Trace("读取 Sprite：{0} pathId={1}", path, pathId);
         var bundle = _manager.LoadBundleFile(path, unpackIfPacked: true)
             ?? throw new InvalidDataException($"无法读取 Unity Bundle: {path}");
         _bundles.Add(bundle);
+        if (Log.IsDebugEnabled)
+            Log.Debug("读取 Sprite：加载 Bundle（本后端第 {0} 次）：{1}（{2} 字节，内含 {3} 个文件）",
+                _bundles.Count, path, File.Exists(path) ? new FileInfo(path).Length : -1L,
+                bundle.file.GetAllFileNames().Count());
         foreach (var fileName in bundle.file.GetAllFileNames())
         {
             cancellationToken.ThrowIfCancellationRequested();
             var index = bundle.file.GetFileIndex(fileName);
             if (!bundle.file.IsAssetsFile(index)) continue;
+            if (Log.IsTraceEnabled) Log.Trace("Sprite 候选扫描：{0} 内文件 {1}", path, fileName);
             var file = _manager.LoadAssetsFileFromBundle(bundle, fileName, loadDeps: false);
             if (file is null) continue;
             var info = file.file.GetAssetInfo(pathId);
             if (info is null || info.GetTypeId(file.file) != UnityClassId.Sprite) continue;
             var fields = _manager.GetBaseField(file, info, AssetReadFlags.None);
+            if (Log.IsDebugEnabled)
+                Log.Debug("读取 Sprite 完成：{0}::{1} pathId={2}", path, fileName, pathId);
             return ReadSpriteFields(fileName, pathId, fields);
         }
+        Log.Debug("读取 Sprite 未命中：{0} 内没有 pathId={1} 的 Sprite", path, pathId);
         return null;
     }
 
@@ -885,9 +1114,13 @@ public sealed class AssetsToolsBackend : IDisposable
         string bundlePath, string? serializedFileName, long pathId, int expectedTypeId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(bundlePath);
+        var locateWatch = System.Diagnostics.Stopwatch.StartNew();
         var bundle = _manager.LoadBundleFile(bundlePath, unpackIfPacked: true)
             ?? throw new InvalidDataException($"无法读取 Unity Bundle: {bundlePath}");
         _bundles.Add(bundle);
+        if (Log.IsDebugEnabled)
+            Log.Debug("定位 bundle 内对象：加载 Bundle（本后端第 {0} 次）：{1}（class {2} pathId={3}，指定文件 {4}）",
+                _bundles.Count, bundlePath, expectedTypeId, pathId, serializedFileName ?? "任意");
         var names = string.IsNullOrWhiteSpace(serializedFileName)
             ? bundle.file.GetAllFileNames()
             : [serializedFileName];
@@ -895,12 +1128,18 @@ public sealed class AssetsToolsBackend : IDisposable
         {
             var index = bundle.file.GetFileIndex(fileName);
             if (index < 0 || !bundle.file.IsAssetsFile(index)) continue;
+            if (Log.IsTraceEnabled) Log.Trace("定位对象候选扫描：{0} 内文件 {1}", bundlePath, fileName);
             var file = _manager.LoadAssetsFileFromBundle(bundle, fileName, loadDeps: false);
             if (file is null) continue;
             var info = file.file.GetAssetInfo(pathId);
             if (info is null || info.GetTypeId(file.file) != expectedTypeId) continue;
+            if (Log.IsDebugEnabled)
+                Log.Debug("定位 bundle 内对象成功：{0}::{1} class {2} pathId={3}，耗时 {4} ms",
+                    bundlePath, fileName, expectedTypeId, pathId, locateWatch.ElapsedMilliseconds);
             return (bundle, file, info);
         }
+        Log.Warn("定位 bundle 内对象失败：{0} 中未找到 class {1} 的对象 pathId={2}（指定文件 {3}），耗时 {4} ms",
+            bundlePath, expectedTypeId, pathId, serializedFileName ?? "任意", locateWatch.ElapsedMilliseconds);
         throw new KeyNotFoundException(
             $"Bundle 中未找到 class {expectedTypeId} 的对象 Path {pathId}" +
             $"（SerializedFile：{serializedFileName ?? "任意"}）：{bundlePath}");
@@ -912,6 +1151,7 @@ public sealed class AssetsToolsBackend : IDisposable
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (Log.IsTraceEnabled) Log.Trace("读取 TextAsset：{0}::{1} pathId={2}", bundlePath, serializedFileName, pathId);
         var (_, file, info) = LoadBundleObject(bundlePath, serializedFileName, pathId, UnityClassId.TextAsset);
         var fields = _manager.GetBaseField(file, info, AssetReadFlags.None);
         var name = FindField(fields, "m_Name", "name")?.AsString ?? string.Empty;
@@ -925,6 +1165,8 @@ public sealed class AssetsToolsBackend : IDisposable
                 $"TextAsset.m_Script 的序列化类型 {script.Value.ValueType} 不在已验证范围（string / byteArray）内（Path {pathId}）。")
         };
         if (data.Length == 0) throw new InvalidDataException($"TextAsset 正文为空（Path {pathId}，名称 {name}）。");
+        Log.Debug("读取 TextAsset 完成：{0}::{1} pathId={2}，名称 {3}，正文 {4} 字节，序列化形态 {5}",
+            bundlePath, serializedFileName, pathId, name, data.Length, script.Value.ValueType);
         return new UnityTextAsset(serializedFileName, pathId, name, data);
     }
 

@@ -7,6 +7,8 @@ using System.Windows.Threading;
 using LimbusModEditor.Application.AppConfig;
 using LimbusModEditor.Application.StaticMods;
 using LimbusModEditor.Application.Texts;
+using LimbusModEditor.Domain.Diagnostics;
+using NLog;
 
 namespace LimbusModEditor.App;
 
@@ -29,6 +31,8 @@ namespace LimbusModEditor.App;
 /// </summary>
 public partial class StaticWorkbenchPage : UserControl
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     /// <summary>浏览列视图（树 / 列表）。</summary>
     private enum StaticViewMode
     {
@@ -78,6 +82,10 @@ public partial class StaticWorkbenchPage : UserControl
     private StaticTableEntry? _selected;
     private StaticViewMode _viewMode = StaticViewMode.Tree;
     private int _loadGeneration;
+    /// <summary>页面已载入过（<c>Loaded</c> 守卫）：本页常驻，切页回来不该重跑定位/索引。</summary>
+    private bool _loaded;
+    /// <summary>dataClass 树已展开节点的稳定 key（跨重建累积）。</summary>
+    private readonly HashSet<string> _expandedTreeKeys = new(StringComparer.OrdinalIgnoreCase);
 
     public StaticWorkbenchPage(IWorkbenchHost host)
     {
@@ -87,8 +95,12 @@ public partial class StaticWorkbenchPage : UserControl
         _index = new StaticIndexService(new StaticTableIndexStore(host.Env.CacheDirectory));
         // 宿主共享的编辑集会话（页面常驻，只创建一次）：导出 / 调试看的就是它。
         _edits = host.StaticEdits;
+        // 编辑集变更 → 刷新按钮与视图。注意 ApplyFilter 会重建树（展开态由
+        // TreeExpansionState 回放），因此**调用方不要再手动 ApplyFilter 一次**：
+        // 早先 SaveCurrentEdit / RevertTableAsync 各自又调了一次，同一次保存要重建两遍。
         _edits.Changed += (_, _) => Dispatcher.InvokeAsync(() =>
         {
+            Log.Debug("静态页编辑集变更：触发者=宿主会话 Changed，刷新按钮并重建筛选视图");
             RefreshActionButtons();
             ApplyFilter();
         });
@@ -129,6 +141,7 @@ public partial class StaticWorkbenchPage : UserControl
         _tableTree.ToolTip = "按数据类分组；展开时才生成下一层";
         _tableTree.SelectedItemChanged += (_, e) => OnTreeSelectionChanged(e.NewValue as TreeViewItem);
         _tableTree.AddHandler(TreeViewItem.ExpandedEvent, new RoutedEventHandler(TreeItem_Expanded));
+        _tableTree.AddHandler(TreeViewItem.CollapsedEvent, new RoutedEventHandler(TreeItem_Collapsed));
 
         // ── 视图二：表列表 ───────────────────────────────────────────
         _tableList = WorkbenchShell.CreateList();
@@ -172,7 +185,21 @@ public partial class StaticWorkbenchPage : UserControl
         editPanel.Children.Add(_diffInfo);
         Shell.SetEditContent(new ScrollViewer { Content = editPanel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
 
-        Loaded += async (_, _) => await RefreshAsync();
+        // 页面常驻（MainWindow 的 PageHost 只换 Contents）：WPF 在每次重新挂载时都会
+        // 再抛一次 Loaded，没有守卫就会「切页回来就重跑定位/索引 + 把树重建回初始形态」
+        // ——用户反馈的「树突然折叠」最隐蔽的一条触发路径。
+        Loaded += async (_, _) =>
+        {
+            if (_loaded)
+            {
+                Log.Debug("静态页 Loaded：守卫命中（_loaded=true），跳过重新定位/索引；展开键 {0} 个，选中表={1}",
+                    _expandedTreeKeys.Count, _selected?.Key ?? "-");
+                return;
+            }
+            _loaded = true;
+            Log.Debug("静态页 Loaded：首次载入，触发者=Loaded 事件，开始首次刷新");
+            await RefreshAsync();
+        };
     }
 
     private static Style? FindStyle(string key) => System.Windows.Application.Current?.TryFindResource(key) as Style;
@@ -186,15 +213,25 @@ public partial class StaticWorkbenchPage : UserControl
     /// <summary>
     /// 宿主在启动扫描完成后调用（plan-15）：**主动**刷新本页数据到最新索引。
     /// 不强制重建索引（扫描刚写完库，这里是热读路径：本机实测 1392 张表 11ms）。
+    /// 同时置 <c>_loaded</c>：宿主已经刷过一次，首次 <c>Loaded</c> 不必再跑一遍。
     /// </summary>
-    public Task ReloadFromIndexAsync() => RefreshAsync();
+    public Task ReloadFromIndexAsync()
+    {
+        Log.Debug("静态页 ReloadFromIndexAsync：触发者=宿主（启动扫描完成后主动刷新），forceRebuild=false，_loaded 由 {0} 置为 true", _loaded);
+        _loaded = true;
+        return RefreshAsync();
+    }
 
     private async Task RefreshAsync(bool forceRebuild = false)
     {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var trigger = forceRebuild ? "重新定位/重建索引按钮" : "首次加载/宿主刷新";
         var gameDirectory = _host.Env.EffectiveGameDirectory(_host.Project);
         var cacheRoots = StaticIndexService.CacheRoots(_host.Env.EffectiveUnityCacheDirectory(_host.Project));
         Shell.SetEmptyHint(null);
         Shell.SetStatus("正在从 catalog 定位静态数据 bundle…");
+        Log.Debug("静态页刷新开始：触发者={0}，游戏目录={1}，缓存根 {2} 个",
+            trigger, gameDirectory ?? "-", cacheRoots.Count);
         try
         {
             var location = await Task.Run(() => StaticIndexService.Locate(gameDirectory, cacheRoots));
@@ -205,6 +242,8 @@ public partial class StaticWorkbenchPage : UserControl
                 _tables.Clear();
                 ApplyFilter();
                 Shell.SetEmptyHint("没有定位到静态数据 bundle。请确认「设置」页的游戏目录 / Unity 缓存目录，并启动一次游戏生成缓存。");
+                Log.Warn("静态页刷新：未定位到静态数据 bundle，表清单已清空（触发者={0}，缓存根 {1} 个，耗时 {2} ms）",
+                    trigger, cacheRoots.Count, watch.Elapsed.TotalMilliseconds);
                 return;
             }
             if (!location.IsCached)
@@ -214,6 +253,8 @@ public partial class StaticWorkbenchPage : UserControl
                 ApplyFilter();
                 Shell.SetEmptyHint("缓存里还没有这个 bundle：启动一次游戏让它生成缓存后点「重新定位/重建索引」。");
                 Shell.SetStatus("静态数据 bundle 已定位，但缓存条目不存在。");
+                Log.Warn("静态页刷新：bundle 已定位但不在 Unity 缓存里，表清单已清空（触发者={0}，bundle={1}，耗时 {2} ms）",
+                    trigger, location.Describe(), watch.Elapsed.TotalMilliseconds);
                 return;
             }
 
@@ -226,21 +267,28 @@ public partial class StaticWorkbenchPage : UserControl
                 _locationInfo.Text = location.Describe();
                 Shell.SetStatus($"{_tables.Count} 张静态表（读索引 {load.ReadElapsed.TotalMilliseconds:F0} ms）· 点「重新定位/重建索引」可强制重建");
                 RefreshActionButtons();
+                Log.Debug("静态页刷新完成（热读索引）：触发者={0}，{1} 张表，读索引 {2:F0} ms，总耗时 {3} ms",
+                    trigger, _tables.Count, load.ReadElapsed.TotalMilliseconds, watch.Elapsed.TotalMilliseconds);
                 return;
             }
 
             Shell.SetEmptyHint("正在读取静态数据表…（首次需要枚举 bundle 内的全部 TextAsset）");
             var progress = new Progress<StaticIndexProgress>(p => Shell.SetStatus(p.Describe()));
+            Log.Debug("静态页刷新：走重建索引路径（触发者={0}，缓存可用={1}）", trigger, load.IsUsable);
             var result = await _index.RebuildAsync(location, source, progress);
             var reloaded = _index.Load(source);
             ApplyEntries(reloaded.Entries);
             _locationInfo.Text = location.Describe();
             Shell.SetStatus(result.Describe());
+            Log.Info("静态页重建索引完成：触发者={0}，{1} 张表，耗时 {2} ms",
+                trigger, _tables.Count, watch.Elapsed.TotalMilliseconds);
         }
         catch (Exception ex)
         {
             Shell.SetStatus($"定位或读取静态数据表失败：{ex.Message}");
             Shell.SetEmptyHint("读取失败：详见状态栏。");
+            Log.Error(ex, "静态页定位或读取静态数据表失败：触发者={0}，游戏目录={1}，耗时 {2} ms",
+                trigger, gameDirectory ?? "-", watch.Elapsed.TotalMilliseconds);
         }
         finally
         {
@@ -261,12 +309,14 @@ public partial class StaticWorkbenchPage : UserControl
         _tables.Clear();
         _tables.AddRange(entries);
         ApplyFilter();
+        Log.Debug("静态页应用表清单：{0} 张表", _tables.Count);
     }
 
     // ── 筛选 / 排序 / 视图 ───────────────────────────────────────────
 
     private void ClearFilters()
     {
+        Log.Debug("静态页清除筛选：重置搜索/状态/排序 3 项");
         _search.Text = string.Empty;
         _stateFilter.SelectedIndex = 0;
         _sortFilter.SelectedIndex = 0;
@@ -304,6 +354,7 @@ public partial class StaticWorkbenchPage : UserControl
 
     private void ApplyFilter()
     {
+        var filterWatch = System.Diagnostics.Stopwatch.StartNew();
         var filtered = FilteredEntries();
         if (_viewMode == StaticViewMode.List)
         {
@@ -318,10 +369,14 @@ public partial class StaticWorkbenchPage : UserControl
         else Shell.SetEmptyHint(null);
         Shell.SetStatus($"{filtered.Count} / {_tables.Count} 张表" +
                         (_edits.EntryCount > 0 ? $" · 已修改 {_edits.EntryCount} 张" : string.Empty));
+        Log.Debug("静态页筛选完成：{0} / {1} 张表（搜索=\"{2}\"，状态档={3}，排序档={4}，视图={5}），耗时 {6} ms",
+            filtered.Count, _tables.Count, _search.Text.Trim(), _stateFilter.SelectedIndex, _sortFilter.SelectedIndex,
+            _viewMode, filterWatch.Elapsed.TotalMilliseconds);
     }
 
     private void SwitchView(StaticViewMode mode)
     {
+        Log.Debug("静态页视图切换：{0} → {1}", _viewMode, mode);
         _viewMode = mode;
         if (mode == StaticViewMode.List) Shell.SetBrowseContent(_tableList);
         else Shell.SetBrowseContent(_tableTree);
@@ -332,6 +387,11 @@ public partial class StaticWorkbenchPage : UserControl
 
     private void RebuildTree(IReadOnlyList<StaticTableEntry> filtered)
     {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        // 先收下当前展开态（累积集合跨重建保留），重建后按 dataClass key 回放。
+        TreeExpansionState.Capture(_tableTree, DataClassKeyOf, _expandedTreeKeys);
+        var capturedKeys = _expandedTreeKeys.Count;
+        var filteredKeys = filtered.Select(x => x.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var groups = filtered.GroupBy(x => x.DataClass, StringComparer.OrdinalIgnoreCase)
             .OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase);
         var roots = new List<TreeViewItem>();
@@ -343,20 +403,69 @@ public partial class StaticWorkbenchPage : UserControl
                 Tag = group.Key,
                 Style = WorkbenchShell.CreateTreeItemStyle(),
             };
-            node.Items.Add(new TreeViewItem { Header = PlaceholderText });
+            node.Items.Add(new TreeViewItem { Header = PlaceholderText, Tag = StaticPlaceholderTag });
             roots.Add(node);
         }
         _tableTree.ItemsSource = roots;
+        Log.Debug("静态页重建 dataClass 树：根节点 {0} 个（{1} 张表参与分组），捕获展开键 {2} 个",
+            roots.Count, filtered.Count, capturedKeys);
+        TreeExpansionState.Restore(_tableTree, DataClassKeyOf, _expandedTreeKeys,
+            item => MaterializeDataClass(item, filteredKeys));
+        // 重建会丢树上的选中高亮：按 key 找回选中的表（编辑列内容本来就不受影响）。
+        if (_selected is { } selected) RestoreTreeSelection(selected.Key);
+        Log.Debug("静态页重建 dataClass 树完成：展开键 {0} 个，总耗时 {1} ms", _expandedTreeKeys.Count, watch.Elapsed.TotalMilliseconds);
+    }
+
+    /// <summary>重建后按表 key 找回树里的选中叶子。</summary>
+    private void RestoreTreeSelection(string tableKey)
+    {
+        foreach (var root in _tableTree.Items)
+        {
+            if (root is not TreeViewItem node) continue;
+            foreach (var child in node.Items)
+            {
+                if (child is TreeViewItem { Tag: StaticTableEntry entry } leaf &&
+                    string.Equals(entry.Key, tableKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    leaf.IsSelected = true;
+                    leaf.BringIntoView();
+                    Log.Debug("静态页恢复树选中成功：{0}", tableKey);
+                    return;
+                }
+            }
+        }
+        Log.Warn("静态页恢复树选中失败：重建后的树里找不到该表（可能在当前筛选外或所属 dataClass 未展开），选中={0}", tableKey);
     }
 
     private const string PlaceholderText = "载入中…";
 
-    private void TreeItem_Expanded(object sender, RoutedEventArgs e)
+    /// <summary>占位子项的哨兵 Tag：判定「这一层是否已物化过」（参照其余三页的做法）。</summary>
+    private static readonly object StaticPlaceholderTag = new();
+
+    /// <summary>dataClass 节点的稳定 key（同分组只可能有一个节点）。</summary>
+    private static string? DataClassKeyOf(object? tag) => tag as string;
+
+    /// <summary>物化一个 dataClass 的子层（与展开事件同一逻辑，供回放复用）。
+    /// <paramref name="filteredKeys"/> 为 null 时按当前筛选即时重算（用户在展开）。</summary>
+    private void MaterializeDataClass(TreeViewItem item, IReadOnlySet<string>? filteredKeys)
     {
-        if (e.OriginalSource is not TreeViewItem item) return;
-        if (item.Tag is not string dataClass) return;
+        if (item.Tag is not string dataClass)
+        {
+            Log.Trace("静态页物化 dataClass：Tag 不是字符串（{0}），跳过", item.Tag?.GetType().Name ?? "-");
+            return;
+        }
+        // 幂等：只有「还是占位子项」时才物化（占位项 Tag 是哨兵对象，真实子项 Tag 是 StaticTableEntry）。
+        if (item.Items.Count != 1 || !ReferenceEquals((item.Items[0] as TreeViewItem)?.Tag, StaticPlaceholderTag))
+        {
+            Log.Trace("静态页物化 dataClass：{0} 已物化（子项 {1} 个），跳过", dataClass, item.Items.Count);
+            return;
+        }
+        var entries = filteredKeys is null
+            ? FilteredEntries().Where(x => string.Equals(x.DataClass, dataClass, StringComparison.OrdinalIgnoreCase))
+            : FilteredEntries().Where(x => string.Equals(x.DataClass, dataClass, StringComparison.OrdinalIgnoreCase) && filteredKeys.Contains(x.Key));
         item.Items.Clear();
-        foreach (var entry in FilteredEntries().Where(x => string.Equals(x.DataClass, dataClass, StringComparison.OrdinalIgnoreCase)))
+        var added = 0;
+        foreach (var entry in entries)
         {
             var modified = _edits.IsModified(entry.Key);
             item.Items.Add(new TreeViewItem
@@ -366,12 +475,48 @@ public partial class StaticWorkbenchPage : UserControl
                 Tag = entry,
                 Style = WorkbenchShell.CreateTreeItemStyle(),
             });
+            added++;
+        }
+        Log.Debug("静态页物化 dataClass：{0} 建出 {1} 个子项（按筛选键限定={2}）", dataClass, added, filteredKeys is not null);
+    }
+
+    private void TreeItem_Expanded(object sender, RoutedEventArgs e)
+    {
+        if (e.OriginalSource is not TreeViewItem item)
+        {
+            Log.Debug("静态页树展开事件：原发者不是 TreeViewItem（{0}），忽略", e.OriginalSource?.GetType().Name ?? "-");
+            return;
+        }
+        MaterializeDataClass(item, null);
+        if (DataClassKeyOf(item.Tag) is { Length: > 0 } key)
+        {
+            _expandedTreeKeys.Add(key);
+            Log.Debug("静态页树节点展开：key={0}，累积展开键 {1} 个", key, _expandedTreeKeys.Count);
+        }
+        else
+        {
+            Log.Debug("静态页树节点展开：该节点不是 dataClass 节点（Tag 类型={0}），展开键保持 {1} 个",
+                item.Tag?.GetType().Name ?? "-", _expandedTreeKeys.Count);
+        }
+    }
+
+    private void TreeItem_Collapsed(object sender, RoutedEventArgs e)
+    {
+        if (e.OriginalSource is TreeViewItem item && DataClassKeyOf(item.Tag) is { Length: > 0 } key)
+        {
+            _expandedTreeKeys.Remove(key);
+            Log.Debug("静态页树节点折叠：key={0}，剩余展开键 {1} 个", key, _expandedTreeKeys.Count);
         }
     }
 
     private void OnTreeSelectionChanged(TreeViewItem? item)
     {
-        if (item?.Tag is not StaticTableEntry entry) return;
+        if (item?.Tag is not StaticTableEntry entry)
+        {
+            Log.Trace("静态页树选择变化：选中的不是表叶子（Tag 类型={0}）", item?.Tag?.GetType().Name ?? "-");
+            return;
+        }
+        Log.Debug("静态页树选择变化：{0}", entry.Key);
         _ = SelectTableAsync(entry);
     }
 
@@ -380,23 +525,34 @@ public partial class StaticWorkbenchPage : UserControl
     private async Task SelectTableAsync(StaticTableEntry entry)
     {
         var generation = ++_loadGeneration;
+        var loadWatch = System.Diagnostics.Stopwatch.StartNew();
         _selected = entry;
         _editor.Clear();
         _tableInfo.Text = $"{entry.DataClass}/{entry.FileName} · {entry.SizeLabel} · pathId {entry.PathId}";
+        Log.Debug("静态页选中表：{0}（{1} 字节，UTF-8={2}，代际 {3}）", entry.Key, entry.SizeBytes, entry.IsUtf8, generation);
         if (!entry.IsUtf8)
         {
             _tableInfo.Text += " · 非 UTF-8，无法以文本编辑";
             RefreshActionButtons();
+            Log.Warn("静态页选中表：非 UTF-8，无法以文本编辑（{0}，{1} 字节）", entry.Key, entry.SizeBytes);
             return;
         }
-        if (_location is null) return;
+        if (_location is null)
+        {
+            Log.Warn("静态页选中表：静态数据 bundle 未定位（_location=null），不载入正文（{0}）", entry.Key);
+            return;
+        }
         Shell.SetStatus($"正在读取 {entry.FileName}…");
         try
         {
             var document = _edits.TryGetModifiedText(entry.Key) is { } modifiedText
                 ? new StaticTableDocument(entry, modifiedText, false)
                 : await _index.LoadDocumentAsync(_location, entry);
-            if (generation != _loadGeneration) return;
+            if (generation != _loadGeneration)
+            {
+                Log.Debug("静态页选中表：代际已过期（本次 {0}，当前 {1}），丢弃正文（{2}）", generation, _loadGeneration, entry.Key);
+                return;
+            }
             var vanilla = _vanilla.TryGetValue(entry.Key, out var savedVanilla)
                 ? savedVanilla
                 : _edits.TryGetOfficialText(entry.Key) ?? document.Text;
@@ -405,16 +561,25 @@ public partial class StaticWorkbenchPage : UserControl
             {
                 Shell.SetStatus($"{entry.FileName} 不是可读文本（{entry.SizeLabel}）。");
                 RefreshActionButtons();
+                Log.Warn("静态页选中表：正文为空（不可读文本），未载入编辑器（{0}，{1} 字节）", entry.Key, entry.SizeBytes);
                 return;
             }
             _editor.LoadDocument(document.Text, vanilla);
             Shell.SetStatus($"{entry.FileName}：{_editor.DiffSummary}（{(document.FromCache ? "正文来自缓存" : "现场解码")}）");
             UpdateDiffInfo();
+            Log.Debug("静态页载入表正文完成：{0}，{1} 个字符，正文来自缓存={2}，有官方基线={3}，耗时 {4} ms",
+                entry.Key, document.Text.Length, document.FromCache, vanilla is not null, loadWatch.Elapsed.TotalMilliseconds);
         }
         catch (Exception ex)
         {
-            if (generation != _loadGeneration) return;
+            if (generation != _loadGeneration)
+            {
+                Log.Debug(ex, "静态页读取静态表异常：代际已过期（本次 {0}，当前 {1}），按原有语义忽略（{2}）",
+                    generation, _loadGeneration, entry.Key);
+                return;
+            }
             Shell.SetStatus($"读取静态表失败：{ex.Message}");
+            Log.Error(ex, "静态页读取静态表失败：{0}，耗时 {1} ms", entry.Key, loadWatch.Elapsed.TotalMilliseconds);
         }
         RefreshActionButtons();
     }
@@ -427,23 +592,33 @@ public partial class StaticWorkbenchPage : UserControl
         _diffInfo.Text = e.IsModified
             ? $"编辑器中已有未保存的修改（与官方版本 {e.DiffOperationCount} 处差异）。点「保存修改到编辑集」登记。"
             : "与官方版本无差异。";
+        Log.Debug("静态页编辑器文档变更：{0}，已修改={1}，差异操作 {2} 处",
+            _selected.Key, e.IsModified, e.DiffOperationCount);
     }
 
     private void SaveCurrentEdit()
     {
-        if (_selected is null || !_editor.HasDocument) return;
+        if (_selected is null || !_editor.HasDocument)
+        {
+            Log.Debug("静态页保存修改：前置条件不足，忽略（选中表={0}，编辑器有文档={1}）",
+                _selected?.Key ?? "-", _editor.HasDocument);
+            return;
+        }
         var baseline = _vanilla.TryGetValue(_selected.Key, out var vanilla) ? vanilla : null;
         if (baseline is null)
         {
             // 导出要生成 RFC6902 差分，必须有官方基线；没有就明确拒绝，不写一个差不出东西的条目。
             Shell.SetStatus($"{_selected.FileName}：缺少官方基线，无法登记（重新打开该表即可拿到基线）。");
+            Log.Warn("静态页保存修改被拒绝：缺少官方基线（{0}）", _selected.Key);
             return;
         }
         _edits.Set(_selected.Key, _selected, baseline, _editor.CurrentJsonText);
         UpdateDiffInfo();
         RefreshActionButtons();
-        ApplyFilter();
+        // 不再手动 ApplyFilter()：_edits.Set 会触发 Changed → ApplyFilter（重建一次即可）。
         Shell.SetStatus($"{_selected.FileName} 的修改已进入编辑集（导出模组时生成 .staticmod 的 RFC6902 补丁）。");
+        Log.Info("静态页保存修改到编辑集：{0}（基线 {1} 字符 → 当前 {2} 字符，编辑集共 {3} 张）",
+            _selected.Key, baseline.Length, _editor.CurrentJsonText.Length, _edits.EntryCount);
     }
 
     private void UpdateDiffInfo()
@@ -462,6 +637,7 @@ public partial class StaticWorkbenchPage : UserControl
             if (baseline is null)
             {
                 _diffInfo.Text = "（缺少官方基线，无法计算差异）";
+                Log.Warn("静态页差异信息：缺少官方基线，无法计算差异（{0}）", _selected.Key);
                 return;
             }
             var before = System.Text.Json.Nodes.JsonNode.Parse(baseline);
@@ -470,20 +646,28 @@ public partial class StaticWorkbenchPage : UserControl
             _diffInfo.Text = operations.Count == 0
                 ? "与官方版本无差异。"
                 : $"与官方版本差异：{operations.Count} 个 RFC6902 操作（导出时写入 patches/*.json）。";
+            Log.Trace("静态页差异信息：{0}，{1} 个 RFC6902 操作", _selected.Key, operations.Count);
         }
-        catch (System.Text.Json.JsonException)
+        catch (System.Text.Json.JsonException ex)
         {
             _diffInfo.Text = "（差异无法计算：JSON 非法）";
+            Log.Warn(ex, "静态页差异计算失败：JSON 非法，界面降级为提示文案（{0}，当前文本 {1} 字符）",
+                _selected.Key, modified.Length);
         }
     }
 
     private async Task RevertTableAsync()
     {
-        if (_selected is null) return;
+        if (_selected is null)
+        {
+            Log.Debug("静态页还原表：未选中表，忽略");
+            return;
+        }
         _edits.Remove(_selected.Key);
         _vanilla.Remove(_selected.Key);
+        Log.Info("静态页还原表：{0} 已移出编辑集（未写任何文件，编辑集剩 {1} 张）", _selected.Key, _edits.EntryCount);
         await SelectTableAsync(_selected);
-        ApplyFilter();
+        // 不再手动 ApplyFilter()：_edits.Remove 会触发 Changed → ApplyFilter（重建一次即可）。
         Shell.SetStatus($"{_selected.FileName} 已还原（未写任何文件）。");
     }
 
@@ -494,6 +678,9 @@ public partial class StaticWorkbenchPage : UserControl
         _revertTable.IsEnabled = hasTable && _selected is not null && _edits.IsModified(_selected.Key);
         _exportStaticMod.IsEnabled = _edits.EntryCount > 0;
         _clearDocumentCache.IsEnabled = _source is not null;
+        Log.Trace("静态页刷新按钮状态：选中表={0}，保存={1}，还原={2}，导出={3}，清缓存={4}（编辑集 {5} 张）",
+            _selected?.Key ?? "-", _saveEdit.IsEnabled, _revertTable.IsEnabled, _exportStaticMod.IsEnabled,
+            _clearDocumentCache.IsEnabled, _edits.EntryCount);
     }
 
     // ── 正文缓存维护 ─────────────────────────────────────────────────
@@ -503,11 +690,17 @@ public partial class StaticWorkbenchPage : UserControl
         try
         {
             var before = _index.Store.ReadDocumentCacheUsage();
+            Log.Info("静态页清空正文缓存：开始（{0} 张表 / {1} 字节）", before.Count, before.Bytes);
             _index.Store.ClearDocuments();
             Shell.SetStatus($"已清空正文缓存（{before.Count} 张表 / {before.Bytes / 1024.0 / 1024.0:0.0} MB）。元数据索引保留，" +
                             "再次打开表时会重新读取并按需缓存。");
+            Log.Info("静态页清空正文缓存：完成（{0} 张表 / {1} 字节已释放，元数据索引保留）", before.Count, before.Bytes);
         }
-        catch (Exception ex) { Shell.SetStatus($"清空正文缓存失败：{ex.Message}"); }
+        catch (Exception ex)
+        {
+            Shell.SetStatus($"清空正文缓存失败：{ex.Message}");
+            Log.Error(ex, "静态页清空正文缓存失败：{0}", _index.Store.DatabasePath);
+        }
     }
 
     // ── 导出 .staticmod ─────────────────────────────────────────────
@@ -523,6 +716,7 @@ public partial class StaticWorkbenchPage : UserControl
         if (snapshot.Count == 0)
         {
             Shell.SetStatus("没有修改：先编辑至少一张表并「保存修改到编辑集」。");
+            Log.Debug("静态页导出 .staticmod：编辑集为空，忽略");
             return;
         }
         var project = _host.Project;
@@ -537,10 +731,15 @@ public partial class StaticWorkbenchPage : UserControl
             InitialDirectory = defaultDirectory,
             Title = "导出 .staticmod（放进模组目录后由加载器重打包并双写 catalog）",
         };
-        if (dialog.ShowDialog(Window.GetWindow(this)) != true) return;
+        if (dialog.ShowDialog(Window.GetWindow(this)) != true)
+        {
+            Log.Debug("静态页导出 .staticmod：用户取消保存对话框（{0} 张表待导出）", snapshot.Count);
+            return;
+        }
 
         var work = Path.Combine(Path.GetTempPath(), "lme-staticmod-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(work);
+        var watch = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             var entries = new List<(string DataClass, string File, string? Container, string OfficialJsonPath, string ModifiedJsonPath)>();
@@ -554,10 +753,12 @@ public partial class StaticWorkbenchPage : UserControl
                 entries.Add((edit.Entry.DataClass, edit.Entry.FileName,
                     string.IsNullOrWhiteSpace(edit.Entry.ContainerEntry) ? null : edit.Entry.ContainerEntry,
                     officialPath, modifiedPath));
+                Log.Every(index + 1, 200, LogLevel.Debug, () => $"静态页导出 .staticmod：已写出 {index + 1} / {snapshot.Count} 张表的临时 JSON");
             }
             if (entries.Count == 0)
             {
                 Shell.SetStatus("没有可导出的差异（编辑集为空）。");
+                Log.Warn("静态页导出 .staticmod：编辑集快照 {0} 条但临时条目为 0，已中止（{1}）", snapshot.Count, dialog.FileName);
                 return;
             }
             var package = _staticMods.CreateJsonPatchPackage(
@@ -568,11 +769,18 @@ public partial class StaticWorkbenchPage : UserControl
             _staticMods.Write(package, dialog.FileName);
             Shell.SetStatus($"已导出：{dialog.FileName}（{package.Patches.Count} 个补丁条目）\n" +
                             "提示：真实加载器需要开启静态模组开关，并由它负责重打包 bundle 与双写 catalog。");
+            Log.Info("静态页导出 .staticmod 完成：{0} 个补丁条目 → {1}，耗时 {2} ms",
+                package.Patches.Count, dialog.FileName, watch.Elapsed.TotalMilliseconds);
         }
-        catch (Exception ex) { Shell.SetStatus($"导出失败：{ex.Message}"); }
+        catch (Exception ex)
+        {
+            Shell.SetStatus($"导出失败：{ex.Message}");
+            Log.Error(ex, "静态页导出 .staticmod 失败：{0}（{1} 张表，耗时 {2} ms）",
+                dialog.FileName, snapshot.Count, watch.Elapsed.TotalMilliseconds);
+        }
         finally
         {
-            try { Directory.Delete(work, true); } catch (Exception) { /* 临时目录 */ }
+            try { Directory.Delete(work, true); } catch (Exception ex) { /* 临时目录 */ Log.Debug(ex, "静态页导出 .staticmod：清理临时目录失败，已忽略（{0}）", work); }
         }
     }
 

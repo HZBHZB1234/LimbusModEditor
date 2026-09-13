@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
@@ -10,6 +10,10 @@
     <ProjectReference Include="..\LimbusModEditor.Domain\LimbusModEditor.Domain.csproj" />
     <ProjectReference Include="..\LimbusModEditor.Formats.Abstractions\LimbusModEditor.Formats.Abstractions.csproj" />
     <ProjectReference Include="..\LimbusModEditor.Formats.Bank\LimbusModEditor.Formats.Bank.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NLog" Version="6.2.0" />
   </ItemGroup>
 
 </Project>

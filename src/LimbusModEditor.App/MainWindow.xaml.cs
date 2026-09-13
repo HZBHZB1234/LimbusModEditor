@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
@@ -9,7 +10,9 @@ using LimbusModEditor.Application.Formats;
 using LimbusModEditor.Application.Projects;
 using LimbusModEditor.Application.Scanning;
 using LimbusModEditor.Domain.Assets;
+using LimbusModEditor.Domain.Diagnostics;
 using LimbusModEditor.Domain.Projects;
+using NLog;
 using LimbusModEditor.Formats.Bank;
 
 namespace LimbusModEditor.App;
@@ -21,6 +24,8 @@ namespace LimbusModEditor.App;
 /// </summary>
 public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     private readonly IProjectService _projects = new ProjectService();
     private readonly DebugApplyService _debugApply = new();
     private readonly GameLaunchService _gameLaunch = new();
@@ -102,6 +107,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     {
         StartupTrace.Mark("MainWindow ctor 开始");
         InitializeComponent();
+        Log.Info("主窗口构造：InitializeComponent 完成（XAML 已加载）");
         _startupScan = new StartupScanService(_env, _cacheScan);
         // 启动即进入资源工作台（活动栏首个入口）。
         ShowPage("assets");
@@ -111,10 +117,13 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
         Loaded += async (_, _) =>
         {
             StartupTrace.Mark("MainWindow Loaded");
+            Log.Debug("主窗口 Loaded：等待首次呈现排空（Background 优先级）");
             await Dispatcher.InvokeAsync(() => { },
                 System.Windows.Threading.DispatcherPriority.Background);
             StartupTrace.Mark("首次呈现已排空（Background 优先级到手）");
+            Log.Debug("主窗口首次呈现已排空，进入 OnWindowLoadedAsync");
             await OnWindowLoadedAsync();
+            Log.Debug("主窗口 Loaded 流程结束");
         };
     }
 
@@ -123,11 +132,13 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     /// <summary>切换页面：惰性创建并常驻（保住各页面的搜索/选中/预览状态）。</summary>
     public void ShowPage(string key)
     {
+        var createdNew = false;
         if (!_pages.TryGetValue(key, out var page))
         {
             page = CreatePage(key);
             if (page is null) return;
             _pages[key] = page;
+            createdNew = true;
         }
         PageHost.Content = page;
         _currentPageKey = key;
@@ -135,6 +146,10 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
         // 设置页每次显示都重载字段（项目可能已切换）。
         if (page is SettingsPage settings) settings.Reload();
         UpdateHint();
+        // 窗口尺寸一并记下：排查「窗口变矮后页面内容被裁掉 / 无法上下滑动」时，
+        // 需要知道切页当时的窗口实际高度（本窗口没有 SizeChanged 处理器）。
+        Log.Debug("切换页面：{0}（本次是否新建页面={1}；已创建 {2} 页；窗口 {3}×{4}）",
+            key, createdNew, _pages.Count, Math.Round(ActualWidth), Math.Round(ActualHeight));
     }
 
     private UserControl? CreatePage(string key) => key switch
@@ -198,21 +213,29 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
         UpdateHint();
         var last = _env.Config.LastProjectFile;
         StartupTrace.Mark($"OnWindowLoaded: UpdateHint 后，最近项目={last}");
+        Log.Info("启动引导开始：最近项目={0}", last ?? "-");
         if (!string.IsNullOrWhiteSpace(last) && File.Exists(last))
         {
             try
             {
                 await OpenProjectFileAsync(last, "已恢复上次项目");
+                Log.Info("启动引导结束：已恢复上次项目 {0}", Path.GetFileName(last));
                 return;
             }
-            catch (Exception ex) { ShowError("恢复上次项目失败", ex); }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "启动引导失败：恢复上次项目 {0}", last);
+                ShowError("恢复上次项目失败", ex);
+            }
         }
         // 没有可恢复的项目：启动扫描仍要跑（打开即扫，用户不必先点任何按钮）
         // —— 它会把四个索引库准备好，并说明「还没有项目所以跳过资源扫描」。
+        Log.Debug("启动引导：无可恢复项目，进入启动扫描（无项目）");
         await RunStartupScanAsync();
         await WarmUpWorkbenchesAsync();
         UpdateDirectoryStatus(); // 目录状态一览放在最后：定位器要扫盘，绝不挡在模态窗口之前
         UpdateHint();
+        Log.Debug("启动引导结束：无项目路径走完（启动扫描 + 工作台预热 + 目录状态）");
     }
 
     /// <summary>
@@ -242,12 +265,16 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
         _startupScanCancellation?.Cancel();
         _startupScanCancellation = null;
         StartupScanReport? report;
+        var scanWatch = Stopwatch.StartNew();
+        Log.Info("启动扫描开始：项目={0}，传入 projectMatchesIndex={1}，含前奏={2}",
+            _project?.Name ?? "-", projectMatchesIndex?.ToString() ?? "-", prepare is not null);
         try
         {
             StatusText.Text = _project is null
                 ? "启动扫描：正在准备四个索引库…"
                 : "启动扫描：正在检查全部资源与四张表…";
             StartupTrace.Mark("RunStartupScanAsync: 构造模态窗口前");
+            Log.Debug("启动扫描：弹占位窗口前，先起 ProbeCacheTables 后台任务");
             // 先开一个最小「正在准备…」窗口占位（构造几乎零成本），模态在它的 Loaded 里再构造 ——
             // 构造模态本身要探四张表（SQLite count，本机实测 ~430ms），不能让用户多等这一下。
             // 探测任务<b>在占位窗口显示前就起跑</b>（后台线程），与占位显示并行，不占弹出延迟。
@@ -290,17 +317,23 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
                 placeholder.Close();
             };
             placeholder.ShowDialog();
+            Log.Debug("启动扫描：占位窗口已关闭（耗时 {0} ms），模态构造情况={1}",
+                scanWatch.ElapsedMilliseconds, dialog is null ? "未构造（视为取消）" : "已构造");
 
             if (dialog is null) return; // 占位窗口被用户提前关掉：当作取消
             StartupTrace.Mark("RunStartupScanAsync: ShowDialog 前");
             _startupScanCancellation = dialog.Cancellation;
             dialog.Owner = this;
+            Log.Debug("启动扫描：进入模态 ShowDialog（此时主窗口 UI 线程开始被模态泵占用）");
             dialog.ShowDialog();
             StartupTrace.Mark("RunStartupScanAsync: ShowDialog 返回（窗口已关闭）");
             report = dialog.Result;
+            Log.Debug("启动扫描：模态返回，耗时 {0} ms，报告={1}",
+                scanWatch.ElapsedMilliseconds, report is null ? "null（用户关窗取消）" : report.Describe());
         }
         catch (Exception ex)
         {
+            Log.Error(ex, "启动扫描失败（已跑 {0} ms）：项目={1}", scanWatch.ElapsedMilliseconds, _project?.Name ?? "-");
             ShowError("启动扫描失败", ex);
             return;
         }
@@ -320,6 +353,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
         RefreshProjectState();
         StatusText.Text = report.Describe();
         if (_project is null || _project.Assets.Count == 0) UpdateHint();
+        Log.Info("启动扫描结束（总耗时 {0} ms）：扫描 {1} 个资源，状态栏文案=「{2}」",
+            scanWatch.ElapsedMilliseconds, report.ScannedCount, report.Describe());
     }
 
     /// <summary>
@@ -331,8 +366,11 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     /// </summary>
     private async Task WarmUpWorkbenchesAsync()
     {
+        var warmWatch = Stopwatch.StartNew();
+        Log.Debug("工作台预热开始：{0} 个页面（{1}）", PageOrder.Length, string.Join("/", PageOrder));
         foreach (var key in PageOrder)
         {
+            var pageWatch = Stopwatch.StartNew();
             try
             {
                 if (!_pages.ContainsKey(key))
@@ -340,6 +378,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
                     var created = CreatePage(key);
                     if (created is null) continue;
                     _pages[key] = created;
+                    Log.Debug("工作台预热：按需新建页面 {0}", key);
                 }
                 switch (_pages[key])
                 {
@@ -349,54 +388,74 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
                     case TextWorkbenchPage texts: await texts.ReloadFromIndexAsync(); break;
                     case SettingsPage settings: settings.Reload(); break;
                 }
+                Log.Debug("工作台预热：{0} 完成，耗时 {1} ms", key, pageWatch.ElapsedMilliseconds);
             }
             catch (Exception ex)
             {
                 StatusText.Text = $"预热「{key}」工作台失败（不影响其它页面）：{ex.Message}";
+                Log.Warn(ex, "工作台预热失败：{0}（耗时 {1} ms，继续其它页面）", key, pageWatch.ElapsedMilliseconds);
             }
         }
+        Log.Debug("工作台预热结束：总耗时 {0} ms", warmWatch.ElapsedMilliseconds);
     }
 
     /// <summary>P3.1: new-mod wizard scaffolds a project plus a minimal,
     /// handler-validated template package, then opens the project.</summary>
     private async void NewModWizard_Click(object sender, RoutedEventArgs e)
     {
+        Log.Info("用户动作：点击「新建模组项目」（打开向导窗口）");
         var service = new LimbusModEditor.Application.Build.NewModTemplateService(_projects);
         var wizard = new NewModWizardWindow(service) { Owner = this };
         if (wizard.ShowDialog() != true || wizard.Result is null) return;
+        Log.Info("新建向导返回：项目文件={0}", wizard.Result.ProjectFile ?? "-");
         try
         {
-            _project = await _projects.LoadAsync(wizard.Result.ProjectFile);
+            _project = await _projects.LoadAsync(wizard.Result.ProjectFile!);
             _projectFile = wizard.Result.ProjectFile;
             await AfterProjectOpenedAsync("已通过向导创建项目");
         }
-        catch (Exception ex) { ShowError("打开新建项目失败", ex); }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "打开新建项目失败：{0}", wizard.Result.ProjectFile ?? "-");
+            ShowError("打开新建项目失败", ex);
+        }
     }
 
     private async void OpenProject_Click(object sender, RoutedEventArgs e)
     {
+        Log.Info("用户动作：点击「打开项目」");
         var dialog = new Microsoft.Win32.OpenFileDialog
         {
             Filter = "LME 项目 (*.lmeproj)|*.lmeproj|所有文件 (*.*)|*.*",
             InitialDirectory = Directory.Exists(_env.ProjectsDirectory) ? _env.ProjectsDirectory : null
         };
         if (dialog.ShowDialog() != true) return;
+        Log.Info("用户选定项目文件：{0}", dialog.FileName);
         try
         {
             await OpenProjectFileAsync(dialog.FileName, "已打开项目");
         }
-        catch (Exception ex) { ShowError("打开项目失败", ex); }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "打开项目失败：{0}", dialog.FileName);
+            ShowError("打开项目失败", ex);
+        }
     }
 
     /// <summary>打开项目的统一入口：加载 → 记录最近项目 → 无感自动配置 →
     /// 需要时自动要求加载资源 → 更新提示。</summary>
     private async Task OpenProjectFileAsync(string projectFile, string? statusPrefix = null)
     {
+        var loadWatch = Stopwatch.StartNew();
+        Log.Info("打开项目开始：{0}（状态前缀={1}）", projectFile, statusPrefix ?? "-");
         using (StartupTrace.Span($"OpenProjectFileAsync: LoadAsync({Path.GetFileName(projectFile)})"))
             _project = await _projects.LoadAsync(projectFile);
         _projectFile = Path.GetFullPath(projectFile);
         _env.RegisterRecentProject(_projectFile, _project.Name);
+        Log.Info("打开项目：LoadAsync 完成，耗时 {0} ms，项目名={1}，资产 {2} 条",
+            loadWatch.ElapsedMilliseconds, _project.Name, _project.Assets.Count);
         await AfterProjectOpenedAsync(statusPrefix ?? "已打开项目");
+        Log.Debug("打开项目结束：{0}，总耗时 {1} ms", Path.GetFileName(_projectFile), loadWatch.ElapsedMilliseconds);
     }
 
     /// <summary>项目就绪后的无感流程（plan-15 修复启动时序）：这里只做<b>秒级</b>的事
@@ -409,6 +468,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     /// </summary>
     private async Task AfterProjectOpenedAsync(string prefix)
     {
+        var afterWatch = Stopwatch.StartNew();
+        Log.Info("项目就绪流程开始：「{0}」，项目={1}，文件={2}", prefix, _project?.Name ?? "-", _projectFile ?? "-");
         StartupTrace.Mark("AfterProjectOpened: RefreshProjectState");
         RefreshProjectState(prefix);
         StartupTrace.Mark("AfterProjectOpened: 进入 RunStartupScanAsync");
@@ -420,6 +481,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
         UpdateDirectoryStatus(); // 目录状态一览放在最后：定位器要扫盘，绝不挡在模态窗口之前
         UpdateHint();
         StartupTrace.Mark("AfterProjectOpened: 完成");
+        Log.Info("项目就绪流程结束：总耗时 {0} ms（含模态扫描全程）", afterWatch.ElapsedMilliseconds);
     }
 
     /// <summary>
@@ -431,19 +493,34 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     private async Task PrepareProjectInsideModalAsync(
         Action<string> status, Action matchesIndex, CancellationToken cancellationToken)
     {
-        if (_project is not { } project || _projectFile is null) return;
+        if (_project is not { } project || _projectFile is null)
+        {
+            Log.Debug("模态前奏跳过：项目={0}，项目文件={1}",
+                _project?.Name ?? "-", _projectFile ?? "-");
+            return;
+        }
 
+        Log.Info("模态前奏开始：项目={0}，文件={1}", project.Name, _projectFile);
         status("正在自动配置目录（游戏 / Unity 缓存 / 模组 / FMOD）…");
         StartupTrace.Mark("前奏: AutoConfigureAsync 前");
+        var configureWatch = Stopwatch.StartNew();
         using (StartupTrace.Span("前奏: AutoConfigureAsync"))
             await AutoConfigureAsync();
+        Log.Debug("模态前奏：AutoConfigureAsync 完成，耗时 {0} ms", configureWatch.ElapsedMilliseconds);
 
         cancellationToken.ThrowIfCancellationRequested();
         status("正在从扫描索引重建资源列表（不解析任何 bundle）…");
         StartupTrace.Mark("前奏: 回灌前");
+        var rehydrateWatch = Stopwatch.StartNew();
         var added = await RehydrateAssetsFromIndexAsync(project, cancellationToken);
         StartupTrace.Mark("前奏: 回灌后");
-        if (added is null) return; // 已被取消
+        if (added is null)
+        {
+            Log.Debug("模态前奏：回灌被取消（耗时 {0} ms），前奏中止", rehydrateWatch.ElapsedMilliseconds);
+            return; // 已被取消
+        }
+        Log.Info("模态前奏结束：回灌 {0} 条引用资产，耗时 {1} ms（项目共 {2} 条）",
+            added.Value, rehydrateWatch.ElapsedMilliseconds, project.Assets.Count);
         status(added > 0
             ? $"资源索引已重建（{added:N0} 条引用资产，未解析任何 bundle）"
             : "资源索引已是最新（项目里的引用资产无需重建）");
@@ -458,6 +535,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     private async Task<int?> RehydrateAssetsFromIndexAsync(ModProject project, CancellationToken cancellationToken)
     {
         _assetsMatchIndex = false; // 先保守置否：只有真的回灌成功才敢声称「项目与索引一致」
+        var rehydrateWatch = Stopwatch.StartNew();
         try
         {
             var added = await _cacheScan.RehydrateFromIndexAsync(project);
@@ -465,15 +543,20 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
             // 回灌成功后，索引里每一行都能在项目里找到对应记录 → 启动扫描可以跳过
             // 「119 万行逐条对账」（实测该步占启动扫描 50 秒里的 ~40 秒）。
             _assetsMatchIndex = true;
+            Log.Debug("回灌引用资产成功：新增 {0} 条，耗时 {1} ms，_assetsMatchIndex=true（后续跳过逐条对账）",
+                added, rehydrateWatch.ElapsedMilliseconds);
             return added;
         }        catch (OperationCanceledException)
         {
+            Log.Debug("回灌引用资产被取消（用户关窗）：已跑 {0} ms，_assetsMatchIndex 保持 false", rehydrateWatch.ElapsedMilliseconds);
             return null;
         }
         catch (Exception ex)
         {
             // 失败只写状态栏 + 诊断：模态窗口还在跑，不能再弹一个模态 MessageBox 把它顶掉。
             StatusText.Text = $"重建资源索引失败（不影响功能，本次跳过逐条对账加速）：{ex.Message}";
+            Log.Error(ex, "回灌引用资产失败（已跑 {0} ms，项目={1}）：本次跳过逐条对账加速",
+                rehydrateWatch.ElapsedMilliseconds, project.Name);
             return 0;
         }
     }
@@ -481,12 +564,19 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     private async void SaveProject_Click(object sender, RoutedEventArgs e)
     {
         if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }
+        var saveWatch = Stopwatch.StartNew();
+        Log.Info("用户动作：点击「保存项目」，目标={0}", _projectFile);
         try
         {
             await _projects.SaveAsync(_project, _projectFile);
             StatusText.Text = "项目已保存";
+            Log.Debug("保存项目成功：{0}，耗时 {1} ms", Path.GetFileName(_projectFile), saveWatch.ElapsedMilliseconds);
         }
-        catch (Exception ex) { ShowError("保存项目失败", ex); }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "保存项目失败：{0}（已跑 {1} ms）", _projectFile, saveWatch.ElapsedMilliseconds);
+            ShowError("保存项目失败", ex);
+        }
     }
 
     /// <summary>项目保存的同步入口已被 async 版本取代：全缓存扫描后项目
@@ -494,12 +584,19 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     private async Task<bool> SaveProjectInternalAsync()
     {
         if (_project is null || _projectFile is null) return false;
+        var saveWatch = Stopwatch.StartNew();
         try
         {
             await _projects.SaveAsync(_project, _projectFile);
+            Log.Debug("保存项目（内部入口）成功：{0}，耗时 {1} ms", Path.GetFileName(_projectFile), saveWatch.ElapsedMilliseconds);
             return true;
         }
-        catch (Exception ex) { ShowError("保存项目失败", ex); return false; }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "保存项目（内部入口）失败：{0}（已跑 {1} ms）", _projectFile, saveWatch.ElapsedMilliseconds);
+            ShowError("保存项目失败", ex);
+            return false;
+        }
     }
 
     /// <summary>无感自动化（共享配置版）：只填充从未配置过的目录（游戏 /
@@ -508,11 +605,14 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     private async Task AutoConfigureAsync()
     {
         if (_project is null) return;
+        var configureWatch = Stopwatch.StartNew();
         var report = await Task.Run(() => _env.ApplyAutoConfigure(_project));
         if (_projectFile is not null) await SaveProjectQuietlyAsync();
         ResetLocatorCache();
         UpdateDirectoryStatus();
         if (report.Any) StatusText.Text = $"自动配置：{report.Describe()}（共享设置已保存到程序目录）";
+        Log.Info("自动配置目录完成：项目={0}，有变更={1}，{2}，耗时 {3} ms",
+            _project.Name, report.Any, report.Any ? report.Describe() : "无需变更", configureWatch.ElapsedMilliseconds);
     }
 
     /// <summary>加载游戏资源入口（侧边栏「① 获取资源」）。plan-15：与启动扫描<b>合并</b>——
@@ -520,6 +620,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     private async void Scan_Click(object sender, RoutedEventArgs e)
     {
         if (_project is null) { StatusText.Text = "请先创建或打开项目"; return; }
+        Log.Info("用户动作：点击「加载游戏资源」，改走启动扫描模态（_assetsMatchIndex={0}）", _assetsMatchIndex);
         await RunStartupScanAsync();
     }
 
@@ -535,6 +636,9 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     private async void ExportMod_Click(object sender, RoutedEventArgs e)
     {
         if (_project is null || _projectFile is null) { StatusText.Text = "请先创建或打开项目"; return; }
+        using var exportScope = Log.Scope("导出模组");
+        var exportWatch = Stopwatch.StartNew();
+        Log.Info("用户动作：点击「导出模组…」，项目={0}，文件={1}", _project.Name, _projectFile);
         await AutoConfigureAsync();
 
         // 选目录：用 SaveFileDialog 的「选择此文件夹」惯例（与本仓库既有一键导出的交互一致）。
@@ -548,40 +652,83 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
                 ? _env.EffectiveModDirectory(_project)
                 : Path.GetDirectoryName(_projectFile)!,
         };
-        if (dialog.ShowDialog() != true) return;
+        if (dialog.ShowDialog() != true) { Log.Info("导出模组：用户在选目录对话框取消，流程结束"); return; }
         var root = Path.GetDirectoryName(dialog.FileName);
-        if (string.IsNullOrWhiteSpace(root)) return;
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            Log.Warn("导出模组：选中的路径取不到目录（{0}），流程中止", dialog.FileName);
+            return;
+        }
+        Log.Info("导出模组：目标目录={0}（选目录耗时 {1} ms）", root, exportWatch.ElapsedMilliseconds);
 
         var progressWindow = new ExportProgressWindow("导出模组",
             "正在分析当前修改并逐槽位写出；跳过的槽位与原因会在报告里列出来。") { Owner = this };
         var progress = new Progress<string>(progressWindow.Report);
         progressWindow.Show();
         IsEnabled = false;
+        var cancelled = false;
+        Log.Debug("导出模组：进度窗口已 Show（非模态），主窗口 IsEnabled=false，取消按钮尚未启用");
         try
         {
-            var (plan, context) = await PrepareExportPlanAsync(root, progress);
+            // 分析与写出整体跑在后台线程：await 一个「同步完成」的 Task 会原地继续执行，
+            // 因此导出链上的同步重活（bundle 重打包、逐对象 XZ、bank 重组）以前全部落在
+            // UI 线程上 —— 这正是「模态窗口弹出后软件未响应且不恢复」的主因。
+            var planWatch = Stopwatch.StartNew();
+            Log.Debug("导出模组：PrepareExportPlanAsync 开始（实体化 + 存项目 + 分析计划）");
+            var (plan, context) = await PrepareExportPlanAsync(root, progress, progressWindow.Token);
+            Log.Debug("导出模组：PrepareExportPlanAsync 返回，耗时 {0} ms，计划槽位 {1} 个",
+                planWatch.ElapsedMilliseconds, plan.PlannedSlotCount);
             if (plan.PlannedSlotCount == 0)
             {
+                progressWindow.MarkFinished();
                 progressWindow.Close();
                 StatusText.Text = "没有可导出的修改（先改点东西：替换图片 / 替换音频样本 / 编辑文本表 / 编辑静态表）。";
+                Log.Info("导出模组：无可导出修改，计划为空（总耗时 {0} ms），只弹报告窗口", exportWatch.ElapsedMilliseconds);
                 new ModExportReportWindow(new ModPackExportResult(root, plan.ModName, [])) { Owner = this }.ShowDialog();
                 return;
             }
-            var result = await new ModPackExportService().ExportAsync(_project, Path.GetDirectoryName(_projectFile)!,
-                plan, context, progress);
+            progressWindow.EnableCancel();
+            Log.Debug("导出模组：EnableCancel 已调用（此后用户可取消），准备 Task.Run 写出 {0} 个槽位", plan.PlannedSlotCount);
+            var writeWatch = Stopwatch.StartNew();
+            var result = await Task.Run(() => new ModPackExportService().ExportAsync(
+                _project!, Path.GetDirectoryName(_projectFile)!, plan, context, progress, progressWindow.Token),
+                progressWindow.Token);
+            Log.Debug("导出模组：写出完成，Task.Run 耗时 {0} ms；准备 MarkFinished + Close",
+                writeWatch.ElapsedMilliseconds);
+            progressWindow.MarkFinished();
             progressWindow.Close();
             StatusText.Text = result.Describe();
+            Log.Info("导出模组成功：目标={0}，状态栏文案=「{1}」，总耗时 {2} ms",
+                root, result.Describe(), exportWatch.ElapsedMilliseconds);
             new ModExportReportWindow(result) { Owner = this }.ShowDialog();
+            Log.Debug("导出模组：报告窗口已关闭，流程结束");
+        }
+        catch (OperationCanceledException)
+        {
+            cancelled = true;
+            try { progressWindow.MarkFinished(); progressWindow.Close(); } catch { /* 已关闭 */ }
+            StatusText.Text = "导出已取消：已写出的产物保留在目标目录，临时文件已清理（可再次导出覆盖）。";
+            Log.Info("导出模组被取消：用户取消或关闭进度窗口，总耗时 {0} ms，目标={1}",
+                exportWatch.ElapsedMilliseconds, root);
         }
         catch (Exception ex)
         {
-            try { progressWindow.Close(); } catch { /* 已关闭 */ }
+            try { progressWindow.MarkFinished(); progressWindow.Close(); } catch { /* 已关闭 */ }
+            Log.Error(ex, "导出模组失败：目标={0}，已跑 {1} ms", root, exportWatch.ElapsedMilliseconds);
             ShowError("导出模组失败", ex);
         }
         finally
         {
             IsEnabled = true;
             UpdateHint();
+            // 用户在导出过程中关掉了进度窗口（它是 Show() 非模态）：导出被取消，
+            // 这里必须明确说明，否则「窗口没了 + 主窗恢复」会让人以为导出成功了。
+            if (!cancelled && progressWindow.ClosedByUser)
+            {
+                StatusText.Text = "导出已取消（进度窗口被关闭）。已写出的产物保留在目标目录。";
+                Log.Info("导出模组：进度窗口被用户关闭（ClosedByUser），按取消处理并改写状态栏");
+            }
+            Log.Debug("导出模组 finally：主窗口 IsEnabled=true，总耗时 {0} ms", exportWatch.ElapsedMilliseconds);
         }
     }
 
@@ -621,13 +768,18 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
         IsEnabled = false;
         try
         {
-            var (plan, context) = await PrepareExportPlanAsync(debugPack, progress);
-            var export = await new ModPackExportService().ExportAsync(_project, projectRoot, plan, context, progress);
+            var (plan, context) = await PrepareExportPlanAsync(debugPack, progress, progressWindow.Token);
+            progressWindow.EnableCancel();
+            // 与「导出模组…」同一条线程口径：写出与铺盘整体在后台线程上跑
+            // （否则 await 同步完成的 Task 会原地继续，重活全落在 UI 线程）。
+            var export = await Task.Run(() => new ModPackExportService().ExportAsync(
+                _project!, projectRoot, plan, context, progress, progressWindow.Token), progressWindow.Token);
             progressWindow.Report("正在铺到游戏目录与 Unity 缓存（自动备份）…");
-            var report = await new ModApplyService().ApplyAsync(_project, export,
+            var report = await Task.Run(() => new ModApplyService().ApplyAsync(_project!, export,
                 gameDirectory, _env.EffectiveUnityCacheDirectory(_project),
-                Path.Combine(projectRoot, "backups"), context, progress);
+                Path.Combine(projectRoot, "backups"), context, progress, progressWindow.Token), progressWindow.Token);
             _debugApplyBackupDirectory = report.BackupDirectory;
+            progressWindow.MarkFinished();
             progressWindow.Close();
 
             var launch = _gameLaunch.TryLaunch(gameDirectory, _project.GameExecutablePath);
@@ -639,9 +791,14 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
                 MessageBox.Show(this, "以下内容本次调试未应用（原因如下）：\n\n" + string.Join("\n", report.Skipped),
                     "调试启动", MessageBoxButton.OK, MessageBoxImage.Information);
         }
+        catch (OperationCanceledException)
+        {
+            try { progressWindow.MarkFinished(); progressWindow.Close(); } catch { /* 已关闭 */ }
+            StatusText.Text = "调试启动已取消（未铺盘）。已生成的调试包保留在 builds/debug-pack。";
+        }
         catch (Exception ex)
         {
-            try { progressWindow.Close(); } catch { /* 已关闭 */ }
+            try { progressWindow.MarkFinished(); progressWindow.Close(); } catch { /* 已关闭 */ }
             ShowError("调试启动失败（已回滚本次改动）", ex);
         }
         finally
@@ -654,17 +811,29 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
     /// <summary>
     /// 导出/调试的共用前奏：实体化已编辑的缓存资源 → 存项目 → 分析计划。
     /// 两条链路必须走同一份分析与同一份上下文（否则报告与实际产物会不一致）。
+    ///
+    /// <para><b>线程口径</b>：<c>MaterializeEditedAssetsAsync</c> 会改写
+    /// <c>project.Assets</c>（ObservableCollection 绑定在 UI 上），必须留在 UI 线程；
+    /// 项目序列化（119 万行，实测 12~14 秒）与计划分析（同步遍历 127 万资产 ×4）
+    /// 是纯读的重活，显式放到后台线程 —— 早先它们同步跑在 UI 线程上，是
+    /// 「导出模态弹出后软件未响应」的组成部分。</para>
     /// </summary>
     private async Task<(ModExportPlan Plan, ModExportPlanContext Context)> PrepareExportPlanAsync(
-        string rootDirectory, IProgress<string>? progress)
+        string rootDirectory, IProgress<string>? progress, CancellationToken cancellationToken = default)
     {
         await MaterializeEditedAssetsAsync(progress);
-        await SaveProjectQuietlyAsync();
+        cancellationToken.ThrowIfCancellationRequested();
+        await Task.Run(() => SaveProjectQuietlyAsync(), cancellationToken);
         var fmodDirectory = _env.EffectiveFmodLibraryDirectory(_project);
         var context = new ModExportPlanContext(
             UnityCacheDirectory: _env.EffectiveUnityCacheDirectory(_project),
             FmodDirectory: fmodDirectory);
-        var plan = new ModExportPlanService().Plan(_project!, rootDirectory, _langEdits, _staticEdits, context);
+        var project = _project!;
+        var langEdits = _langEdits;
+        var staticEdits = _staticEdits;
+        var plan = await Task.Run(
+            () => new ModExportPlanService().Plan(project, rootDirectory, langEdits, staticEdits, context),
+            cancellationToken);
         return (plan, context);
     }
 

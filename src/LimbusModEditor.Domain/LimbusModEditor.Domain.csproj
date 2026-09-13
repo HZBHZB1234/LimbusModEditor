@@ -1,10 +1,16 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 日志引擎（全仓库共享）：LoggerExtensions 也在这里，供任意层直接 Log.Info(...)。
+         约定见 docs/LOGGING.md。 -->
+    <PackageReference Include="NLog" Version="6.2.0" />
+  </ItemGroup>
 
 </Project>
 

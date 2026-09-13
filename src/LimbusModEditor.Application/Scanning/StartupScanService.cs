@@ -6,6 +6,7 @@ using LimbusModEditor.Application.StaticMods;
 using LimbusModEditor.Application.Texts;
 using LimbusModEditor.Domain.Projects;
 using Microsoft.Data.Sqlite;
+using NLog;
 
 namespace LimbusModEditor.Application.Scanning;
 
@@ -213,6 +214,8 @@ public sealed record CacheTableRowView(
 /// </summary>
 public sealed class StartupScanService
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     /// <summary>步骤标识：四个缓存库建库/校表。</summary>
     public const string CacheDatabaseStep = "cache-databases";
     /// <summary>步骤标识：游戏资源（Unity 缓存全部 bundle）。</summary>
@@ -295,6 +298,8 @@ public sealed class StartupScanService
     /// </summary>
     public IReadOnlyList<string> EnsureCacheDatabases()
     {
+        var cacheDirectory = _env.CacheDirectory;
+        Log.Debug("开始检查 {0} 个缓存库：cache={1}", CacheTableCatalog.Length, cacheDirectory);
         var repaired = new List<string>();
         foreach (var ensure in DatabaseEnsurers())
         {
@@ -306,8 +311,11 @@ public sealed class StartupScanService
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or Microsoft.Data.Sqlite.SqliteException)
             {
                 // 单个库建不起来不影响其它库，也不影响功能（缓存只影响速度）。
+                Log.Error(ex, "建库/补表失败（已跳过该库，继续其它库）：cache={0}", cacheDirectory);
             }
         }
+        Log.Debug("缓存库建库/校表结束：新建或补建 {0} 个（{1}）", repaired.Count,
+            repaired.Count == 0 ? "-" : string.Join("、", repaired.Select(Path.GetFileName)));
         return repaired;
     }
 
@@ -363,14 +371,24 @@ public sealed class StartupScanService
             {
                 if (File.Exists(path)) stamp = new FileInfo(path).LastWriteTimeUtc;
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* 时间读不到：留 null */ }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                /* 时间读不到：留 null */
+                Log.Debug(ex, "读缓存库时间戳失败（该项留空）：{0}", table.FileName);
+            }
 
+            var primary = CountRows(path, business.Primary);
+            var secondary = CountRows(path, business.Secondary);
+            Log.Debug("缓存表现场读况：{0} · {1}={2} · {3}={4} · 库时间={5}",
+                table.FileName, business.Primary, primary?.ToString() ?? "-",
+                business.Secondary, secondary?.ToString() ?? "-",
+                stamp?.ToString("O") ?? "未建库");
             rows.Add(new CacheTableRowCount(
                 table.Kind,
                 table.FileName,
                 stamp,
-                CountRows(path, business.Primary),
-                CountRows(path, business.Secondary),
+                primary,
+                secondary,
                 business.Primary,
                 business.Secondary));
         }
@@ -397,10 +415,14 @@ public sealed class StartupScanService
             connection.Open();
             using var command = connection.CreateCommand();
             command.CommandText = $"SELECT count(*) FROM \"{tableName}\"";
-            return Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+            var count = Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+            if (Log.IsTraceEnabled)
+                Log.Trace("统计表行数：{0} · {1} = {2} 行", Path.GetFileName(databasePath), tableName, count);
+            return count;
         }
         catch (Exception ex) when (ex is SqliteException or IOException or UnauthorizedAccessException)
         {
+            Log.Debug(ex, "统计表行数失败（返回空）：{0} · {1}", Path.GetFileName(databasePath), tableName);
             return null;
         }
     }
@@ -423,8 +445,10 @@ public sealed class StartupScanService
             command.Parameters.AddWithValue("$name", table);
             return Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) > 0;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            Log.Debug(ex, "探测表是否存在失败（返回 false，按需要补建处理）：{0} · {1}",
+                Path.GetFileName(dbFile), table);
             return false; // 打不开（损坏 / 被占用）：当作需要补建
         }
     }
@@ -450,6 +474,8 @@ public sealed class StartupScanService
         ArgumentNullException.ThrowIfNull(project);
         var watch = Stopwatch.StartNew();
         var steps = new List<StartupScanStepResult>();
+        Log.Info("启动扫描开始：5 个步骤（缓存库 → 资源 → 音频 → 静态表 → 文本）· 项目={0} · 索引与项目一致={1}",
+            project.Name, projectMatchesIndex);
 
         steps.Add(Timed(() => ScanCacheDatabases(progress)));
         steps.Add(await TimedAsync(() => ScanUnityAssetsAsync(project, progress, projectMatchesIndex, cancellationToken)).ConfigureAwait(false));
@@ -458,6 +484,8 @@ public sealed class StartupScanService
         steps.Add(await TimedAsync(() => ScanTextIndexAsync(project, progress, cancellationToken)).ConfigureAwait(false));
 
         watch.Stop();
+        Log.Info("启动扫描结束：共 {0} 步 · 用时 {1:0.0} 秒 · {2}", steps.Count, watch.Elapsed.TotalSeconds,
+            string.Join(" | ", steps.Select(s => $"{s.Key}={s.Status}({s.Elapsed.TotalSeconds:0.0}s)")));
         return new StartupScanReport(steps, watch.Elapsed);
     }
 
@@ -467,6 +495,8 @@ public sealed class StartupScanService
         var watch = Stopwatch.StartNew();
         var result = step();
         watch.Stop();
+        Log.Debug("步骤耗时：{0} · {1} · {2:0.0} 秒 · {3}",
+            result.Key, result.Status, watch.Elapsed.TotalSeconds, result.Detail);
         return result with { Elapsed = watch.Elapsed };
     }
 
@@ -476,6 +506,8 @@ public sealed class StartupScanService
         var watch = Stopwatch.StartNew();
         var result = await step().ConfigureAwait(false);
         watch.Stop();
+        Log.Debug("步骤耗时：{0} · {1} · {2:0.0} 秒 · {3}",
+            result.Key, result.Status, watch.Elapsed.TotalSeconds, result.Detail);
         return result with { Elapsed = watch.Elapsed };
     }
 
@@ -490,11 +522,13 @@ public sealed class StartupScanService
             var detail = repaired.Count == 0
                 ? $"{names} 个缓存库均已就绪"
                 : $"{names} 个缓存库已就绪（新建/补表 {repaired.Count} 个：{string.Join("、", repaired.Select(Path.GetFileName))}）";
+            Log.Info("缓存库检查完成：{0} 个库 · 新建/补表 {1} 个 · {2}", names, repaired.Count, detail);
             return new StartupScanStepResult(CacheDatabaseStep, "缓存库", 
                 repaired.Count == 0 ? StartupScanStepStatus.AlreadyFresh : StartupScanStepStatus.Scanned, detail);
         }
         catch (Exception ex)
         {
+            Log.Error(ex, "缓存库步骤失败：cache={0}", _env.CacheDirectory);
             return new StartupScanStepResult(CacheDatabaseStep, "缓存库", StartupScanStepStatus.Failed, ex.Message);
         }
     }
@@ -528,12 +562,15 @@ public sealed class StartupScanService
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(project);
+        Log.Info("工作台索引刷新开始：音频 → 静态表 → 文本 · 项目={0}", project.Name);
         var steps = new List<StartupScanStepResult>
         {
             await TimedAsync(() => ScanBankIndexAsync(project, progress, cancellationToken)).ConfigureAwait(false),
             await TimedAsync(() => ScanStaticTablesAsync(project, progress, cancellationToken)).ConfigureAwait(false),
             await TimedAsync(() => ScanTextIndexAsync(project, progress, cancellationToken)).ConfigureAwait(false),
         };
+        Log.Info("工作台索引刷新结束：{0}", string.Join(" | ",
+            steps.Select(s => $"{s.Key}={s.Status}({s.Elapsed.TotalSeconds:0.0}s)")));
         return steps;
     }
 
@@ -554,11 +591,15 @@ public sealed class StartupScanService
         var cacheDirectory = _env.EffectiveUnityCacheDirectory(project);
         if (string.IsNullOrWhiteSpace(cacheDirectory) || !Directory.Exists(cacheDirectory))
         {
+            Log.Warn("游戏资源扫描跳过：未找到 Unity 缓存目录（生效值={0}）", cacheDirectory ?? "-");
             return new StartupScanStepResult(UnityAssetsStep, "游戏资源", StartupScanStepStatus.Skipped,
                 "未找到 Unity 缓存目录（启动一次游戏生成缓存，或在「设置」页指定）");
         }
 
         progress?.Report(new StartupScanProgress("扫描游戏资源", "正在枚举缓存条目…"));
+        Log.Info("游戏资源扫描开始：cache={0} · game={1} · 索引与项目一致={2}",
+            cacheDirectory, _env.EffectiveGameDirectory(project) ?? "-", projectMatchesIndex);
+        var watch = Stopwatch.StartNew();
         try
         {
             var reporter = progress is null
@@ -574,6 +615,9 @@ public sealed class StartupScanService
                              ? "（项目与索引已一致、无变化，未对账也未重建资产表）"
                              : result.SkippedRowReconciliation ? "（项目与索引已一致，未逐条对账）" : string.Empty) +
                          (result.Diagnostics.Count > 0 ? $" · 诊断 {result.Diagnostics.Count} 条" : string.Empty);
+            Log.Info("游戏资源扫描结束：bundle {0} 个（解析 {1} · 索引命中 {2}）· 新增资源 {3} · 更新 {4} · 跳过合并={5} · 跳过对账={6} · 诊断 {7} 条 · 用时 {8:0.0} 秒",
+                result.TotalEntries, result.ScannedBundles, result.IndexedBundles, result.AddedAssets, result.UpdatedAssets,
+                result.SkippedMerge, result.SkippedRowReconciliation, result.Diagnostics.Count, watch.Elapsed.TotalSeconds);
             return new StartupScanStepResult(UnityAssetsStep, "游戏资源", StartupScanStepStatus.Scanned, detail,
                 RowCount: result.TotalEntries);
         }
@@ -583,6 +627,7 @@ public sealed class StartupScanService
         }
         catch (Exception ex)
         {
+            Log.Error(ex, "游戏资源扫描失败：cache={0}", cacheDirectory);
             return new StartupScanStepResult(UnityAssetsStep, "游戏资源", StartupScanStepStatus.Failed, ex.Message);
         }
     }
@@ -600,11 +645,14 @@ public sealed class StartupScanService
         var bankDirectory = new BankDirectoryService().ResolveBankDirectory(gameDirectory);
         if (string.IsNullOrWhiteSpace(bankDirectory) || !Directory.Exists(bankDirectory))
         {
+            Log.Warn("音频索引扫描跳过：未找到 FMOD bank 目录（game={0} · 解析结果={1}）",
+                gameDirectory ?? "-", bankDirectory ?? "-");
             return new StartupScanStepResult(BankIndexStep, "音频索引", StartupScanStepStatus.Skipped,
                 "未找到 FMOD bank 目录（需要游戏目录）", CacheDatabase: WorkbenchCacheKind.BankIndex);
         }
 
         progress?.Report(new StartupScanProgress("扫描音频索引", "正在枚举 bank…"));
+        Log.Info("音频索引扫描开始：bank={0}", bankDirectory);
         try
         {
             var service = new BankIndexService(new BankIndexStore(_env.CacheDirectory));
@@ -616,6 +664,9 @@ public sealed class StartupScanService
             var status = result.ParseCount == 0 ? StartupScanStepStatus.AlreadyFresh : StartupScanStepStatus.Scanned;
             // 四张表那一行要显示「事实行数」：扫描落定后从库现读（读不到就不显示数字，绝不编）。
             int? bankCount = TryReadCount(() => new BankIndexStore(_env.CacheDirectory).ReadBankCount());
+            Log.Info("音频索引扫描结束：{0} · 本次解析 {1} · 复用 {2} · 移除 {3} · 库内行数 {4} · 用时 {5:0.0} 秒",
+                result.Describe(), result.ParseCount, result.ReusedCount, result.RemovedCount,
+                bankCount?.ToString() ?? "-", result.Elapsed.TotalSeconds);
             return new StartupScanStepResult(BankIndexStep, "音频索引", status, result.Describe(),
                 CacheDatabase: WorkbenchCacheKind.BankIndex, RowCount: bankCount);
         }
@@ -625,6 +676,7 @@ public sealed class StartupScanService
         }
         catch (Exception ex)
         {
+            Log.Error(ex, "音频索引扫描失败：bank={0}", bankDirectory);
             return new StartupScanStepResult(BankIndexStep, "音频索引", StartupScanStepStatus.Failed, ex.Message,
                 CacheDatabase: WorkbenchCacheKind.BankIndex);
         }
@@ -636,6 +688,7 @@ public sealed class StartupScanService
         try { return read(); }
         catch (Exception ex) when (ex is SqliteException or IOException or UnauthorizedAccessException or InvalidOperationException)
         {
+            Log.Debug(ex, "读诊断用计数失败（返回空，仅影响呈现）：{0}", read.Method.Name);
             return null;
         }
     }
@@ -656,26 +709,36 @@ public sealed class StartupScanService
         var store = new StaticTableIndexStore(_env.CacheDirectory);
 
         progress?.Report(new StartupScanProgress("扫描静态数据表", "正在核对缓存里的静态数据 bundle…"));
+        Log.Info("静态表扫描开始：game={0} · 缓存根 {1} 个", gameDirectory ?? "-", cacheRoots.Count);
         try
         {
             if (ProbeFreshStaticBundle(store, cacheRoots) is { } probe)
             {
+                Log.Debug("静态表扫描走探针快路径：{0} 张表（缓存签名一致，未解析 catalog）", probe.TableCount);
                 return new StartupScanStepResult(StaticTablesStep, "静态数据表", StartupScanStepStatus.AlreadyFresh,
                     $"{probe.TableCount} 张表（缓存签名一致，未解析 catalog）",
                     CacheDatabase: WorkbenchCacheKind.StaticTables, RowCount: probe.TableCount);
             }
 
             progress?.Report(new StartupScanProgress("扫描静态数据表", "正在从 catalog 定位 bundle…"));
+            var locateWatch = Stopwatch.StartNew();
             var location = await Task.Run(() => StaticIndexService.Locate(gameDirectory, cacheRoots), cancellationToken)
                 .ConfigureAwait(false);
+            locateWatch.Stop();
+            Log.Debug("静态表 catalog 定位结束：{0} · 用时 {1:0.0} 秒",
+                location is null ? "未定位到" : $"{location.BundleName}（缓存条目存在={location.IsCached}）",
+                locateWatch.Elapsed.TotalSeconds);
             if (location is null)
             {
+                Log.Warn("静态表扫描跳过：未定位到静态数据 bundle（game={0} · 缓存根 {1} 个）", gameDirectory ?? "-", cacheRoots.Count);
                 return new StartupScanStepResult(StaticTablesStep, "静态数据表", StartupScanStepStatus.Skipped,
                     "没有定位到静态数据 bundle（确认游戏目录 / Unity 缓存目录，并启动一次游戏生成缓存）",
                     CacheDatabase: WorkbenchCacheKind.StaticTables);
             }
             if (!location.IsCached)
             {
+                Log.Warn("静态表扫描跳过：{0} 已定位，但缓存条目还不存在（dataPath={1}）",
+                    location.BundleName, location.DataPath ?? "（catalog 未给出）");
                 return new StartupScanStepResult(StaticTablesStep, "静态数据表", StartupScanStepStatus.Skipped,
                     $"{location.BundleName} 已定位，但缓存条目还不存在",
                     CacheDatabase: WorkbenchCacheKind.StaticTables);
@@ -686,6 +749,7 @@ public sealed class StartupScanService
             var load = service.Load(source);
             if (load.IsUsable)
             {
+                Log.Debug("静态表扫描复用既有索引：{0} 张表（源未变）", load.Entries.Count);
                 return new StartupScanStepResult(StaticTablesStep, "静态数据表", StartupScanStepStatus.AlreadyFresh,
                     $"{load.Entries.Count} 张表（源未变，索引直接复用）",
                     CacheDatabase: WorkbenchCacheKind.StaticTables, RowCount: load.Entries.Count);
@@ -696,6 +760,8 @@ public sealed class StartupScanService
                 ? null
                 : new Progress<StaticIndexProgress>(p => progress.Report(new StartupScanProgress("扫描静态数据表", p.Describe())));
             var result = await service.RebuildAsync(location, source, reporter, cancellationToken).ConfigureAwait(false);
+            Log.Info("静态表扫描结束（重建索引）：{0} 张表 · {1:0.0} MB · 用时 {2:0.0} 秒 · bundle={3}",
+                result.TableCount, result.TotalBytes / 1024.0 / 1024.0, result.Elapsed.TotalSeconds, location.BundleName);
             return new StartupScanStepResult(StaticTablesStep, "静态数据表", StartupScanStepStatus.Scanned,
                 $"{result.TableCount} 张表 · {result.TotalBytes / 1024.0 / 1024.0:0.0} MB · 用时 {result.Elapsed.TotalSeconds:0.0} 秒",
                 CacheDatabase: WorkbenchCacheKind.StaticTables, RowCount: result.TableCount);
@@ -706,6 +772,7 @@ public sealed class StartupScanService
         }
         catch (Exception ex)
         {
+            Log.Error(ex, "静态表扫描失败：game={0} · 缓存根 {1} 个", gameDirectory ?? "-", cacheRoots.Count);
             return new StartupScanStepResult(StaticTablesStep, "静态数据表", StartupScanStepStatus.Failed, ex.Message,
                 CacheDatabase: WorkbenchCacheKind.StaticTables);
         }
@@ -725,15 +792,31 @@ public sealed class StartupScanService
     {
         string? sourceKey;
         try { sourceKey = store.ReadSourceKey(); }
-        catch (Exception) { return null; } // 索引库不可读：走全路径（会重新建库/重建索引）
-        if (string.IsNullOrWhiteSpace(sourceKey)) return null;
+        catch (Exception ex)
+        {
+            Log.Warn(ex, "读静态表索引的源键失败：探针不成立，回落到 catalog 全路径（会重新建库/重建索引）");
+            return null; // 索引库不可读：走全路径（会重新建库/重建索引）
+        }
+        if (string.IsNullOrWhiteSpace(sourceKey))
+        {
+            Log.Debug("静态表新鲜度探针不成立：索引里没有源键（未建过索引）→ 走 catalog 全路径");
+            return null;
+        }
 
         foreach (var root in cacheRoots)
         {
-            if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root)) continue;
+            if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
+            {
+                if (Log.IsDebugEnabled) Log.Debug("静态表新鲜度探针跳过缓存根（不存在或为空）：{0}", root ?? "-");
+                continue;
+            }
             IEnumerable<string> outers;
             try { outers = Directory.EnumerateDirectories(root); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { continue; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                Log.Warn(ex, "枚举静态表缓存根失败（跳过该根，回落 catalog 全路径）：{0} · sourceKey={1}", root, sourceKey);
+                continue;
+            }
             foreach (var outer in outers)
             {
                 var dataPath = Path.Combine(outer, sourceKey, "__data");
@@ -741,11 +824,26 @@ public sealed class StartupScanService
                 var location = new StaticBundleLocation(
                     $"{StaticBundleLocator.BundleNamePrefix}{sourceKey}.bundle",
                     sourceKey, Path.GetFileName(outer), Record: null, CacheRoot: root, DataPath: dataPath);
-                if (!store.MatchesSource(StaticIndexSource.From(location))) return null; // 签名变过：走全路径
+                if (!store.MatchesSource(StaticIndexSource.From(location)))
+                {
+                    Log.Debug("静态表新鲜度探针不成立：源签名变过（sourceKey={0} · data={1}）→ 走 catalog 全路径",
+                        sourceKey, dataPath);
+                    return null; // 签名变过：走全路径
+                }
                 var count = store.ReadTableCount();
-                return count > 0 ? new StaticTableFreshProbe(count) : null; // 空索引必须重建
+                if (count <= 0)
+                {
+                    Log.Debug("静态表新鲜度探针不成立：索引为空（表数 0）→ 必须重建 · sourceKey={0} · data={1}",
+                        sourceKey, dataPath);
+                    return null; // 空索引必须重建
+                }
+                if (Log.IsDebugEnabled)
+                    Log.Debug("静态表新鲜度探针成立：表数 {0} · sourceKey={1} · data={2}", count, sourceKey, dataPath);
+                return new StaticTableFreshProbe(count);
             }
         }
+        Log.Debug("静态表新鲜度探针不成立：{0} 个缓存根下都没找到 <外层键>/{1}/__data → 走 catalog 全路径",
+            cacheRoots.Count, sourceKey);
         return null;
     }
 
@@ -756,6 +854,7 @@ public sealed class StartupScanService
         var langRoot = new LangTextWorkbenchService().ResolveLangRoot(_env.EffectiveGameDirectory(project));
         if (langRoot is null)
         {
+            Log.Warn("lang 文本索引跳过：未定位 lang 目录（game={0}）", _env.EffectiveGameDirectory(project) ?? "-");
             return Task.FromResult(new StartupScanStepResult(TextIndexStep, "lang 文本索引", StartupScanStepStatus.Skipped,
                 "未定位 lang 目录（需要游戏目录）", CacheDatabase: WorkbenchCacheKind.TextIndex));
         }
@@ -774,6 +873,8 @@ public sealed class StartupScanService
             if (store.IsFresh(source))
             {
                 var count = TryReadCount(store.ReadFileCount);
+                Log.Debug("lang 文本索引已有且签名一致：{0} 个 JSON 文件 · lang={1} · 活动语言={2}",
+                    count?.ToString() ?? "-", langRoot, languageName ?? "未指定");
                 return Task.FromResult(new StartupScanStepResult(TextIndexStep, "lang 文本索引", StartupScanStepStatus.AlreadyFresh,
                     $"{count ?? 0} 个 JSON 文件（签名一致，索引直接复用）",
                     CacheDatabase: WorkbenchCacheKind.TextIndex, RowCount: count));
@@ -783,6 +884,8 @@ public sealed class StartupScanService
             var cached = store.ReadFileMap(languageDirectory);
             var files = service.EnumerateFiles(langRoot, cached);
             store.PersistFiles(source, files);
+            Log.Info("lang 文本索引重建完成：{0} 个 JSON 文件 · lang={1} · 活动语言={2} · 已缓存条目 {3}",
+                files.Count, langRoot, service.ReadActiveLanguage(langRoot) ?? "未指定", cached.Count);
             return Task.FromResult(new StartupScanStepResult(TextIndexStep, "lang 文本索引", StartupScanStepStatus.Scanned,
                 $"{files.Count} 个 JSON 文件已索引（活动语言：{service.ReadActiveLanguage(langRoot) ?? "未指定"}）",
                 CacheDatabase: WorkbenchCacheKind.TextIndex, RowCount: files.Count));
@@ -793,6 +896,7 @@ public sealed class StartupScanService
         }
         catch (Exception ex)
         {
+            Log.Error(ex, "lang 文本索引失败：lang={0}", langRoot ?? "-");
             return Task.FromResult(new StartupScanStepResult(TextIndexStep, "lang 文本索引", StartupScanStepStatus.Failed,
                 ex.Message, CacheDatabase: WorkbenchCacheKind.TextIndex));
         }

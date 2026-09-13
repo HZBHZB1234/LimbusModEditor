@@ -1,5 +1,8 @@
+using System.Diagnostics;
 using Microsoft.Data.Sqlite;
 using LimbusModEditor.Domain.Assets;
+using LimbusModEditor.Domain.Diagnostics;
+using NLog;
 
 namespace LimbusModEditor.Application.Scanning;
 
@@ -27,6 +30,8 @@ public sealed record UnityCacheIndexBundle(
 /// </summary>
 public sealed class UnityCacheSqliteIndexStore
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     private readonly string _connectionString;
     private readonly string _dbFile;
     private bool _schemaReady;
@@ -71,6 +76,8 @@ public sealed class UnityCacheSqliteIndexStore
     /// <summary>建表（幂等）。写连接顺带开启 WAL，提升并发读与批量写表现。</summary>
     public void EnsureSchema()
     {
+        var watch = Stopwatch.StartNew();
+        var existedBefore = File.Exists(_dbFile);
         using var connection = Open();
         using var command = connection.CreateCommand();
         command.CommandText = """
@@ -97,6 +104,9 @@ public sealed class UnityCacheSqliteIndexStore
         command.ExecuteNonQuery();
         EnsureContainerEntryColumn(connection);
         EnsureStaticBundleColumn(connection);
+        watch.Stop();
+        Log.Debug("资源索引库建表完成：db={0} · 建前已存在={1} · 用时 {2:0.0} 秒",
+            Path.GetFileName(_dbFile), existedBefore, watch.Elapsed.TotalSeconds);
     }
 
     /// <summary>轻量迁移：container_entry 列（m_Container 路径）是后加的。
@@ -107,11 +117,22 @@ public sealed class UnityCacheSqliteIndexStore
         using var probe = connection.CreateCommand();
         probe.CommandText = "SELECT container_entry FROM assets LIMIT 0";
         try { probe.ExecuteNonQuery(); return; }
-        catch (SqliteException) { }
+        catch (SqliteException ex)
+        {
+            Log.Debug(ex, "探测 assets.container_entry 列失败（旧库，走 ALTER 补列）：{0}", ex.SqliteErrorCode);
+        }
         using var alter = connection.CreateCommand();
         alter.CommandText = "ALTER TABLE assets ADD COLUMN container_entry TEXT";
-        try { alter.ExecuteNonQuery(); }
-        catch (SqliteException) { }
+        try
+        {
+            alter.ExecuteNonQuery();
+            Log.Info("资源索引库迁移：assets 表已补 container_entry 列");
+        }
+        catch (SqliteException ex)
+        {
+            // 列已存在 / 无写权限：静默跳过（语义保持原样），只留痕。
+            Log.Debug(ex, "补 assets.container_entry 列未生效（列已存在或无写权限，继续用旧行为）：{0}", ex.SqliteErrorCode);
+        }
     }
 
     /// <summary>轻量迁移：static_bundle 列（plan-08 静态数据 bundle 标记）是
@@ -121,11 +142,22 @@ public sealed class UnityCacheSqliteIndexStore
         using var probe = connection.CreateCommand();
         probe.CommandText = "SELECT static_bundle FROM bundles LIMIT 0";
         try { probe.ExecuteNonQuery(); return; }
-        catch (SqliteException) { }
+        catch (SqliteException ex)
+        {
+            Log.Debug(ex, "探测 bundles.static_bundle 列失败（旧库，走 ALTER 补列）：{0}", ex.SqliteErrorCode);
+        }
         using var alter = connection.CreateCommand();
         alter.CommandText = "ALTER TABLE bundles ADD COLUMN static_bundle INTEGER NOT NULL DEFAULT 0";
-        try { alter.ExecuteNonQuery(); }
-        catch (SqliteException) { }
+        try
+        {
+            alter.ExecuteNonQuery();
+            Log.Info("资源索引库迁移：bundles 表已补 static_bundle 列（旧行默认 0=非静态）");
+        }
+        catch (SqliteException ex)
+        {
+            // 列已存在 / 无写权限：静默跳过（语义保持原样），只留痕。
+            Log.Warn(ex, "补 bundles.static_bundle 列未生效（列已存在或无写权限）：旧索引将把全部 bundle 视为非静态，建议删库重建索引");
+        }
     }
 
     /// <summary>一次性持久化：prune（收缩到本次枚举的条目）+ 全部变化 bundle
@@ -143,6 +175,9 @@ public sealed class UnityCacheSqliteIndexStore
             pragma.ExecuteNonQuery();
         }
         using var transaction = connection.BeginTransaction();
+        var watch = Stopwatch.StartNew();
+        var writtenBundles = 0;
+        var writtenRows = 0;
         try
         {
             var keep = currentEntries.Select(x => x.DataPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -199,6 +234,8 @@ public sealed class UnityCacheSqliteIndexStore
                 deleteParam.Value = path;
                 delete.ExecuteNonQuery();
             }
+            if (stale.Count > 0)
+                Log.Debug("索引库收缩：删除 {0} 个磁盘上已不存在的 bundle（旧索引条目已淘汰）", stale.Count);
             foreach (var (bundle, rows) in changedBundles)
             {
                 deleteParam.Value = bundle.DataPath;
@@ -215,6 +252,7 @@ public sealed class UnityCacheSqliteIndexStore
                     b.Value = (object?)row.Baseline ?? DBNull.Value;
                     ce.Value = (object?)row.ContainerEntry ?? DBNull.Value;
                     insert.ExecuteNonQuery();
+                    writtenRows++;
                 }
                 up.Value = bundle.DataPath;
                 us.Value = bundle.Size;
@@ -223,12 +261,20 @@ public sealed class UnityCacheSqliteIndexStore
                 uin.Value = bundle.Inner;
                 usb.Value = bundle.StaticBundle ? 1 : 0;
                 upsert.ExecuteNonQuery();
+                writtenBundles++;
+                Log.Every(writtenBundles, 5000, LogLevel.Debug,
+                    () => $"索引库写入进度：已写 {writtenBundles} 个 bundle · bundle={bundle.Outer}/{bundle.Inner} · 静态标记={bundle.StaticBundle}");
             }
             transaction.Commit();
+            watch.Stop();
+            Log.Debug("索引库批量写完成：磁盘条目 {0} 个 · 收缩删除 {1} 个 · 重写 bundle {2} 个 · 资产行 {3} 行 · 用时 {4:0.0} 秒",
+                currentEntries.Count, stale.Count, writtenBundles, writtenRows, watch.Elapsed.TotalSeconds);
         }
-        catch
+        catch (Exception ex)
         {
             transaction.Rollback();
+            Log.Error(ex, "索引库批量写失败（事务已回滚；缓存写失败不影响扫描结果）：db={0} · 磁盘条目 {1} 个 · 已写 bundle {2} 个",
+                Path.GetFileName(_dbFile), currentEntries.Count, writtenBundles);
             throw;
         }
     }
@@ -239,17 +285,23 @@ public sealed class UnityCacheSqliteIndexStore
     public Dictionary<string, UnityCacheIndexBundle> ReadBundleIndex(StringComparer comparer)
     {
         var index = new Dictionary<string, UnityCacheIndexBundle>(comparer);
+        var watch = Stopwatch.StartNew();
         using var connection = OpenEnsured();
         EnsureStaticBundleColumn(connection);
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT data_path, size, mtime_ticks, outer_key, inner_key, static_bundle FROM bundles";
         using var reader = command.ExecuteReader();
+        var staticBundles = 0;
         while (reader.Read())
         {
             var bundle = new UnityCacheIndexBundle(reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2),
                 reader.GetString(3), reader.GetString(4), !reader.IsDBNull(5) && reader.GetInt64(5) != 0);
             index[bundle.DataPath] = bundle;
+            if (bundle.StaticBundle) staticBundles++;
         }
+        watch.Stop();
+        Log.Debug("读资源索引 bundles 表：{0} 行（静态 bundle {1} 个）· 用时 {2:0.0} 秒 · db={3}",
+            index.Count, staticBundles, watch.Elapsed.TotalSeconds, Path.GetFileName(_dbFile));
         return index;
     }
 
@@ -260,6 +312,7 @@ public sealed class UnityCacheSqliteIndexStore
     public Dictionary<string, List<UnityCacheIndexRow>> ReadAllRowsGrouped(StringComparer comparer)
     {
         var grouped = new Dictionary<string, List<UnityCacheIndexRow>>(comparer);
+        var watch = Stopwatch.StartNew();
         using var connection = OpenEnsured();
         EnsureContainerEntryColumn(connection);
         using var command = connection.CreateCommand();
@@ -268,6 +321,7 @@ public sealed class UnityCacheSqliteIndexStore
             FROM assets
             """;
         using var reader = command.ExecuteReader();
+        var totalRows = 0;
         while (reader.Read())
         {
             var dataPath = reader.GetString(0);
@@ -282,7 +336,13 @@ public sealed class UnityCacheSqliteIndexStore
                 reader.GetInt64(6),
                 reader.IsDBNull(7) ? null : reader.GetString(7),
                 reader.IsDBNull(8) ? null : reader.GetString(8)));
+            totalRows++;
+            Log.Every(totalRows, 200_000, LogLevel.Debug,
+                () => $"读资源索引 assets 表进度：{totalRows} 行 · 已聚合 {grouped.Count} 个 bundle");
         }
+        watch.Stop();
+        Log.Debug("读资源索引 assets 表：{0} 行 · 聚合 {1} 个 bundle · 用时 {2:0.0} 秒 · db={3}",
+            totalRows, grouped.Count, watch.Elapsed.TotalSeconds, Path.GetFileName(_dbFile));
         return grouped;
     }
 
@@ -302,6 +362,8 @@ public sealed class UnityCacheSqliteIndexStore
                 bundles.Add(new UnityCacheIndexBundle(reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2),
                     reader.GetString(3), reader.GetString(4), !reader.IsDBNull(5) && reader.GetInt64(5) != 0));
         }
+        Log.Debug("整库读出 bundles 表：{0} 行（静态 bundle {1} 个）· db={2}",
+            bundles.Count, bundles.Count(x => x.StaticBundle), Path.GetFileName(_dbFile));
         var grouped = ReadAllRowsGrouped(StringComparer.OrdinalIgnoreCase);
         foreach (var bundle in bundles)
         {

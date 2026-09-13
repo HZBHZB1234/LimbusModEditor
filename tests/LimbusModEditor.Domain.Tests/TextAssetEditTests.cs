@@ -74,4 +74,61 @@ public sealed class TextAssetEditTests
         }
         finally { root.Delete(true); }
     }
+
+    [Fact]
+    public async Task BundleAssetIsRefusedInsteadOfReadingTheContainerAsText()
+    {
+        // 回归（2026-09 卡死事故）：bundle 内对象的 SourcePath 是**整个 AssetBundle 容器**
+        // （<外层键>/<内层键>/__data）。以前 OpenAsync 会把容器字节当正文读，
+        // 2.26 MB 二进制塞进 WPF 文本框实测排版 26.5 秒 → 界面被 Windows 判「未响应」后强杀
+        // （用户报的「预览 static-data 后软件崩溃」，实为挂起，所以没有 crash 日志）。
+        var root = Directory.CreateTempSubdirectory("lme-bundle-");
+        try
+        {
+            var container = Path.Combine(root.FullName, "__data");
+            var payload = new byte[64];
+            Encoding.ASCII.GetBytes("UnityFS").CopyTo(payload, 0);
+            payload[32] = 0;
+            await File.WriteAllBytesAsync(container, payload);
+
+            var project = new ModProject();
+            var asset = new AssetRecord
+            {
+                LogicalPath = "outer/inner/CAB-x/1.49",
+                SourcePath = container,
+                ContainerPath = "CAB-x",
+                Bundle = "62d6e466f528b73cf836882c2a786cc2",
+                UnityPathId = 1,
+                UnityTypeId = 49,
+                Type = AssetType.Text,
+                Metadata = { ["unityBundle"] = "true" },
+            };
+            project.Assets.Add(asset);
+
+            Assert.False(TextAssetEditService.CanEditText(asset));
+            var service = new TextAssetEditService(new AssetEditService());
+            await Assert.ThrowsAsync<NotSupportedException>(() => service.OpenAsync(project, asset.AssetId));
+            Assert.Equal(AssetEditState.Unchanged, asset.EditState);
+        }
+        finally { root.Delete(true); }
+    }
+
+    [Fact]
+    public async Task LooseFileWithBinaryContentIsRefused()
+    {
+        // 第二道防线：即使来源是松散文件，只要内容看起来是二进制（含 NUL），
+        // 也不能塞进 WPF 文本框。
+        var root = Directory.CreateTempSubdirectory("lme-binary-");
+        try
+        {
+            var source = Path.Combine(root.FullName, "weird.json");
+            await File.WriteAllBytesAsync(source, new byte[] { 0x7B, 0x00, 0x7D, 0x00 });
+            var project = new ModProject();
+            var asset = new AssetRecord { LogicalPath = "weird.json", SourcePath = source, Type = AssetType.Json };
+            project.Assets.Add(asset);
+            var service = new TextAssetEditService(new AssetEditService());
+            await Assert.ThrowsAsync<NotSupportedException>(() => service.OpenAsync(project, asset.AssetId));
+        }
+        finally { root.Delete(true); }
+    }
 }

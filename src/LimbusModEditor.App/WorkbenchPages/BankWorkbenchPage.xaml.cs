@@ -11,9 +11,11 @@ using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Application.Build;
 using LimbusModEditor.Application.Formats;
 using LimbusModEditor.Domain.Assets;
+using LimbusModEditor.Domain.Diagnostics;
 using LimbusModEditor.Domain.Formats;
 using LimbusModEditor.Domain.Projects;
 using LimbusModEditor.Formats.Bank;
+using NLog;
 
 namespace LimbusModEditor.App;
 
@@ -40,6 +42,8 @@ namespace LimbusModEditor.App;
 /// </summary>
 public partial class BankWorkbenchPage : UserControl
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     /// <summary>浏览列的两种呈现形态（与壳的列表/树切换对一一对应）。</summary>
     private enum BankViewMode
     {
@@ -129,6 +133,10 @@ public partial class BankWorkbenchPage : UserControl
     private SampleRow? _selectedSample;
     private bool _isSelecting;
     private bool _indexing;
+    /// <summary>页面已载入过（<c>Loaded</c> 守卫）：本页常驻，切页回来不该重跑索引与重建树。</summary>
+    private bool _loaded;
+    /// <summary>bank 树已展开节点的稳定 key（跨重建累积：bank 路径 / <c>路径|FSBn</c>）。</summary>
+    private readonly HashSet<string> _expandedTreeKeys = new(StringComparer.OrdinalIgnoreCase);
     private CancellationTokenSource? _indexCancellation;
 
     public BankWorkbenchPage(IWorkbenchHost host)
@@ -218,12 +226,17 @@ public partial class BankWorkbenchPage : UserControl
         _audioGrid.ItemsSource = _viewSamples;
         _audioGrid.SelectionChanged += (_, _) =>
         {
-            if (_isSelecting) return;
+            if (_isSelecting)
+            {
+                Log.Trace("音频页总表选择变化：重入中，忽略");
+                return;
+            }
             _isSelecting = true;
             try
             {
                 if (_audioGrid.SelectedItem is SampleRow row)
                 {
+                    Log.Debug("音频页总表选择变化：{0}", row.LocationLabel);
                     _selectedSample = row;
                     SelectBank(row.BankPath, loadEditor: false);
                     LoadEditorForSample(row);
@@ -238,6 +251,7 @@ public partial class BankWorkbenchPage : UserControl
         _bankTree.ToolTip = "bank → FSB → 样本；展开时才生成下一层；双击已在别的视图里选中的样本即在此定位";
         _bankTree.SelectedItemChanged += (_, e) => OnTreeSelectionChanged(e.NewValue as TreeViewItem);
         _bankTree.AddHandler(TreeViewItem.ExpandedEvent, new RoutedEventHandler(TreeItem_Expanded));
+        _bankTree.AddHandler(TreeViewItem.CollapsedEvent, new RoutedEventHandler(TreeItem_Collapsed));
         // 双击定位：首版的「在 bank 树中定位」按钮已按计划删除，能力移到这里
         // （树/list 交互本身），所以别再为它单开一个按钮位和一份启用状态。
         _bankTree.MouseDoubleClick += (_, _) => LocateInTree();
@@ -319,7 +333,20 @@ public partial class BankWorkbenchPage : UserControl
         Shell.SetEditContent(new ScrollViewer { Content = editPanel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
         RefreshSampleDetail();
 
-        Loaded += async (_, _) => await RefreshAsync();
+        // 页面常驻（MainWindow 的 PageHost 只换 Contents）：WPF 每次重新挂载都会再抛一次
+        // Loaded，没有守卫就会「离开再回到音频页 = 重建整棵树、展开态全丢」
+        // ——用户反馈的「树突然折叠」最隐蔽的一条触发路径。
+        Loaded += async (_, _) =>
+        {
+            if (_loaded)
+            {
+                Log.Debug("音频页 Loaded：守卫命中（_loaded=true），跳过刷新与重建树；展开键 {0} 个", _expandedTreeKeys.Count);
+                return;
+            }
+            _loaded = true;
+            Log.Debug("音频页 Loaded：首次载入，触发者=Loaded 事件，开始首次刷新");
+            await RefreshAsync();
+        };
     }
 
     // ── 构件助手（色值一律来自共享样式）────────────────────────────
@@ -396,14 +423,23 @@ public partial class BankWorkbenchPage : UserControl
     /// 宿主在启动扫描完成后调用（plan-15）：**主动**刷新本页数据到最新索引。
     /// 不强制重建索引（扫描刚写完库，这里是热读路径），也不解析任何文件。
     /// </summary>
-    public Task ReloadFromIndexAsync() => RefreshAsync();
+    public Task ReloadFromIndexAsync()
+    {
+        Log.Debug("音频页 ReloadFromIndexAsync：触发者=宿主（扫描完成后主动刷新），forceReindex=false，_loaded 由 {0} 置为 true", _loaded);
+        _loaded = true;   // 宿主已刷过一次，首次 Loaded 不必再跑
+        return RefreshAsync();
+    }
 
     private async Task RefreshAsync(bool forceReindex = false)
     {
+        var watch = Stopwatch.StartNew();
+        var trigger = forceReindex ? "重新扫描按钮" : "首次加载/宿主刷新";
         var gameDirectory = _host.Env.EffectiveGameDirectory(_host.Project);
         _bankDirectory = _index.ResolveBankDirectory(gameDirectory);
         if (_bankDirectory is null)
         {
+            Log.Warn("音频页刷新：未找到 FMOD bank 目录，清空视图（游戏目录={0}，forceReindex={1}）",
+                gameDirectory ?? "-", forceReindex);
             Shell.SetStatus("没有找到 FMOD bank 目录。请在「设置」页填写游戏目录（bank 目录为 " +
                             string.Join("/", BankDirectoryService.BankRelativePath) + "）。");
             Shell.SetEmptyHint("没有找到 FMOD bank 目录：请先在「设置」页填写游戏目录。");
@@ -424,22 +460,32 @@ public partial class BankWorkbenchPage : UserControl
             Shell.SetStatus($"{_allSamples.Count} 个样本 · {_entries.Count} 个 bank（读索引 " +
                             $"{cache.Snapshot.ReadElapsed.TotalMilliseconds:F0} ms）· 点「重新扫描」可强制重建索引");
             RefreshActionButtons();
+            Log.Debug("音频页刷新完成（热读索引）：触发者={0}，{1} 个 bank / {2} 个样本，读索引 {3:F0} ms，总耗时 {4} ms",
+                trigger, _entries.Count, _allSamples.Count, cache.Snapshot.ReadElapsed.TotalMilliseconds, watch.Elapsed.TotalMilliseconds);
             return;
         }
 
+        Log.Debug("音频页刷新：走建索引路径（触发者={0}，缓存可用={1}），bank 目录={2}",
+            trigger, cache.IsUsable, source.BankDirectory);
         await RunIndexAsync(source);
+        Log.Debug("音频页刷新完成（建索引路径）：触发者={0}，总耗时 {1} ms", trigger, watch.Elapsed.TotalMilliseconds);
     }
 
     /// <summary>后台建索引（带进度、可取消），完成后刷新三个视图。</summary>
     private async Task RunIndexAsync(BankIndexSource source)
     {
-        if (_indexing) return;
+        if (_indexing)
+        {
+            Log.Debug("音频页建索引：已有索引任务在跑（_indexing=true），本次请求直接忽略");
+            return;
+        }
         _indexing = true;
         _indexCancellation = new CancellationTokenSource();
         _cancelIndexButton.IsEnabled = true;
         _reloadButton.IsEnabled = false;
         Shell.SetEmptyHint("正在建立音频索引…\n（首次需要读一遍全部 bank 文件，之后进页面直接读缓存）");
         var watch = Stopwatch.StartNew();
+        Log.Info("音频页开始建立索引：触发者=刷新入口，bank 目录={0}", source.BankDirectory);
         try
         {
             var progress = new Progress<BankIndexProgress>(p => Shell.SetStatus(p.Describe()));
@@ -451,16 +497,21 @@ public partial class BankWorkbenchPage : UserControl
             Shell.SetStatus(result.Describe() + $"（建索引总计 {watch.Elapsed.TotalSeconds:0.0} 秒）");
             if (_index.Store.WasRecreated)
                 Shell.SetStatus("索引缓存曾损坏，已自动删除重建。" + result.Describe());
+            Log.Info("音频页建索引完成：{0} 个 bank / {1} 个样本，耗时 {2} ms，缓存被重建={3}",
+                _entries.Count, _allSamples.Count, watch.Elapsed.TotalMilliseconds, _index.Store.WasRecreated);
         }
         catch (OperationCanceledException)
         {
             Shell.SetStatus("索引已取消。已完成的文件已入库，下次进页面会继续增量补齐。");
             var partial = _index.Load(source);
             if (partial.IsUsable) ApplySnapshot(partial.Snapshot.Directory, partial.Snapshot.Entries);
+            Log.Info("音频页建索引已取消：已取消，耗时 {0} ms，已用部分结果刷新视图（可用={1}）",
+                watch.Elapsed.TotalMilliseconds, partial.IsUsable);
         }
         catch (Exception ex)
         {
             Shell.SetStatus($"建立/读取音频索引失败：{ex.Message}");
+            Log.Error(ex, "音频页建立/读取音频索引失败：bank 目录={0}，耗时 {1} ms", source.BankDirectory, watch.Elapsed.TotalMilliseconds);
         }
         finally
         {
@@ -470,12 +521,14 @@ public partial class BankWorkbenchPage : UserControl
             _cancelIndexButton.IsEnabled = false;
             _reloadButton.IsEnabled = true;
             RefreshActionButtons();
+            Log.Debug("音频页建索引收尾：_indexing 置回 false，耗时 {0} ms", watch.Elapsed.TotalMilliseconds);
         }
     }
 
     /// <summary>把索引快照灌进三个视图（总表行集 / bank 列表 / 树）。</summary>
     private void ApplySnapshot(string directory, IReadOnlyList<BankIndexEntry> entries)
     {
+        var watch = Stopwatch.StartNew();
         _entries.Clear();
         _entries.AddRange(entries);
         _sampleRecords.Clear();
@@ -523,6 +576,8 @@ public partial class BankWorkbenchPage : UserControl
         _bankDirectory = directory;
         if (_entries.Count == 0)
             Shell.SetEmptyHint("索引里没有 bank 记录（目录为空？）");
+        Log.Debug("音频页应用索引快照：{0} 个 bank / {1} 个样本，其中已修改 bank {2} 个，耗时 {3} ms",
+            _entries.Count, _allSamples.Count, _modifiedBanks.Count, watch.Elapsed.TotalMilliseconds);
     }
 
     private void RebuildCodecFilter()
@@ -545,6 +600,7 @@ public partial class BankWorkbenchPage : UserControl
 
     private void ClearFilters()
     {
+        Log.Debug("音频页清除筛选：重置搜索/类型/codec/时长/仅已修改/事件bank/排序 7 项");
         _search.Text = string.Empty;
         _kindFilter.SelectedIndex = 0;
         _codecFilter.SelectedIndex = 0;
@@ -569,6 +625,7 @@ public partial class BankWorkbenchPage : UserControl
 
     private void ApplyFilter()
     {
+        var filterWatch = Stopwatch.StartNew();
         var query = _search.Text.Trim();
         var kind = _kindFilter.SelectedIndex switch
         {
@@ -621,7 +678,14 @@ public partial class BankWorkbenchPage : UserControl
         };
 
         _viewSamples.Clear();
-        foreach (var row in sorted) _viewSamples.Add(row);
+        var added = 0;
+        foreach (var row in sorted)
+        {
+            _viewSamples.Add(row);
+            added++;
+            // 行集可达 5 万行：采样记录，避免逐行写日志。
+            Log.Every(added, 5000, LogLevel.Debug, () => $"音频页筛选已载入视图 {added} 行");
+        }
 
         // 事件 bank 的隐藏量在这里算一次：总表与树共用同一份「默认隐藏事件 bank」口径，
         // 两处都由它出文案（不静默丢数据）。
@@ -640,13 +704,20 @@ public partial class BankWorkbenchPage : UserControl
                 : "没有样本匹配当前筛选条件。")
               + (hiddenNote is null ? string.Empty : $"\n{hiddenNote}")
             : null);
+
+        Log.Debug("音频页筛选完成：{0} / {1} 行命中，搜索=\"{2}\"，codec={3}，时长档={4}，仅已修改={5}，隐藏事件bank={6}，视图={7}，耗时 {8} ms",
+            _viewSamples.Count, _allSamples.Count, query, codec ?? "-", duration, modifiedOnly, hiddenEventBanks, _viewMode, filterWatch.Elapsed.TotalMilliseconds);
     }
 
     private void SwitchView(BankViewMode mode)
     {
         if (_viewMode == mode &&
             ReferenceEquals(Shell.Browse.Content, mode == BankViewMode.BankTree ? _bankTree : _audioGrid))
+        {
+            Log.Debug("音频页视图切换：目标 {0} 与当前一致且内容已挂载，忽略", mode);
             return;
+        }
+        Log.Debug("音频页视图切换：{0} → {1}", _viewMode, mode);
         _viewMode = mode;
         if (mode == BankViewMode.BankTree)
         {
@@ -675,7 +746,14 @@ public partial class BankWorkbenchPage : UserControl
 
     private void RebuildTree()
     {
-        if (_viewMode != BankViewMode.BankTree) return;
+        if (_viewMode != BankViewMode.BankTree)
+        {
+            Log.Debug("音频页重建 bank 树：被跳过（当前视图={0}，非 bank 树）", _viewMode);
+            return;
+        }
+        var watch = Stopwatch.StartNew();
+        // 先收下当前展开态（累积集合跨重建保留），重建后按 key 回放（bank 层 / FSB 层）。
+        TreeExpansionState.Capture(_bankTree, BankTreeKeyOf, _expandedTreeKeys);
         var filter = ToKindFilter();
         var showEventBanks = ShowEventBanksChecked;
         var roots = new List<TreeViewItem>();
@@ -691,6 +769,37 @@ public partial class BankWorkbenchPage : UserControl
             roots.Add(node);
         }
         _bankTree.ItemsSource = roots;
+        Log.Debug("音频页重建 bank 树：{0} 个根节点（筛选={1}，显示事件bank={2}），捕获展开键 {3} 个，重建耗时 {4} ms",
+            roots.Count, filter, showEventBanks, _expandedTreeKeys.Count, watch.Elapsed.TotalMilliseconds);
+        TreeExpansionState.Restore(_bankTree, BankTreeKeyOf, _expandedTreeKeys, MaterializeBankNode);
+        Log.Debug("音频页重建 bank 树完成：回放展开键后 {0} 个，总耗时 {1} ms", _expandedTreeKeys.Count, watch.Elapsed.TotalMilliseconds);
+    }
+
+    /// <summary>bank / FSB 节点的稳定 key（回放展开态用）。</summary>
+    private static string? BankTreeKeyOf(object? tag) => tag switch
+    {
+        BankIndexEntry entry => entry.Path,
+        FsbNodeTag fsb => $"{fsb.Bank.Path}|FSB{fsb.FsbIndex}",
+        _ => null,
+    };
+
+    /// <summary>物化一个 bank / FSB 节点的子层（与 <see cref="TreeItem_Expanded"/> 同一路径）。</summary>
+    private void MaterializeBankNode(TreeViewItem item)
+    {
+        switch (item.Tag)
+        {
+            case BankIndexEntry entry when IsPlaceholder(item):
+                Log.Debug("音频页物化树节点：bank={0}（未填充，开始建 FSB 层）", entry.FileName);
+                BuildFsbNodes(item, entry);
+                break;
+            case FsbNodeTag fsb when IsPlaceholder(item):
+                Log.Debug("音频页物化树节点：bank={0} 的 FSB {1}（未填充，开始建样本层）", fsb.Bank.FileName, fsb.FsbIndex);
+                BuildSampleNodes(item, fsb.Bank, fsb.FsbIndex);
+                break;
+            default:
+                Log.Trace("音频页物化树节点：跳过（Tag={0}，占位={1}）", item.Tag?.GetType().Name ?? "-", IsPlaceholder(item));
+                break;
+        }
     }
 
     private const string PlaceholderText = "载入中…";
@@ -717,15 +826,34 @@ public partial class BankWorkbenchPage : UserControl
     /// </summary>
     private void TreeItem_Expanded(object sender, RoutedEventArgs e)
     {
-        if (e.OriginalSource is not TreeViewItem item) return;
-        switch (item.Tag)
+        if (e.OriginalSource is not TreeViewItem item)
         {
-            case BankIndexEntry entry when IsPlaceholder(item):
-                BuildFsbNodes(item, entry);
-                break;
-            case FsbNodeTag fsb when IsPlaceholder(item):
-                BuildSampleNodes(item, fsb.Bank, fsb.FsbIndex);
-                break;
+            Log.Debug("音频页树展开事件：原发者不是 TreeViewItem（{0}），忽略", e.OriginalSource?.GetType().Name ?? "-");
+            return;
+        }
+        MaterializeBankNode(item);
+        if (BankTreeKeyOf(item.Tag) is { Length: > 0 } key)
+        {
+            _expandedTreeKeys.Add(key);
+            Log.Debug("音频页树节点展开：key={0}，累积展开键 {1} 个", key, _expandedTreeKeys.Count);
+        }
+        else
+        {
+            Log.Warn("音频页树节点展开：该节点没有稳定 key（Tag={0}），展开态无法跨重建保留", item.Tag?.GetType().Name ?? "-");
+        }
+    }
+
+    private void TreeItem_Collapsed(object sender, RoutedEventArgs e)
+    {
+        if (e.OriginalSource is TreeViewItem item && BankTreeKeyOf(item.Tag) is { Length: > 0 } key)
+        {
+            _expandedTreeKeys.Remove(key);
+            Log.Debug("音频页树节点折叠：key={0}，剩余展开键 {1} 个", key, _expandedTreeKeys.Count);
+        }
+        else
+        {
+            Log.Debug("音频页树节点折叠：无稳定 key 的节点（原发者={0}），展开键保持 {1} 个",
+                e.OriginalSource?.GetType().Name ?? "-", _expandedTreeKeys.Count);
         }
     }
 
@@ -761,20 +889,36 @@ public partial class BankWorkbenchPage : UserControl
             var (node, tag) = fsbNodes[0];
             BuildSampleNodes(node, tag.Bank, tag.FsbIndex);
             node.IsExpanded = true;
+            Log.Debug("音频页建 FSB 层：bank={0} 只有 1 个 FSB {1}，已自动展开到样本层", entry.FileName, tag.FsbIndex);
         }
+        Log.Debug("音频页建 FSB 层：bank={0}，{1} 个 FSB 节点，{2} 个样本，无样本说明行={3}",
+            entry.FileName, fsbNodes.Count, entry.Samples.Count, entry.Samples.Count == 0);
     }
 
     /// <summary>把 FSB 节点的样本行建出来（同 <see cref="BuildFsbNodes"/> 的幂等判据）。</summary>
     private void BuildSampleNodes(TreeViewItem item, BankIndexEntry bank, int fsbIndex)
     {
-        if (item.Items.Count > 0) return;
+        if (item.Items.Count > 0)
+        {
+            Log.Trace("音频页建样本层：bank={0} 的 FSB {1} 已有 {2} 个子项，跳过（幂等）", bank.FileName, fsbIndex, item.Items.Count);
+            return;
+        }
 
+        var added = 0;
+        var missing = 0;
         foreach (var sample in bank.Samples.Where(x => x.FsbIndex == fsbIndex))
         {
             var row = _allSamples.FirstOrDefault(x =>
                 string.Equals(x.BankPath, bank.Path, StringComparison.OrdinalIgnoreCase) &&
                 x.FsbIndex == sample.FsbIndex && x.SampleIndex == sample.SampleIndex);
-            if (row is null) continue;
+            if (row is null)
+            {
+                missing++;
+                // 索引里有这个样本、但总表行集里找不到它：说明筛选/快照口径不一致，必须留痕。
+                Log.Warn("音频页建样本层：索引样本在总表行集里找不到，已跳过该行（bank={0}，FSB {1}，样本 {2}）",
+                    bank.FileName, sample.FsbIndex, sample.SampleIndex);
+                continue;
+            }
             item.Items.Add(new TreeViewItem
             {
                 Header = $"{row.Name}（{row.CodecName} · {row.DurationLabel} · {row.SizeLabel} 字节）",
@@ -784,12 +928,19 @@ public partial class BankWorkbenchPage : UserControl
                 Foreground = row.IsModified ? TryBrush("WbModifiedBrush") : TryBrush("WbTextPrimaryBrush"),
                 Style = WorkbenchShell.CreateTreeItemStyle(),
             });
+            added++;
         }
+        Log.Debug("音频页建样本层：bank={0} 的 FSB {1} 建出 {2} 行（缺失 {3} 行）", bank.FileName, fsbIndex, added, missing);
     }
 
     private void OnTreeSelectionChanged(TreeViewItem? item)
     {
-        if (_isSelecting || item is null) return;
+        if (_isSelecting || item is null)
+        {
+            Log.Debug("音频页树选择变化：被忽略（重入={0}，节点为空={1}）", _isSelecting, item is null);
+            return;
+        }
+        Log.Debug("音频页树选择变化：节点 Tag 类型={0}", item.Tag?.GetType().Name ?? "-");
         switch (item.Tag)
         {
             case BankIndexEntry entry:
@@ -830,11 +981,17 @@ public partial class BankWorkbenchPage : UserControl
     /// </summary>
     private void LocateInTree()
     {
-        if (_selectedSample is not { } row) return;
+        if (_selectedSample is not { } row)
+        {
+            Log.Debug("音频页树内定位：当前没有选中样本，忽略");
+            return;
+        }
         if (_viewMode != BankViewMode.BankTree)
         {
-            Shell.SetViewMode(WorkbenchViewMode.Tree); // 触发 ViewModeChanged → SwitchView(BankTree)
-            RebuildTree();
+            // SetViewMode → ViewModeChanged → SwitchView(BankTree) 里已经重建过树，
+            // 这里不要再调 RebuildTree()（早先是同一次定位重建两遍）。
+            Log.Debug("音频页树内定位：当前视图={0}，先切到 bank 树（{1}）", _viewMode, row.LocationLabel);
+            Shell.SetViewMode(WorkbenchViewMode.Tree);
         }
         foreach (var item in _bankTree.Items.OfType<TreeViewItem>())
         {
@@ -844,9 +1001,12 @@ public partial class BankWorkbenchPage : UserControl
             item.IsSelected = true;
             item.BringIntoView();
             Shell.SetStatus($"已在 bank 树中定位：{entry.FileName}（{row.FsbLabel} · 样本 {row.SampleIndex}）");
+            Log.Info("音频页树内定位成功：{0} → {1}", row.LocationLabel, entry.FileName);
             return;
         }
         Shell.SetStatus("当前筛选条件下 bank 树里没有这个 bank（先清除筛选再定位）。");
+        Log.Warn("音频页树内定位失败：根节点里找不到该 bank，可能被当前筛选隐藏（{0}，筛选={1}，树根已挂载={2}）",
+            row.LocationLabel, ToKindFilter(), _bankTree.ItemsSource is not null);
     }
 
     // ── 编辑列（选中上下文 + 选中样本明细）──────────────────────────
@@ -867,6 +1027,7 @@ public partial class BankWorkbenchPage : UserControl
             _sampleInfo.Text = "—";
             RefreshSampleDetail();
             RefreshActionButtons();
+            Log.Debug("音频页载入编辑列：未选择 bank（clearSample={0}，选中样本已清空={1}）", clearSample, _selectedSample is null);
             return;
         }
         _contextInfo.Text = $"{entry.FileName} · {entry.KindLabel} · {entry.SizeBytes:N0} 字节 · FSB {entry.FsbCount} 个" +
@@ -877,14 +1038,19 @@ public partial class BankWorkbenchPage : UserControl
             : $"{entry.Samples.Count} 个样本（索引快照，未重新解析 bank 文件）";
         RefreshSampleDetail();
         RefreshActionButtons();
+        Log.Debug("音频页载入编辑列（bank）：{0}（{1}，{2} 个样本，clearSample={3}）",
+            entry.FileName, entry.KindLabel, entry.Samples.Count, clearSample);
     }
 
     private void LoadEditorForSample(SampleRow row)
     {
         var entry = _entries.FirstOrDefault(x => string.Equals(x.Path, row.BankPath, StringComparison.OrdinalIgnoreCase));
+        if (entry is null)
+            Log.Warn("音频页载入编辑列：样本所属 bank 不在索引里，bank 上下文按未选中处理（{0}）", row.LocationLabel);
         LoadEditorForBank(entry); // 不清样本：row 就是要在编辑列里展开的那个
         RefreshSampleDetail();
         Shell.SetStatus($"{row.LocationLabel} · {row.CodecName} · {row.DurationLabel} · {row.SizeLabel} 字节");
+        Log.Debug("音频页载入编辑列（样本）：{0}，bank 命中={1}", row.LocationLabel, entry is not null);
     }
 
     /// <summary>
@@ -945,17 +1111,18 @@ public partial class BankWorkbenchPage : UserControl
         if (player is not null)
         {
             try { player.Stop(); player.Close(); }
-            catch (Exception) { /* 已释放 */ }
+            catch (Exception ex) { /* 已释放 */ Log.Debug(ex, "音频页停止播放：释放 MediaPlayer 失败，已忽略（文件={0}）", _playerFile ?? "-"); }
         }
         var file = _playerFile;
         _playerFile = null;
         if (file is not null)
         {
-            try { File.Delete(file); } catch (Exception) { /* 系统清理 */ }
+            try { File.Delete(file); } catch (Exception ex) { /* 系统清理 */ Log.Debug(ex, "音频页停止播放：删除临时 WAV 失败，已忽略（{0}）", file); }
         }
         _playTimer.Stop();
         ResetPlaybackUi();
         RefreshActionButtons();
+        if (file is not null) Log.Debug("音频页停止播放：已释放播放器与临时 WAV（{0}）", file);
     }
 
     /// <summary>进度条与时间标签归零（停止 / 切换选择时调用）。</summary>
@@ -1028,15 +1195,22 @@ public partial class BankWorkbenchPage : UserControl
 
     private async Task AuditionAsync()
     {
-        if (_selectedBank is null || SelectedSample is not { } sample) return;
-        if (_player is not null) { StopAudio(); Shell.SetStatus("已停止试听。"); return; }
+        if (_selectedBank is null || SelectedSample is not { } sample)
+        {
+            Log.Debug("音频页试听：未选中 bank 或样本，忽略");
+            return;
+        }
+        if (_player is not null) { StopAudio(); Shell.SetStatus("已停止试听。"); Log.Debug("音频页试听：正在播放，本次点击=停止（{0}）", sample.LocationLabel); return; }
         var fmodDirectory = _host.Env.EffectiveFmodLibraryDirectory(_host.Project);
         if (string.IsNullOrWhiteSpace(fmodDirectory) || !Directory.Exists(fmodDirectory))
         {
             Shell.SetStatus("需要 FMOD DLL 才能解码试听：把 fmod64.dll 放进程序目录 fmod\\，或在「设置」页指定目录。");
+            Log.Warn("音频页试听：FMOD 库目录不可用，已取消（{0}，目录={1}）", sample.LocationLabel, fmodDirectory ?? "-");
             return;
         }
         Shell.SetStatus($"正在解码 {sample.Name}…");
+        var watch = Stopwatch.StartNew();
+        Log.Info("音频页试听开始：{0}，bank={1}", sample.LocationLabel, _selectedBank.Path);
         try
         {
             var wav = await Task.Run(() =>
@@ -1057,22 +1231,37 @@ public partial class BankWorkbenchPage : UserControl
             StartPlaybackUi(player.NaturalDuration.HasTimeSpan ? player.NaturalDuration.TimeSpan.TotalSeconds : null);
             RefreshActionButtons(); // 按钮切成「■ 停止」
             Shell.SetStatus($"正在播放 {sample.Name}（WAV {wav.Length / 1024} KB）");
+            Log.Info("音频页试听开始播放：{0}，WAV {1} 字节，临时文件={2}，解码耗时 {3} ms",
+                sample.LocationLabel, wav.Length, file, watch.Elapsed.TotalMilliseconds);
         }
-        catch (Exception ex) { StopAudio(); Shell.SetStatus($"试听失败：{ex.Message}"); }
+        catch (Exception ex) { StopAudio(); Shell.SetStatus($"试听失败：{ex.Message}"); Log.Error(ex, "音频页试听失败：{0}，耗时 {1} ms", sample.LocationLabel, watch.Elapsed.TotalMilliseconds); }
     }
 
     private async Task ExportSampleWavAsync()
     {
-        if (_selectedBank is null || SelectedSample is not { } sample) return;
+        if (_selectedBank is null || SelectedSample is not { } sample)
+        {
+            Log.Debug("音频页导出样本 WAV：未选中 bank 或样本，忽略");
+            return;
+        }
         var fmodDirectory = _host.Env.EffectiveFmodLibraryDirectory(_host.Project);
-        if (string.IsNullOrWhiteSpace(fmodDirectory) || !Directory.Exists(fmodDirectory)) return;
+        if (string.IsNullOrWhiteSpace(fmodDirectory) || !Directory.Exists(fmodDirectory))
+        {
+            Log.Warn("音频页导出样本 WAV：FMOD 库目录不可用，静默取消（{0}，目录={1}）", sample.LocationLabel, fmodDirectory ?? "-");
+            return;
+        }
         var dialog = new Microsoft.Win32.SaveFileDialog
         {
             Filter = "WAV 音频 (*.wav)|*.wav|所有文件 (*.*)|*.*",
             FileName = Sanitize(sample.Name) + ".wav",
             Title = "导出样本为 WAV",
         };
-        if (dialog.ShowDialog(Window.GetWindow(this)) != true) return;
+        if (dialog.ShowDialog(Window.GetWindow(this)) != true)
+        {
+            Log.Debug("音频页导出样本 WAV：用户取消保存对话框（{0}）", sample.LocationLabel);
+            return;
+        }
+        var watch = Stopwatch.StartNew();
         try
         {
             var wav = await Task.Run(() =>
@@ -1083,8 +1272,10 @@ public partial class BankWorkbenchPage : UserControl
             });
             await File.WriteAllBytesAsync(dialog.FileName, wav);
             Shell.SetStatus($"已导出：{dialog.FileName}");
+            Log.Info("音频页导出样本 WAV 完成：{0} → {1}，{2} 字节，耗时 {3} ms",
+                sample.LocationLabel, dialog.FileName, wav.Length, watch.Elapsed.TotalMilliseconds);
         }
-        catch (Exception ex) { Shell.SetStatus($"导出 WAV 失败：{ex.Message}"); }
+        catch (Exception ex) { Shell.SetStatus($"导出 WAV 失败：{ex.Message}"); Log.Error(ex, "音频页导出样本 WAV 失败：{0} → {1}", sample.LocationLabel, dialog.FileName); }
     }
 
     /// <summary>从 bank 文件里切出第 <paramref name="fsbIndex"/> 个 FSB 负载。</summary>
@@ -1104,6 +1295,8 @@ public partial class BankWorkbenchPage : UserControl
         if (project is null || _host.ProjectFile is null || _selectedBank is null || SelectedSample is not { } sample)
         {
             Shell.SetStatus("请先打开项目并选中一个样本。");
+            Log.Debug("音频页替换样本：前置条件不足，忽略（项目={0}，项目文件={1}，选中 bank={2}，选中样本={3}）",
+                project is not null, _host.ProjectFile is not null, _selectedBank is not null, SelectedSample is not null);
             return;
         }
         var dialog = new Microsoft.Win32.OpenFileDialog
@@ -1111,7 +1304,13 @@ public partial class BankWorkbenchPage : UserControl
             Filter = "WAV 音频 (*.wav)|*.wav|所有文件 (*.*)|*.*",
             Title = $"选择替换样本 {sample.Name} 的 WAV 文件",
         };
-        if (dialog.ShowDialog(Window.GetWindow(this)) != true) return;
+        if (dialog.ShowDialog(Window.GetWindow(this)) != true)
+        {
+            Log.Debug("音频页替换样本：用户取消选择 WAV（{0}）", sample.LocationLabel);
+            return;
+        }
+        var watch = Stopwatch.StartNew();
+        Log.Info("音频页替换样本开始：{0} ← {1}", sample.LocationLabel, dialog.FileName);
         try
         {
             var projectDirectory = Path.GetDirectoryName(_host.ProjectFile)!;
@@ -1130,8 +1329,10 @@ public partial class BankWorkbenchPage : UserControl
             ApplyFilter();
             Shell.SetStatus("替换已登记到项目。导出时会用 FSBANK 把 WAV 重新编码进 bank；" +
                             "缺少 fsbank64.dll 时导出会明确报错（不会静默跳过）。");
+            Log.Info("音频页替换样本完成：{0} ← {1}，bank 副本={2}，项目登记路径={3}，耗时 {4} ms",
+                sample.LocationLabel, dialog.FileName, bankCopy, replacement, watch.Elapsed.TotalMilliseconds);
         }
-        catch (Exception ex) { Shell.SetStatus($"替换失败：{ex.Message}"); }
+        catch (Exception ex) { Shell.SetStatus($"替换失败：{ex.Message}"); Log.Error(ex, "音频页替换样本失败：{0} ← {1}，耗时 {2} ms", sample.LocationLabel, dialog.FileName, watch.Elapsed.TotalMilliseconds); }
     }
 
     /// <summary>把 bank 复制进项目（引用模式 + 实体化，与 Unity 缓存同策略），
@@ -1194,6 +1395,8 @@ public partial class BankWorkbenchPage : UserControl
     {
         try
         {
+            Log.Info("音频页清空索引缓存：开始（条目 {0} 个 / 样本 {1} 个 / 展开键 {2} 个）",
+                _entries.Count, _allSamples.Count, _expandedTreeKeys.Count);
             _index.Store.DeleteDatabase();
             _entries.Clear();
             _sampleRecords.Clear();
@@ -1207,8 +1410,9 @@ public partial class BankWorkbenchPage : UserControl
             RefreshActionButtons();
             Shell.SetEmptyHint("索引缓存已清空：点「重新扫描」重建（不影响游戏目录里的任何文件）。");
             Shell.SetStatus("已删除 cache/bank-index.db。再次进入本页或点「重新扫描」会重新建索引。");
+            Log.Info("音频页清空索引缓存：完成，视图已清空（展开键保留 {0} 个）", _expandedTreeKeys.Count);
         }
-        catch (Exception ex) { Shell.SetStatus($"清空索引缓存失败：{ex.Message}"); }
+        catch (Exception ex) { Shell.SetStatus($"清空索引缓存失败：{ex.Message}"); Log.Error(ex, "音频页清空索引缓存失败：cache/bank-index.db（缓存目录={0}）", _host.Env.CacheDirectory); }
     }
 
     private static string Sanitize(string name)

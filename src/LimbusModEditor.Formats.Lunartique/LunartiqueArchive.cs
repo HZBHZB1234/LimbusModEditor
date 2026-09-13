@@ -1,5 +1,7 @@
 using System.IO.Compression;
 using System.Security.Cryptography;
+using LimbusModEditor.Domain.Diagnostics;
+using NLog;
 
 namespace LimbusModEditor.Formats.Lunartique;
 

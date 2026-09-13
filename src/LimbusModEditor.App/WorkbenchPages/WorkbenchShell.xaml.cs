@@ -6,6 +6,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using LimbusModEditor.Application.AppConfig;
+using NLog;
 
 namespace LimbusModEditor.App;
 
@@ -37,6 +38,8 @@ public sealed record WorkbenchViewToggles(ToggleButton List, ToggleButton Tree);
 /// </summary>
 public partial class WorkbenchShell : UserControl
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     private IWorkbenchHost? _host;
     private UiStateService? _uiState;
     private string _uiStateFile = string.Empty;
@@ -64,6 +67,8 @@ public partial class WorkbenchShell : UserControl
         if (host is null)
         {
             SetPreviewColumnWidth(UiStateService.DefaultPreviewColumnWidth);
+            Log.Debug("工作台骨架 Attach：未绑定宿主（设计器/自检），pageKey={0}，预览列宽用默认值 {1}",
+                PageKey, UiStateService.DefaultPreviewColumnWidth);
             return;
         }
 
@@ -71,6 +76,8 @@ public partial class WorkbenchShell : UserControl
         _uiState = UiStateService.Load(_uiStateFile);
         SetPreviewColumnWidth(_uiState.GetPreviewWidth(PageKey));
         RegisterLive();
+        Log.Debug("工作台骨架 Attach：pageKey={0}，状态文件={1}，恢复预览列宽 {2}（默认 {3}）",
+            PageKey, _uiStateFile, PreviewColumnWidth, UiStateService.DefaultPreviewColumnWidth);
     }
 
     /// <summary>本页面 key（<see cref="WorkbenchPageKeys"/>），列宽持久化以它为键。</summary>
@@ -106,11 +113,15 @@ public partial class WorkbenchShell : UserControl
         PreviewColumn.Width = new GridLength(clamped);
         _uiState?.SetPreviewWidth(PageKey, clamped);
         if (persist) SavePreviewWidth();
+        Log.Debug("工作台骨架设置预览列宽：请求 {0:F1} → 实际 {1:F1}（允许区间 {2}~{3}，persist={4}，pageKey={5}）",
+            width, clamped, UiStateService.MinPreviewColumnWidth, UiStateService.MaxPreviewColumnWidth, persist, PageKey);
     }
 
     /// <summary>复位到默认列宽并持久化（splitter 双击）。</summary>
     public void ResetPreviewColumnWidth()
     {
+        Log.Debug("工作台骨架复位预览列宽（splitter 双击）：{0:F1} → 默认 {1:F1}，pageKey={2}",
+            PreviewColumnWidth, UiStateService.DefaultPreviewColumnWidth, PageKey);
         PreviewColumn.Width = new GridLength(UiStateService.DefaultPreviewColumnWidth);
         _uiState?.SetPreviewWidth(PageKey, UiStateService.DefaultPreviewColumnWidth);
         SavePreviewWidth();

@@ -110,6 +110,7 @@
                               SelectedItemChanged="AssetTree_SelectedItemChanged"
                               MouseDoubleClick="AssetTree_DoubleClick"
                               TreeViewItem.Expanded="AssetTree_Expanded"
+                              TreeViewItem.Collapsed="AssetTree_Collapsed"
                               ToolTip="按游戏容器目录浏览；展开目录即时生成下一层。"/>
                 </Grid>
             </DockPanel>
@@ -139,13 +140,23 @@
                 预览必须「撑满剩余高度」，不能塞在 StackPanel + ScrollViewer 里：
                 ScrollViewer 以无限高度测量子元素，预览区只能吃自己的固定高度
                 （旧实现是写死 220），下面的状态/属性/操作一多就把预览挤成一条。
-                因此拆两行：Row0 = 预览（* ，占满剩余高度），Row1 = 其余内容（Auto + 自带滚动）。
+                因此拆两行：Row0 = 预览，Row1 = 创作状态（自带滚动）。
+
+                行高必须是「有界」的（2026-09 修）：Row1 原来是 Auto —— Auto 行按内容的
+                期望高度测量，ScrollViewer 拿到的是无限高，于是它的可滚高恒等于可视高
+                （日志实测：创作状态区 可视高=643 可滚高=643 滚动条=Collapsed），
+                永远不出现滚动条；窗口缩小后该行仍索要 643，把 Row0 的 * 挤到 0，
+                自身又被父容器裁掉下半截 —— 底部的按钮既看不见也滚不到
+                （用户反馈：「窗口缩放较小时右侧无法上下滑动」）。
+                改成有界的两行后：ScrollViewer 拿到确定高度，内容放不下就真的滚动；
+                Row0 有 MinHeight 兜底，不会再被挤成一条。
+                权重 1 : 2.4 复现原视觉（898 高时 264 / 634 ≈ 原来的 255 / 643），
                 图像预览自己还有一个固定视口常量（「适应窗口」算法依赖确定视口），不受影响。
             -->
             <Grid>
                 <Grid.RowDefinitions>
-                    <RowDefinition Height="*"/>
-                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*" MinHeight="170"/>
+                    <RowDefinition Height="2.4*" MinHeight="120"/>
                 </Grid.RowDefinitions>
                 <Grid Grid.Row="0">
                     <Grid.RowDefinitions>

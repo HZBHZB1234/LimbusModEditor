@@ -1,4 +1,6 @@
 using LimbusModEditor.Domain.Assets;
+using LimbusModEditor.Domain.Diagnostics;
+using NLog;
 
 namespace LimbusModEditor.Application.Assets.Preview;
 
@@ -84,6 +86,8 @@ public interface IAssetPreviewProvider
 /// </summary>
 public sealed class AssetPreviewRegistry
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     private readonly IReadOnlyList<IAssetPreviewProvider> _providers;
 
     public AssetPreviewRegistry(IEnumerable<IAssetPreviewProvider> providers)
@@ -113,23 +117,47 @@ public sealed class AssetPreviewRegistry
     public async Task<AssetPreview> PreviewAsync(AssetRecord? asset, IProgress<string>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        if (asset is null) return AssetPreview.None();
+        if (asset is null)
+        {
+            Log.Debug("预览跳过：没有选中资源。");
+            return AssetPreview.None();
+        }
+        using var scope = Log.Scope("生成资源预览");
+        Log.Info("预览开始：类型 {0}，路径 {1}，provider 候选 {2} 个",
+            AssetDisplay.TypeLabel(asset.Type), AssetDisplay.DisplayPath(asset), _providers.Count);
         foreach (var provider in _providers)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!provider.CanPreview(asset)) continue;
+            if (!provider.CanPreview(asset))
+            {
+                if (Log.IsTraceEnabled)
+                    Log.Trace("provider {0} 判定不适用（CanPreview=false），跳过：{1}",
+                        provider.Name, AssetDisplay.DisplayPath(asset));
+                continue;
+            }
+            Log.Debug("provider {0} 接受该资源，尝试生成预览：{1}", provider.Name, AssetDisplay.DisplayPath(asset));
             try
             {
                 var preview = await provider.PreviewAsync(asset, progress, cancellationToken).ConfigureAwait(false);
-                if (preview is not null) return preview;
+                if (preview is not null)
+                {
+                    Log.Info("预览 provider 选中：{0} → 形态 {1}，信息行「{2}」，文本 {3} 字符，行 {4} 条，PNG {5} 字节",
+                        provider.Name, preview.Kind, preview.InfoLine,
+                        preview.Text?.Length ?? 0, preview.Rows?.Count ?? 0, preview.ImagePng?.Length ?? 0);
+                    return preview;
+                }
+                Log.Debug("provider {0} 返回 null（实际处理不了），继续下一个：{1}", provider.Name, AssetDisplay.DisplayPath(asset));
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 // 单个提供者失败不阻塞后续：记录原因，继续尝试下一种形态。
+                Log.Error(ex, "预览 provider {0} 抛异常，继续尝试下一个：{1}", provider.Name, AssetDisplay.DisplayPath(asset));
                 progress?.Report($"{provider.Name} 预览失败：{ex.Message}");
             }
         }
+        Log.Warn("没有任何 provider 能预览该资源，返回说明性 Message：类型 {0}，路径 {1}",
+            AssetDisplay.TypeLabel(asset.Type), AssetDisplay.DisplayPath(asset));
         return AssetPreview.Message(
             "没有可用的预览形态。",
             $"资源类型：{AssetDisplay.TypeLabel(asset.Type)}\n路径：{AssetDisplay.DisplayPath(asset)}\n" +

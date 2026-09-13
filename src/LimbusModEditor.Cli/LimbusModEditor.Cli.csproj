@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -10,6 +10,14 @@
   <ItemGroup>
     <ProjectReference Include="..\LimbusModEditor.Application\LimbusModEditor.Application.csproj" />
     <ProjectReference Include="..\LimbusModEditor.Infrastructure\LimbusModEditor.Infrastructure.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NLog" Version="6.2.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\nlog.config" Link="nlog.config" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

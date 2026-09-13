@@ -1,8 +1,10 @@
 using LimbusModEditor.Application.Formats;
 using LimbusModEditor.Application.Projects;
+using LimbusModEditor.Domain.Diagnostics;
 using LimbusModEditor.Domain.Formats;
 using LimbusModEditor.Formats.Abstractions;
 using LimbusModEditor.Formats.Carra;
+using NLog;
 
 namespace LimbusModEditor.Application.Build;
 
@@ -28,6 +30,8 @@ public sealed record NewModTemplateResult(
 /// template.</summary>
 public sealed class NewModTemplateService
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     private readonly IProjectService _projects;
 
     public NewModTemplateService(IProjectService projects) => _projects = projects;
@@ -51,6 +55,9 @@ public sealed class NewModTemplateService
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(request.Name);
+        using var scope = Log.Scope("新建模组模板");
+        Log.Info("新建模组模板开始：名称「{0}」，格式 {1}，目录 {2}，base_bank {3}",
+            request.Name, request.Format.ToString(), directory, request.BaseBank ?? "-");
         var name = Sanitize(request.Name);
         if (request.Format is not ModFormatKind.Carra2)
             throw new NotSupportedException(
@@ -82,18 +89,24 @@ public sealed class NewModTemplateService
         var diagnostics = validation.Diagnostics
             .Select(d => $"{d.Severity}: {d.Message}")
             .ToArray();
+        foreach (var diagnostic in validation.Diagnostics.Where(d => d.Severity != DiagnosticSeverity.Error))
+            Log.Warn("模板校验产生非错误诊断：{0} {1}", diagnostic.Code ?? "-", diagnostic.Message ?? "-");
 
         await AtomicOutput.WriteAsync(templateFile, async (stream, token) =>
         {
             await handler.ExportAsync(package, stream, new ExportContext(
                 ModFormatKind.Carra2, PreserveUnknownFiles: true, ValidateBeforeExport: false, token, new JovelerXzCodec()));
         }, cancellationToken);
+        Log.Debug("模板包写出：{0}（{1} 字节，校验诊断 {2} 条）",
+            templateFile, File.Exists(templateFile) ? new FileInfo(templateFile).Length : 0, diagnostics.Length);
 
         project.Version = string.IsNullOrWhiteSpace(request.Version) ? "0.1.0" : request.Version.Trim();
         project.Author = string.IsNullOrWhiteSpace(request.Author) ? string.Empty : request.Author.Trim();
         project.Description = string.IsNullOrWhiteSpace(request.Description) ? string.Empty : request.Description.Trim();
         await _projects.SaveAsync(project, projectFile, cancellationToken);
 
+        Log.Info("新建模组模板完成：项目文件 {0}，模板文件 {1}（目录 {2}）",
+            projectFile, templateFile, Path.GetFullPath(directory));
         return new NewModTemplateResult(Path.GetFullPath(directory), projectFile, templateFile, diagnostics);
     }
 
@@ -109,6 +122,13 @@ public sealed class NewModTemplateService
     {
         var invalid = Path.GetInvalidFileNameChars();
         var cleaned = new string(name.Trim().Select(c => invalid.Contains(c) ? '_' : c).ToArray());
-        return string.IsNullOrWhiteSpace(cleaned) ? "MyMod" : cleaned;
+        if (string.IsNullOrWhiteSpace(cleaned))
+        {
+            Log.Warn("模组名「{0}」清洗后为空，回退用默认名 MyMod", name);
+            return "MyMod";
+        }
+        if (!string.Equals(cleaned, name.Trim(), StringComparison.Ordinal))
+            Log.Warn("模组名「{0}」含非法文件名字符，已清洗为「{1}」", name.Trim(), cleaned);
+        return cleaned;
     }
 }

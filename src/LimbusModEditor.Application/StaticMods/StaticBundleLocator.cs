@@ -1,6 +1,8 @@
 using System.Text.RegularExpressions;
 using LimbusModEditor.Application.Catalog;
+using LimbusModEditor.Domain.Diagnostics;
 using LimbusModEditor.Formats.Unity;
+using NLog;
 
 namespace LimbusModEditor.Application.StaticMods;
 
@@ -49,6 +51,8 @@ public sealed record StaticBundleLocation(
 /// </summary>
 public static class StaticBundleLocator
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     /// <summary>静态数据 bundle 名前缀（LCTA staticmod.py:65 同名约定）。</summary>
     public const string BundleNamePrefix = "static_s1_0_assets_all_";
 
@@ -66,11 +70,16 @@ public static class StaticBundleLocator
         if (string.IsNullOrWhiteSpace(cacheRoot)) return null;
         string full;
         try { full = Path.GetFullPath(cacheRoot); }
-        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { return null; }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            Log.Debug(ex, "缓存根路径不合法，无法推导 LocalLow 根：{0}", cacheRoot ?? "-");
+            return null;
+        }
         var current = new DirectoryInfo(Path.TrimEndingDirectorySeparator(full));
         if (string.Equals(current.Name, "ProjectMoon_LimbusCompany", StringComparison.OrdinalIgnoreCase) &&
             string.Equals(current.Parent?.Name, "Unity", StringComparison.OrdinalIgnoreCase))
             return current.Parent?.Parent?.FullName;
+        Log.Debug("缓存根层级不是 <LocalLow>/Unity/ProjectMoon_LimbusCompany，不推导 LocalLow 根：{0}", full);
         return null;
     }
 
@@ -93,7 +102,11 @@ public static class StaticBundleLocator
             if (string.IsNullOrWhiteSpace(path)) return;
             string full;
             try { full = Path.GetFullPath(path); }
-            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { return; }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                Log.Debug(ex, "catalog 候选路径不合法，忽略该候选：{0}", path);
+                return;
+            }
             if (!File.Exists(full)) return;
             if (seen.Add(full)) result.Add(full);
         }
@@ -105,17 +118,24 @@ public static class StaticBundleLocator
             var installDirectory = Path.Combine(gameDirectory, "LimbusCompany_Data", "StreamingAssets", "aa");
             foreach (var name in CatalogFileNames) Add(Path.Combine(installDirectory, name));
         }
+        Log.Debug("catalog 候选：{0} 个（游戏目录 {1}）→ {2}",
+            result.Count, gameDirectory ?? "-", string.Join(" | ", result));
         return result;
     }
 
     private static string? FirstExistingCatalog(string directory)
     {
-        if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory)) return null;
+        if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory))
+        {
+            Log.Debug("catalog 目录不存在，该目录不参与定位：{0}", directory ?? "-");
+            return null;
+        }
         foreach (var name in CatalogFileNames)
         {
             var candidate = Path.Combine(directory, name);
             if (File.Exists(candidate)) return candidate;
         }
+        Log.Debug("catalog 目录里没有 catalog.bin / catalog_S1.bin：{0}", directory);
         return null;
     }
 
@@ -130,10 +150,18 @@ public static class StaticBundleLocator
     /// <summary>从 catalog 定位静态数据 bundle（只读；解析失败返回 null）。</summary>
     public static StaticBundleLocation? LocateFromCatalog(string? catalogPath)
     {
-        if (string.IsNullOrWhiteSpace(catalogPath) || !File.Exists(catalogPath)) return null;
+        if (string.IsNullOrWhiteSpace(catalogPath) || !File.Exists(catalogPath))
+        {
+            Log.Debug("catalog 不存在或未给出，跳过静态 bundle 定位：{0}", catalogPath ?? "-");
+            return null;
+        }
         CatalogFileService catalog;
         try { catalog = CatalogFileService.Load(catalogPath); }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException) { return null; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            Log.Error(ex, "catalog 解析失败，静态 bundle 定位跳过该文件：{0}", catalogPath);
+            return null;
+        }
         return LocateFromCatalog(catalog, catalogPath);
     }
 
@@ -147,8 +175,12 @@ public static class StaticBundleLocator
             if (!match.Success) continue;
             var innerHash = match.Groups[1].Value.ToLowerInvariant();
             var record = catalog.FindByInnerHash(innerHash);
+            Log.Info("从 catalog 定位到静态 bundle：{0}（内层键 {1}，外层键 {2}，catalog {3}）",
+                name, innerHash, record?.OuterKey ?? "-", catalogPath ?? "-");
             return new StaticBundleLocation(name, innerHash, record?.OuterKey, record, CatalogPath: catalogPath);
         }
+        Log.Warn("catalog 里没有 static_s1_0_assets_all_*.bundle 条目（共 {0} 个名字）——静态数据只能靠 bundle 名兜底判定：{1}",
+            catalog.Names.Count, catalogPath ?? "-");
         return null;
     }
 
@@ -157,13 +189,94 @@ public static class StaticBundleLocator
     public static IReadOnlySet<string> StaticInnerHashes(CatalogFileService? catalog)
     {
         var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (catalog is null) return result;
+        if (catalog is null)
+        {
+            Log.Warn("catalog 缺失，静态 bundle 内层键集合为空集 —— 扫描无法写 staticBundle 标记，资源工作台将只靠 bundle 名兜底判定。");
+            return result;
+        }
         foreach (var name in catalog.Names)
         {
             var match = StaticBundlePattern.Match(name);
             if (match.Success) result.Add(match.Groups[1].Value.ToLowerInvariant());
         }
+        Log.Debug("静态 bundle 内层键集合：{0} 个（catalog 名字总数 {1}）", result.Count, catalog.Names.Count);
         return result;
+    }
+
+    /// <summary>
+    /// 按 <b>bundle 文件名</b>判定它是不是静态数据 bundle（不依赖 catalog）。
+    ///
+    /// <para><b>为什么要这条兜底</b>：扫描时写的 <c>staticBundle</c> 元数据标记是
+    /// 「catalog 可用且内层键命中」的产物 —— catalog 缺失 / 版本不符 / 旧索引缺列时，
+    /// 标记就是假，资源工作台于是又把 static-data 的表全列出来（用户反馈的
+    /// 「资源工作台仍然包含 static-data」）。而 bundle 名本身就是权威事实
+    /// （<see cref="BundleNamePrefix"/> + 32 位内容哈希），任何来源的
+    /// <c>__data</c> 都带着它，所以这里再加一道不依赖 catalog 的判定。</para>
+    ///
+    /// <para><b>为什么只认「带前缀的全名」</b>：缓存目录里只有内层内容哈希
+    /// （<c>&lt;32hex&gt;</c>），裸哈希<b>无法</b>反推它属于哪个 bundle —— 任何
+    /// 32 位十六进制串都长得一样。接受裸哈希等于把普通 bundle 的内容哈希误判成
+    /// 静态，所以这里只接受带 <see cref="BundleNamePrefix"/> 前缀的名字；
+    /// 内层键路径由调用方用元数据标记兜底（那是扫描时的权威判定）。</para>
+    /// </summary>
+    /// <param name="bundleName">bundle 文件名（如
+    /// <c>static_s1_0_assets_all_&lt;32hex&gt;.bundle</c>），路径会被取文件名。</param>
+    public static bool LooksLikeStaticBundle(string? bundleName)
+    {
+        if (string.IsNullOrWhiteSpace(bundleName))
+        {
+            if (Log.IsTraceEnabled)
+                Log.Trace("静态判定（bundle 名兜底）：输入为空 → 结论：非静态。");
+            return false;
+        }
+        var value = Path.GetFileName(bundleName.Trim());
+        var looksStatic = value.StartsWith(BundleNamePrefix, StringComparison.OrdinalIgnoreCase);
+        if (Log.IsTraceEnabled)
+            Log.Trace("静态判定（bundle 名兜底）：输入 {0} → 文件名 {1}，前缀 {2} 命中 {3} → 结论：{4}",
+                bundleName, value, BundleNamePrefix, looksStatic, looksStatic ? "静态" : "非静态");
+        return looksStatic;
+    }
+
+    /// <summary>静态数据表在游戏内的容器路径前缀（<c>m_Container</c> 里的资源路径）。</summary>
+    public const string StaticTablePathPrefix = "Assets/Resources_moved/StaticData/static-data/";
+
+    /// <summary>
+    /// 按 <b>资源自身的游戏内路径</b>判定它是不是静态数据表 —— 不依赖 catalog、
+    /// 不依赖 bundle 名、不依赖 <c>staticBundle</c> 元数据标记。
+    ///
+    /// <para><b>为什么需要这条判据</b>（2026-09 真实数据取证）：静态判定的前两道
+    /// 判据都以「bundle 身份」为前提 —— 元数据标记是「catalog 可用且内层键命中」
+    /// 的产物，bundle 名兜底又只认带 <see cref="BundleNamePrefix"/> 前缀的全名，
+    /// 而缓存目录里只有内层内容哈希（裸 32hex，无法反推名字）。游戏更新换键后，
+    /// 旧版本静态 bundle 会以「裸哈希目录」留在 Unity 缓存里（本机实测：
+    /// <c>62d6e466…</c>（9/3）与 catalog 里的 <c>fa6984…</c>（9/10）同外层键、
+    /// 同 CAB 名、内容同源），于是两道判据同时失效，static-data 的表又出现在
+    /// 资源工作台里（用户反馈的「资源工作台仍然包含 static-data」）。</para>
+    ///
+    /// <para><b>为什么不会误伤</b>：真实 catalog 实测 2926 个 bundle 名里
+    /// <c>Assets/Resources_moved</c> 只出现在静态数据路径上，普通资源用的是
+    /// <c>Assets/Prefab</c>、<c>Assets/FX</c>、<c>Assets/Animation</c> 等前缀；
+    /// 且这条判据用的是扫描时已经写进
+    /// <c>Metadata["containerEntry"]</c>（<c>AssetDisplay.ContainerEntryPath</c>）
+    /// 的事实，读起来是 O(1)，不需要任何 catalog / 数据库。</para>
+    /// </summary>
+    /// <param name="containerEntry">容器路径（m_Container 条目），如
+    /// <c>Assets/Resources_moved/StaticData/static-data/item/item-02.json</c>。</param>
+    public static bool LooksLikeStaticTablePath(string? containerEntry)
+    {
+        if (string.IsNullOrWhiteSpace(containerEntry))
+        {
+            if (Log.IsTraceEnabled)
+                Log.Trace("静态判定（资源路径兜底）：容器路径为空 → 结论：非静态。");
+            return false;
+        }
+        var normalized = containerEntry.Replace('\\', '/').Trim();
+        var byPrefix = normalized.StartsWith(StaticTablePathPrefix, StringComparison.OrdinalIgnoreCase);
+        var bySegment = !byPrefix && normalized.Contains("/StaticData/static-data/", StringComparison.OrdinalIgnoreCase);
+        if (Log.IsTraceEnabled)
+            Log.Trace("静态判定（资源路径兜底）：容器路径「{0}」→ 前缀命中={1}，段命中={2} → 结论：{3}",
+                normalized, byPrefix, bySegment, byPrefix || bySegment ? "静态" : "非静态");
+        return byPrefix || bySegment;
     }
 
     /// <summary>在候选缓存根里找 <c>&lt;外层键&gt;/&lt;内层键&gt;/__data</c>；

@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Text;
+using NLog;
 
 namespace LimbusModEditor.Application.Assets.Preview;
 
@@ -7,6 +8,8 @@ namespace LimbusModEditor.Application.Assets.Preview;
 /// 弹窗与内嵌预览共用同一份逻辑）。只读前 <paramref name="MaxBytes"/> 字节。</summary>
 public static class HexDumpService
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     public const int MaxBytes = 4096;
 
     public sealed record HexDump(string Text, int ShownBytes, long TotalBytes, bool Truncated)
@@ -44,13 +47,20 @@ public static class HexDumpService
         }
         if (data.Length > MaxBytes)
             text.AppendLine($"\n… 已截断，共 {data.Length:N0} 字节（只读预览，显示前 {MaxBytes} 字节）。");
+        // 转储文本本身不进日志（可能上万字符）：只记长度与规模。
+        Log.Debug("十六进制转储：输入 {0:N0} 字节 → 显示 {1:N0} 字节（偏移 0x0 起，每行 16 字节，共 {2:N0} 行），截断={3}，文本 {4:N0} 字符，上限 {5:N0} 字节。",
+            data.LongLength, shown, (shown + 15) / 16, data.Length > MaxBytes, text.Length, MaxBytes);
         return new HexDump(text.ToString(), shown, data.Length, data.Length > MaxBytes);
     }
 
     /// <summary>读取文件头部并转储（文件不存在/读取失败返回 null）。</summary>
     public static HexDump? DumpFile(string path)
     {
-        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return null;
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            Log.Debug("十六进制转储读文件失败：路径「{0}」为空或文件不存在 → 返回 null。", path ?? "-");
+            return null;
+        }
         try
         {
             using var stream = File.OpenRead(path);
@@ -64,10 +74,14 @@ public static class HexDumpService
             }
             var data = read == buffer.Length ? buffer : buffer[..read];
             var dump = Dump(data);
-            return dump with { TotalBytes = stream.Length, Truncated = stream.Length > MaxBytes };
+            var result = dump with { TotalBytes = stream.Length, Truncated = stream.Length > MaxBytes };
+            Log.Debug("十六进制转储读文件完成：{0}，文件共 {1:N0} 字节，实际读入 {2:N0} 字节，截断={3}。",
+                path, stream.Length, read, result.Truncated);
+            return result;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            Log.Warn(ex, "十六进制转储读文件失败（IO/权限），返回 null：{0}", path);
             return null;
         }
     }
@@ -79,6 +93,8 @@ public static class HexDumpService
 /// </summary>
 public static class AudioWaveform
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     public sealed record Result(IReadOnlyList<float> Envelope, int SampleRate, int Channels, double DurationSeconds, string? UnavailableReason)
     {
         public bool HasEnvelope => Envelope.Count > 0;
@@ -87,16 +103,32 @@ public static class AudioWaveform
     /// <summary>把 WAV 的 PCM 数据按桶取峰值（0..1）。<paramref name="buckets"/> 通常取绘制宽度。</summary>
     public static Result BuildEnvelope(byte[]? wav, int buckets = 400)
     {
-        if (wav is null || wav.Length == 0)
+        if (wav is null)
+        {
+            Log.Warn("波形包络：没有解码后的 WAV（wav 为 null），返回空包络。");
             return new Result([], 0, 0, 0, "没有解码后的 WAV 数据（需要 FMOD DLL 才能试听/绘制波形）。");
+        }
+        if (wav.Length == 0)
+        {
+            Log.Warn("波形包络：解码后的 WAV 为空（0 字节），返回空包络。");
+            return new Result([], 0, 0, 0, "没有解码后的 WAV 数据（需要 FMOD DLL 才能试听/绘制波形）。");
+        }
         if (buckets <= 0) buckets = 400;
         try
         {
             var (pcm, sampleRate, channels, bitsPerSample) = ParsePcm16(wav);
             if (pcm.Length == 0 || channels <= 0)
+            {
+                Log.Warn("波形包络：WAV 没有可用的 PCM 数据（PCM {0:N0} 字节，声道 {1}，采样率 {2}，位深 {3}）。",
+                    pcm.Length, channels, sampleRate, bitsPerSample);
                 return new Result([], sampleRate, channels, 0, "WAV 没有 PCM 数据。");
+            }
             var frameCount = pcm.Length / (channels * 2);
-            if (frameCount == 0) return new Result([], sampleRate, channels, 0, "WAV 帧数为 0。");
+            if (frameCount == 0)
+            {
+                Log.Warn("波形包络：WAV 帧数为 0（PCM {0:N0} 字节，声道 {1}，位深 {2}）。", pcm.Length, channels, bitsPerSample);
+                return new Result([], sampleRate, channels, 0, "WAV 帧数为 0。");
+            }
             var envelope = new float[Math.Min(buckets, frameCount)];
             var framesPerBucket = (double)frameCount / envelope.Length;
             for (var bucket = 0; bucket < envelope.Length; bucket++)
@@ -119,10 +151,13 @@ public static class AudioWaveform
                 envelope[bucket] = peak;
             }
             var duration = sampleRate > 0 ? (double)frameCount / sampleRate : 0;
+            Log.Debug("波形包络生成：WAV {0:N0} 字节，PCM {1:N0} 字节 / {2} 声道 / {3} Hz / {4}-bit，帧 {5:N0}，桶 {6:N0}（每桶约 {7:0.#} 帧），时长 {8:0.##} 秒。",
+                wav.Length, pcm.Length, channels, sampleRate, bitsPerSample, frameCount, envelope.Length, framesPerBucket, duration);
             return new Result(envelope, sampleRate, channels, duration, null);
         }
         catch (Exception ex) when (ex is InvalidDataException or ArgumentException)
         {
+            Log.Warn(ex, "波形包络：WAV 解析失败，返回空包络（不做猜测性解码）：{0:N0} 字节，桶 {1}", wav.Length, buckets);
             return new Result([], 0, 0, 0, $"WAV 解析失败：{ex.Message}");
         }
     }

@@ -5,7 +5,9 @@ using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Threading;
 using LimbusModEditor.Application.Texts;
+using LimbusModEditor.Domain.Diagnostics;
 using LimbusModEditor.Domain.Projects;
+using NLog;
 
 namespace LimbusModEditor.App;
 
@@ -94,6 +96,8 @@ public sealed record TextHitRow(LangTextSearchHit Hit, string DisplayPath)
 /// </summary>
 public sealed partial class TextWorkbenchPage : UserControl
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     private readonly IWorkbenchHost _host;
     /// <summary>
     /// lang 服务实例：**宿主共享的那一份**（plan-16 S3）。
@@ -141,6 +145,8 @@ public sealed partial class TextWorkbenchPage : UserControl
     private bool _loadingDocument;
     private bool _loaded;
     private bool _suppressSelection;
+    /// <summary>文件树已展开节点的稳定 key（条目相对路径，跨重建累积）。</summary>
+    private readonly HashSet<string> _expandedTreeKeys = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>最近一次**成功载入编辑器**的条目路径（相对活动语言目录）。
     ///
@@ -292,6 +298,7 @@ public sealed partial class TextWorkbenchPage : UserControl
 
         _fileTree = WorkbenchShell.CreateTree();
         _fileTree.AddHandler(TreeViewItem.ExpandedEvent, new RoutedEventHandler(TreeItem_Expanded));
+        _fileTree.AddHandler(TreeViewItem.CollapsedEvent, new RoutedEventHandler(FileTree_Collapsed));
         _fileTree.SelectedItemChanged += (_, e) =>
         {
             if (!_suppressSelection && e.NewValue is TreeViewItem { Tag: LangTextTreeNode { IsFile: true } node })
@@ -338,8 +345,14 @@ public sealed partial class TextWorkbenchPage : UserControl
 
         Loaded += async (_, _) =>
         {
-            if (_loaded) return; // 页面常驻：只在首次显示时载入
+            if (_loaded)
+            {
+                Log.Debug("文本页 Loaded：守卫命中（_loaded=true），跳过刷新；展开键 {0} 个，当前选中={1}",
+                    _expandedTreeKeys.Count, _lastLoadedPath ?? "-");
+                return; // 页面常驻：只在首次显示时载入
+            }
             _loaded = true;
+            Log.Debug("文本页 Loaded：首次载入，触发者=Loaded 事件，开始首次刷新");
             await RefreshAsync();
         };
     }
@@ -381,15 +394,19 @@ public sealed partial class TextWorkbenchPage : UserControl
     /// </summary>
     public async Task ReloadFromIndexAsync()
     {
+        Log.Debug("文本页 ReloadFromIndexAsync：触发者=宿主（启动扫描完成后主动刷新），_loaded 由 {0} 置为 true", _loaded);
         _loaded = true;
         await RefreshAsync();
     }
 
     private async Task RefreshAsync()
     {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
         var langRoot = _service.ResolveLangRoot(_host.Env.EffectiveGameDirectory(_host.Project));
         if (langRoot is null)
         {
+            Log.Warn("文本页刷新：未定位 lang 目录，清空浏览与编辑器（游戏目录={0}）",
+                _host.Env.EffectiveGameDirectory(_host.Project) ?? "-");
             _files = [];
             _rows = [];
             _treeRoot = null;
@@ -429,7 +446,7 @@ public sealed partial class TextWorkbenchPage : UserControl
             {
                 // 索引未建 / 源变过 / 库被删：重新枚举（有缓存时只重解析签名变过的文件）。
                 Shell.SetStatus("正在建立文本索引（首次会扫描全部 lang 文件）…");
-                var watch = System.Diagnostics.Stopwatch.StartNew();
+                var indexWatch = System.Diagnostics.Stopwatch.StartNew();
                 files = await Task.Run(() =>
                 {
                     var cached = _store.ReadFileMap(languageDirectory);
@@ -437,10 +454,14 @@ public sealed partial class TextWorkbenchPage : UserControl
                     _store.PersistFiles(source, enumerated);
                     return enumerated;
                 });
-                watch.Stop();
-                elapsed = watch.ElapsedMilliseconds;
+                indexWatch.Stop();
+                elapsed = indexWatch.ElapsedMilliseconds;
             }
-            if (generation != _loadGeneration) return;
+            if (generation != _loadGeneration)
+            {
+                Log.Debug("文本页刷新：代际已过期（本次 {0}，当前 {1}），丢弃结果不落地", generation, _loadGeneration);
+                return;
+            }
 
             _files = files;
             // 树按条目口径建（相对活动语言目录）：顶层就是语言目录的直接子项
@@ -462,11 +483,19 @@ public sealed partial class TextWorkbenchPage : UserControl
                 ? "已从索引载入（未重读文件）。选中文件即可编辑；修改只进内存编辑集，导出补丁时才写盘。"
                 : "索引已更新。选中文件即可编辑；修改只进内存编辑集，导出补丁时才写盘。");
             RefreshEditSetState();
+            Log.Debug("文本页刷新完成：触发者={0}，{1} 个 JSON 文件，索引命中={2}，索引重建={3}，索引耗时 {4} ms，总耗时 {5} ms，lang 根={6}，语言={7}",
+                _loaded ? "宿主刷新/首次加载" : "加载", files.Count, fresh, _store.WasRecreated, elapsed,
+                watch.Elapsed.TotalMilliseconds, langRoot, languageName ?? "-");
         }
         catch (Exception ex)
         {
-            if (generation != _loadGeneration) return;
+            if (generation != _loadGeneration)
+            {
+                Log.Debug(ex, "文本页刷新异常：代际已过期（本次 {0}，当前 {1}），按原有语义忽略", generation, _loadGeneration);
+                return;
+            }
             Shell.SetStatus($"载入 lang 文件失败：{ex.Message}");
+            Log.Error(ex, "文本页载入 lang 文件失败：lang 根={0}，耗时 {1} ms", langRoot, watch.Elapsed.TotalMilliseconds);
         }
     }
 
@@ -493,6 +522,7 @@ public sealed partial class TextWorkbenchPage : UserControl
     /// <summary>筛选（状态 / 键数）后绑定扁平列表（两千行级，防抖 300ms）。</summary>
     private void ApplyFileFilter()
     {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
         var state = _stateFilter?.SelectedIndex ?? 0;
         var minKeys = int.TryParse(_keyCountFilter?.Text?.Trim(), out var parsed) ? parsed : -1;
         var rows = _rows.Where(row => state switch
@@ -509,12 +539,17 @@ public sealed partial class TextWorkbenchPage : UserControl
             {
                 var match = rows.FirstOrDefault(x => x.RelativePath == selected.RelativePath);
                 if (match is not null) _fileList.SelectedItem = match;
+                else
+                    Log.Warn("文本页筛选列表：已选文件不在筛选结果里，列表选择未同步（{0}，结果 {1} 行）",
+                        selected.RelativePath, rows.Count);
             }
         }
         finally
         {
             _suppressSelection = false;
         }
+        Log.Debug("文本页筛选列表：{0} / {1} 行命中（状态档={2}，键数下限={3}），耗时 {4} ms",
+            rows.Count, _rows.Count, state, minKeys, watch.Elapsed.TotalMilliseconds);
     }
 
     private void ApplyViewMode()
@@ -523,18 +558,23 @@ public sealed partial class TextWorkbenchPage : UserControl
         _fileTree.Visibility = tree ? Visibility.Visible : Visibility.Collapsed;
         _fileList.Visibility = tree ? Visibility.Collapsed : Visibility.Visible;
         if (tree) SyncTreeSelection();
+        Log.Debug("文本页视图模式切换：模式={0}，列表行 {1} 行，展开键 {2} 个",
+            tree ? "树" : "列表", _rows.Count, _expandedTreeKeys.Count);
     }
 
     private void ClearCache()
     {
         try
         {
+            Log.Info("文本页清空缓存：删除 {0}（当前 {1} 个文件 / 展开键 {2} 个）",
+                _store.DatabasePath, _files.Count, _expandedTreeKeys.Count);
             _store.DeleteDatabase();
             Shell.SetStatus("缓存已删除（cache/text-index.db）。点「重新加载」会重建索引——缓存只影响速度，删除不影响功能。");
         }
         catch (Exception ex)
         {
             Shell.SetStatus($"删除缓存失败：{ex.Message}");
+            Log.Error(ex, "文本页删除索引缓存失败：{0}", _store.DatabasePath);
         }
     }
 
@@ -542,19 +582,42 @@ public sealed partial class TextWorkbenchPage : UserControl
 
     private void RebuildTree()
     {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
         _suppressSelection = true;
         try
         {
+            // 先收下当前展开态（累积集合跨重建保留），重建后按条目路径回放。
+            TreeExpansionState.Capture(_fileTree, LangTreeKeyOf, _expandedTreeKeys);
+            var capturedKeys = _expandedTreeKeys.Count;
             // 树顶层 = **活动语言目录的直接子项**：文件夹（StoryData / BattleAnnouncerDlg…）
             // 排在前面、根级 json 文件平铺在后。**没有根节点**（也从来没有语言目录那一层
             // 包裹节点）——根容器只是 LangTextTreeBuilder 的内部结构，不渲染。
-            _fileTree.ItemsSource = _treeRoot is null
-                ? null
-                : _treeRoot.Children.Select(CreateTreeItem).ToList();
+            var roots = _treeRoot is null ? null : _treeRoot.Children.Select(CreateTreeItem).ToList();
+            _fileTree.ItemsSource = roots;
+            Log.Debug("文本页重建文件树：根节点 {0} 个（文件清单 {1} 个），捕获展开键 {2} 个",
+                roots?.Count ?? 0, _files.Count, capturedKeys);
+            TreeExpansionState.Restore(_fileTree, LangTreeKeyOf, _expandedTreeKeys, item =>
+            {
+                if (item.Tag is LangTextTreeNode node && node.IsFolder) MaterializeChildren(item, node);
+            });
+            Log.Debug("文本页重建文件树完成：展开键 {0} 个，总耗时 {1} ms", _expandedTreeKeys.Count, watch.Elapsed.TotalMilliseconds);
         }
         finally
         {
             _suppressSelection = false;
+        }
+    }
+
+    /// <summary>文本树节点的稳定 key（条目相对路径，与索引 / 编辑集同一口径）。</summary>
+    private static string? LangTreeKeyOf(object? tag)
+        => tag is LangTextTreeNode node && node.Kind != LangTextTreeNodeKind.Root ? node.RelativePath : null;
+
+    private void FileTree_Collapsed(object sender, RoutedEventArgs e)
+    {
+        if (e.OriginalSource is TreeViewItem item && LangTreeKeyOf(item.Tag) is { Length: > 0 } key)
+        {
+            _expandedTreeKeys.Remove(key);
+            Log.Debug("文本页树节点折叠：key={0}，剩余展开键 {1} 个", key, _expandedTreeKeys.Count);
         }
     }
 
@@ -598,28 +661,55 @@ public sealed partial class TextWorkbenchPage : UserControl
 
     private void TreeItem_Expanded(object sender, RoutedEventArgs e)
     {
-        if (e.OriginalSource is not TreeViewItem item || item.Tag is not LangTextTreeNode node || !node.IsFolder) return;
-        MaterializeChildren(item, node);
+        if (e.OriginalSource is not TreeViewItem item)
+        {
+            Log.Debug("文本页树展开事件：原发者不是 TreeViewItem（{0}），忽略", e.OriginalSource?.GetType().Name ?? "-");
+            return;
+        }
+        if (item.Tag is LangTextTreeNode { IsFolder: true } node) MaterializeChildren(item, node);
+        if (LangTreeKeyOf(item.Tag) is { Length: > 0 } key)
+        {
+            _expandedTreeKeys.Add(key);
+            Log.Debug("文本页树节点展开：key={0}，累积展开键 {1} 个", key, _expandedTreeKeys.Count);
+        }
+        else
+        {
+            Log.Warn("文本页树节点展开：该节点没有稳定 key（Tag 类型={0}），展开态无法跨重建保留",
+                item.Tag?.GetType().Name ?? "-");
+        }
     }
 
     /// <summary>把占位子项替换成真实子项（只在展开时生成这一层）。</summary>
     private void MaterializeChildren(TreeViewItem item, LangTextTreeNode node)
     {
-        if (item.Items.Count != 1 || item.Items[0] is not TreeViewItem { Tag: null }) return;
+        if (item.Items.Count != 1 || item.Items[0] is not TreeViewItem { Tag: null })
+        {
+            Log.Trace("文本页物化树节点：跳过（{0}，子项 {1} 个）", node.RelativePath, item.Items.Count);
+            return;
+        }
         item.Items.Clear();
+        var before = node.Children.Count;
         foreach (var child in LangTextTreeBuilder.Expand(node)) item.Items.Add(CreateTreeItem(child));
+        Log.Trace("文本页物化树节点：{0} 生成 {1} 个子项（展开前 {2} 个未展开子项）", node.RelativePath, item.Items.Count, before);
     }
 
     private void FileTree_DoubleClick(object sender, MouseButtonEventArgs e)
     {
         if (_fileTree.SelectedItem is TreeViewItem { Tag: LangTextTreeNode { IsFile: true } node })
+        {
+            Log.Debug("文本页树双击：定位到文件 {0}", node.RelativePath);
             _ = SelectFileAsync(node.RelativePath, null);
+        }
     }
 
     /// <summary>把当前选中文件同步到树（切到树视图时沿途展开，不丢选中）。</summary>
     private void SyncTreeSelection()
     {
-        if (_selectedFile is not { } file || _fileTree.Items.Count == 0) return;
+        if (_selectedFile is not { } file || _fileTree.Items.Count == 0)
+        {
+            Log.Debug("文本页同步树选中：跳过（选中文件={0}，树根项 {1} 个）", _selectedFile?.RelativePath ?? "-", _fileTree.Items.Count);
+            return;
+        }
         var segments = file.RelativePath.Split('/');
         if (segments.Length == 0) return;
 
@@ -629,18 +719,28 @@ public sealed partial class TextWorkbenchPage : UserControl
             // 顶层项是语言目录的直接子项（没有包裹节点），所以从 Items 里按第一段找起。
             var container = _fileTree.Items.OfType<TreeViewItem>().FirstOrDefault(x =>
                 x.Tag is LangTextTreeNode node && node.RelativePath == segments[0]);
-            if (container is null) return;
+            if (container is null)
+            {
+                Log.Warn("文本页同步树选中：树里找不到顶层节点，选中未同步（文件={0}，首段={1}）", file.RelativePath, segments[0]);
+                return;
+            }
             for (var i = 1; i < segments.Length; i++)
             {
                 if (container.Tag is LangTextTreeNode current) MaterializeChildren(container, current);
                 var accumulated = string.Join('/', segments.Take(i + 1));
                 var next = container.Items.OfType<TreeViewItem>().FirstOrDefault(x =>
                     x.Tag is LangTextTreeNode node && node.RelativePath == accumulated);
-                if (next is null) return;
+                if (next is null)
+                {
+                    Log.Warn("文本页同步树选中：中途节点缺失，选中未同步（文件={0}，已走 {1} 段，缺 {2}）",
+                        file.RelativePath, i, accumulated);
+                    return;
+                }
                 container = next;
             }
             container.IsSelected = true;
             container.BringIntoView();
+            Log.Debug("文本页同步树选中成功：{0}（{1} 段路径）", file.RelativePath, segments.Length);
         }
         finally
         {
@@ -660,11 +760,17 @@ public sealed partial class TextWorkbenchPage : UserControl
         }
         var generation = ++_searchGeneration;
         var files = _files;
+        var searchWatch = System.Diagnostics.Stopwatch.StartNew();
         Shell.SetStatus($"正在搜索「{query}」…");
+        Log.Debug("文本页搜索开始：query=\"{0}\"，可搜索文件 {1} 个，代际 {2}", query, files.Count, generation);
         try
         {
             var hits = await Task.Run(() => _service.Search(query, files, cached: _store.ReadHits()));
-            if (generation != _searchGeneration) return;
+            if (generation != _searchGeneration)
+            {
+                Log.Debug("文本页搜索：代际已过期（本次 {0}，当前 {1}），丢弃结果", generation, _searchGeneration);
+                return;
+            }
             // 命中的 RelativePath 就是条目口径（相对活动语言目录），直接当显示路径用。
             var rows = hits
                 .Select(x => new TextHitRow(x, x.RelativePath))
@@ -677,16 +783,23 @@ public sealed partial class TextWorkbenchPage : UserControl
             Shell.SetStatus(rows.Count == 0
                 ? $"没有匹配「{query}」的文件名/键/值。"
                 : $"匹配 {rows.Count} 条（点击命中即可跳转文件并定位键；「返回浏览」收起结果）。");
+            Log.Debug("文本页搜索完成：query=\"{0}\"，{1} 条命中，耗时 {2} ms", query, rows.Count, searchWatch.Elapsed.TotalMilliseconds);
         }
         catch (Exception ex)
         {
-            if (generation != _searchGeneration) return;
+            if (generation != _searchGeneration)
+            {
+                Log.Debug(ex, "文本页搜索异常：代际已过期（本次 {0}，当前 {1}），按原有语义忽略", generation, _searchGeneration);
+                return;
+            }
             Shell.SetStatus($"搜索失败：{ex.Message}");
+            Log.Error(ex, "文本页搜索失败：query=\"{0}\"，耗时 {1} ms", query, searchWatch.Elapsed.TotalMilliseconds);
         }
     }
 
     private void ExitSearchMode()
     {
+        Log.Debug("文本页退出搜索模式：收起命中面板并清空命中列表");
         _hitPanel.Visibility = Visibility.Collapsed;
         _hitList.ItemsSource = null;
     }
@@ -695,7 +808,13 @@ public sealed partial class TextWorkbenchPage : UserControl
     /// 命中的 RelativePath 就是条目口径，直接交给 <see cref="SelectFileAsync"/>。</summary>
     private async Task NavigateToHitAsync(TextHitRow row)
     {
-        if (!_byDisplay.ContainsKey(row.Hit.RelativePath)) return;
+        if (!_byDisplay.ContainsKey(row.Hit.RelativePath))
+        {
+            Log.Warn("文本页跳转命中：文件不在当前文件清单里，已忽略（命中={0}，类别={1}）",
+                row.Hit.RelativePath, row.Hit.Kind);
+            return;
+        }
+        Log.Debug("文本页跳转命中：{0}（类别={1}，键={2}）", row.Hit.RelativePath, row.Hit.Kind, row.Hit.KeyPath ?? "-");
         await SelectFileAsync(row.Hit.RelativePath,
             row.Hit.Kind == LangTextSearchKind.FileName ? null : row.Hit.KeyPath);
     }
@@ -711,20 +830,29 @@ public sealed partial class TextWorkbenchPage : UserControl
     private async Task SelectFileAsync(string relativePath, string? keyPath)
     {
         var file = FindFileByPath(relativePath);
-        if (file is null) return;
+        if (file is null)
+        {
+            Log.Warn("文本页选中文件：文件不在清单里，忽略（{0}）", relativePath);
+            return;
+        }
 
         // 同一文件被重复触发（树/列表刷新各自抛一次选中事件）：不重建编辑器，
         // 只把定位补上。见 _lastLoadedPath 的说明。
         if (!_loadingDocument &&
             string.Equals(_lastLoadedPath, file.RelativePath, StringComparison.OrdinalIgnoreCase))
         {
+            Log.Debug("文本页选中文件：与上次已载入的一致，跳过重建编辑器（{0}，重定位键={1}）",
+                relativePath, keyPath ?? "-");
             if (!string.IsNullOrWhiteSpace(keyPath)) _editor.SelectPath(keyPath);
             return;
         }
 
         var generation = ++_loadGeneration;
+        var loadWatch = System.Diagnostics.Stopwatch.StartNew();
         _selectedFile = file;
         _loadingDocument = true;
+        Log.Debug("文本页载入文件：{0}（{1} 字节，键 {2} 个，代际 {3}，定位键={4}）",
+            relativePath, file.SizeBytes, file.KeyCount, generation, keyPath ?? "-");
         try
         {
             _fileTitle.Text = Path.GetFileName(relativePath);
@@ -735,7 +863,12 @@ public sealed partial class TextWorkbenchPage : UserControl
             // 先读、后清：读失败（非 UTF-8 / 非法 JSON / 文件被删）时不再抹掉
             // 当前已经渲染好的键值树，只报错并保留现场。
             var text = await Task.Run(() => _service.BeginEdit(file.RelativePath));
-            if (generation != _loadGeneration) return;
+            if (generation != _loadGeneration)
+            {
+                Log.Debug("文本页载入文件：代际已过期（本次 {0}，当前 {1}），丢弃载入结果（{2}）",
+                    generation, _loadGeneration, relativePath);
+                return;
+            }
 
             _editor.Clear();
             _editor.LoadDocument(text, _service.TryGetVanillaText(file.RelativePath));
@@ -753,12 +886,20 @@ public sealed partial class TextWorkbenchPage : UserControl
                 ? $"已载入 {relativePath}，正在定位键 {keyPath}（树按需展开）…"
                 : $"已载入 {relativePath}（修改只进内存编辑集）。");
             ReportKeyLocation(file.RelativePath, keyPath);
+            Log.Info("文本页载入文件完成：{0}（{1} 个字符，耗时 {2} ms）",
+                relativePath, text.Length, loadWatch.Elapsed.TotalMilliseconds);
         }
         catch (Exception ex)
         {
-            if (generation != _loadGeneration) return;
+            if (generation != _loadGeneration)
+            {
+                Log.Debug(ex, "文本页载入文件异常：代际已过期（本次 {0}，当前 {1}），按原有语义忽略（{2}）",
+                    generation, _loadGeneration, relativePath);
+                return;
+            }
             _fileDetail.Text = "—";
             Shell.SetStatus($"读取失败：{ex.Message}");
+            Log.Error(ex, "文本页读取文件失败：{0}，耗时 {1} ms", relativePath, loadWatch.Elapsed.TotalMilliseconds);
         }
         finally
         {
@@ -825,17 +966,25 @@ public sealed partial class TextWorkbenchPage : UserControl
             // 「一打开文件就提示已修改」有一半出在这种只进不出的账上）。
             if (string.Equals(_service.TryGetModifiedText(relativePath), e.JsonText, StringComparison.Ordinal))
             {
+                Log.Trace("文本页文档变更：文本与编辑集内一致，不写入（{0}）", relativePath);
                 RefreshEditSetState();
                 return;
             }
             if (string.Equals(_service.TryGetVanillaText(relativePath), e.JsonText, StringComparison.Ordinal))
+            {
                 _host.LangEdits.Revert(relativePath);
+                Log.Info("文本页文档变更：内容回到官方原文，已移出编辑集（{0}，{1} 个字符）", relativePath, e.JsonText.Length);
+            }
             else
+            {
                 _host.LangEdits.SetModified(relativePath, e.JsonText);
+                Log.Info("文本页文档变更：写入编辑集（{0}，{1} 个字符）", relativePath, e.JsonText.Length);
+            }
         }
         catch (Exception ex)
         {
             Shell.SetStatus($"写入编辑集失败：{ex.Message}");
+            Log.Error(ex, "文本页写入编辑集失败：{0}", relativePath);
             return;
         }
         RefreshEditSetState();
@@ -843,7 +992,11 @@ public sealed partial class TextWorkbenchPage : UserControl
 
     private async void RevertFile_Click(object sender, RoutedEventArgs e)
     {
-        if (_selectedFile is null) return;
+        if (_selectedFile is null)
+        {
+            Log.Debug("文本页还原文件：未选中文件，忽略");
+            return;
+        }
         var relativePath = _selectedFile.RelativePath;
         // 走宿主会话（而不是直接调服务）：会话要推进版本号并广播 Changed，
         // 否则 Revision 恒为 0、依赖它的导出报告对不上账。
@@ -851,6 +1004,7 @@ public sealed partial class TextWorkbenchPage : UserControl
         Shell.SetStatus(reverted
             ? $"已还原 {relativePath}（移出编辑集；lang 目录从未被改动）。"
             : "该文件不在编辑集中。");
+        Log.Info("文本页还原文件：{0}，实际移出编辑集={1}", relativePath, reverted);
         await SelectFileAsync(relativePath, null);
     }
 
@@ -886,12 +1040,49 @@ public sealed partial class TextWorkbenchPage : UserControl
             changed = true;
         }
         if (changed) ApplyFileFilter();
-        if (_treeRoot is not null) RebuildTree();
+        // 不再整棵重建：树的内容（文件集合）没变，变的只是「● 已修改」前缀。
+        // 重建会丢掉展开态（用户反馈的「树突然折叠」），也因此必须靠 SyncTreeSelection
+        // 反反复复把路径物化回来。就地改 Header 即可，零状态损失。
+        RefreshTreeHeaders();
 
         // 树 / 列表在重建后都会丢掉「选中高亮」（容器是新建的），但编辑器里的内容还在。
         // 这里把选中同步回去，让用户看到的选中行与编辑列里的文件始终一致
         // （同步走的是程序化路径，不会触发重新打开文件，见 _lastLoadedPath）。
         if (_selectedFile is not null) SelectRowInViews(_selectedFile.RelativePath);
+        Log.Debug("文本页刷新编辑集状态：编辑集 {0} 个文件已改（变更行 {1} 行，选中已修改={2}，选中文件={3}）",
+            edited.Count, changed, selectedModified, _selectedFile?.RelativePath ?? "-");
+    }
+
+    /// <summary>就地刷新树里每个节点的 Header（含「● 已修改」前缀），不重建容器。</summary>
+    private void RefreshTreeHeaders()
+    {
+        _suppressSelection = true;
+        var visited = 0;
+        try
+        {
+            foreach (var item in _fileTree.Items)
+            {
+                RefreshTreeHeader(item);
+                visited++;
+            }
+        }
+        finally
+        {
+            _suppressSelection = false;
+        }
+        // 就地刷新（不重建树）是「树突然折叠」修复的关键，记一行便于事后核对确实没重建。
+        Log.Debug("文本页就地刷新树 Header：顶层 {0} 项（未重建树，展开键保持 {1} 个）", visited, _expandedTreeKeys.Count);
+    }
+
+    private void RefreshTreeHeader(object? item)
+    {
+        if (item is not TreeViewItem node)
+        {
+            Log.Trace("文本页刷新树 Header：非 TreeViewItem（{0}），跳过", item?.GetType().Name ?? "-");
+            return;
+        }
+        if (node.Tag is LangTextTreeNode model) node.Header = BuildTreeHeader(model);
+        foreach (var child in node.Items) RefreshTreeHeader(child);
     }
 
     // ── 导出与直接应用（plan-16 S6 起已移除）──────────────────────────

@@ -1,6 +1,8 @@
 using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Domain.Assets;
+using LimbusModEditor.Domain.Diagnostics;
 using LimbusModEditor.Domain.Projects;
+using NLog;
 
 namespace LimbusModEditor.Application.Build;
 
@@ -48,16 +50,29 @@ public sealed record ExportAdvisorContext(
 /// 再给出「这次该用哪个出口」的清单，推荐项排最前。</summary>
 public sealed class ExportAdvisor
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     public IReadOnlyList<ExportIdea> Analyze(ModProject project, ExportAdvisorContext? context = null)
     {
         ArgumentNullException.ThrowIfNull(project);
         context ??= new ExportAdvisorContext();
+        using var scope = Log.Scope("分析导出思路");
+        Log.Info("分析导出思路开始：项目 {0}，资源 {1} 个，源 {2} 个，游戏目录 {3}，模组目录 {4}",
+            project.Name ?? "-", project.Assets.Count, project.Sources.Count,
+            context.GameDirectory ?? "-", context.ModDirectory ?? "-");
 
         var edited = project.Assets.Where(AssetEditService.HasEdits).ToList();
         var unityEdited = edited.Where(IsUnityAsset).ToList();
         var audioEdited = edited.Where(x => x.Type == AssetType.Audio).ToList();
         var sourceCount = project.Sources.Count;
         var gameDirectoryReady = !string.IsNullOrWhiteSpace(context.GameDirectory) && Directory.Exists(context.GameDirectory);
+        Log.Debug("导出思路统计：有修改 {0} 个，Unity 修改 {1} 个，音频修改 {2} 个，游戏目录可用 {3}，FMOD 可用 {4}",
+            edited.Count, unityEdited.Count, audioEdited.Count, gameDirectoryReady, context.FmodAvailable);
+        if (!gameDirectoryReady)
+        {
+            Log.Warn("游戏目录不可用（{0}）：lang 补丁与调试覆盖层两条出口将被置为不可用（Enabled=false）",
+                context.GameDirectory ?? "-");
+        }
 
         var ideas = new List<ExportIdea>();
 
@@ -145,7 +160,10 @@ public sealed class ExportAdvisor
             gameDirectoryReady ? null : "没找到游戏目录，无法定位覆盖目标。"));
 
         // 推荐项排最前（OrderByDescending 是稳定排序，同类保持添加顺序）。
-        return ideas.OrderByDescending(x => x.Recommended).ToArray();
+        var ordered = ideas.OrderByDescending(x => x.Recommended).ToArray();
+        Log.Debug("分析导出思路完成：共 {0} 条思路，推荐 {1} 条，可用 {2} 条",
+            ordered.Length, ordered.Count(x => x.Recommended), ordered.Count(x => x.Enabled));
+        return ordered;
     }
 
     /// <summary>Unity bundle / SerializedFile 来源的修改（走 Carra2 写回）。

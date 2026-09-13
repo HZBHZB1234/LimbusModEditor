@@ -11,8 +11,10 @@ using LimbusModEditor.Application.AppConfig;
 using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Application.Assets.Preview;
 using LimbusModEditor.Domain.Assets;
+using LimbusModEditor.Domain.Diagnostics;
 using LimbusModEditor.Editing.Images;
 using LimbusModEditor.Formats.Bank;
+using NLog;
 
 namespace LimbusModEditor.App;
 
@@ -24,6 +26,8 @@ namespace LimbusModEditor.App;
 /// </summary>
 public partial class AssetsWorkbenchPage : UserControl
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     private readonly IWorkbenchHost _host;
     private readonly AssetSearchService _search = new();
     private readonly AssetEditService _assetEdits = new();
@@ -32,6 +36,8 @@ public partial class AssetsWorkbenchPage : UserControl
     private readonly UnityFieldEditService _unityFieldEdits = new();
     private readonly AssetPreviewRegistry _previewRegistry;
     private readonly DispatcherTimer _searchTimer;
+    // ③ 布局实测日志的合并去抖（只观测，不参与布局）。
+    private readonly DispatcherTimer _layoutLogTimer;
     private readonly UiStateService _uiState;
     private readonly string _uiStateFile;
     private int _searchGeneration;
@@ -44,6 +50,8 @@ public partial class AssetsWorkbenchPage : UserControl
     private AssetRecord? _selectedAsset;
     // 最近一次搜索结果快照：目录树视图按它重建根层。
     private IReadOnlyList<AssetRecord>? _lastResults;
+    // 目录树已展开节点的稳定 key（跨重建累积）：修复「刷新/同步后树突然折叠回初始形态」。
+    private readonly HashSet<string> _expandedTreeKeys = new(StringComparer.OrdinalIgnoreCase);
     // 默认以「容器目录树」呈现：用户看到的是类文件夹结构，而不是扁平技术路径。
     private bool _treeMode = true;
     private bool _filtersInitialized;
@@ -63,6 +71,14 @@ public partial class AssetsWorkbenchPage : UserControl
         // plan-05：预览提供者管线（FMOD 目录每次现取，设置改动后立即生效）。
         _previewRegistry = AssetPreviewRegistry.CreateDefault(
             () => host.Env.EffectiveFmodLibraryDirectory(host.Project));
+        // ③ 高度/裁切诊断：页面尺寸变化只做合并观测（不改布局）。
+        _layoutLogTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+        _layoutLogTimer.Tick += (_, _) => { _layoutLogTimer.Stop(); LogLayoutMetrics("页面尺寸变化后"); };
+        SizeChanged += OnPageSizeChanged;
+        Loaded += OnPageLoaded;
+        Unloaded += OnPageUnloaded;
+        Log.Info("资源工作台页面构造完成：默认视图={0}，预览列宽={1}，ui-state={2}",
+            _treeMode ? "树形" : "列表", PreviewColumn.Width, _uiStateFile);
     }
 
     /// <summary>当前选中的资源（宿主拖放判定用）。</summary>
@@ -72,7 +88,10 @@ public partial class AssetsWorkbenchPage : UserControl
     /// 百万级资产下计数在后台线程算，避免刷新瞬间卡死 UI。</summary>
     public void OnProjectRefreshed()
     {
+        using var scope = Log.Scope("OnProjectRefreshed");
         var project = _host.Project;
+        Log.Info("项目状态刷新入口：资产总数={0}，视图={1}，已展开树键={2}",
+            project?.Assets.Count ?? 0, _treeMode ? "树形" : "列表", _expandedTreeKeys.Count);
         AssetCountText.Text = (project?.Assets.Count ?? 0).ToString();
         EditCountText.Text = "…";
         _ = UpdateEditCountAsync();
@@ -83,10 +102,12 @@ public partial class AssetsWorkbenchPage : UserControl
 
     private async Task UpdateEditCountAsync()
     {
+        using var scope = Log.Scope("UpdateEditCountAsync");
         var project = _host.Project;
-        if (project is null) { EditCountText.Text = "0"; return; }
+        if (project is null) { EditCountText.Text = "0"; Log.Debug("项目为空，已修改资源数记为 0"); return; }
         var count = await Task.Run(() => project.Assets.Count(AssetEditService.HasEdits));
         EditCountText.Text = count.ToString();
+        Log.Debug("已修改资源计数完成：{0} / {1}", count, project.Assets.Count);
     }
 
     /// <summary>宿主（Ctrl+F）聚焦搜索框。</summary>
@@ -109,20 +130,90 @@ public partial class AssetsWorkbenchPage : UserControl
 
     // ── plan-04：预览列拖拽与占比持久化 ─────────────────────────────
 
-    private void PreviewSplitter_DragCompleted(object sender, System.Windows.Input.MouseButtonEventArgs e) => SavePreviewWidth();
+    private void PreviewSplitter_DragCompleted(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        Log.Info("用户拖拽预览列分隔条完成：预览列宽={0}", PreviewColumn.Width);
+        SavePreviewWidth();
+        LogLayoutMetrics("拖拽预览列后");
+    }
 
     /// <summary>双击把手复位默认宽（360）并持久化。</summary>
     private void PreviewSplitter_DoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
+        Log.Info("用户双击预览列分隔条：复位为 360（原 {0}）", PreviewColumn.Width);
         PreviewColumn.Width = new GridLength(360);
         SavePreviewWidth();
+        LogLayoutMetrics("复位预览列宽后");
     }
 
     private void SavePreviewWidth()
     {
         _uiState.AssetsPreviewColumnWidth = PreviewColumn.Width.IsAbsolute ? PreviewColumn.Width.Value : 360;
         UiStateService.Save(_uiState, _uiStateFile);
+        Log.Debug("预览列宽持久化：{0} → {1}", _uiState.AssetsPreviewColumnWidth, _uiStateFile);
     }
+
+    // ── ③ 高度/滚动诊断：只读测量，不参与布局决策 ────────────────────
+    // 用户报障「预览区（最顶栏『创作状态』整块）在窗口变矮时不能上下滑动、内容被裁」。
+    // 这里只把布局实测值记下来（页面总高、右栏两行高度、预览块与「创作状态」滚动区的
+    // 实测高度），不改任何布局。
+
+    /// <summary>走到页面根 Grid（右栏两行布局的宿主）。取不到时返回 null（调用点自行降级）。</summary>
+    private Grid? FindRootGrid()
+    {
+        System.Windows.DependencyObject? node = PreviewHost;
+        for (var depth = 0; depth < 12 && node is not null; depth++)
+        {
+            if (node is Grid g && g.Parent is Border) return g;
+            node = System.Windows.Media.VisualTreeHelper.GetParent(node);
+        }
+        return null;
+    }
+
+    /// <summary>记录一次布局实测值（Debug）。<paramref name="reason"/> 说明触发场景。</summary>
+    private void LogLayoutMetrics(string reason)
+    {
+        var root = FindRootGrid();
+        if (root is null) { Log.Debug("布局实测（{0}）：尚未接入可视化树，跳过", reason); return; }
+        var previewRow = root.RowDefinitions.Count > 0 ? root.RowDefinitions[0] : null;
+        var statusRow = root.RowDefinitions.Count > 1 ? root.RowDefinitions[1] : null;
+        var statusScroll = root.Children.Count > 1 ? root.Children[1] as ScrollViewer : null;
+        var previewGrid = PreviewHost.Parent as Grid;
+        Log.Debug(
+            "布局实测（{0}）：页面 Actual={1}x{2}；右栏 Grid Actual={3}x{4}；行0(预览)={5}/{6}，行1(创作状态)={7}/{8}；"
+            + "预览块 Actual={9}x{10}（行0:{11}/行1:{12}/行2:{13}），PreviewHost Actual={14}x{15}，"
+            + "创作状态区(ScrollViewer) Actual={16}x{17} 可视高={18} 可滚高={19} 滚动条={20}，PreviewMaxHeight={21}",
+            reason, ActualWidth, ActualHeight,
+            root.ActualWidth, root.ActualHeight,
+            previewRow?.ActualHeight ?? -1, previewRow?.Height.ToString() ?? "-",
+            statusRow?.ActualHeight ?? -1, statusRow?.Height.ToString() ?? "-",
+            previewGrid?.ActualWidth ?? -1, previewGrid?.ActualHeight ?? -1,
+            previewGrid is { RowDefinitions.Count: > 0 } ? previewGrid.RowDefinitions[0].ActualHeight : -1,
+            previewGrid is { RowDefinitions.Count: > 1 } ? previewGrid.RowDefinitions[1].ActualHeight : -1,
+            previewGrid is { RowDefinitions.Count: > 2 } ? previewGrid.RowDefinitions[2].ActualHeight : -1,
+            PreviewHost.ActualWidth, PreviewHost.ActualHeight,
+            statusScroll?.ActualWidth ?? -1, statusScroll?.ActualHeight ?? -1,
+            statusScroll?.ViewportHeight ?? -1, statusScroll?.ExtentHeight ?? -1,
+            statusScroll?.ComputedVerticalScrollBarVisibility.ToString() ?? "-",
+            PreviewMaxHeight);
+    }
+
+    /// <summary>页面尺寸变化的合并观测（500 ms 去抖，避免拖拽窗口时刷屏）。</summary>
+    private void OnPageSizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        _layoutLogTimer.Stop();
+        _layoutLogTimer.Start();
+    }
+
+    private void OnPageLoaded(object sender, RoutedEventArgs e)
+    {
+        Log.Info("资源工作台页面 Loaded：页面尺寸={0}x{1}，视图={2}，预览列宽={3}",
+            ActualWidth, ActualHeight, _treeMode ? "树形" : "列表", PreviewColumn.Width);
+        LogLayoutMetrics("页面 Loaded");
+    }
+
+    private void OnPageUnloaded(object sender, RoutedEventArgs e)
+        => Log.Info("资源工作台页面 Unloaded：页面尺寸={0}x{1}", ActualWidth, ActualHeight);
 
     // ── plan-03：拖放收窄为「单张图片拖到选中的图像资源上替换」──────────
 
@@ -149,6 +240,7 @@ public partial class AssetsWorkbenchPage : UserControl
             $"把 {Path.GetFileName(path)} 用作选中资源的替换图？\n\n资源：{AssetDisplay.DisplayPath(selected)}",
             "拖放替换", MessageBoxButton.YesNo, MessageBoxImage.Question);
         if (choice != MessageBoxResult.Yes) return;
+        Log.Info("用户确认拖放替换：资源={0}，来源图片={1}", AssetDisplay.DisplayPath(selected), path);
         try
         {
             await _assetEdits.ReplaceFromFileAsync(project, selected.AssetId, path, projectDirectory);
@@ -156,7 +248,7 @@ public partial class AssetsWorkbenchPage : UserControl
             _host.RefreshProjectState("拖放替换已登记");
             RestoreListSelection(selected);
         }
-        catch (Exception ex) { ShowError("拖放替换失败", ex); }
+        catch (Exception ex) { Log.Error(ex, "拖放替换失败：资源={0}，来源图片={1}", AssetDisplay.DisplayPath(selected), path); ShowError("拖放替换失败", ex); }
     }
 
     // ── 搜索 / 筛选 ──────────────────────────────────────────────────
@@ -164,6 +256,7 @@ public partial class AssetsWorkbenchPage : UserControl
     private void SearchBox_TextChanged(object sender, TextChangedEventArgs e)
     {
         if (_searchTimer is null) return; // XAML 解析期间可能先于构造函数赋值
+        if (Log.IsDebugEnabled) Log.Debug("用户修改搜索框：关键词长度={0}", SearchBox.Text.Length);
         _searchTimer.Stop();
         _searchTimer.Start();
     }
@@ -171,6 +264,14 @@ public partial class AssetsWorkbenchPage : UserControl
     private void Filter_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (!_filtersInitialized || _searchTimer is null) return;
+        if (Log.IsDebugEnabled) Log.Debug(
+            "用户修改下拉筛选：类型={0}{1}，状态={2}{3}，排序={4}，大小={5}~{6} KB",
+            TypeFilter.SelectedIndex,
+            TypeFilter.SelectedItem is null ? "(全部)" : "(已选)",
+            StateFilter.SelectedIndex,
+            StateFilter.SelectedItem is null ? "(全部)" : "(已选)",
+            SortFilter?.SelectedIndex ?? -1,
+            MinSizeFilter?.Text ?? "-", MaxSizeFilter?.Text ?? "-");
         RequestSearch();
     }
 
@@ -180,6 +281,9 @@ public partial class AssetsWorkbenchPage : UserControl
     private void Filter_Changed(object sender, RoutedEventArgs e)
     {
         if (_searchTimer is null || _host.Project is null) return;
+        if (Log.IsDebugEnabled) Log.Debug("用户勾选复选框筛选：容器内={0}，仅已替换={1}，显示静态数据表={2}，发送者={3}",
+            ContainerOnlyFilter?.IsChecked == true, ReplacedOnlyFilter?.IsChecked == true,
+            ShowStaticFilter?.IsChecked == true, (sender as FrameworkElement)?.Name ?? "-");
         RequestSearch();
     }
 
@@ -195,6 +299,8 @@ public partial class AssetsWorkbenchPage : UserControl
 
     private void ClearFilters_Click(object sender, RoutedEventArgs e)
     {
+        Log.Info("用户点击「清除筛选」：重置全部筛选条件（显示静态数据表={0} → False）",
+            ShowStaticFilter?.IsChecked == true);
         SearchBox.Text = string.Empty;
         TypeFilter.SelectedIndex = -1;
         StateFilter.SelectedIndex = -1;
@@ -203,7 +309,7 @@ public partial class AssetsWorkbenchPage : UserControl
         MinSizeFilter.Text = string.Empty;
         MaxSizeFilter.Text = string.Empty;
         ReplacedOnlyFilter.IsChecked = false;
-        ShowStaticFilter.IsChecked = false;
+        ShowStaticFilter!.IsChecked = false;
         _searchTimer.Stop();
         // 上面这些赋值会经 Filter_Changed 触发防抖搜索；这里要求「立刻」重跑，
         // 避免用户看到清除筛选后仍然空白的旧结果。
@@ -214,7 +320,15 @@ public partial class AssetsWorkbenchPage : UserControl
     /// RunSearchAsync（后台线程 + 防抖）。</summary>
     private void RefreshAssetList()
     {
-        if (_host.Project is null) { AssetList.ItemsSource = null; _lastResults = null; AssetTree.ItemsSource = null; return; }
+        using var scope = Log.Scope("RefreshAssetList");
+        if (_host.Project is null)
+        {
+            AssetList.ItemsSource = null; _lastResults = null; AssetTree.ItemsSource = null;
+            Log.Debug("刷新资源列表：无项目，已清空列表与目录树");
+            return;
+        }
+        Log.Debug("刷新资源列表：资产总数={0}，筛选已初始化={1}，视图={2}",
+            _host.Project.Assets.Count, _filtersInitialized, _treeMode ? "树形" : "列表");
         if (!_filtersInitialized)
         {
             _filtersInitialized = true;
@@ -245,6 +359,14 @@ public partial class AssetsWorkbenchPage : UserControl
         if (long.TryParse(MinSizeFilter.Text.Trim(), out var minSize) && minSize > 0) minKb = minSize * 1024;
         if (long.TryParse(MaxSizeFilter.Text.Trim(), out var maxSize) && maxSize > 0) maxKb = maxSize * 1024;
         var sort = (AssetSortKind)Math.Clamp(SortFilter?.SelectedIndex ?? 0, 0, 4);
+        // ① 关键线索：静态数据表是否被显式包含（默认 False = 隐藏 static-data）。
+        Log.Debug("构造搜索条件：关键词长度={0}，类型={1}，状态={2}，最小={3} KB，最大={4} KB，"
+            + "仅已替换={5}，排序={6}，仅容器内={7}，显示静态数据表={8}",
+            SearchBox?.Text?.Length ?? 0,
+            selectedType?.ToString() ?? "-", selectedState?.ToString() ?? "-",
+            minKb?.ToString() ?? "-", maxKb?.ToString() ?? "-",
+            ReplacedOnlyFilter?.IsChecked == true, sort,
+            ContainerOnlyFilter?.IsChecked == true, ShowStaticFilter?.IsChecked == true);
         return new AssetSearchQuery(
             SearchBox?.Text,
             selectedType,
@@ -254,7 +376,7 @@ public partial class AssetsWorkbenchPage : UserControl
             null,
             minKb,
             maxKb,
-            ReplacedOnlyFilter.IsChecked,
+            ReplacedOnlyFilter!.IsChecked,
             sort,
             ContainerOnlyFilter?.IsChecked == true ? true : null,
             // plan-08：静态数据 bundle 的资源默认隐藏（勾选「显示静态数据表」后可见）。
@@ -278,11 +400,13 @@ public partial class AssetsWorkbenchPage : UserControl
     /// 记录构建。</summary>
     private async Task RunSearchAsync()
     {
+        using var scope = Log.Scope("RunSearchAsync");
         var project = _host.Project;
-        if (project is null) { AssetList.ItemsSource = null; _lastResults = null; AssetTree.ItemsSource = null; return; }
+        if (project is null) { AssetList.ItemsSource = null; _lastResults = null; AssetTree.ItemsSource = null; Log.Debug("搜索跳过：无项目"); return; }
         var generation = ++_searchGeneration;
         var query = BuildSearchQuery();
         var snapshot = project.Assets.ToArray();
+        Log.Debug("搜索开始：代际={0}，快照={1} 条资产，视图={2}", generation, snapshot.Length, _treeMode ? "树形" : "列表");
         IReadOnlyList<AssetRecord> results;
         IReadOnlyList<AssetRow> rows;
         try
@@ -296,8 +420,12 @@ public partial class AssetsWorkbenchPage : UserControl
                 return (filtered, (IReadOnlyList<AssetRow>)rowList);
             });
         }
-        catch (ArgumentException) { return; }
-        if (generation != _searchGeneration) return;
+        catch (ArgumentException ex) { Log.Error(ex, "搜索参数被拒绝（语义原样：结果丢弃）：代际={0}，快照={1} 条", generation, snapshot.Length); return; }
+        if (generation != _searchGeneration)
+        {
+            Log.Debug("搜索结果已过期丢弃：本代际={0}，当前代际={1}，命中={2} 条", generation, _searchGeneration, results.Count);
+            return;
+        }
         _lastResults = results;
         var selectedId = (AssetList.SelectedItem as AssetRow)?.AssetId;
         AssetList.ItemsSource = rows;
@@ -305,10 +433,13 @@ public partial class AssetsWorkbenchPage : UserControl
         {
             var restored = rows2.FirstOrDefault(x => x.AssetId == id);
             if (restored is not null) AssetList.SelectedItem = restored;
+            else Log.Warn("搜索后恢复选中失败：AssetId={0} 不在本代际 {1} 条结果中", id, results.Count);
         }
         AssetCountText.Text = results.Count == project.Assets.Count
             ? project.Assets.Count.ToString()
             : $"{results.Count} / {project.Assets.Count}";
+        Log.Debug("搜索完成：代际={0}，命中 {1} / 全量 {2} 条，行视图模型={3} 个",
+            generation, results.Count, project.Assets.Count, rows.Count);
         // 目录树视图：按最新搜索结果重建根层（展开仍是惰性的）。
         if (_treeMode) RebuildTree();
     }
@@ -316,12 +447,21 @@ public partial class AssetsWorkbenchPage : UserControl
     // ── 选中与预览 ───────────────────────────────────────────────────
 
     private void AssetList_SelectionChanged(object sender, SelectionChangedEventArgs e)
-        => ApplyAssetSelection((AssetList.SelectedItem as AssetRow)?.Asset);
+    {
+        var row = AssetList.SelectedItem as AssetRow;
+        if (Log.IsDebugEnabled) Log.Debug("列表选中变化：{0}（共 {1} 项被选/取消）",
+            row is null ? "(无)" : AssetDisplay.DisplayPath(row.Asset), e.AddedItems.Count);
+        ApplyAssetSelection(row?.Asset);
+    }
 
     /// <summary>统一的选中处理：列表与目录树两个视图共用（右侧状态、按钮
     /// 可用性、预览都以此为准；右键菜单/双击读取 <see cref="_selectedAsset"/>）。</summary>
     private void ApplyAssetSelection(AssetRecord? asset)
     {
+        Log.Info("选中资源：{0}（类型={1}，大小={2}，状态={3}，UnityPathId={4}）",
+            asset is null ? "(无)" : AssetDisplay.DisplayPath(asset),
+            asset?.Type.ToString() ?? "-", asset?.Size.ToString() ?? "-",
+            asset?.EditState.ToString() ?? "-", asset?.UnityPathId?.ToString() ?? "-");
         _selectedAsset = asset;
         SelectedAssetNameText.Text = asset is null ? "未选择" : AssetDisplay.DisplayName(asset);
         SelectedAssetPathText.Text = asset is null ? "—" : AssetDisplay.DisplayPath(asset);
@@ -345,9 +485,11 @@ public partial class AssetsWorkbenchPage : UserControl
             {
                 AssetList.SelectedItem = row;
                 AssetList.ScrollIntoView(row);
+                Log.Debug("恢复列表选中：{0} → 已定位到行对象", AssetDisplay.DisplayPath(asset));
                 return;
             }
         }
+        Log.Debug("恢复列表选中：{0} 不在当前结果中，改为直接应用选中", AssetDisplay.DisplayPath(asset));
         ApplyAssetSelection(asset);
     }
 
@@ -359,7 +501,14 @@ public partial class AssetsWorkbenchPage : UserControl
         var project = _host.Project;
         var hasProjectFile = _host.ProjectFile is not null;
         ReplaceAssetButton.IsEnabled = asset is not null && hasProjectFile;
-        EditTextButton.IsEnabled = asset?.Type is AssetType.Text or AssetType.Json && hasProjectFile;
+        EditTextButton.IsEnabled = asset is not null && TextAssetEditService.CanEditText(asset) && hasProjectFile;
+        // bundle 内对象的正文在 AssetBundle 容器里，内置编辑器不支持 —— 置灰并说明原因，
+        // 否则双击会把整个容器字节当正文读进 WPF 文本框（实测 2.26 MB 二进制排版
+        // 26.5 秒 → 界面被 Windows 判「未响应」）。
+        var textAssetSelected = asset?.Type is AssetType.Text or AssetType.Json;
+        EditTextButton.ToolTip = asset is not null && textAssetSelected && !TextAssetEditService.CanEditText(asset)
+            ? TextAssetEditService.BundleAssetHint
+            : "文本 / JSON 资源的内置编辑器：改完保存即登记为替换（可撤销，导出时写入模组）。";
         HexPreviewButton.IsEnabled = asset is not null;
         ClearEditsButton.IsEnabled = asset is not null && AssetEditService.HasEdits(asset);
         SpriteMetadataButton.IsEnabled = asset?.Type == AssetType.Sprite &&
@@ -393,9 +542,13 @@ public partial class AssetsWorkbenchPage : UserControl
     /// 保证快速切换选中项时旧结果不覆盖新选中项；属性区并行异步加载。</summary>
     private async Task UpdatePreviewAsync(AssetRecord? asset)
     {
+        using var scope = Log.Scope("UpdatePreviewAsync");
         var generation = ++_previewGeneration;
         ResetPreview();
-        if (asset is null) return;
+        if (asset is null) { Log.Debug("预览跳过：无选中资源（代际={0}）", generation); return; }
+        Log.Debug("预览开始：代际={0}，资源={1}，类型={2}，LogicalPath={3}，SourcePath={4}",
+            generation, AssetDisplay.DisplayPath(asset), asset.Type,
+            asset.LogicalPath ?? "-", asset.SourcePath ?? "-");
         AssetPreview preview;
         try
         {
@@ -403,15 +556,44 @@ public partial class AssetsWorkbenchPage : UserControl
         }
         catch (Exception ex)
         {
-            if (generation != _previewGeneration) return;
+            if (generation != _previewGeneration) { Log.Error(ex, "预览失败（结果已过期丢弃）：资源={0}", AssetDisplay.DisplayPath(asset)); return; }
+            Log.Error(ex, "预览失败：资源={0}，类型={1}，LogicalPath={2}",
+                AssetDisplay.DisplayPath(asset), asset.Type, asset.LogicalPath ?? "-");
             PreviewInfoText.Text = $"预览失败：{ex.Message}";
             return;
         }
-        if (generation != _previewGeneration) return;
+        if (generation != _previewGeneration)
+        {
+            Log.Debug("预览结果已过期丢弃：本代际={0}，当前代际={1}，资源={2}",
+                generation, _previewGeneration, AssetDisplay.DisplayPath(asset));
+            return;
+        }
         _currentAudio = preview.Audio;
         PreviewInfoText.Text = preview.InfoLine;
-        PreviewHost.Content = BuildPreviewView(preview);
+        LogPreviewResult(generation, asset, preview);
+        var buildTimer = System.Diagnostics.Stopwatch.StartNew();
+        var view = WrapPreview(BuildPreviewView(preview), preview.Kind);
+        PreviewHost.Content = view;
+        buildTimer.Stop();
+        Log.Debug("预览视图已挂载：代际={0}，形态={1}，构建耗时={2} ms，PreviewHost ActualHeight={3}（可用高={4}）",
+            generation, preview.Kind, buildTimer.ElapsedMilliseconds,
+            PreviewHost.ActualHeight, ActualHeight);
         _ = UpdatePropertiesAsync(asset, generation);
+    }
+
+    /// <summary>② 预览链路结果留痕：Kind + 内容规模 + 是否截断（不记内容本身）。</summary>
+    private static void LogPreviewResult(int generation, AssetRecord asset, AssetPreview preview)
+    {
+        var textLength = preview.Text?.Length ?? -1;
+        var rows = preview.Rows?.Count ?? -1;
+        Log.Debug("预览结果：代际={0}，资源={1}，Kind={2}，InfoLine={3}，文本长度={4}，字符/行数={5}，"
+            + "音频={6}，图像字节={7}，替换图字节={8}，替换图标签={9}，是否截断见 InfoLine",
+            generation, AssetDisplay.DisplayPath(asset), preview.Kind, preview.InfoLine ?? "-",
+            textLength, rows,
+            preview.Audio is null ? "无" : "有",
+            preview.ImagePng?.Length ?? -1,
+            preview.AlternateImagePng?.Length ?? -1,
+            preview.AlternateLabel ?? "-");
     }
 
     /// <summary>属性区（plan-01 第 3 步）：后台读取 + 代际守卫；失败只影响本区。</summary>
@@ -427,14 +609,32 @@ public partial class AssetsWorkbenchPage : UserControl
             PropertyInfoText.Text = rows.Count == 0
                 ? "（没有可显示的属性）"
                 : $"{rows.Count} 项 · {AssetDisplay.DisplayPath(asset)}";
+            Log.Debug("属性读取完成：代际={0}，资源={1}，条目数={2}",
+                generation, AssetDisplay.DisplayPath(asset), rows.Count);
         }
         catch (Exception ex)
         {
+            Log.Error(ex, "属性读取失败：代际={0}，资源={1}", generation, AssetDisplay.DisplayPath(asset));
             if (generation == _previewGeneration) PropertyInfoText.Text = $"属性读取失败：{ex.Message}";
         }
     }
 
     // ── 预览视图构建（按 Kind 切换；全部只读，plan-05）──────────────────
+
+    /// <summary>
+    /// 预览区最大高度：超过就滚动而不是无限撑高。
+    ///
+    /// <para><b>为什么必须有上限</b>：预览内容高度由内容自身决定（行号正文 /
+    /// 键值行 / 说明文字），窗口不够高时它会被裁掉且**外层没有滚动入口**
+    /// （预览列的 Row0 是 <c>*</c>，滚动器只包着下面的属性区）。用户反馈的
+    /// 「窗口缩小时预览看不到下面、也没法上下滑动」就是它。给一个上限 +
+    /// 可滚动容器后，内容再长也能滚。</para>
+    /// </summary>
+    private const double PreviewMaxHeight = 520;
+
+    /// <summary>JSON 树预览的行数上限（超过就只给纯文本，见
+    /// <see cref="IsJsonTreeWorthBuilding"/>）。</summary>
+    private const int JsonTreeMaxSourceLines = 1500;
 
     private UIElement? BuildPreviewView(AssetPreview preview) => preview.Kind switch
     {
@@ -447,6 +647,42 @@ public partial class AssetsWorkbenchPage : UserControl
         AssetPreviewKind.Message => BuildMessageView(preview.Text),
         _ => null,
     };
+
+    /// <summary>
+    /// 把预览内容包进「可滚动 + 有最大高度」的容器。
+    ///
+    /// <para>图像预览自带固定视口（<see cref="ImagePreviewViewportHeight"/>）、
+    /// 音频是交互控件，两者都不再包一层，否则会出现双滚动条。</para>
+    /// </summary>
+    private UIElement? WrapPreview(UIElement? content, AssetPreviewKind kind)
+    {
+        if (content is null) { Log.Debug("预览包装：内容为空（Kind={0}），PreviewHost 将保持空", kind); return null; }
+        if (kind is AssetPreviewKind.Image or AssetPreviewKind.Audio)
+        {
+            Log.Debug("预览包装：Kind={0} 自带滚动/固定视口，不再外包（图像视口高={1}，音频控件）",
+                kind, ImagePreviewViewportHeight);
+            return content;
+        }
+        var scroller = new ScrollViewer
+        {
+            Content = content,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            MaxHeight = PreviewMaxHeight,
+        };
+        // ③ 关键数值：内容实际需求高度 vs 设定的 MaxHeight vs 可用高度
+        // （可用高度取自 PreviewHost 所在行的实测高度；外层 Row0 是 *，窗口变矮时会被压缩）。
+        var kindName = kind;
+        scroller.Loaded += (_, _) => Log.Debug(
+            "预览滚动容器实测：Kind={0}，MaxHeight={1}，Actual={2}x{3}，可滚高 ExtentHeight={4}，"
+            + "可视高 ViewportHeight={5}，滚动条={6}，PreviewHost 可用高={7}，页面高={8}",
+            kindName, PreviewMaxHeight, scroller.ActualWidth, scroller.ActualHeight,
+            scroller.ExtentHeight, scroller.ViewportHeight,
+            scroller.ComputedVerticalScrollBarVisibility, PreviewHost.ActualHeight, ActualHeight);
+        Log.Debug("预览包装：Kind={0}，MaxHeight={1}，内容类型={2}（③ 若内容需求高 > MaxHeight 且窗口更矮则会被裁）",
+            kind, PreviewMaxHeight, content.GetType().Name);
+        return scroller;
+    }
 
     /// <summary>图像预览的视口高度（固定高度才能让 ScrollViewer 有确定的可视区，
     /// 「适应窗口」比例也才有意义）。</summary>
@@ -470,6 +706,9 @@ public partial class AssetsWorkbenchPage : UserControl
     {
         var container = new DockPanel { LastChildFill = true };
         var bitmap = preview.ImagePng is null ? null : LoadBitmap(preview.ImagePng);
+        Log.Debug("构建图像预览：PNG 字节={0}，解码像素={1}x{2}，固定视口高={3}，替换图={4}",
+            preview.ImagePng?.Length ?? -1, bitmap?.PixelWidth ?? -1, bitmap?.PixelHeight ?? -1,
+            ImagePreviewViewportHeight, preview.AlternateImagePng is null ? "无" : "有");
         var image = new Image
         {
             Stretch = Stretch.Fill, // 尺寸完全由「像素 × 缩放」决定，不再依赖 Uniform 的自动适配
@@ -531,6 +770,10 @@ public partial class AssetsWorkbenchPage : UserControl
             var fit = Math.Min(viewportWidth / bitmap.PixelWidth, viewportHeight / bitmap.PixelHeight);
             fitScale = Math.Clamp(fit, 0.02, ImagePreviewMaxFitScale);
             ApplyZoom();
+            if (Log.IsDebugEnabled) Log.Debug(
+                "图像适应视口：视口={0}x{1}（Actual={2}x{3}），图像={4}x{5}，fit={6:0.###}，最终比例={7:0.###}",
+                viewportWidth, viewportHeight, scroll.ActualWidth, scroll.ActualHeight,
+                bitmap.PixelWidth, bitmap.PixelHeight, fit, fitScale);
         }
 
         // 视口尺寸变化（拖分隔条 / 换选中项）时重新适应：用户手动缩放过就不打扰他。
@@ -608,7 +851,23 @@ public partial class AssetsWorkbenchPage : UserControl
     {
         text ??= string.Empty;
         var textView = BuildNumberedText(text);
-        if (!jsonTree || TryBuildJsonTree(text) is not { } tree) return textView;
+        // ② 未响应的关键闸门：JSON 树在 UI 线程一次性建到 2000 节点，
+        // 静态数据表这类大 JSON 会被这里挡下（退回纯文本）。
+        var worthTree = jsonTree && IsJsonTreeWorthBuilding(text);
+        Log.Debug("构建文本预览：请求 JSON 树={0}，值得建树={1}（源行数上限={2}），字符数={3}",
+            jsonTree, worthTree, JsonTreeMaxSourceLines, text.Length);
+        if (!worthTree)
+        {
+            if (jsonTree && text.Length > 0)
+                Log.Debug("JSON 树闸门拦下：行数超过 {0} 行（字符数={1}），退回纯文本预览以避免 UI 线程卡顿",
+                    JsonTreeMaxSourceLines, text.Length);
+            return textView;
+        }
+        if (TryBuildJsonTree(text) is not { } tree)
+        {
+            Log.Warn("JSON 树构建失败（解析异常或超预算）：字符数={0}，已回退纯文本预览", text.Length);
+            return textView;
+        }
 
         var panel = new DockPanel { LastChildFill = true };
         var host = new ContentControl { Content = textView };
@@ -625,6 +884,27 @@ public partial class AssetsWorkbenchPage : UserControl
         return panel;
     }
 
+    /// <summary>
+    /// 是否值得为这段 JSON 建树。
+    ///
+    /// <para><b>为什么要有这个闸门</b>：JSON 树是在 **UI 线程**上一次性构造的
+    /// （<see cref="TryBuildJsonTree"/> 最多 2000 个 <c>TreeViewItem</c>，前两层还
+    /// <c>IsExpanded=true</c> 立刻参与布局）。静态数据表这类大 JSON（实测单表 3.4 MB、
+    /// 截断仍有上万行）会让「点一下预览」变成秒级冻屏甚至未响应。行数超阈值时
+    /// 退回纯文本预览（<see cref="BuildNumberedText"/>）并保持可滚动。</para>
+    /// </summary>
+    private static bool IsJsonTreeWorthBuilding(string text)
+    {
+        if (text.Length == 0) return false;
+        var lines = 1;
+        foreach (var character in text)
+        {
+            if (character != '\n') continue;
+            if (++lines > JsonTreeMaxSourceLines) return false;
+        }
+        return true;
+    }
+
     /// <summary>行号 + 正文：两列都用同一字体/字号的只读 TextBox（行高天然一致），
     /// 由外层 ScrollViewer 统一滚动。
     ///
@@ -638,6 +918,7 @@ public partial class AssetsWorkbenchPage : UserControl
         foreach (var character in text) if (character == '\n') lineCount++;
         var numbers = new StringBuilder();
         for (var i = 1; i <= lineCount; i++) numbers.Append(i).Append('\n');
+        Log.Debug("构建行号文本预览：字符数={0}，行数={1}，行号列宽预算=Auto", text.Length, lineCount);
 
         var grid = new Grid();
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -695,10 +976,15 @@ public partial class AssetsWorkbenchPage : UserControl
     {
         JsonDocument document;
         try { document = JsonDocument.Parse(text); }
-        catch (JsonException) { return null; }
+        catch (JsonException ex)
+        {
+            Log.Warn(ex, "JSON 树解析失败：字符数={0}，已回退纯文本预览", text.Length);
+            return null;
+        }
 
-        const int maxNodes = 2000;
+        const int maxNodes = 1500;
         var budget = maxNodes;
+        var treeTimer = System.Diagnostics.Stopwatch.StartNew();
         TreeViewItem BuildNode(string label, JsonElement element, int depth)
         {
             var (typeLabel, valueLabel) = element.ValueKind switch
@@ -740,6 +1026,11 @@ public partial class AssetsWorkbenchPage : UserControl
 
         var root = BuildNode("$", document.RootElement, 0);
         document.Dispose();
+        treeTimer.Stop();
+        // ② 未响应线索：这段构造发生在 UI 线程（BuildTextView 调用链）。
+        Log.Debug("JSON 树构建完成：字符数={0}，节点数={1}（预算 {2}），是否触顶={3}，UI 线程耗时={4} ms，线程={5}",
+            text.Length, maxNodes - Math.Max(0, budget), maxNodes, budget <= 0,
+            treeTimer.ElapsedMilliseconds, Environment.CurrentManagedThreadId);
         if (budget <= 0) root.Items.Add(new TreeViewItem { Header = $"… 节点过多，只显示前 {maxNodes} 个" });
         var tree = new TreeView
         {
@@ -761,6 +1052,9 @@ public partial class AssetsWorkbenchPage : UserControl
     private UIElement BuildAudioView(AssetPreviewAudio? audio)
     {
         var panel = new StackPanel();
+        Log.Debug("构建音频预览：PCM 字节={0}，时长={1:0.##} 秒，采样率={2} Hz，声道={3}，包络点={4}，可播放={5}",
+            audio?.Wave?.Length ?? -1, audio?.DurationSeconds ?? -1, audio?.SampleRate ?? -1,
+            audio?.Channels ?? -1, audio?.Envelope.Count ?? -1, audio?.CanPlay == true);
         if (audio is null)
         {
             panel.Children.Add(new TextBlock { Text = "（没有音频数据）", Foreground = Brushes.Silver });
@@ -829,6 +1123,7 @@ public partial class AssetsWorkbenchPage : UserControl
     /// <summary>键值行预览（摘要卡 / 只读字段树）。</summary>
     private static UIElement BuildRowsView(IReadOnlyList<AssetPreviewRow>? rows)
     {
+        Log.Debug("构建键值行预览：行数={0}，固定 MaxHeight=260（行越多越依赖外层滚动）", rows?.Count ?? -1);
         var panel = new StackPanel();
         if (rows is null || rows.Count == 0)
         {
@@ -868,35 +1163,43 @@ public partial class AssetsWorkbenchPage : UserControl
         };
     }
 
-    private static UIElement BuildHexView(string? text) => new Border
+    private static UIElement BuildHexView(string? text)
     {
-        Background = WbBrush("WbListBrush"),
-        BorderBrush = WbBrush("WbBorderBrush"),
-        BorderThickness = new Thickness(1),
-        Height = 200,
-        Child = new TextBox
+        Log.Debug("构建十六进制预览：字符数={0}，固定 Height=200", text?.Length ?? -1);
+        return new Border
+        {
+            Background = WbBrush("WbListBrush"),
+            BorderBrush = WbBrush("WbBorderBrush"),
+            BorderThickness = new Thickness(1),
+            Height = 200,
+            Child = new TextBox
+            {
+                Text = text ?? string.Empty,
+                IsReadOnly = true,
+                BorderThickness = new Thickness(0),
+                Background = Brushes.Transparent,
+                Foreground = WbBrush("WbCodeForegroundBrush"),
+                FontFamily = MonoFont,
+                FontSize = 11,
+                TextWrapping = TextWrapping.NoWrap,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+                Padding = new Thickness(6),
+            },
+        };
+    }
+
+    private static UIElement BuildMessageView(string? text)
+    {
+        Log.Debug("构建说明文字预览：字符数={0}", text?.Length ?? -1);
+        return new TextBlock
         {
             Text = text ?? string.Empty,
-            IsReadOnly = true,
-            BorderThickness = new Thickness(0),
-            Background = Brushes.Transparent,
-            Foreground = WbBrush("WbCodeForegroundBrush"),
-            FontFamily = MonoFont,
-            FontSize = 11,
-            TextWrapping = TextWrapping.NoWrap,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
-            Padding = new Thickness(6),
-        },
-    };
-
-    private static UIElement BuildMessageView(string? text) => new TextBlock
-    {
-        Text = text ?? string.Empty,
-        TextWrapping = TextWrapping.Wrap,
-        Foreground = WbBrush("WbTextSecondaryBrush"),
-        LineHeight = 18,
-    };
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = WbBrush("WbTextSecondaryBrush"),
+            LineHeight = 18,
+        };
+    }
 
     private static string Truncate(string value, int max)
         => value.Length <= max ? value : value[..max] + "…";
@@ -914,6 +1217,8 @@ public partial class AssetsWorkbenchPage : UserControl
     /// <summary>清空预览区（切换选中项 / 无选中时调用），并停止正在播放的试听。</summary>
     private void ResetPreview()
     {
+        if (Log.IsDebugEnabled) Log.Debug("清空预览区：原 PreviewHost 内容={0}，代际={1}",
+            PreviewHost.Content?.GetType().Name ?? "(空)", _previewGeneration);
         PreviewHost.Content = null;
         PreviewInfoText.Text = "无预览";
         PropertyList.ItemsSource = null;
@@ -927,6 +1232,9 @@ public partial class AssetsWorkbenchPage : UserControl
     private async Task PlayCurrentAudioAsync()
     {
         var audio = _currentAudio;
+        Log.Info("用户点击试听：音频数据={0}，PCM 字节={1}，当前播放器={2}",
+            audio is null ? "无" : "有", audio?.Wave?.Length ?? -1,
+            _previewPlayer is null ? "空闲" : "播放中");
         if (audio?.Wave is not { Length: > 0 })
         {
             _host.SetStatus(audio?.UnavailableReason ?? "当前资源没有可播放的音频数据");
@@ -939,6 +1247,7 @@ public partial class AssetsWorkbenchPage : UserControl
             return;
         }
         var generation = _previewGeneration;
+        var playTimer = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             var file = Path.Combine(Path.GetTempPath(), $"lme-preview-{Guid.NewGuid():N}.wav");
@@ -955,12 +1264,16 @@ public partial class AssetsWorkbenchPage : UserControl
             _previewPlayer = player;
             _previewAudioFile = file;
             player.Play();
+            playTimer.Stop();
+            Log.Info("试听已开始：临时 WAV={0}，字节={1}，准备耗时={2} ms",
+                file, audio.Wave.Length, playTimer.ElapsedMilliseconds);
             _host.SetStatus($"正在播放（WAV {audio.Wave.Length / 1024} KB）");
         }
         catch (Exception ex)
         {
             StopAudioPreview();
             _host.SetStatus($"试听失败：{ex.Message}");
+            Log.Error(ex, "试听失败：PCM 字节={0}，代际={1}", audio.Wave?.Length ?? -1, generation);
         }
     }
 
@@ -969,6 +1282,7 @@ public partial class AssetsWorkbenchPage : UserControl
         if (!ReferenceEquals(_previewPlayer, player)) return; // 已经停止 / 换成另一个资源了
         StopAudioPreview();
         _host.SetStatus("播放结束");
+        Log.Debug("试听自然结束（MediaEnded）");
     }
 
     private void StopAudioPreview()
@@ -978,21 +1292,24 @@ public partial class AssetsWorkbenchPage : UserControl
         if (player is not null)
         {
             try { player.Stop(); player.Close(); }
-            catch (Exception) { /* 播放器已释放 */ }
+            catch (Exception ex) { Log.Debug(ex, "停止试听时播放器已释放（无害，语义原样忽略）"); }
         }
         var file = _previewAudioFile;
         _previewAudioFile = null;
+        if (file is not null) Log.Debug("试听停止：已释放播放器并清理临时 WAV {0}", file);
         TryDelete(file);
     }
 
     private static void TryDelete(string? file)
     {
         if (file is null) return;
-        try { File.Delete(file); } catch (Exception) { /* 临时文件留给系统清理 */ }
+        try { File.Delete(file); }
+        catch (Exception ex) { Log.Debug(ex, "删除预览临时文件失败（无害，留给系统清理）：{0}", file); }
     }
 
     private static BitmapImage LoadBitmap(byte[] png)
     {
+        Log.Debug("解码预览位图：PNG 字节={0}", png.Length);
         var bitmap = new BitmapImage();
         using var stream = new MemoryStream(png);
         bitmap.BeginInit(); bitmap.CacheOption = BitmapCacheOption.OnLoad; bitmap.StreamSource = stream; bitmap.EndInit(); bitmap.Freeze();
@@ -1003,25 +1320,30 @@ public partial class AssetsWorkbenchPage : UserControl
 
     private async void SplitAtlas_Click(object sender, RoutedEventArgs e)
     {
+        using var scope = Log.Scope("SplitAtlas_Click");
         var project = _host.Project;
         if (project is null || _host.ProjectFile is null || _selectedAsset is not AssetRecord asset) return;
-        if (!TryGetImageSource(asset, out var source)) { _host.SetStatus("当前资源没有可读取的本地图像文件"); return; }
+        if (!TryGetImageSource(asset, out var source)) { _host.SetStatus("当前资源没有可读取的本地图像文件"); Log.Warn("拆分图集中止：资源没有可读取的本地图像文件，资源={0}", AssetDisplay.DisplayPath(asset)); return; }
         if (!int.TryParse(AtlasColumnsBox.Text, out var columns) || !int.TryParse(AtlasRowsBox.Text, out var rows) || columns <= 0 || rows <= 0)
-        { _host.SetStatus("列数和行数必须是正整数"); return; }
+        { _host.SetStatus("列数和行数必须是正整数"); Log.Warn("拆分图集中止：行列输入无效（列={0}，行={1}）", AtlasColumnsBox.Text ?? "-", AtlasRowsBox.Text ?? "-"); return; }
+        Log.Info("用户拆分图集：资源={0}，来源={1}，列={2}，行={3}", AssetDisplay.DisplayPath(asset), source, columns, rows);
         try
         {
             var result = await _atlasEdits.SplitAsync(project, asset.AssetId, source, Path.GetDirectoryName(_host.ProjectFile)!, columns, rows);
             await _host.SaveProjectAsync();
             RepackAtlasButton.IsEnabled = true;
+            Log.Info("图集拆分完成：区域数={0}", result.Layout.Regions.Count);
             _host.SetStatus($"图集已拆分：{result.Layout.Regions.Count} 个区域");
         }
-        catch (Exception ex) { ShowError("拆分图集失败", ex); }
+        catch (Exception ex) { Log.Error(ex, "拆分图集失败：资源={0}", AssetDisplay.DisplayPath(asset)); ShowError("拆分图集失败", ex); }
     }
 
     private async void RepackAtlas_Click(object sender, RoutedEventArgs e)
     {
+        using var scope = Log.Scope("RepackAtlas_Click");
         var project = _host.Project;
         if (project is null || _host.ProjectFile is null || _selectedAsset is not AssetRecord asset) return;
+        Log.Info("用户恢复图集：资源={0}", AssetDisplay.DisplayPath(asset));
         try
         {
             await _atlasEdits.RepackAsync(project, asset.AssetId, Path.GetDirectoryName(_host.ProjectFile)!);
@@ -1029,7 +1351,7 @@ public partial class AssetsWorkbenchPage : UserControl
             _host.RefreshProjectState("图集已恢复并记录替换");
             RestoreListSelection(asset);
         }
-        catch (Exception ex) { ShowError("恢复图集失败", ex); }
+        catch (Exception ex) { Log.Error(ex, "恢复图集失败：资源={0}", AssetDisplay.DisplayPath(asset)); ShowError("恢复图集失败", ex); }
     }
 
     private static bool TryGetImageSource(AssetRecord asset, out string path)
@@ -1055,6 +1377,7 @@ public partial class AssetsWorkbenchPage : UserControl
             Title = $"替换资源：{AssetDisplay.DisplayPath(asset)}"
         };
         if (dialog.ShowDialog(OwnerWindow) != true) return;
+        Log.Info("用户替换资源：资源={0}，来源文件={1}", AssetDisplay.DisplayPath(asset), dialog.FileName);
         try
         {
             await _assetEdits.ReplaceFromFileAsync(project, asset.AssetId, dialog.FileName, Path.GetDirectoryName(_host.ProjectFile)!);
@@ -1062,7 +1385,7 @@ public partial class AssetsWorkbenchPage : UserControl
             _host.RefreshProjectState("资源替换已记录");
             RestoreListSelection(asset);
         }
-        catch (Exception ex) { ShowError("替换资源失败", ex); }
+        catch (Exception ex) { Log.Error(ex, "替换资源失败：资源={0}，来源文件={1}", AssetDisplay.DisplayPath(asset), dialog.FileName); ShowError("替换资源失败", ex); }
     }
 
     /// <summary>撤销选中资源上的全部修改（替换文件 / Unity 字段 / Sprite
@@ -1076,14 +1399,16 @@ public partial class AssetsWorkbenchPage : UserControl
             $"撤销资源 {AssetDisplay.DisplayPath(asset)} 上的全部修改？\n\n替换文件、Unity 字段、Sprite 元数据会被清除；导出将不再包含此资源的修改。",
             "撤销修改", MessageBoxButton.YesNo, MessageBoxImage.Question);
         if (confirm != MessageBoxResult.Yes) return;
+        Log.Info("用户撤销资源全部修改：资源={0}", AssetDisplay.DisplayPath(asset));
         try
         {
             var cleared = _assetEdits.ClearEdits(project, asset.AssetId, Path.GetDirectoryName(_host.ProjectFile)!);
             await _host.SaveProjectAsync();
             _host.RefreshProjectState(cleared ? "已撤销此资源的全部修改" : "此资源没有可撤销的修改");
             RestoreListSelection(asset);
+            Log.Debug("撤销修改结果：资源={0}，是否实际清除={1}", AssetDisplay.DisplayPath(asset), cleared);
         }
-        catch (Exception ex) { ShowError("撤销修改失败", ex); }
+        catch (Exception ex) { Log.Error(ex, "撤销修改失败：资源={0}", AssetDisplay.DisplayPath(asset)); ShowError("撤销修改失败", ex); }
     }
 
     /// <summary>双击资源 = 按类型做最常用的事（列表与目录树共用：
@@ -1091,6 +1416,7 @@ public partial class AssetsWorkbenchPage : UserControl
     private void AssetList_DoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
         if (_selectedAsset is not AssetRecord asset) return;
+        Log.Info("用户双击列表行：资源={0}（类型={1}）", AssetDisplay.DisplayPath(asset), asset.Type);
         ActivateDefaultAction(asset);
     }
 
@@ -1100,42 +1426,62 @@ public partial class AssetsWorkbenchPage : UserControl
     {
         if (asset.Type is AssetType.Texture or AssetType.Sprite && ReplaceAssetButton.IsEnabled)
         {
+            Log.Debug("默认动作：图像资源 → 替换（替换按钮可用）");
             ReplaceAsset_Click(this, new RoutedEventArgs());
             return;
         }
         if (asset.Type is AssetType.Text or AssetType.Json && EditTextButton.IsEnabled)
         {
+            Log.Debug("默认动作：文本/JSON 资源 → 内置文本编辑器");
             EditTextAsset_Click(this, new RoutedEventArgs());
             return;
         }
-        if (UnityFieldsButton.IsEnabled) { EditUnityFields_Click(this, new RoutedEventArgs()); return; }
-        if (HexPreviewButton.IsEnabled) HexPreview_Click(this, new RoutedEventArgs());
+        if (UnityFieldsButton.IsEnabled) { Log.Debug("默认动作：Unity 字段编辑（按钮可用）"); EditUnityFields_Click(this, new RoutedEventArgs()); return; }
+        if (HexPreviewButton.IsEnabled) { Log.Debug("默认动作：十六进制预览（兜底分支）"); HexPreview_Click(this, new RoutedEventArgs()); return; }
+        Log.Warn("默认动作：没有任何可执行动作（资源={0}，类型={1}，替换可用={2}，文本可用={3}，Unity 可用={4}，Hex 可用={5}）",
+            AssetDisplay.DisplayPath(asset), asset.Type, ReplaceAssetButton.IsEnabled,
+            EditTextButton.IsEnabled, UnityFieldsButton.IsEnabled, HexPreviewButton.IsEnabled);
     }
 
     /// <summary>文本 / JSON 资源的内置编辑器（P3.10）：改完保存即登记为替换，
     /// 走与替换文件同一条可撤销 / 可导出管道；JSON 保存前校验并格式化。</summary>
     private async void EditTextAsset_Click(object sender, RoutedEventArgs e)
     {
+        using var scope = Log.Scope("EditTextAsset_Click");
         var project = _host.Project;
         if (project is null || _host.ProjectFile is null) { _host.SetStatus("请先创建或打开项目"); return; }
         if (_selectedAsset is not AssetRecord asset) return;
         if (asset.Type is not (AssetType.Text or AssetType.Json))
         {
             _host.SetStatus("当前资源不是文本 / JSON 资源；可以用「替换…」换掉整个文件。");
+            Log.Warn("编辑文本中止：资源类型不是文本/JSON，资源={0}，类型={1}",
+                AssetDisplay.DisplayPath(asset), asset.Type);
             return;
         }
+        Log.Info("用户打开文本编辑器：资源={0}，类型={1}", AssetDisplay.DisplayPath(asset), asset.Type);
         try
         {
             var service = new TextAssetEditService(_assetEdits);
             var document = await service.OpenAsync(project, asset.AssetId);
             var window = new TextAssetEditorWindow(document, AssetDisplay.DisplayPath(asset)) { Owner = OwnerWindow };
-            if (window.ShowDialog() != true || window.Result is not { } edited) return;
+            if (window.ShowDialog() != true || window.Result is not { } edited)
+            {
+                Log.Debug("文本编辑器取消/无结果：资源={0}", AssetDisplay.DisplayPath(asset));
+                return;
+            }
             await service.SaveAsync(project, edited, Path.GetDirectoryName(_host.ProjectFile)!);
             await _host.SaveProjectAsync();
             _host.RefreshProjectState("文本修改已记录");
             RestoreListSelection(asset);
         }
-        catch (Exception ex) { ShowError("编辑文本失败", ex); }
+        catch (NotSupportedException ex)
+        {
+            // 不是故障，是能力边界：给出中文原因和替代做法，不弹「失败」吓人。
+            Log.Warn("文本编辑器拒绝该资源：资源={0}，原因={1}", AssetDisplay.DisplayPath(asset), ex.Message);
+            _host.SetStatus(ex.Message);
+            MessageBox.Show(OwnerWindow, ex.Message, "此资源不能用内置文本编辑器", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex) { Log.Error(ex, "编辑文本失败：资源={0}", AssetDisplay.DisplayPath(asset)); ShowError("编辑文本失败", ex); }
     }
 
     /// <summary>右键菜单跟随光标：右键落在某行上时先选中该行。</summary>
@@ -1166,12 +1512,13 @@ public partial class AssetsWorkbenchPage : UserControl
     private void CopyAssetPath_Click(object sender, RoutedEventArgs e)
     {
         if (_selectedAsset is not AssetRecord asset) return;
-        try { Clipboard.SetText(AssetDisplay.DisplayPath(asset)); _host.SetStatus("已复制资源路径"); }
-        catch (Exception) { _host.SetStatus("复制失败（剪贴板被其他程序占用）"); }
+        try { Clipboard.SetText(AssetDisplay.DisplayPath(asset)); _host.SetStatus("已复制资源路径"); Log.Debug("已复制资源路径到剪贴板：{0}", AssetDisplay.DisplayPath(asset)); }
+        catch (Exception ex) { Log.Debug(ex, "复制资源路径失败（剪贴板被占用，无害）：{0}", AssetDisplay.DisplayPath(asset)); _host.SetStatus("复制失败（剪贴板被其他程序占用）"); }
     }
 
     private async void BatchReplace_Click(object sender, RoutedEventArgs e)
     {
+        using var scope = Log.Scope("BatchReplace_Click");
         var project = _host.Project;
         if (project is null || _host.ProjectFile is null) { _host.SetStatus("请先创建或打开项目"); return; }
         var dialog = new Microsoft.Win32.OpenFileDialog
@@ -1184,25 +1531,28 @@ public partial class AssetsWorkbenchPage : UserControl
         if (dialog.ShowDialog(OwnerWindow) != true) return;
         var folder = Path.GetDirectoryName(dialog.FileName);
         if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder)) return;
+        Log.Info("用户批量登记替换：文件夹={0}", folder);
         try
         {
             var report = await _assetEdits.BatchReplaceFromDirectoryAsync(project, folder, Path.GetDirectoryName(_host.ProjectFile)!);
             await _host.SaveProjectAsync();
             _host.RefreshProjectState($"批量替换已登记（{report.Matched} 个）");
+            Log.Info("批量替换完成：匹配={0}，无对应资源的文件={1}", report.Matched, report.FilesWithoutAsset.Count);
             var detail = report.Describe();
             if (report.FilesWithoutAsset.Count > 0)
                 detail += "\n\n没有对应资源的文件（前 15 个）：\n" + string.Join("\n", report.FilesWithoutAsset.Take(15));
             MessageBox.Show(OwnerWindow, detail, "批量登记替换", MessageBoxButton.OK,
                 report.Matched > 0 ? MessageBoxImage.Information : MessageBoxImage.Warning);
         }
-        catch (Exception ex) { ShowError("批量登记替换失败", ex); }
+        catch (Exception ex) { Log.Error(ex, "批量登记替换失败：文件夹={0}", folder); ShowError("批量登记替换失败", ex); }
     }
 
     private void HexPreview_Click(object sender, RoutedEventArgs e)
     {
         if (_selectedAsset is not AssetRecord asset) return;
+        Log.Info("用户打开十六进制预览：资源={0}", AssetDisplay.DisplayPath(asset));
         try { new HexPreviewWindow(asset) { Owner = OwnerWindow }.ShowDialog(); }
-        catch (Exception ex) { ShowError("十六进制预览失败", ex); }
+        catch (Exception ex) { Log.Error(ex, "十六进制预览失败：资源={0}", AssetDisplay.DisplayPath(asset)); ShowError("十六进制预览失败", ex); }
     }
 
     private async void InspectSprite_Click(object sender, RoutedEventArgs e)
@@ -1210,10 +1560,12 @@ public partial class AssetsWorkbenchPage : UserControl
         var project = _host.Project;
         if (_selectedAsset is not AssetRecord asset || asset.Type != AssetType.Sprite ||
             !asset.UnityPathId.HasValue || string.IsNullOrWhiteSpace(asset.SourcePath) || !File.Exists(asset.SourcePath)) return;
+        Log.Info("用户查看 Sprite 元数据：资源={0}，UnityPathId={1}",
+            AssetDisplay.DisplayPath(asset), asset.UnityPathId?.ToString() ?? "-");
         try
         {
-            var sprite = new LimbusModEditor.Formats.Unity.UnityAssetService().ReadSprite(asset.SourcePath, asset.UnityPathId.Value);
-            if (sprite is null) { _host.SetStatus("未找到 Sprite 对象。"); return; }
+            var sprite = new LimbusModEditor.Formats.Unity.UnityAssetService().ReadSprite(asset.SourcePath!, asset.UnityPathId!.Value);
+            if (sprite is null) { _host.SetStatus("未找到 Sprite 对象。"); Log.Warn("Sprite 元数据未找到对象：资源={0}", AssetDisplay.DisplayPath(asset)); return; }
             var initial = _spriteEdits.ReadStored(asset) ?? UnitySpriteMetadata.From(sprite);
             var dialog = new SpriteMetadataWindow(initial) { Owner = OwnerWindow };
             if (dialog.ShowDialog() != true || dialog.Result is null) return;
@@ -1222,7 +1574,7 @@ public partial class AssetsWorkbenchPage : UserControl
             _host.RefreshProjectState("Sprite 元数据修改已记录");
             RestoreListSelection(asset);
         }
-        catch (Exception ex) { ShowError("读取 Sprite 元数据失败", ex); }
+        catch (Exception ex) { Log.Error(ex, "读取 Sprite 元数据失败：资源={0}", AssetDisplay.DisplayPath(asset)); ShowError("读取 Sprite 元数据失败", ex); }
     }
 
     private async void EditUnityFields_Click(object sender, RoutedEventArgs e)
@@ -1231,7 +1583,11 @@ public partial class AssetsWorkbenchPage : UserControl
         if (project is null || _host.ProjectFile is null || _selectedAsset is not AssetRecord asset ||
             !asset.UnityPathId.HasValue || string.IsNullOrWhiteSpace(asset.SourcePath) || !File.Exists(asset.SourcePath)) return;
         UnityFieldsButton.IsEnabled = false;
+        Log.Info("用户打开 Unity 字段编辑：资源={0}，PathId={1}，来源={2}，容器={3}",
+            AssetDisplay.DisplayPath(asset), asset.UnityPathId?.ToString() ?? "-",
+            asset.SourcePath ?? "-", asset.ContainerPath ?? "-");
         _host.SetStatus("正在读取对象字段…");
+        var readTimer = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             // Field tree, script info, dependencies and the in-file object scan
@@ -1239,15 +1595,15 @@ public partial class AssetsWorkbenchPage : UserControl
             // thread so large bundles do not freeze the window.
             var service = new LimbusModEditor.Formats.Unity.UnityAssetService();
             var isBundle = asset.Metadata.ContainsKey("unityBundle") && !string.IsNullOrWhiteSpace(asset.ContainerPath);
-            var source = asset.SourcePath;
+            var source = asset.SourcePath!;
             var container = asset.ContainerPath;
-            var pathId = asset.UnityPathId.Value;
+            var pathId = asset.UnityPathId!.Value;
             var stored = _unityFieldEdits.ReadStored(asset);
             var (fields, scriptInfo, dependencies, inFileObjects) = await Task.Run(() =>
             {
                 var root = isBundle
-                    ? service.ReadBundleObjectFields(source, container!, pathId)
-                    : service.ReadObjectFields(source, pathId);
+                    ? service.ReadBundleObjectFields(source!, container!, pathId)
+                    : service.ReadObjectFields(source!, pathId);
                 LimbusModEditor.Formats.Unity.UnityScriptInfo? script = null;
                 try
                 {
@@ -1255,7 +1611,7 @@ public partial class AssetsWorkbenchPage : UserControl
                         ? service.ReadBundleObjectScriptInfo(source, container!, pathId)
                         : service.ReadObjectScriptInfo(source, pathId);
                 }
-                catch (Exception) { /* non-MonoBehaviour objects have no script info */ }
+                catch (Exception ex) { Log.Debug(ex, "读取 Unity 脚本信息失败（非 MonoBehaviour 属正常，语义原样忽略）：Path={0}", pathId); }
                 IReadOnlyList<LimbusModEditor.Formats.Unity.UnityDependency>? deps = null;
                 try
                 {
@@ -1263,7 +1619,7 @@ public partial class AssetsWorkbenchPage : UserControl
                         ? service.ReadBundleObjectDependencies(source, container!, pathId)
                         : service.ReadObjectDependencies(source, pathId);
                 }
-                catch (Exception) { /* dependency view is best-effort */ }
+                catch (Exception ex) { Log.Debug(ex, "读取 Unity 依赖失败（尽力而为，语义原样忽略）：Path={0}", pathId); }
                 IReadOnlyList<AssetRecord>? objects = null;
                 try
                 {
@@ -1272,9 +1628,13 @@ public partial class AssetsWorkbenchPage : UserControl
                         .Where(x => x.UnityPathId.HasValue && (!isBundle || string.Equals(x.ContainerPath, container, StringComparison.OrdinalIgnoreCase)))
                         .ToArray();
                 }
-                catch (Exception) { /* object picker is best-effort */ }
+                catch (Exception ex) { Log.Debug(ex, "扫描文件内对象失败（对象选择器尽力而为，语义原样忽略）：Path={0}", pathId); }
                 return (root, script, deps, objects);
             });
+            readTimer.Stop();
+            Log.Debug("Unity 字段读取完成：PathId={0}，isBundle={1}，耗时={2} ms，依赖={3}，同文件对象={4}，脚本信息={5}",
+                pathId, isBundle, readTimer.ElapsedMilliseconds,
+                dependencies?.Count ?? -1, inFileObjects?.Count ?? -1, scriptInfo is null ? "无" : "有");
             var dialog = new UnityFieldEditorWindow(fields, stored, scriptInfo, dependencies, inFileObjects) { Owner = OwnerWindow };
             if (dialog.ShowDialog() != true || dialog.Result is null) return;
             if (dialog.Result.Count == 0) return;
@@ -1283,7 +1643,7 @@ public partial class AssetsWorkbenchPage : UserControl
             _host.RefreshProjectState("Unity 字段修改已记录");
             RestoreListSelection(asset);
         }
-        catch (Exception ex) { ShowError("Unity 字段读取或保存失败", ex); }
+        catch (Exception ex) { Log.Error(ex, "Unity 字段读取或保存失败：资源={0}，PathId={1}", AssetDisplay.DisplayPath(asset), asset.UnityPathId?.ToString() ?? "-"); ShowError("Unity 字段读取或保存失败", ex); }
         finally
         {
             RefreshSelectionButtons(_selectedAsset);
@@ -1297,12 +1657,14 @@ public partial class AssetsWorkbenchPage : UserControl
     {
         if (_host.Project is null || _selectedAsset is not AssetRecord asset ||
             string.IsNullOrWhiteSpace(asset.SourcePath) || !File.Exists(asset.SourcePath)) return;
+        Log.Info("用户查看 FSB 结构：资源={0}，来源={1}", AssetDisplay.DisplayPath(asset), asset.SourcePath ?? "-");
         try
         {
             var inspection = await new BankAudioService().InspectFsbAsync(asset);
+            Log.Debug("FSB 结构读取完成：资源={0}", AssetDisplay.DisplayPath(asset));
             new BankInspectorWindow(asset, inspection) { Owner = OwnerWindow }.ShowDialog();
         }
-        catch (Exception ex) { ShowError("FSB 结构检查失败", ex); }
+        catch (Exception ex) { Log.Error(ex, "FSB 结构检查失败：资源={0}", AssetDisplay.DisplayPath(asset)); ShowError("FSB 结构检查失败", ex); }
     }
 
     /// <summary>Answers "who points at this object" for the selected Unity
@@ -1314,17 +1676,24 @@ public partial class AssetsWorkbenchPage : UserControl
         if (_host.Project is null || _selectedAsset is not AssetRecord asset ||
             !asset.UnityPathId.HasValue || string.IsNullOrWhiteSpace(asset.SourcePath) || !File.Exists(asset.SourcePath)) return;
         ReferencersButton.IsEnabled = false;
+        Log.Info("用户查找引用者：资源={0}，PathId={1}，来源={2}，容器={3}",
+            AssetDisplay.DisplayPath(asset), asset.UnityPathId?.ToString() ?? "-",
+            asset.SourcePath ?? "-", asset.ContainerPath ?? "-");
         _host.SetStatus("正在扫描引用者…");
+        var refTimer = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             var service = new LimbusModEditor.Formats.Unity.UnityAssetService();
             var isBundle = asset.Metadata.ContainsKey("unityBundle") && !string.IsNullOrWhiteSpace(asset.ContainerPath);
-            var pathId = asset.UnityPathId.Value;
-            var source = asset.SourcePath;
+            var pathId = asset.UnityPathId!.Value;
+            var source = asset.SourcePath!;
             var container = asset.ContainerPath;
             var referencers = await Task.Run(() => isBundle
-                ? service.FindBundleReferencers(source, container!, pathId)
-                : service.FindReferencers(source, pathId));
+                ? service.FindBundleReferencers(source!, container!, pathId)
+                : service.FindReferencers(source!, pathId));
+            refTimer.Stop();
+            Log.Debug("引用者扫描完成：PathId={0}，isBundle={1}，引用者={2}，耗时={3} ms",
+                pathId, isBundle, referencers.Count, refTimer.ElapsedMilliseconds);
             if (referencers.Count == 0)
             {
                 MessageBox.Show(OwnerWindow,
@@ -1342,7 +1711,7 @@ public partial class AssetsWorkbenchPage : UserControl
                 "\n\n修改此对象前请确认这些指针仍然有效；把指针改成空引用是允许的，改成不存在的 Path ID 会在保存时被拒绝。",
                 "引用者检查", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
-        catch (Exception ex) { ShowError("引用者检查失败", ex); }
+        catch (Exception ex) { Log.Error(ex, "引用者检查失败：资源={0}", AssetDisplay.DisplayPath(asset)); ShowError("引用者检查失败", ex); }
         finally
         {
             RefreshSelectionButtons(_selectedAsset);
@@ -1363,12 +1732,18 @@ public partial class AssetsWorkbenchPage : UserControl
         var container = asset.ContainerPath;
         var pathId = asset.UnityPathId.Value;
         ObjectSummaryButton.IsEnabled = false;
+        Log.Info("用户查看对象摘要：资源={0}，PathId={1}，类型={2}，isBundle={3}",
+            AssetDisplay.DisplayPath(asset), pathId, asset.Type, isBundle);
         _host.SetStatus("正在生成对象摘要…");
+        var summaryTimer = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             var summary = await Task.Run(() => isBundle
                 ? service.ReadBundleObjectSummary(source, container!, pathId)
                 : service.ReadObjectSummary(source, pathId));
+            summaryTimer.Stop();
+            Log.Debug("对象摘要完成：PathId={0}，有结果={1}，耗时={2} ms",
+                pathId, summary is not null, summaryTimer.ElapsedMilliseconds);
             if (summary is null)
             {
                 MessageBox.Show(OwnerWindow,
@@ -1378,7 +1753,7 @@ public partial class AssetsWorkbenchPage : UserControl
             }
             new ObjectSummaryWindow(summary) { Owner = OwnerWindow }.ShowDialog();
         }
-        catch (Exception ex) { ShowError("对象摘要生成失败", ex); }
+        catch (Exception ex) { Log.Error(ex, "对象摘要生成失败：资源={0}，PathId={1}", AssetDisplay.DisplayPath(asset), pathId); ShowError("对象摘要生成失败", ex); }
         finally
         {
             RefreshSelectionButtons(_selectedAsset);
@@ -1398,14 +1773,19 @@ public partial class AssetsWorkbenchPage : UserControl
             Title = "导出 Bank 音频为 WAV"
         };
         if (dialog.ShowDialog(OwnerWindow) != true) return;
+        Log.Info("用户导出音频 WAV：资源={0}，目标={1}，FMOD 目录={2}",
+            AssetDisplay.DisplayPath(asset), dialog.FileName, fmodDirectory);
+        var decodeTimer = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             using var codec = new NativeFmodAudioCodec(fmodDirectory);
             var data = await new BankAudioService().DecodeToWaveAsync(asset, codec);
             await File.WriteAllBytesAsync(dialog.FileName, data);
+            decodeTimer.Stop();
+            Log.Info("音频导出完成：字节={0}，耗时={1} ms，目标={2}", data.Length, decodeTimer.ElapsedMilliseconds, dialog.FileName);
             _host.SetStatus($"音频已导出：{dialog.FileName}");
         }
-        catch (Exception ex) { ShowError("导出 WAV 失败", ex); }
+        catch (Exception ex) { Log.Error(ex, "导出 WAV 失败：资源={0}，目标={1}", AssetDisplay.DisplayPath(asset), dialog.FileName); ShowError("导出 WAV 失败", ex); }
     }
 
     // ── 列表 / 目录树视图切换 ────────────────────────────────────────────
@@ -1419,6 +1799,7 @@ public partial class AssetsWorkbenchPage : UserControl
         // XAML 解析期间事件可能先于其他元素就绪：跳过首次触发。
         if (AssetTree is null || AssetViewListToggle is null || AssetViewTreeToggle is null) return;
         var treeSelected = ReferenceEquals(sender, AssetViewTreeToggle);
+        Log.Info("用户切换浏览视图：{0} → {1}", _treeMode ? "目录树" : "列表", treeSelected ? "目录树" : "列表");
         AssetViewListToggle.IsChecked = !treeSelected;
         AssetViewTreeToggle.IsChecked = treeSelected;
         _treeMode = treeSelected;
@@ -1429,8 +1810,76 @@ public partial class AssetsWorkbenchPage : UserControl
 
     private void RebuildTree()
     {
-        if (_lastResults is null) { AssetTree.ItemsSource = null; return; }
-        AssetTree.ItemsSource = AssetTreeBuilder.BuildRoots(_lastResults).Select(MakeTreeItem).ToList();
+        using var scope = Log.Scope("RebuildTree");
+        if (_lastResults is null)
+        {
+            AssetTree.ItemsSource = null;
+            _expandedTreeKeys.Clear();
+            Log.Debug("重建目录树：无搜索结果，清空树并清空展开键集合");
+            return;
+        }
+        // 先把「现在哪些节点是展开的」收进累积集合（跨重建保留：否则一次筛选把树清空
+        // 就会把展开集合冲掉，清空筛选后无法回放）。
+        // ④ 关键线索：捕获前后展开键数量变化能看出「突然折叠回初始形态」。
+        var keysBefore = _expandedTreeKeys.Count;
+        TreeExpansionState.Capture(AssetTree, AssetTreeKeyOf, _expandedTreeKeys);
+        var capturedKeys = _expandedTreeKeys.Count;
+        var selectedAssetId = (AssetTree.SelectedItem as TreeViewItem)?.Tag is AssetTreeNode { Asset: { } selected }
+            ? selected.AssetId
+            : (Guid?)null;
+        var roots = AssetTreeBuilder.BuildRoots(_lastResults).Select(MakeTreeItem).ToList();
+        AssetTree.ItemsSource = roots;
+        Log.Debug("重建目录树：结果 {0} 条 → 根节点 {1} 个；捕获展开键 {2} → {3}；重建前选中 AssetId={4}（④ 若展开键数量骤减即折叠）",
+            _lastResults.Count, roots.Count, keysBefore, capturedKeys, selectedAssetId?.ToString() ?? "(无)");
+        // 回放展开态（懒加载：按 key 逐层物化 + 展开），并找回树上的选中叶子。
+        TreeExpansionState.Restore(AssetTree, AssetTreeKeyOf, _expandedTreeKeys, MaterializeAssetNode);
+        Log.Debug("回放展开态完成：应回放 {0} 个键，AssetTree 根层实测 {1} 项",
+            _expandedTreeKeys.Count, AssetTree.Items.Count);
+        if (selectedAssetId is { } id) RestoreTreeSelection(id);
+    }
+
+    /// <summary>树节点的稳定 key：从根到自己的显示路径段（兄弟间唯一，见
+    /// <c>AssetTreeNode.DistinguishLeaves</c> 的同名消歧）。</summary>
+    private static string? AssetTreeKeyOf(object? tag)
+    {
+        if (tag is not AssetTreeNode node) return null;
+        var segments = AssetDisplay.SplitTreePath(AssetDisplay.TreePath(node.Assets[0]));
+        var depth = node.Depth + 1;
+        return depth <= 0 || depth > segments.Length ? null : string.Join('/', segments.Take(depth));
+    }
+
+    /// <summary>物化一个节点的子层（与 <see cref="AssetTree_Expanded"/> 同一逻辑，供回放复用）。</summary>
+    private static void MaterializeAssetNode(TreeViewItem item)
+    {
+        if (item.Tag is not AssetTreeNode node || node.IsLeaf) return;
+        if (item.Items.Count == 1 && item.Items[0] is not AssetTreeNode)
+        {
+            item.Items.Clear();
+            foreach (var child in node.Expand())
+                item.Items.Add(MakeTreeItem(child));
+            if (Log.IsDebugEnabled) Log.Debug("物化树节点子层：节点={0}，子项={1}，累计资源数={2}",
+                node.Name, item.Items.Count, node.Count);
+        }
+    }
+
+    /// <summary>重建后按 AssetId 找回树里的选中叶子（重建会丢选中高亮）。</summary>
+    private void RestoreTreeSelection(Guid assetId)
+    {
+        var found = FindLeafItem(AssetTree.Items, assetId);
+        if (found is not null) found.IsSelected = true;
+        else Log.Warn("重建目录树后找不到选中叶子：AssetId={0}（④ 树折叠/重建可能已丢掉该节点）", assetId);
+    }
+
+    private static TreeViewItem? FindLeafItem(System.Collections.IEnumerable items, Guid assetId)
+    {
+        foreach (var item in items)
+        {
+            if (item is not TreeViewItem node) continue;
+            if (node.Tag is AssetTreeNode { IsLeaf: true, Asset: { } asset } && asset.AssetId == assetId) return node;
+            var nested = FindLeafItem(node.Items, assetId);
+            if (nested is not null) return nested;
+        }
+        return null;
     }
 
     /// <summary>包装一个树节点：目录节点先放一个占位子项，真正展开时才
@@ -1448,26 +1897,39 @@ public partial class AssetsWorkbenchPage : UserControl
 
     private void AssetTree_Expanded(object sender, RoutedEventArgs e)
     {
-        if (e.OriginalSource is not TreeViewItem item ||
-            item.Tag is not AssetTreeNode node || node.IsLeaf) return;
-        if (item.Items.Count == 1 && item.Items[0] is not AssetTreeNode)
+        if (e.OriginalSource is not TreeViewItem item) return;
+        MaterializeAssetNode(item);
+        if (AssetTreeKeyOf(item.Tag) is { Length: > 0 } key) _expandedTreeKeys.Add(key);
+        if (Log.IsDebugEnabled) Log.Debug("树节点展开：键={0}，子项={1}，累计展开键={2}",
+            AssetTreeKeyOf(item.Tag) ?? "(无)", item.Items.Count, _expandedTreeKeys.Count);
+    }
+
+    private void AssetTree_Collapsed(object sender, RoutedEventArgs e)
+    {
+        if (e.OriginalSource is TreeViewItem item && AssetTreeKeyOf(item.Tag) is { Length: > 0 } key)
         {
-            item.Items.Clear();
-            foreach (var child in node.Expand())
-                item.Items.Add(MakeTreeItem(child));
+            _expandedTreeKeys.Remove(key);
+            if (Log.IsDebugEnabled) Log.Debug("树节点折叠：键={0}，剩余展开键={1}（④ 若是用户没动就整片折叠，看这里与 RebuildTree 的先后顺序）",
+                key, _expandedTreeKeys.Count);
         }
     }
 
     private void AssetTree_SelectedItemChanged(object sender, RoutedPropertyChangedEventArgs<object> e)
     {
         if (e.NewValue is TreeViewItem { Tag: AssetTreeNode { IsLeaf: true } leaf })
+        {
+            if (Log.IsDebugEnabled) Log.Debug("树选中叶子：{0}", AssetDisplay.DisplayPath(leaf.Asset!));
             ApplyAssetSelection(leaf.Asset);
+        }
     }
 
     private void AssetTree_DoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
         if (AssetTree.SelectedItem is TreeViewItem { Tag: AssetTreeNode { IsLeaf: true, Asset: { } asset } })
+        {
+            Log.Info("用户双击目录树叶子：资源={0}（类型={1}）", AssetDisplay.DisplayPath(asset), asset.Type);
             ActivateDefaultAction(asset);
+        }
     }
 
     // ── 辅助 ─────────────────────────────────────────────────────────
@@ -1477,6 +1939,8 @@ public partial class AssetsWorkbenchPage : UserControl
 
     private void ShowError(string title, Exception ex)
     {
+        // 调用点已各自 Log.Error 记过完整栈；这里只补「用户实际看到了什么」。
+        Log.Warn("弹出错误对话框：{0} —— {1}", title, ex.Message);
         _host.SetStatus($"{title}：{ex.Message}");
         MessageBox.Show(OwnerWindow, ex.Message, title, MessageBoxButton.OK, MessageBoxImage.Error);
     }

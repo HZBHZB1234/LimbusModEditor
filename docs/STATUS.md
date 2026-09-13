@@ -29,9 +29,9 @@ dotnet test  LimbusModEditor.slnx --no-build --nologo
 dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r win-x64 --self-contained false -o artifacts/publish-win-x64 --no-restore
 ```
 
-**2026-09-12 实测：611 个测试全绿（74 Format + 537 Domain），本机真实数据门控测试全部真跑。**
+**2026-09-13 实测：642 个测试全绿（74 Format + 568 Domain），本机真实数据门控测试全部真跑。**
 
-测试基线的历史轨迹（参考）：168 → 205 → 218 → 223 → 228 → 231 → 256 → 274 → 334 → 476 → 528 → 549 → 562 → 573 → 610 → **611**。
+测试基线的历史轨迹（参考）：168 → 205 → 218 → 223 → 228 → 231 → 256 → 274 → 334 → 476 → 528 → 549 → 562 → 573 → 610 → 611 → 625 → 634 → **642**。
 
 注意（见 `docs/PROJECT-INDEX.md` §11）：
 
@@ -63,6 +63,16 @@ dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r 
 11. **文档索引与代码同步**：新增/删除源文件、改变职责边界或口径时，同步更新
     `docs/PROJECT-INDEX.md`（逐文件索引）与 `docs/CODE-STRUCTURE.md`（不变量表/流程）；
     行数等派生数据也用 read/edit/write 工具改，不要用脚本批量重写文档（见 §6.3 事故记录）。
+12. **优先第三方库，不要为了「零依赖」手搓基础设施**：日志、序列化、压缩/归档、图像、解析、
+    加密、命令行等**通用能力**，先选 NuGet 上维护良好的成熟库再考虑自研
+    （本仓库已在用 AssetsTools.NET / ImageSharp / Joveler.Compression.XZ / SharpCompress /
+    Microsoft.Data.Sqlite / WPF-UI / NLog）。只有三种情况允许自研：
+    ① 库的能力、许可或分发方式明确不合适（例：FMOD 只绑公开 C ABI，见 §3-4）；
+    ② 引库会强制带来与需求不匹配的架构改造、且收益明显不足以抵偿（例：为一个日志库引入 DI 容器）；
+    ③ 需求本身是**本工具特有的编排逻辑**（导出计划、四套索引、页面状态、走查口径），这类才写在自己代码里。
+    引进新库时：`Nullable` + `TreatWarningsAsErrors` 必须照样零警告通过；依赖登记进
+    `docs/CODE-STRUCTURE.md` §2 依赖表；许可证不得与「不整段复制 GPL 代码」（§3-5）冲突。
+    **不允许**的借口是"分层好看/保持纯净"——分层服务的目的是可维护，不是零依赖本身。
 
 ---
 
@@ -137,6 +147,13 @@ dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r 
 - 40 万级资产下的列表虚拟化/分页；`UnityTextureCodec` 的逐像素路径（大纹理）块拷贝化；
   `ImagePreviewService.HasAlpha` 的全图扫描采样化。
 
+### T-I（已做，跟踪回归）2026-09-12 用户报障四条
+- 见 §6.2「用户报障四条已修」表：资源工作台含 static-data、预览即未响应、
+  侧栏预览不能滚动、树突然折叠、导出未响应无产物 —— 全部已修并入库回归测试。
+- **回归门**（改这几处代码前先看它们）：`StaticBundleLocatorTests`（bundle 名兜底 +
+  无 catalog 时不清标记）、`AssetPreviewRegistryTests`（真实静态表预览必须有界）、
+  `ModPackExportTests`（进度节流）。
+
 ---
 
 ## 6. 已知边界与已知问题（不要顺手改）
@@ -162,6 +179,39 @@ dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r 
 | 游戏更新后缓存外层键变化 | Carra2 导出会与缓存不对齐 | 由导出诊断暴露（**不自动修复**） |
 | 旧导出通道与新导出并列 | 概念重叠 | 见 T-D 决策点 |
 
+**2026-09-12 用户报障四条已修（回归测试已入库，别再退回旧写法）**：
+
+| 报障 | 根因（一句话） | 现在的口径 |
+|---|---|---|
+| 资源工作台仍含 static-data | 静态标记只由 catalog 判定产生，`catalog` 缺失/滞后时标记为假 | 默认隐藏走两道判据：元数据标记 **+** bundle 名兜底（`StaticBundleLocator.LooksLikeStaticBundle`）；扫描侧**只在 catalog 权威时才清除**标记。2026-09-13 追加**第三道**：容器路径前缀（见 6.2.1） |
+| 预览 static-data 资源即未响应 | 静态表被通用文本预览当 20 万字符 JSON 去建树，UI 线程一次性造几千个节点 | 文本预览有字符上限；静态数据表只给「摘要 + 前若干行」并指路静态数据工作台；JSON 树另有行数闸门 |
+| 侧栏预览在窗口变矮时不能上下滑动 | 预览内容高度由内容决定，而滚动器只包着「内容下方」的属性区 | 预览统一包 `WrapPreview`（最大高度 + Auto 滚动条）；图像/音频不重复包（自带交互/视口） |
+| 树形视图突然折叠回初始形态 | 重建时展开态全丢（节点模型是只读纯数据）；Static/Bank 页 `Loaded` 无守卫，切页回来就重跑并重建 | `TreeExpansionState` 按稳定 key 回放展开态（四页共用）；`Loaded` 加「已载入」守卫；编辑集变化改为就地刷新标题，不重建树 |
+| 导出模态弹出后未响应且无产物 | `await` 同步完成的 Task 会原地继续 → 整条导出链的重活全跑在 UI 线程；且无取消入口 | 导出/调试整体跑后台线程；`UnityBundleBuildService.BuildAsync` 自己切线程池；进度上报节流；`ExportProgressWindow` 提供取消令牌（关窗即取消）；Carra/Lunartique 复用同一份中间产物 |
+
+### 6.2.1 第二轮实测取证（2026-09-13：日志 + Windows 事件日志 + 探针）
+
+用户第二次实测（`artifacts/publish-win-x64/logs/` 全量日志、事件日志、一次 WPF 探针）后的根因与修复：
+
+| 现象 | 实测根因 | 关键证据 | 修复 |
+|---|---|---|---|
+| 「预览几个文件后崩溃、无 crash 文件」 | **不是崩溃，是挂起**：双击 bundle 内的 TextAsset 时，内置编辑器把 `SourcePath`（= **整个** AssetBundle 容器 `<外层键>/<内层键>/__data`）当正文读，2.26 MB 二进制进了 WPF `TextBox` —— 探针实测 `Window.Show()` **26,570 ms**（等长纯文本对照 1,113 ms）。UI 线程不泵消息 → 心跳（本身跑在 UI 线程）也停 → Windows 记 `AppHangB1`/事件 1002 后强杀，所以**没有** `crash-*.log`（只在托管异常时写） | 旧 `AssetEditService.ReadCurrentBytesAsync`（`SourcePath` → `File.ReadAllBytesAsync`）；日志末行 `02:05:02.1712 EditTextAsset_Click` 之后 22 s 全静默；`artifacts/ui-probe`（一次性探针，gitignored） | 三层防线：① 读取层拒绝把容器当正文（`NotSupportedException`）；② `TextAssetEditService.CanEditText` 让「编辑文本内容…」置灰 + ToolTip 说明，`OpenAsync` 抛中文原因；③ 二进制（`UnityFS`/含 NUL）与超长正文（>40 万字符）拒绝打开 |
+| 资源工作台仍含 static-data | 游戏更新换键后，**旧版本静态 bundle 以裸哈希目录留在 Unity 缓存**（本机实测 `62d6e466…`(9/3) 与 catalog 里的 `fa6984…`(9/10) 同外层键、同 CAB、内容同源）：元数据标记与 bundle 名兜底**同时失效**（裸哈希无法反推名字，`LooksLikeStaticBundle` 只认带前缀的全名） | 日志「静态表判定结论：非静态数据」；读真实 catalog 字节：2926 个 bundle 名里 `static_s1_0_*` 只有 1 个，`62d6e466…` 出现 **0** 次 | 第三道判据 `StaticBundleLocator.LooksLikeStaticTablePath`（容器路径前缀 `Assets/Resources_moved/StaticData/static-data/`，扫描时已写进 `containerEntry`，O(1) 可读、不依赖 catalog），搜索与预览共用同一口径 |
+| 「创作状态」区在窗口变矮时不能上下滑动 | 该行是 `Height="Auto"`：`ScrollViewer` 被以**无限高度**测量 → 可滚高恒等于可视高 → 永远不出现滚动条；窗口变矮时 Auto 行仍索要 643 px，把预览行 `*` 挤到 0，自身被父容器裁掉下半截（底部按钮既看不见也滚不到） | 日志 `LogLayoutMetrics`：「行0(预览)=255/\*，行1(创作状态)=643/Auto」，同期「可视高 643 = 可滚高 643，滚动条 Collapsed」 | 两行都改成**有界**：`*` MinHeight=170 : `2.4*` MinHeight=120（898 高时 264/634 ≈ 原视觉），`ScrollViewer` 拿到确定高度后真正滚动 |
+| 导出 7 分钟未成功 / 取消很久不生效 | **单点根因**：`UnityCacheExportService.IsEditedCacheAsset` 把 `File.Exists` 排在编辑标记**之前**，而回灌后项目有 **1,275,623** 条资产 → 每次全表约 **44 s**（实测 ≈34.5 µs/次 stat）。该谓词在一次导出里被跑 **4 遍**：计划 46 s、carra2 两次各 44 s、`UnityBundleBuildService.Build` 因惰性 `GroupBy` 的 `.Count()`+`foreach` **双枚举**再 88 s —— 419 s 里约 **400 s 是白烧的空转**；取消只在步骤边界生效，进行中的 90 MB 重打包不可中断 | 日志：计划 46,265 ms；`carra2 导出开始`→`重打包提交` 各 43.8/43.3 s；`BuildAsync` 147 s（同函数在 395 资产项目里 45 s） | ① 编辑标记（O(1)）前置；② `candidates` 物化 `.ToArray()` 消除双枚举；③ 三个构建服务候选谓词补 `unityFieldEdits`（原来纯字段编辑会被静默跳过） |
+
+**修复前后（同一项目、同一份真实数据、都带 1,275,623 条资产）**：
+
+| 阶段 | 修复前（GUI） | 修复后（CLI，`LME_REHYDRATE=1`） |
+|---|---|---|
+| 生成导出计划 | 46,265 ms | **550 ms** |
+| carra2 开始 → 重打包提交 | 43,850 / 43,300 ms | **357 / 410 ms** |
+| 一次 90 MB bundle 重打包（含校验） | 147,000 ms | 56,543 ms（纯重打包部分不变） |
+| carra2 槽位两次 | 191,734 / 174,203 ms（第二次被取消） | 57,437 / 48,953 ms |
+| **整次导出** | 419,672 ms 且**没有产物**（Lunartique zip 未生成） | **156,340 ms，2 个槽位产物全部写出** |
+
+**仍未做（已列账，收益与风险都已评估）**：导出剩下的 156 s 里约 155 s 是**同一份 90 MB bundle 被完整重打包 3 次**（carra 槽位 + lunartique 中间包 + lunartique 安装侧）。消除它需要把「改后 bundle」当独立产物缓存（键 = 源 bundle + 源签名 + 编辑集签名）或让 lunartique 复用 carra 的产物 —— 这动的是导出语义，必须配一次真实数据回归验证，不适合和本轮修复混在一起做。取消同理：要秒级生效必须给 `AssetsToolsBackend.WritePackedBundle` 与四个 `ReplaceBundle*` 加 token，且单次 `Pack` 内部无法中断，现实下限是「一个重打包步骤」。
+
 ### 6.3 工具纪律事故记录（写文档必看）
 
 - **2026-09-12**：编写本文档体系时，用 pwsh（`Get-Content` + `WriteAllLines`）批量改 `docs/PROJECT-INDEX.md`
@@ -178,7 +228,8 @@ dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r 
 | `README.md` | 项目门面：三步工作流、格式边界、CLI、打包与验证 |
 | `docs/STATUS.md`（本文） | 现状 / 基线 / 铁律 / 环境事实 / 待办 / 已知问题 |
 | `docs/CODE-STRUCTURE.md` | 分层与依赖、目录地图、界面外壳、核心流程、跨文件不变量、落盘位置、决策表 |
-| `docs/PROJECT-INDEX.md` | **逐文件功能索引** + 元数据键字典 + 症状→文件速查 |
+| `docs/LOGGING.md` | **日志与报错收集的唯一权威约定**：`logs/` 里有什么、两行样板、级别选择、热路径纪律（守卫/采样）、§4 记录点、运行中改级别、怎么用日志定位「未响应」 |
+| `docs/PROJECT-INDEX.md` | **逐文件功能索引** + 元数据键字典 + 症状→文件速查（**只记命名空间与大致功能，不记行号/类名**：加一行即可维护，精确到方法请 grep） |
 | `docs/USAGE.md` | 用户手册（界面行为、操作步骤、故障排查、格式边界、验证入口） |
 | `docs/REALDATA-VERIFY.md` | 写回链路真实数据验证报告（含严重缺陷的根因与修复） |
 | `docs/REVIEW.md` | 自审报告：审查发现、设计变更风险、性能量化基线 |

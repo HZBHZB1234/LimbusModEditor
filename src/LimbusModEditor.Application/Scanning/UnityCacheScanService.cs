@@ -1,10 +1,13 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.IO;
 using LimbusModEditor.Application.Catalog;
 using LimbusModEditor.Application.StaticMods;
 using LimbusModEditor.Domain.Assets;
+using LimbusModEditor.Domain.Diagnostics;
 using LimbusModEditor.Domain.Projects;
 using LimbusModEditor.Formats.Unity;
+using NLog;
 
 namespace LimbusModEditor.Application.Scanning;
 
@@ -43,6 +46,8 @@ public sealed record UnityCacheScanResult(
 /// </summary>
 public sealed class UnityCacheScanService
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     private readonly UnityCacheSqliteIndexStore? _store;
 
     /// <param name="indexCacheFile">索引文件路径；默认放在程序目录 cache/ 下
@@ -70,13 +75,19 @@ public sealed class UnityCacheScanService
                 results.Add(new UnityCacheScanEntry(Path.GetFileName(outer), Path.GetFileName(inner), data));
             }
         }
+        if (Log.IsDebugEnabled)
+            Log.Debug("枚举 Unity 缓存条目：{0} 条 · cache={1}", results.Count, cacheDirectory);
         return results;
     }
 
     private static IEnumerable<string> EnumerateDirectoriesSafe(string directory)
     {
         try { return Directory.EnumerateDirectories(directory); }
-        catch (Exception) { return []; }
+        catch (Exception ex)
+        {
+            Log.Warn(ex, "枚举缓存子目录失败（该目录被跳过，扫描继续）：{0}", directory);
+            return [];
+        }
     }
 
     /// <summary>
@@ -107,11 +118,16 @@ public sealed class UnityCacheScanService
         if (!Directory.Exists(cacheDirectory))
             throw new DirectoryNotFoundException($"Unity 缓存目录不存在：{cacheDirectory}");
 
+        using var scope = Log.Scope($"扫描游戏资源（{Path.GetFileName(cacheDirectory.TrimEnd(Path.DirectorySeparatorChar))}）");
+        Log.Info("Unity 缓存扫描开始：cache={0} · game={1} · 项目={2}（资产 {3} 条）· 索引与项目一致={4}",
+            cacheDirectory, gameDirectory ?? "-", project.Name, project.Assets.Count, projectMatchesIndex);
+
         // 枚举缓存目录放后台线程：缓存可能上万条目，同步枚举会让调用方
         // （UI 线程）在「开始扫描」时卡住。
         var entries = await Task.Run(() => EnumerateCacheEntries(cacheDirectory), cancellationToken);
         if (entries.Count == 0)
             throw new InvalidDataException($"缓存目录里没有 <外层>/<内层>/__data 缓存条目：{cacheDirectory}");
+        Log.Debug("缓存条目枚举完成：{0} 条 · cache={1}", entries.Count, cacheDirectory);
 
         // 建表 / 读索引在后台线程完成（避免调用方 UI 线程上的同步卡顿）。
         //
@@ -135,13 +151,17 @@ public sealed class UnityCacheScanService
                 // 纯扫描不持久化，不影响扫描正确性。
                 try { s.EnsureSchema(); }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or Microsoft.Data.Sqlite.SqliteException)
-                { s = null; }
+                {
+                    Log.Error(ex, "资源索引库建表失败（降级为纯扫描、不持久化索引）：数据库已存在={0}", s.Exists);
+                    s = null;
+                }
             }
             // 新鲜度检查用一次性载入的内存字典（阶段 C3：实测逐 bundle 开连接
             // 查询会把并行解析阶段拖慢一个数量级；bundle 元数据只有 1459 行级别）。
             var idx = s is not null
                 ? s.ReadBundleIndex(StringComparer.OrdinalIgnoreCase)
                 : new Dictionary<string, UnityCacheIndexBundle>(StringComparer.OrdinalIgnoreCase);
+            Log.Debug("资源索引载入内存：库可用={0} · 索引内 bundle {1} 行", s is not null, idx.Count);
             return (s, idx);
         }, cancellationToken);
 
@@ -159,6 +179,7 @@ public sealed class UnityCacheScanService
         // 进度节流：热扫描（索引命中）时上报可达每秒上万条，逐条 Post 到 UI
         // 线程会把它 flood 到卡死；按 100ms 窗口聚合，扫描过程界面始终可响应。
         var lastReportTicks = Environment.TickCount64;
+        var failureSamples = 0;
         await Task.Run(() =>
         {
             Parallel.ForEach(entries, new ParallelOptions
@@ -191,8 +212,12 @@ public sealed class UnityCacheScanService
                 {
                     // 个别 bundle 损坏/格式未知不阻断整体扫描；按铁律明确报告。
                     failures.Enqueue($"{entry.OuterKey}/{entry.InnerKey}: {ex.Message}");
+                    if (Log.IsWarnEnabled && Interlocked.Increment(ref failureSamples) <= 20)
+                        Log.Warn(ex, "解析 bundle 失败（已记录诊断并跳过该 bundle）：{0}", entry.DataPath);
                 }
                 var done = Interlocked.Increment(ref processed);
+                Log.Every(done, 5000, LogLevel.Debug,
+                    () => $"资源扫描进度：{done}/{total} 个缓存条目（解析 {Volatile.Read(ref scanned)} · 索引命中 {Volatile.Read(ref indexed)}）");
                 var now = Environment.TickCount64;
                 if (now - Volatile.Read(ref lastReportTicks) >= 100)
                 {
@@ -203,10 +228,14 @@ public sealed class UnityCacheScanService
             // 结束补报一次最终进度（最后一条可能因节流被跳过）。
             progress?.Report(new UnityCacheScanProgress(total, processed, string.Empty, scanned, indexed));
         }, cancellationToken).ConfigureAwait(false);
+        Log.Info("资源扫描解析阶段结束：{0} 个缓存条目 · 索引命中 {1} · 需解析 {2} · 解析失败 {3}",
+            total, indexed, scanned, failures.Count);
         diagnostics.AddRange(failures.OrderBy(x => x, StringComparer.Ordinal));
         // catalog 只在真的用上时才可能为空：惰性被触发过 + 加载失败 + 配了游戏目录。
         if (catalogLazy.IsValueCreated && catalogLazy.Value is null && !string.IsNullOrWhiteSpace(gameDirectory))
             diagnostics.Add("官方 catalog 缺失或无法解析，本次扫描不做 vanilla 基线判定。");
+        Log.Debug("catalog 惰性值状态：已触发={0} · 目录权威性（staticHashesLazy 已触发）={1} · 配了游戏目录={2}",
+            catalogLazy.IsValueCreated, staticHashesLazy.IsValueCreated, !string.IsNullOrWhiteSpace(gameDirectory));
 
         // 收尾阶段反馈：合并百万级资产与写索引库可能持续数十秒到数分钟，
         // 让 UI 明确展示当前阶段而不是停在最后一条解析进度上。
@@ -233,8 +262,12 @@ public sealed class UnityCacheScanService
         {
             // 索引命中的 bundle 无需对账；但要保留「索引可能已过期（磁盘上删了 bundle）」
             // 的收缩能力 —— 那由后面的 PersistIndex 完成，与项目资产无关。
+            Log.Debug("跳过资产合并段：项目与索引逐条一致={0} · 本次无需解析的 bundle={1}（未对账、未重建资产表）",
+                projectMatchesIndex, !results.Any(x => !x.FromCache));
             PersistIndex(store, entries, results, cancellationToken);
             RegisterCacheSource(project, cacheDirectory, ref cacheSourceRegistered);
+            Log.Info("资源扫描结束（纯索引命中）：bundle {0} 个（解析 {1} · 索引命中 {2}）· 资产未变",
+                total, scanned, indexed);
             return new UnityCacheScanResult(total, scanned, indexed, added, updated, diagnostics,
                 SkippedRowReconciliation: true, SkippedMerge: true);
         }
@@ -242,6 +275,7 @@ public sealed class UnityCacheScanService
         var existingByPath = new Dictionary<string, AssetRecord>(StringComparer.OrdinalIgnoreCase);
         foreach (var existingAsset in project.Assets)
             existingByPath.TryAdd(existingAsset.LogicalPath, existingAsset);
+        Log.Debug("资产合并开始：项目现有资产 {0} 条 · 是否逐条对账={1}", existingByPath.Count, reconcileIndexHits);
         // 索引命中的 bundle 需要行数据参与合并：单条流式查询分组载入
         // （冷扫描没有命中项，完全跳过这一步）。
         // 项目已与索引逐条一致时这趟读行 + 对账是纯 no-op，直接跳过：
@@ -249,6 +283,13 @@ public sealed class UnityCacheScanService
         var rowsByBundle = store is not null && reconcileIndexHits && results.Any(x => x.FromCache)
             ? store.ReadAllRowsGrouped(StringComparer.OrdinalIgnoreCase)
             : null;
+        Log.Debug("索引命中 bundle 的行数据载入：{0} 个 bundle（null=本次不需要对账）", rowsByBundle?.Count.ToString() ?? "-");
+        // 静态标记留痕（只在 Debug 打开时计数）：写入 / 保留 / 清除各计一次，
+        // 便于回答「标记为什么没了」。不参与任何判定，关闭日志时零改动。
+        var staticCounters = Log.IsDebugEnabled
+            ? new ConcurrentDictionary<string, int>(StringComparer.Ordinal)
+            : null;
+        var staticBundleDecisions = 0L;
         foreach (var (entry, fromCache, cachedBundle, records, _) in results.OrderBy(x => x.Entry.OuterKey, StringComparer.Ordinal)
                      .ThenBy(x => x.Entry.InnerKey, StringComparer.Ordinal))
         {
@@ -258,8 +299,26 @@ public sealed class UnityCacheScanService
             // （见本方法开头的惰性说明）。旧索引/旧项目（没有 static_bundle 语义）由
             // 项目记录里已有的标记兜底：命中分支里只要记录上已有标记就保留，
             // 免得一次「什么都没变」的扫描把静态标记全抹掉。
+            //
+            // catalog 不可用（未解析 / 解析失败 / 版本不符）时 staticHashes 集合为空，
+            // 此时**没有资格判定「这个 bundle 不是静态的」** —— 早先的写法会据此把
+            // 已有标记全部清除，于是资源工作台又把 static-data 全列出来。
+            // 因此清除只在「本次真的拿到过 catalog 内层键集合」时发生；
+            // 另有 bundle 名兜底（不依赖 catalog）作为第二道防线。
+            var catalogAuthoritative = staticHashesLazy.IsValueCreated;
+            var nameLooksStatic = StaticBundleLocator.LooksLikeStaticBundle(entry.InnerKey);
             var isStaticBundle = cachedBundle.StaticBundle
-                || (staticHashesLazy.IsValueCreated && staticHashesLazy.Value.Contains(entry.InnerKey));
+                || nameLooksStatic
+                || (catalogAuthoritative && staticHashesLazy.Value.Contains(entry.InnerKey));
+            var mayClearStatic = catalogAuthoritative && !nameLooksStatic;
+            if (Log.IsTraceEnabled)
+                Log.Trace("静态标记判定：bundle={0} · 索引标记={1} · 名字像静态={2} · catalog 权威={3} · 判定静态={4} · 允许清除={5} · 来自索引缓存={6} · data={7}",
+                    entry.InnerKey, cachedBundle.StaticBundle, nameLooksStatic, catalogAuthoritative,
+                    isStaticBundle, mayClearStatic, fromCache, entry.DataPath);
+            if (staticCounters is not null && staticBundleDecisions++ % 5000 == 0)
+                Log.Debug("静态标记判定进度：已判 {0} 个 bundle · 最近一个 {1}（索引标记={2} · 名字像静态={3} · catalog 权威={4} → 静态={5}）",
+                    staticBundleDecisions, entry.InnerKey, cachedBundle.StaticBundle, nameLooksStatic,
+                    catalogAuthoritative, isStaticBundle);
             if (fromCache)
             {
                 // bundle 未变化：数据与索引完全同源（含 vanilla 基线），已有记录
@@ -278,10 +337,15 @@ public sealed class UnityCacheScanService
                         // 已存在：只补/清静态标记（旧项目没有该标记时也能对齐）。
                         // 记录上已有标记就保留：旧索引（static_bundle 列全是 0）在
                         // 「什么都没变」的扫描里不该把标记抹掉。
+                        var hadStaticMark = existingAsset.Metadata.ContainsKey(StaticBundleMetadataKey);
                         var staticForAsset = isStaticBundle
                             || existingAsset.Metadata.ContainsKey(StaticBundleMetadataKey);
                         if (staticForAsset) existingAsset.Metadata[StaticBundleMetadataKey] = "true";
-                        else existingAsset.Metadata.Remove(StaticBundleMetadataKey);
+                        else if (mayClearStatic) existingAsset.Metadata.Remove(StaticBundleMetadataKey);
+                        if (Log.IsDebugEnabled) LogStaticMark(staticCounters, logicalPath, isStaticBundle,
+                            staticForAsset && !hadStaticMark,
+                            mayClearStatic && !staticForAsset && hadStaticMark,
+                            $"bundle 未变化（索引命中）· bundle={entry.InnerKey} · 判定静态={isStaticBundle} · catalog 权威={catalogAuthoritative}");
                         updated++;
                         continue;
                     }
@@ -289,6 +353,9 @@ public sealed class UnityCacheScanService
                     project.Assets.Add(asset);
                     existingByPath.Add(logicalPath, asset);
                     added++;
+                    if (Log.IsDebugEnabled && isStaticBundle)
+                        LogStaticMark(staticCounters, logicalPath, true, true, false,
+                            $"新增引用记录（bundle 未变化，项目里缺失）· bundle={entry.InnerKey}");
                 }
             }
             else
@@ -301,6 +368,9 @@ public sealed class UnityCacheScanService
                         project.Assets.Add(asset);
                         existingByPath.Add(asset.LogicalPath, asset);
                         added++;
+                        if (Log.IsDebugEnabled && isStaticBundle)
+                            LogStaticMark(staticCounters, asset.LogicalPath, true, true, false,
+                                $"新增引用记录（bundle 本次重新解析）· bundle={entry.InnerKey}");
                         continue;
                     }
                     if (existing.Metadata.ContainsKey("reference"))
@@ -324,20 +394,70 @@ public sealed class UnityCacheScanService
                         if (asset.Metadata.TryGetValue("catalogBaseline", out var baseline))
                             existing.Metadata["catalogBaseline"] = baseline;
                     }
-                    // 静态标记随本次 catalog 判定刷新（旧项目也据此补上/清除）。
+                    // 静态标记随本次判定刷新（补上总是安全的；清除需要 catalog 权威判定，见上）。
+                    var existingHadStaticMark = existing.Metadata.ContainsKey(StaticBundleMetadataKey);
                     if (isStaticBundle) existing.Metadata[StaticBundleMetadataKey] = "true";
-                    else existing.Metadata.Remove(StaticBundleMetadataKey);
+                    else if (mayClearStatic) existing.Metadata.Remove(StaticBundleMetadataKey);
+                    if (Log.IsDebugEnabled) LogStaticMark(staticCounters, asset.LogicalPath, isStaticBundle,
+                        isStaticBundle && !existingHadStaticMark,
+                        mayClearStatic && !isStaticBundle && existingHadStaticMark,
+                        $"bundle 本次重新解析 · bundle={entry.InnerKey} · 判定静态={isStaticBundle} · catalog 权威={catalogAuthoritative}");
                     updated++;
                 }
             }
         }
         RegisterCacheSource(project, cacheDirectory, ref cacheSourceRegistered);
 
+        if (staticCounters is not null)
+        {
+            staticCounters.TryGetValue("写入", out var written);
+            staticCounters.TryGetValue("保留", out var kept);
+            staticCounters.TryGetValue("清除", out var cleared);
+            staticCounters.TryGetValue("清除(已无标记)", out var clearedAlready);
+            Log.Debug("静态标记汇总：写入 {0} · 已存在保留 {1} · 清除 {2} · 清除但本就无标记 {3} · catalog 权威={4}",
+                written, kept, cleared, clearedAlready, staticHashesLazy.IsValueCreated);
+            if (cleared > 0)
+                Log.Warn("本次扫描清除了 {0} 条 staticBundle 标记（catalog 权威判定为「非静态」）—— 若资源工作台静态口径不对，先看这里的清除是否合理",
+                    cleared);
+        }
+
         progress?.Report(new UnityCacheScanProgress(total, total, string.Empty, scanned, indexed,
             Phase: "正在写入索引库…"));
         PersistIndex(store, entries, results, cancellationToken);
+        Log.Info("Unity 缓存扫描结束：bundle {0} 个（解析 {1} · 索引命中 {2}）· 新增资产 {3} · 更新资产 {4} · 诊断 {5} 条 · 跳过对账={6}",
+            total, scanned, indexed, added, updated, diagnostics.Count, !reconcileIndexHits);
         return new UnityCacheScanResult(total, scanned, indexed, added, updated, diagnostics,
             SkippedRowReconciliation: !reconcileIndexHits);
+    }
+
+    /// <summary>
+    /// 静态标记（<see cref="StaticBundleMetadataKey"/>）写入 / 保留 / 清除的留痕。
+    /// 只在 <c>Debug</c> 打开时被调用（调用点已守卫）：逐条只做计数，
+    /// 每 5000 条采样一条明细；「清除」单独成类，因为它正是历史上标记丢失的现场。
+    /// 不参与任何判定，也不改动元数据。
+    /// </summary>
+    private static void LogStaticMark(
+        ConcurrentDictionary<string, int>? counters,
+        string logicalPath,
+        bool isStaticBundle,
+        bool wrote,
+        bool cleared,
+        string reason)
+    {
+        // 计数器只在 Debug 级别开启时创建；这里跟着一起降级为「只打日志、不计数」。
+        var category = cleared ? "清除" : wrote ? "写入" : isStaticBundle ? "保留" : "清除(已无标记)";
+        if (counters is null)
+        {
+            if (cleared && Log.IsWarnEnabled)
+                Log.Warn("清除 staticBundle 标记：{0} · 依据：{1}", logicalPath, reason);
+            return;
+        }
+        var counter = counters.AddOrUpdate(category, 1, (_, old) => old + 1);
+        if (cleared && Log.IsWarnEnabled)
+            Log.Warn("清除 staticBundle 标记：{0} · 依据：{1}（累计 {2} 条）", logicalPath, reason, counter);
+        else
+            Log.Every(counter, 5000, LogLevel.Debug,
+                () => $"{category} staticBundle 标记：{logicalPath} · 依据：{reason}");
     }
 
     /// <summary>登记缓存来源（导出全部会跳过 Directory 来源；缓存写回由
@@ -352,6 +472,7 @@ public sealed class UnityCacheScanService
             Format = Domain.Formats.ModFormatKind.Directory
         });
         registered = true;
+        Log.Debug("登记缓存来源到项目：{0}", cacheDirectory);
     }
 
     /// <summary>打开旧项目时的后台回灌：纯引用资产不再存进项目文件（阶段 C
@@ -365,8 +486,14 @@ public sealed class UnityCacheScanService
     {
         ArgumentNullException.ThrowIfNull(project);
         var store = _store;
-        if (store is null || !store.Exists) return 0;
+        if (store is null || !store.Exists)
+        {
+            Log.Warn("从索引回灌资产跳过：资源索引库不存在或未配置（项目={0}）", project.Name);
+            return 0;
+        }
 
+        using var scope = Log.Scope("从索引回灌资产");
+        Log.Info("从索引回灌资产开始：项目={0}（现有资产 {1} 条）", project.Name, project.Assets.Count);
         var rehydrated = await Task.Run(() =>
         {
             // 先快照既有资产（实体化/导入的优先），按 LogicalPath 去重。
@@ -377,9 +504,13 @@ public sealed class UnityCacheScanService
                 merged.Add(existing);
                 byPath.TryAdd(existing.LogicalPath, existing);
             }
+            var readBundles = 0;
             foreach (var (bundle, rows) in store.ReadAll())
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                readBundles++;
+                Log.Every(readBundles, 500, LogLevel.Debug,
+                    () => $"回灌索引读取进度：已读 {readBundles} 个 bundle · 已合并 {merged.Count} 条资产");
                 foreach (var record in RebuildRecords(bundle.DataPath, bundle.Outer, bundle.Inner, rows, bundle.StaticBundle))
                 {
                     if (byPath.TryAdd(record.LogicalPath, record)) merged.Add(record);
@@ -387,6 +518,8 @@ public sealed class UnityCacheScanService
             }
             var added = merged.Count - project.Assets.Count;
             project.Assets = new System.Collections.ObjectModel.ObservableCollection<AssetRecord>(merged);
+            Log.Info("从索引回灌资产结束：读取 {0} 个 bundle · 合并后资产 {1} 条（新增 {2} 条）",
+                readBundles, merged.Count, added);
             return added;
         }, cancellationToken).ConfigureAwait(false);
         return rehydrated;
@@ -413,13 +546,20 @@ public sealed class UnityCacheScanService
         var descriptors = new UnityAssetService().ScanBundle(entry.DataPath);
         var isStaticBundle = staticHashesProvider().Contains(entry.InnerKey);
         var bundle = new UnityCacheIndexBundle(entry.DataPath, info.Length, info.LastWriteTimeUtc.Ticks, entry.OuterKey, entry.InnerKey, isStaticBundle);
+        if (Log.IsDebugEnabled)
+            Log.Debug("解析 bundle 成功：{0}/{1} · {2:0.0} KB · 对象 {3} 个 · 静态 bundle={4}",
+                entry.OuterKey, entry.InnerKey, info.Length / 1024.0, descriptors.Count, isStaticBundle);
 
         var records = new List<AssetRecord>(descriptors.Count);
         string? baselineSummary = null;
         if (catalogProvider() is { } catalog)
         {
             try { baselineSummary = CatalogBaselineService.Evaluate(catalog, entry.DataPath).Summary; }
-            catch (Exception) { baselineSummary = null; }
+            catch (Exception ex)
+            {
+                baselineSummary = null;
+                Log.Debug(ex, "vanilla 基线判定失败（基线留空，扫描继续）：{0}", entry.DataPath);
+            }
         }
         var rows = new List<UnityCacheIndexRow>(descriptors.Count);
         for (var i = 0; i < descriptors.Count; i++)
@@ -517,28 +657,59 @@ public sealed class UnityCacheScanService
         ConcurrentBag<(UnityCacheScanEntry Entry, bool FromCache, UnityCacheIndexBundle Bundle, IReadOnlyList<AssetRecord>? Records, IReadOnlyList<UnityCacheIndexRow>? Rows)> results,
         CancellationToken cancellationToken)
     {
-        if (store is null) return; // 未配置索引路径：只扫描不持久化（与旧内存模式一致）
+        if (store is null)
+        {
+            Log.Debug("跳过索引持久化：未配置索引库路径（只扫描不持久化）");
+            return; // 未配置索引路径：只扫描不持久化（与旧内存模式一致）
+        }
         try
         {
             // 只写变化过的 bundle（索引命中的未变化 bundle 无需重写）；
             // 收缩（游戏更新换键后旧索引自然淘汰）与 upsert 在同一事务完成。
-            store.PersistAll(entries, results
+            var toWrite = results
                 .Where(x => !x.FromCache && x.Rows is not null)
-                .Select(x => (x.Bundle, x.Rows!)));
+                .Select(x => (x.Bundle, x.Rows!))
+                .ToList();
+            var watch = Stopwatch.StartNew();
+            store.PersistAll(entries, toWrite);
+            watch.Stop();
+            Log.Debug("索引库持久化完成：磁盘条目 {0} 个 · 重写 bundle {1} 个 · 用时 {2:0.0} 秒",
+                entries.Count, toWrite.Count, watch.Elapsed.TotalSeconds);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or Microsoft.Data.Sqlite.SqliteException)
         {
             // 缓存写失败不影响扫描结果（下次冷扫描重建）。
+            Log.Error(ex, "索引库持久化失败（本次扫描结果不受影响，下次冷扫描会重建）：磁盘条目 {0} 个", entries.Count);
         }
     }
 
     private static CatalogFileService? LoadCatalog(string? gameDirectory)
     {
-        if (string.IsNullOrWhiteSpace(gameDirectory)) return null;
+        if (string.IsNullOrWhiteSpace(gameDirectory))
+        {
+            Log.Debug("不加载 catalog：未配置游戏目录（vanilla 基线与静态内层键集合都不可用）");
+            return null;
+        }
         var catalogPath = Path.Combine(gameDirectory, "LimbusCompany_Data", "StreamingAssets", "aa", "catalog.bin");
-        if (!File.Exists(catalogPath)) return null;
-        try { return CatalogFileService.Load(catalogPath); }
-        catch (Exception ex) when (ex is InvalidDataException or IOException) { return null; }
+        if (!File.Exists(catalogPath))
+        {
+            Log.Warn("catalog 不存在（vanilla 基线与静态内层键集合都不可用）：{0}", catalogPath);
+            return null;
+        }
+        try
+        {
+            var watch = Stopwatch.StartNew();
+            var catalog = CatalogFileService.Load(catalogPath);
+            watch.Stop();
+            Log.Debug("加载 catalog 成功：{0} · 用时 {1:0.0} 秒（首次解析较慢，约十余秒）",
+                catalogPath, watch.Elapsed.TotalSeconds);
+            return catalog;
+        }
+        catch (Exception ex) when (ex is InvalidDataException or IOException)
+        {
+            Log.Error(ex, "catalog 解析失败（本次不做 vanilla 基线，静态内层键集合为空）：{0}", catalogPath);
+            return null;
+        }
     }
 
     /// <summary>该缓存条目是否需要重新解析：索引里没有，或 (size, mtime) 与磁盘不符。
@@ -555,6 +726,7 @@ public sealed class UnityCacheScanService
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            Log.Debug(ex, "读缓存条目元数据失败（按「需要重新解析」处理，不假装新鲜）：{0}", entry.DataPath);
             return true;
         }
     }

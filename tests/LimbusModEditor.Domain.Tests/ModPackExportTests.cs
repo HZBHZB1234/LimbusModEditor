@@ -37,8 +37,7 @@ public sealed class ModPackExportTests : IDisposable
             {
                 if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
             }
-            catch (Exception) { /* 临时目录清理失败不影响结论 */ }
-        }
+            catch (Exception) { /* 临时目录清理失败不影响结论 */ }        }
     }
 
     private (ModProject Project, ModExportPlan Plan) SeedBankProject(string bankFileName = "1D101A.assets.bank")
@@ -295,5 +294,42 @@ public sealed class ModPackExportTests : IDisposable
         // 未写出的槽位必须带中文原因（报告里要逐条列出来）。
         foreach (var slot in result.Slots.Where(x => !x.Written))
             Assert.False(string.IsNullOrWhiteSpace(slot.Diagnostics.FirstOrDefault()));
+    }
+
+    // ── 进度上报节流（修复「导出把 UI 消息队列淹掉」）────────────────────
+
+    /// <summary>
+    /// 逐资源 / 逐对象的密集上报必须被节流，且**首条与末条一定到达**
+    /// （否则用户看不到开始与结束）。真实规模下这里是十万级 Report，
+    /// 未节流时会 Post 出同样数量的 Dispatcher 回调。
+    /// </summary>
+    [Fact]
+    public void Throttled_progress_keeps_first_and_last_and_suppresses_the_flood()
+    {
+        var seen = new List<string>();
+        var progress = new ThrottledProgress(new CollectingProgress(seen), intervalMs: 10_000);
+
+        progress.Report("第 1 条");
+        for (var i = 2; i <= 50_000; i++) progress.Report($"第 {i} 条");
+        progress.Flush();
+
+        Assert.Equal(["第 1 条", "第 50000 条"], seen);
+        // 5 万条里只有首条当场放行，其余 49,999 条被节流（末条在 Flush 时补发）。
+        Assert.Equal(49_999, progress.SuppressedCount);
+    }
+
+    /// <summary>没有接收者时（CLI / 测试）不得抛，也不该误报被节流。</summary>
+    [Fact]
+    public void Throttled_progress_without_a_receiver_is_a_no_op()
+    {
+        var progress = new ThrottledProgress(null);
+        progress.Report("x");
+        progress.Flush();
+        Assert.Equal(0, progress.SuppressedCount);
+    }
+
+    private sealed class CollectingProgress(List<string> sink) : IProgress<string>
+    {
+        public void Report(string value) => sink.Add(value);
     }
 }

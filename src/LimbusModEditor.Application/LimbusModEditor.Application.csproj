@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.11" />
+    <PackageReference Include="NLog" Version="6.2.0" />
     <PackageReference Include="SixLabors.ImageSharp" Version="3.1.11" />
   </ItemGroup>
 
@@ -20,6 +21,12 @@
     <ProjectReference Include="..\LimbusModEditor.Formats.Rebank\LimbusModEditor.Formats.Rebank.csproj" />
     <ProjectReference Include="..\LimbusModEditor.Formats.Unity\LimbusModEditor.Formats.Unity.csproj" />
     <ProjectReference Include="..\LimbusModEditor.Editing\LimbusModEditor.Editing.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- nlog.config 内嵌一份：万一输出目录里被删/被改坏，也能从程序集内还原，
+         日志系统不会因为配置文件问题而失效（见 Application/Diagnostics/NLogBootstrap.cs）。 -->
+    <EmbeddedResource Include="..\..\nlog.config" LogicalName="nlog.config" />
   </ItemGroup>
 
 </Project>

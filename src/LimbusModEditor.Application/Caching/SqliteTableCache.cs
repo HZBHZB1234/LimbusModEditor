@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using NLog;
 
 namespace LimbusModEditor.Application.Caching;
 
@@ -17,6 +18,8 @@ namespace LimbusModEditor.Application.Caching;
 /// </summary>
 public sealed class SqliteTableCache
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     private readonly string _dbFile;
     private readonly string _schemaSql;
     private readonly string _connectionString;
@@ -33,11 +36,13 @@ public sealed class SqliteTableCache
         _schemaSql = schemaSql;
         var directory = Path.GetDirectoryName(_dbFile);
         if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
-        _connectionString = new SqliteConnectionStringBuilder
-        {
-            DataSource = _dbFile,
-            Mode = SqliteOpenMode.ReadWriteCreate,
-        }.ToString();
+            _connectionString = new SqliteConnectionStringBuilder
+            {
+                DataSource = _dbFile,
+                Mode = SqliteOpenMode.ReadWriteCreate,
+            }.ToString();
+        Log.Debug("打开表缓存：db={0} · 建前已存在={1} · 建表脚本 {2} 字符",
+            Path.GetFileName(_dbFile), File.Exists(_dbFile), _schemaSql.Length);
     }
 
     /// <summary>数据库文件路径。</summary>
@@ -66,8 +71,11 @@ public sealed class SqliteTableCache
         catch (SqliteException ex)
         {
             // 建表都失败的库没有挽救价值：删掉重建（缓存只影响速度）。
+            Log.Error(ex, "表缓存建表失败（删库重建后重试一次）：db={0} · 错误码={1}",
+                Path.GetFileName(_dbFile), ex.SqliteErrorCode);
             RecreateOrThrow(ex);
             EnsureSchemaCore();
+            Log.Warn("表缓存已删库重建：db={0}", Path.GetFileName(_dbFile));
         }
     }
 
@@ -86,6 +94,8 @@ public sealed class SqliteTableCache
         if (_schemaReady) return;
         EnsureSchema();
         _schemaReady = true;
+        Log.Debug("表缓存建表保证完成（本实例只做一次）：db={0} · 重建过={1}",
+            Path.GetFileName(_dbFile), WasRecreated);
     }
 
     private void EnsureSchemaCore()
@@ -95,11 +105,15 @@ public sealed class SqliteTableCache
         using (var probe = connection.CreateCommand())
         {
             probe.CommandText = "SELECT count(*) FROM sqlite_master";
-            probe.ExecuteScalar();
+            var tableCount = probe.ExecuteScalar();
+            if (Log.IsTraceEnabled)
+                Log.Trace("表缓存完整性探测：db={0} · sqlite_master 对象数={1}", Path.GetFileName(_dbFile), tableCount);
         }
         using var command = connection.CreateCommand();
         command.CommandText = "PRAGMA journal_mode=WAL;\n" + _schemaSql;
         command.ExecuteNonQuery();
+        if (Log.IsDebugEnabled)
+            Log.Debug("表缓存建表脚本已执行（WAL + CREATE TABLE IF NOT EXISTS）：db={0}", Path.GetFileName(_dbFile));
     }
 
     /// <summary>轻量迁移：列不存在则 <c>ALTER TABLE ADD COLUMN</c>；已存在（或补列失败）
@@ -123,12 +137,26 @@ public sealed class SqliteTableCache
         {
             probe.CommandText = $"SELECT {column} FROM {table} LIMIT 0";
             try { probe.ExecuteNonQuery(); return; }
-            catch (SqliteException) { /* 缺列（或表结构坏）：走下面的 ALTER */ }
+            catch (SqliteException ex)
+            {
+                /* 缺列（或表结构坏）：走下面的 ALTER */
+                Log.Debug(ex, "探测列失败（缺列或表结构坏，走 ALTER 补列）：{0}.{1} · 错误码={2}",
+                    table, column, ex.SqliteErrorCode);
+            }
         }
         using var alter = connection.CreateCommand();
         alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {columnDefinition}";
-        try { alter.ExecuteNonQuery(); }
-        catch (SqliteException) { /* 列已存在 / 无写权限：静默跳过，旧行读出 null 由调用方兜底 */ }
+        try
+        {
+            alter.ExecuteNonQuery();
+            Log.Info("表缓存轻量迁移：已为 {0} 表补列 {1} {2}", table, column, columnDefinition);
+        }
+        catch (SqliteException ex)
+        {
+            /* 列已存在 / 无写权限：静默跳过，旧行读出 null 由调用方兜底 */
+            Log.Warn(ex, "补列未生效（列已存在或无写权限）：{0}.{1} {2} · 错误码={3}",
+                table, column, columnDefinition, ex.SqliteErrorCode);
+        }
     }
 
     // ── 连接 / 单事务批量写 / 读 ────────────────────────────────────

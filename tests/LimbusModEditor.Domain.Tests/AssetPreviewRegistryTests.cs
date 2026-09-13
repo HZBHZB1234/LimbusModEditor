@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using LimbusModEditor.Application.Assets.Preview;
+using LimbusModEditor.Application.StaticMods;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Formats.Unity;
 
@@ -155,9 +156,55 @@ public class AssetPreviewRegistryTests : IDisposable
         Assert.Equal(AssetPreviewKind.Rows, kinds[AssetType.MonoBehaviour]);
     }
 
+    /// <summary>
+    /// 关键回归：静态数据表（3 MB 级）在资源工作台不得再产出「大预览」——
+    /// 早先截断到 20 万字符后仍当合法 JSON 去建树，UI 侧一次性造几千个
+    /// TreeViewItem，点一下预览就未响应。现在只给「摘要 + 开头若干行」。
+    /// </summary>
     [Fact]
-    public void Default_registry_orders_new_format_providers_before_hex()
+    public async Task Real_static_table_preview_stays_bounded()
     {
+        var cacheRoot = FindRealCacheRoot();
+        if (cacheRoot is null) return; // 无真实样本：跳过
+
+        var gameDirectory = Environment.GetEnvironmentVariable("LME_GAME_DIR") ??
+            @"C:\Program Files (x86)\Steam\steamapps\common\Limbus Company";
+        var location = StaticBundleLocator.Locate(gameDirectory, [cacheRoot]);
+        if (location is null || !location.IsCached) return; // 定位不到静态 bundle：跳过
+
+        var service = new UnityAssetService();
+        var texts = service.ScanBundle(location.DataPath!)
+            .Where(d => d.Type == AssetType.Text && d.UnityPathId.HasValue)
+            .ToArray();
+        Assert.NotEmpty(texts);
+
+        // 取最大的一张表（真实环境 3 MB 级）。
+        var largest = texts.MaxBy(d => d.Size)!;
+        var asset = new AssetRecord
+        {
+            LogicalPath = $"{location.OuterKey}/{location.InnerHash}/{largest.ContainerPath}/{largest.UnityPathId}.{largest.UnityTypeId}",
+            SourcePath = location.DataPath,
+            ContainerPath = largest.ContainerPath,
+            Account = location.OuterKey,
+            Bundle = location.BundleName,
+            UnityPathId = largest.UnityPathId,
+            UnityTypeId = largest.UnityTypeId,
+            Type = largest.Type,
+            Size = largest.Size,
+            Metadata = { ["unityBundle"] = "true" },
+        };
+
+        var preview = await AssetPreviewRegistry.CreateDefault().PreviewAsync(asset);
+
+        Assert.Equal(AssetPreviewKind.Message, preview.Kind);
+        Assert.NotNull(preview.Text);
+        Assert.True(preview.Text!.Length <= TextPreviewProvider.PreviewCharLimit,
+            $"静态表预览必须受上限约束，实际 {preview.Text.Length:N0} 字符");
+        Assert.Contains("静态数据工作台", preview.Text);
+    }
+
+    [Fact]
+    public void Default_registry_orders_new_format_providers_before_hex()    {
         var names = AssetPreviewRegistry.CreateDefault().Providers.Select(p => p.GetType().Name).ToArray();
         // 新格式提供者必须在十六进制兜底之前注册，否则永远轮不到。
         Assert.Contains(nameof(MaterialPreviewProvider), names);

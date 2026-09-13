@@ -6,6 +6,8 @@ using LimbusModEditor.Domain.Projects;
 using LimbusModEditor.Formats.Abstractions;
 using LimbusModEditor.Formats.Carra;
 using LimbusModEditor.Formats.Unity;
+using LimbusModEditor.Domain.Diagnostics;
+using NLog;
 
 namespace LimbusModEditor.Application.Build;
 
@@ -18,6 +20,8 @@ namespace LimbusModEditor.Application.Build;
 /// </summary>
 public sealed class UnityCacheExportService
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     private readonly UnityBundleBuildService _bundleBuilder = new();
 
     /// <param name="projectRoot">项目根目录（.lmeproj 所在目录），重打包
@@ -32,83 +36,199 @@ public sealed class UnityCacheExportService
         ArgumentNullException.ThrowIfNull(project);
         ArgumentException.ThrowIfNullOrWhiteSpace(projectRoot);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        using var scope = Log.Scope("导出 carra2 对象包");
+        Log.Info("carra2 导出开始：产物 {0}，项目根 {1}，缓存目录 {2}",
+            outputPath, projectRoot, unityCacheDirectory ?? "-");
+
+        // 逐资源 / 逐对象的上报量在真实规模下可达十万级，而 UI 侧的 Progress<string>
+        // 每条都 Post 到 Dispatcher 队列；未节流时导出会把 UI 队列淹掉（详见
+        // ThrottledProgress 的说明）。首条与末条仍会到达。
+        var throttled = new ThrottledProgress(progress);
 
         var edited = project.Assets.Where(IsEditedCacheAsset).ToList();
         if (edited.Count == 0)
             throw new InvalidDataException(
                 "没有找到任何已编辑的缓存对象。请先在资源列表中替换图片、编辑 Sprite 元数据或 Unity 字段。");
 
-        // 1) 重打包所有被编辑的 bundle（BuildAsync 自带 staging + 引用完整性验证）。
-        var buildsDirectory = Path.Combine(Path.GetFullPath(projectRoot), "builds", "unity-bundles");
-        progress?.Report($"正在重打包被编辑的 bundle（实体化 → 验证 → 写出）…");
-        var builds = await _bundleBuilder.BuildAsync(project, buildsDirectory, cancellationToken);
-        progress?.Report($"已重打包 {builds.Count} 个 bundle，开始逐对象读取修改后的数据…");
-        var bySource = builds.ToDictionary(
-            x => Path.GetFullPath(x.SourcePath), x => x.OutputPath, StringComparer.OrdinalIgnoreCase);
-
-        // 2) 从重打包结果逐对象读回修改后的原始字节，组装 Carra2。
-        var package = new CarraPackage();
-        var statuses = new List<ExportAssetStatus>();
-        using var backend = new AssetsToolsBackend();
-        var objectIndex = 0;
-        foreach (var asset in edited)
+        var outputFullPath = Path.GetFullPath(outputPath);
+        // Carra 与 Lunartique 两个槽位都要一份「改后对象」：同一目标路径（同一次导出内）
+        // 直接复用上一次的结果，不重跑整条流水线（重跑 = 重打包 + 逐对象 XZ ×2）。
+        if (TryTakeInFlight(outputFullPath, out var reused))
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            objectIndex++;
-            progress?.Report($"[{objectIndex}/{edited.Count}] {asset.LogicalPath}");
-            if (asset.SourcePath is null ||
-                !bySource.TryGetValue(Path.GetFullPath(asset.SourcePath), out var repacked))
+            Log.Info("复用本次导出已生成的对象包，跳过重打包与逐对象压缩：{0}（{1} 个对象）",
+                outputFullPath, reused.AssetStatuses.Count);
+            throttled.Report($"复用本次导出已生成的对象包：{outputFullPath}");
+            return reused;
+        }
+
+        try
+        {
+            // 1) 重打包所有被编辑的 bundle（BuildAsync 自带 staging + 引用完整性验证，
+            //    内部已切到线程池并检查取消）。
+            var buildsDirectory = Path.Combine(Path.GetFullPath(projectRoot), "builds", "unity-bundles");
+            throttled.Report("正在重打包被编辑的 bundle（实体化 → 验证 → 写出）…");
+            var repackWatch = System.Diagnostics.Stopwatch.StartNew();
+            var builds = await _bundleBuilder.BuildAsync(project, buildsDirectory, cancellationToken).ConfigureAwait(false);
+            Log.Debug("bundle 重打包阶段结束：{0} 个 bundle 写出到 {1}，耗时 {2} ms",
+                builds.Count, buildsDirectory, repackWatch.ElapsedMilliseconds);
+            throttled.Report($"已重打包 {builds.Count} 个 bundle，开始逐对象读取修改后的数据…");
+            var bySource = builds.ToDictionary(
+                x => Path.GetFullPath(x.SourcePath), x => x.OutputPath, StringComparer.OrdinalIgnoreCase);
+
+            // 2) 从重打包结果逐对象读回修改后的原始字节，组装 Carra2。
+            //    这一段是同步重活（每个对象都要读一遍 bundle），显式放到后台线程：
+            //    留在 UI 线程上就是「进度窗口弹出后未响应」的直接来源。
+            var readWatch = System.Diagnostics.Stopwatch.StartNew();
+            var (package, statuses) = await Task.Run(() =>
             {
-                statuses.Add(new ExportAssetStatus(asset.LogicalPath, ExportAssetStatus.Skipped, "所属 bundle 没有生成重打包结果。"));
-                continue;
-            }
-            try
-            {
-                var raw = backend.ReadBundleSerializedObject(repacked, asset.ContainerPath!, asset.UnityPathId!.Value);
-                if (raw.Data.Length == 0)
+                var built = new CarraPackage();
+                var results = new List<ExportAssetStatus>();
+                using var backend = new AssetsToolsBackend();
+                var objectIndex = 0;
+                foreach (var asset in edited)
                 {
-                    statuses.Add(new ExportAssetStatus(asset.LogicalPath, ExportAssetStatus.Skipped, "重打包后对象数据为空。"));
-                    continue;
+                    // 取消检查点就在这里：单个对象要从（可能上百 MB 的）bundle 里解析出来，
+                    // 这一步耗时全在 ReadBundleSerializedObject 内部——取消为什么响应慢，看这条 Debug。
+                    if (Log.IsDebugEnabled)
+                        Log.Debug("正在读取重打包后的对象：第 {0}/{1} 个 {2}（已生效 {3} 个，本段已耗时 {4} ms）",
+                            objectIndex + 1, edited.Count, asset.LogicalPath ?? "-",
+                            results.Count(x => x.Status == ExportAssetStatus.Applied), readWatch.ElapsedMilliseconds);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    objectIndex++;
+                    throttled.Report($"[{objectIndex}/{edited.Count}] {asset.LogicalPath}");
+                    if (asset.SourcePath is null ||
+                        !bySource.TryGetValue(Path.GetFullPath(asset.SourcePath), out var repacked))
+                    {
+                        Log.Warn("跳过缓存对象 {0}：所属 bundle {1} 没有生成重打包结果",
+                            asset.LogicalPath ?? "-", asset.SourcePath ?? "-");
+                        results.Add(new ExportAssetStatus(asset.LogicalPath!, ExportAssetStatus.Skipped, "所属 bundle 没有生成重打包结果。"));
+                        continue;
+                    }
+                    try
+                    {
+                        var raw = backend.ReadBundleSerializedObject(repacked, asset.ContainerPath!, asset.UnityPathId!.Value);
+                        if (raw.Data.Length == 0)
+                        {
+                            Log.Warn("跳过缓存对象 {0}：重打包后对象数据为空（bundle {1}，pathId {2}）",
+                                asset.LogicalPath ?? "-", repacked, asset.UnityPathId!.Value);
+                            results.Add(new ExportAssetStatus(asset.LogicalPath!, ExportAssetStatus.Skipped, "重打包后对象数据为空。"));
+                            continue;
+                        }
+                        var outer = asset.Metadata["cacheOuter"];
+                        var inner = asset.Metadata["cacheInner"];
+                        var key = new CarraObjectKey(outer, inner, asset.UnityPathId!.Value, raw.TypeTableIndex);
+                        built.Entries.Add(CarraEntry.CreateNew(key, raw.Data));
+                        results.Add(new ExportAssetStatus(asset.LogicalPath!, ExportAssetStatus.Applied, null));
+                        if (Log.IsDebugEnabled)
+                            Log.Debug("缓存对象读回成功：{0} → 键 {1}/{2}/{3}.{4}（{5} 字节）",
+                                asset.LogicalPath ?? "-", outer, inner, asset.UnityPathId!.Value,
+                                raw.TypeTableIndex, raw.Data.Length);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Error(ex, "读取重打包后的对象失败：{0}（bundle {1}，容器 {2}，pathId {3}）",
+                            asset.LogicalPath ?? "-", repacked, asset.ContainerPath ?? "-", asset.UnityPathId!.Value);
+                        results.Add(new ExportAssetStatus(asset.LogicalPath!, ExportAssetStatus.Skipped, $"读取修改后对象失败：{ex.Message}"));
+                    }
                 }
-                var outer = asset.Metadata["cacheOuter"];
-                var inner = asset.Metadata["cacheInner"];
-                var key = new CarraObjectKey(outer, inner, asset.UnityPathId!.Value, raw.TypeTableIndex);
-                package.Entries.Add(CarraEntry.CreateNew(key, raw.Data));
-                statuses.Add(new ExportAssetStatus(asset.LogicalPath, ExportAssetStatus.Applied, null));
-            }
-            catch (Exception ex)
+                return (built, results);
+            }, cancellationToken).ConfigureAwait(false);
+            Log.Debug("逐对象读回阶段结束：{0}/{1} 个对象进入包，耗时 {2} ms",
+                package.Entries.Count, edited.Count, readWatch.ElapsedMilliseconds);
+            if (package.Entries.Count == 0)
+                throw new InvalidDataException(
+                    "没有对象成功写入 Carra2 包；请查看逐资源状态了解原因。");
+            package.UnknownFiles.Add(("carra.json",
+                Encoding.UTF8.GetBytes($"{{\"format\": \"carra2\", \"objects\": {package.Entries.Count}}}")));
+
+            var handler = new CarraFormatHandler();
+            var validation = await handler.ValidateAsync(
+                new ModPackage { SourceFormat = ModFormatKind.Carra2, Payload = package }, cancellationToken).ConfigureAwait(false);
+            if (validation.Diagnostics.Any(x => x.Severity == DiagnosticSeverity.Error))
+                throw new InvalidDataException(string.Join("; ", validation.Diagnostics.Select(x => x.Message)));
+
+            // 3) 缓存对齐诊断（与 ModExportService 同口径）：外层键缺失 = 游戏更新换键。
+            var diagnostics = CheckCacheAlignment(package, unityCacheDirectory).ToList();
+            foreach (var warning in diagnostics)
+                Log.Warn("缓存对齐诊断：{0}", warning);
+
+            Directory.CreateDirectory(Path.GetDirectoryName(outputFullPath)!);
+            throttled.Report($"正在压缩写出 {package.Entries.Count} 个对象（逐条目 XZ）…");
+            // 逐条目 XZ 压缩 + 归档写盘（原子写）：导出耗时的大头，必须记输入/输出字节与耗时。
+            var inputBytes = package.Entries.Sum(x => (long)(x.ModifiedData?.Length ?? x.CompressedData.Length));
+            var xzWatch = System.Diagnostics.Stopwatch.StartNew();
+            await AtomicOutput.WriteAsync(outputFullPath, async (stream, token) =>
             {
-                statuses.Add(new ExportAssetStatus(asset.LogicalPath, ExportAssetStatus.Skipped, $"读取修改后对象失败：{ex.Message}"));
+                await using var output = stream;
+                await handler.ExportAsync(
+                    new ModPackage { SourceFormat = ModFormatKind.Carra2, Payload = package },
+                    output, new ExportContext(ModFormatKind.Carra2, Codec: new JovelerXzCodec(), CancellationToken: token));
+            }, cancellationToken).ConfigureAwait(false);
+            Log.Debug("carra2 归档写出完成：{0}（输入 {1} 字节 / {2} 个对象 → 输出 {3} 字节，XZ 压缩+写盘耗时 {4} ms）",
+                outputFullPath, inputBytes, package.Entries.Count,
+                File.Exists(outputFullPath) ? new FileInfo(outputFullPath).Length : 0, xzWatch.ElapsedMilliseconds);
+
+            var applied = statuses.Count(x => x.Status == ExportAssetStatus.Applied);
+            var result = new ModExportResult(ModFormatKind.Carra2, outputFullPath, applied, diagnostics, statuses);
+            RememberInFlight(outputFullPath, result);
+            Log.Info("carra2 导出完成：{0} 个对象生效 / 共 {1} 个候选，诊断 {2} 条，节流丢弃进度上报 {3} 条",
+                applied, statuses.Count, diagnostics.Count, throttled.SuppressedCount);
+            return result;
+        }
+        finally
+        {
+            throttled.Flush();
+        }
+    }
+
+    // ── 同一次导出内的对象包复用（carra + lunartique 两个槽位）──────────
+    //
+    // 两个槽位共用「改后 bundle 的对象字节」这一份中间产物：Lunartique 槽位内部
+    // 就是调 ExportCarra2Async 拿 objects.carra。早先它会整条重跑一遍
+    // （重打包 + 逐对象 XZ 各两份），这既是双倍卡顿也是双倍内存。
+    // 复用键 = 目标路径 + 文件签名，避免跨次导出复用过期结果。
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (long Length, long Ticks, ModExportResult Result)> InFlightPackages =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private static bool TryTakeInFlight(string outputPath, out ModExportResult result)
+    {
+        result = null!;
+        if (!InFlightPackages.TryGetValue(outputPath, out var cached)) return false;
+        try
+        {
+            var info = new FileInfo(outputPath);
+            if (!info.Exists || info.Length != cached.Length || info.LastWriteTimeUtc.Ticks != cached.Ticks)
+            {
+                Log.Debug("对象包复用失效（文件签名不匹配），重新生成：{0}", outputPath);
+                InFlightPackages.TryRemove(outputPath, out _);
+                return false;
             }
         }
-        if (package.Entries.Count == 0)
-            throw new InvalidDataException(
-                "没有对象成功写入 Carra2 包；请查看逐资源状态了解原因。");
-        package.UnknownFiles.Add(("carra.json",
-            Encoding.UTF8.GetBytes($"{{\"format\": \"carra2\", \"objects\": {package.Entries.Count}}}")));
-
-        var handler = new CarraFormatHandler();
-        var validation = await handler.ValidateAsync(
-            new ModPackage { SourceFormat = ModFormatKind.Carra2, Payload = package }, cancellationToken);
-        if (validation.Diagnostics.Any(x => x.Severity == DiagnosticSeverity.Error))
-            throw new InvalidDataException(string.Join("; ", validation.Diagnostics.Select(x => x.Message)));
-
-        // 3) 缓存对齐诊断（与 ModExportService 同口径）：外层键缺失 = 游戏更新换键。
-        var diagnostics = CheckCacheAlignment(package, unityCacheDirectory).ToList();
-
-        var outputFullPath = Path.GetFullPath(outputPath);
-        Directory.CreateDirectory(Path.GetDirectoryName(outputFullPath)!);
-        progress?.Report($"正在压缩写出 {package.Entries.Count} 个对象（逐条目 XZ）…");
-        await AtomicOutput.WriteAsync(outputFullPath, async (stream, token) =>
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            await using var output = stream;
-            await handler.ExportAsync(
-                new ModPackage { SourceFormat = ModFormatKind.Carra2, Payload = package },
-                output, new ExportContext(ModFormatKind.Carra2, Codec: new JovelerXzCodec(), CancellationToken: token));
-        }, cancellationToken);
+            Log.Error(ex, "读取对象包签名失败，本次不复用（重新生成）：{0}", outputPath);
+            InFlightPackages.TryRemove(outputPath, out _);
+            return false;
+        }
+        result = cached.Result;
+        return true;
+    }
 
-        var applied = statuses.Count(x => x.Status == ExportAssetStatus.Applied);
-        return new ModExportResult(ModFormatKind.Carra2, outputFullPath, applied, diagnostics, statuses);
+    private static void RememberInFlight(string outputPath, ModExportResult result)
+    {
+        try
+        {
+            var info = new FileInfo(outputPath);
+            if (!info.Exists) return;
+            InFlightPackages[outputPath] = (info.Length, info.LastWriteTimeUtc.Ticks, result);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // 复用只是省时间：拿不到签名就不缓存，绝不影响正确性。
+            Log.Error(ex, "记录对象包签名失败，本次导出内不再复用：{0}", outputPath);
+        }
     }
 
     /// <summary>
@@ -118,13 +238,19 @@ public sealed class UnityCacheExportService
     /// </summary>
     public static bool IsEditedCacheAsset(AssetRecord asset)
     {
+        // 顺序就是性能（2026-09 实测，1.27M 资产项目）：启动回灌后项目里有 127 万条
+        // 引用资产，而真正带编辑的只有个位数。File.Exists 是系统调用（实测
+        // 1,275,623 次 ≈ 44 s），所以必须先用 O(1) 的编辑标记把绝大多数资产筛掉，
+        // 再去问「源文件还在不在」。原来 File.Exists 排在最前面，导致
+        // 「生成导出计划」46 s、每次 carra2 导出前 44 s、重打包入口两遍 88 s。
+        if (!asset.Metadata.ContainsKey("replacementPath")
+            && !asset.Metadata.ContainsKey("spriteMetadata")
+            && !asset.Metadata.ContainsKey("unityFieldEdits")) return false;
         if (asset.UnityPathId is null || string.IsNullOrWhiteSpace(asset.ContainerPath)) return false;
         if (asset.SourcePath is null || !File.Exists(asset.SourcePath)) return false;
         if (!asset.Metadata.TryGetValue("unityBundle", out var isBundle) || isBundle != "true") return false;
         if (!asset.Metadata.ContainsKey("cacheOuter") || !asset.Metadata.ContainsKey("cacheInner")) return false;
-        return asset.Metadata.ContainsKey("replacementPath")
-            || asset.Metadata.ContainsKey("spriteMetadata")
-            || asset.Metadata.ContainsKey("unityFieldEdits");
+        return true;
     }
 
     private static IEnumerable<string> CheckCacheAlignment(CarraPackage package, string? cacheDirectory)

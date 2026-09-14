@@ -291,4 +291,37 @@ public static class AssetDisplay
     /// <summary>显示路径分段（TreePath 的目录段）。</summary>
     public static string[] SplitTreePath(string path)
         => string.IsNullOrEmpty(path) ? [] : path.Split(Separators, StringSplitOptions.RemoveEmptyEntries);
+
+    /// <summary>
+    /// 取显示路径的第 <paramref name="segmentIndex"/> 段（0 基、跳过空段），
+    /// 并顺带返回总段数。<b>零数组分配</b>——<see cref="SplitTreePath"/> 每次调用都会
+    /// 分配一个 <c>string[]</c>，而目录树展开会对整棵子树的<b>每一条资源</b>调用它
+    /// （真实缓存里一个根节点可达 30 万条），这是「展开一个大目录会顿一下」的
+    /// 主要瞬时分配源。返回的 span 指向 <paramref name="path"/> 本身，
+    /// 调用方需要字符串（如当字典键）时再自行 <c>ToString()</c>。
+    /// 索引越界时返回空 span（<paramref name="segmentCount"/> 仍然给出真实段数）。
+    /// </summary>
+    public static ReadOnlySpan<char> SegmentAt(ReadOnlySpan<char> path, int segmentIndex, out int segmentCount)
+    {
+        // 刻意不用 NextSegment(ref span)：它把游标 span 当 ref 参数传入，
+        // 编译器的逃逸分析无法证明返回值不引用那个局部游标，会报 CS8352。
+        // 这里改用整数游标，所有切片都直接取自 path（调用方的 span）。
+        var found = default(ReadOnlySpan<char>);
+        var index = 0;
+        var start = 0;
+        while (start <= path.Length)
+        {
+            var slash = path[start..].IndexOf('/');
+            var end = slash < 0 ? path.Length : start + slash;
+            if (end > start)
+            {
+                if (index == segmentIndex) found = path[start..end];
+                index++;
+            }
+            if (slash < 0) break;
+            start = end + 1;
+        }
+        segmentCount = index;
+        return found;
+    }
 }

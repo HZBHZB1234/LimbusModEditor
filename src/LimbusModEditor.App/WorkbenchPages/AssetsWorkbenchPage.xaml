@@ -78,7 +78,13 @@
                                   IsChecked="True" Click="AssetViewMode_Click" ToolTip="按游戏容器目录浏览（类文件夹，双击展开）"/>
                 </WrapPanel>
                 <Grid>
+                    <!-- AssetList 是全项目此前唯一没显式开虚拟化的列表（AssetTree 反而开了）。
+                         百万级结果下不开虚拟化 = 每条命中都实例化一个 ListViewItem，
+                         滚动与首次挂载都会触发 gen2（实测一次全回收 872 ms）。
+                         ScrollUnit=Pixel 让滚动按像素走，回收模式下不会因为「行高不一致」跳位。 -->
                     <ListView x:Name="AssetList" Visibility="Collapsed" Background="{StaticResource WbListBrush}" BorderBrush="{StaticResource WbBorderBrush}" Foreground="{StaticResource WbTextPrimaryBrush}" SelectionChanged="AssetList_SelectionChanged"
+                             VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
+                             VirtualizingPanel.ScrollUnit="Pixel" ScrollViewer.CanContentScroll="True"
                              MouseDoubleClick="AssetList_DoubleClick" PreviewMouseRightButtonDown="AssetList_PreviewMouseRightButtonDown"
                              ContextMenu="{StaticResource AssetContextMenu}">
                         <ListView.ItemContainerStyle>

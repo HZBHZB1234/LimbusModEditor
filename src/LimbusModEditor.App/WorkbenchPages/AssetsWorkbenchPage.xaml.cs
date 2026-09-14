@@ -34,8 +34,11 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
     /// 待定位的资源（精确跳转用）。搜索是<b>异步</b>的（过滤 + 排序在后台线程，
     /// 见 <see cref="RunSearchAsync"/>），所以「先选中」不可能成功——只能把目标记在这里，
     /// 等这一代搜索结果挂上列表后再选中并滚到它。null = 没有待定位目标。
+    /// <para>存 <see cref="AssetRecord.LogicalPath"/> 而不是 <c>AssetId</c>：
+    /// 后者是每次重建记录都会变的 <c>Guid</c>，一旦列表改成从索引库分页取记录
+    /// （见 <c>AssetCatalog</c>）就会全部失配。</para>
     /// </summary>
-    private Guid? _pendingRevealAssetId;
+    private string? _pendingRevealLogicalPath;
 
     private readonly IWorkbenchHost _host;
     private readonly AssetSearchService _search = new();
@@ -374,7 +377,7 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
         Log.Info("用户确认拖放替换：资源={0}，来源图片={1}", AssetDisplay.DisplayPath(selected), path);
         try
         {
-            await _assetEdits.ReplaceFromFileAsync(project, selected.AssetId, path, projectDirectory);
+            await _assetEdits.ReplaceFromFileAsync(project, selected, path, projectDirectory);
             await _host.SaveProjectAsync();
             _host.RefreshProjectState("拖放替换已登记");
             RestoreListSelection(selected);
@@ -563,23 +566,23 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
         }
         _lastResults = results;
         // 精确跳转优先于「上次选中的资源」：它带的是用户刚点的那条关联，更该被保住。
-        var revealId = _pendingRevealAssetId;
-        _pendingRevealAssetId = null;
-        var selectedId = revealId ?? (AssetList.SelectedItem as AssetRow)?.AssetId;
+        var revealPath = _pendingRevealLogicalPath;
+        _pendingRevealLogicalPath = null;
+        var selectedPath = revealPath ?? (AssetList.SelectedItem as AssetRow)?.LogicalPath;
         AssetList.ItemsSource = rows;
-        if (selectedId is { } id && AssetList.ItemsSource is IEnumerable<AssetRow> rows2)
+        if (selectedPath is { } path && AssetList.ItemsSource is IEnumerable<AssetRow> rows2)
         {
-            var restored = rows2.FirstOrDefault(x => x.AssetId == id);
+            var restored = rows2.FirstOrDefault(x => string.Equals(x.LogicalPath, path, StringComparison.OrdinalIgnoreCase));
             if (restored is not null)
             {
                 AssetList.SelectedItem = restored;
                 AssetList.ScrollIntoView(restored);
             }
-            else Log.Warn("搜索后恢复选中失败：AssetId={0} 不在本代际 {1} 条结果中", id, results.Count);
+            else Log.Warn("搜索后恢复选中失败：LogicalPath={0} 不在本代际 {1} 条结果中", path, results.Count);
         }
-        if (revealId is { } revealedId)
+        if (revealPath is { } revealedPath)
         {
-            if (results.FirstOrDefault(x => x.AssetId == revealedId) is { } revealed)
+            if (results.FirstOrDefault(x => string.Equals(x.LogicalPath, revealedPath, StringComparison.OrdinalIgnoreCase)) is { } revealed)
             {
                 // 两个视图共用一个选中入口（ApplyAssetSelection）：树模式下即使行没挂上，
                 // 右侧预览也必须切到这条资源，否则「跳过来了但还显示上一个」。
@@ -589,8 +592,8 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
             }
             else
             {
-                Log.Warn("资源页精确跳转未命中：AssetId={0} 不在本代际 {1} 条结果中（可能被筛选条件排除）",
-                    revealedId, results.Count);
+                Log.Warn("资源页精确跳转未命中：LogicalPath={0} 不在本代际 {1} 条结果中（可能被筛选条件排除）",
+                    revealedPath, results.Count);
             }
         }
         AssetCountText.Text = results.Count == project.Assets.Count
@@ -604,7 +607,7 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
         {
             RebuildTree(roots);
             // 树是惰性物化的：根层重建后还得把目标叶子选中（并展开路径），否则「跳过来」看不见东西。
-            if (revealId is { } treeRevealId) RestoreTreeSelection(treeRevealId);
+            if (revealPath is { } treeRevealPath) RestoreTreeSelection(treeRevealPath);
         }
     }
 
@@ -640,12 +643,13 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
     }
 
     /// <summary>把底层记录还原成列表选中行：列表已按 AssetRow 承载，选中行
-    /// 必须找到对应的行对象，否则右侧面板不会跟着变。</summary>
+    /// 必须找到对应的行对象，否则右侧面板不会跟着变。身份键是
+    /// <see cref="AssetRecord.LogicalPath"/>（见 <see cref="AssetRow.LogicalPath"/>）。</summary>
     private void RestoreListSelection(AssetRecord asset)
     {
         if (AssetList.ItemsSource is IEnumerable<AssetRow> rows)
         {
-            var row = rows.FirstOrDefault(r => r.AssetId == asset.AssetId);
+            var row = rows.FirstOrDefault(r => string.Equals(r.LogicalPath, asset.LogicalPath, StringComparison.OrdinalIgnoreCase));
             if (row is not null)
             {
                 AssetList.SelectedItem = row;
@@ -896,7 +900,7 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
     ///
     /// <para>为什么还要先过滤：40 万行资源里目标那一行<b>不在当前结果集</b>就没法选中，
     /// 所以顺序是「按路径过滤 → 搜索结果挂上列表后选中」（见
-    /// <see cref="_pendingRevealAssetId"/> 与 <see cref="RunSearchAsync"/>）。</para>
+    /// <see cref="_pendingRevealLogicalPath"/> 与 <see cref="RunSearchAsync"/>）。</para>
     /// </summary>
     public bool Reveal(string payload)
     {
@@ -912,9 +916,9 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
             return false;
         }
 
-        _pendingRevealAssetId = asset.AssetId;
+        _pendingRevealLogicalPath = asset.LogicalPath;
         ApplySearchKeyword(container);
-        Log.Debug("资源页精确跳转已受理：{0} → AssetId={1}", container, asset.AssetId);
+        Log.Debug("资源页精确跳转已受理：{0} → LogicalPath={1}", container, asset.LogicalPath);
         return true;
     }
 
@@ -1739,7 +1743,7 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
         Log.Info("用户恢复图集：资源={0}", AssetDisplay.DisplayPath(asset));
         try
         {
-            await _atlasEdits.RepackAsync(project, asset.AssetId, Path.GetDirectoryName(_host.ProjectFile)!);
+            await _atlasEdits.RepackAsync(project, asset, Path.GetDirectoryName(_host.ProjectFile)!);
             await _host.SaveProjectAsync();
             _host.RefreshProjectState("图集已恢复并记录替换");
             RestoreListSelection(asset);
@@ -1855,7 +1859,7 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
         try
         {
             var service = new TextAssetEditService(_assetEdits);
-            var document = await service.OpenAsync(project, asset.AssetId);
+            var document = await service.OpenAsync(project, asset);
             var window = new TextAssetEditorWindow(document, AssetDisplay.DisplayPath(asset)) { Owner = OwnerWindow };
             if (window.ShowDialog() != true || window.Result is not { } edited)
             {
@@ -2219,18 +2223,18 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
         var keysBefore = _expandedTreeKeys.Count;
         TreeExpansionState.Capture(AssetTree, AssetTreeKeyOf, _expandedTreeKeys);
         var capturedKeys = _expandedTreeKeys.Count;
-        var selectedAssetId = (AssetTree.SelectedItem as TreeViewItem)?.Tag is AssetTreeNode { Asset: { } selected }
-            ? selected.AssetId
-            : (Guid?)null;
+        var selectedLogicalPath = (AssetTree.SelectedItem as TreeViewItem)?.Tag is AssetTreeNode { Asset: { } selected }
+            ? selected.LogicalPath
+            : null;
         var roots = (prebuiltRoots ?? AssetTreeBuilder.BuildRoots(_lastResults)).Select(MakeTreeItem).ToList();
         AssetTree.ItemsSource = roots;
-        Log.Debug("重建目录树：结果 {0} 条 → 根节点 {1} 个；捕获展开键 {2} → {3}；重建前选中 AssetId={4}（④ 若展开键数量骤减即折叠）",
-            _lastResults.Count, roots.Count, keysBefore, capturedKeys, selectedAssetId?.ToString() ?? "(无)");
+        Log.Debug("重建目录树：结果 {0} 条 → 根节点 {1} 个；捕获展开键 {2} → {3}；重建前选中 LogicalPath={4}（④ 若展开键数量骤减即折叠）",
+            _lastResults.Count, roots.Count, keysBefore, capturedKeys, selectedLogicalPath ?? "(无)");
         // 回放展开态（懒加载：按 key 逐层物化 + 展开），并找回树上的选中叶子。
         TreeExpansionState.Restore(AssetTree, AssetTreeKeyOf, _expandedTreeKeys, MaterializeAssetNode);
         Log.Debug("回放展开态完成：应回放 {0} 个键，AssetTree 根层实测 {1} 项",
             _expandedTreeKeys.Count, AssetTree.Items.Count);
-        if (selectedAssetId is { } id) RestoreTreeSelection(id);
+        if (selectedLogicalPath is { } selectedPath) RestoreTreeSelection(selectedPath);
     }
 
     /// <summary>树节点的稳定 key：从根到自己的显示路径段（兄弟间唯一，见
@@ -2257,21 +2261,24 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
         }
     }
 
-    /// <summary>重建后按 AssetId 找回树里的选中叶子（重建会丢选中高亮）。</summary>
-    private void RestoreTreeSelection(Guid assetId)
+    /// <summary>重建后按 LogicalPath 找回树里的选中叶子（重建会丢选中高亮）。
+    /// 用 LogicalPath 而非 AssetId：树叶子上的记录会随重建/分页更换实例，
+    /// AssetId 是每次重建都会变的 Guid。</summary>
+    private void RestoreTreeSelection(string logicalPath)
     {
-        var found = FindLeafItem(AssetTree.Items, assetId);
+        var found = FindLeafItem(AssetTree.Items, logicalPath);
         if (found is not null) found.IsSelected = true;
-        else Log.Warn("重建目录树后找不到选中叶子：AssetId={0}（④ 树折叠/重建可能已丢掉该节点）", assetId);
+        else Log.Warn("重建目录树后找不到选中叶子：LogicalPath={0}（④ 树折叠/重建可能已丢掉该节点）", logicalPath);
     }
 
-    private static TreeViewItem? FindLeafItem(System.Collections.IEnumerable items, Guid assetId)
+    private static TreeViewItem? FindLeafItem(System.Collections.IEnumerable items, string logicalPath)
     {
         foreach (var item in items)
         {
             if (item is not TreeViewItem node) continue;
-            if (node.Tag is AssetTreeNode { IsLeaf: true, Asset: { } asset } && asset.AssetId == assetId) return node;
-            var nested = FindLeafItem(node.Items, assetId);
+            if (node.Tag is AssetTreeNode { IsLeaf: true, Asset: { } asset }
+                && string.Equals(asset.LogicalPath, logicalPath, StringComparison.OrdinalIgnoreCase)) return node;
+            var nested = FindLeafItem(node.Items, logicalPath);
             if (nested is not null) return nested;
         }
         return null;

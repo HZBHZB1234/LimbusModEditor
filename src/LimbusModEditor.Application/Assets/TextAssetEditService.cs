@@ -42,10 +42,16 @@ public sealed class TextAssetEditService(AssetEditService edits)
             && (!PreviewRead.IsBundleAsset(asset) || AssetEditService.TryGetReplacementFile(asset, out _));
     }
 
-    public async Task<TextAssetDocument> OpenAsync(ModProject project, Guid assetId, CancellationToken cancellationToken = default)
+    public Task<TextAssetDocument> OpenAsync(ModProject project, Guid assetId, CancellationToken cancellationToken = default)
+        => OpenAsync(project, project.Assets.FirstOrDefault(x => x.AssetId == assetId)
+            ?? throw new KeyNotFoundException($"未找到资源: {assetId}"), cancellationToken);
+
+    /// <summary>实体重载：调用方已持有资源对象，不必在全项目里线性查找
+    /// （真实规模 127 万条时那是每次打开编辑器一遍全表扫描）。</summary>
+    public async Task<TextAssetDocument> OpenAsync(ModProject project, AssetRecord asset, CancellationToken cancellationToken = default)
     {
-        var asset = project.Assets.FirstOrDefault(x => x.AssetId == assetId)
-            ?? throw new KeyNotFoundException($"未找到资源: {assetId}");
+        ArgumentNullException.ThrowIfNull(project);
+        ArgumentNullException.ThrowIfNull(asset);
         if (asset.Type is not (AssetType.Text or AssetType.Json))
             throw new InvalidOperationException("只有文本或 JSON 资源可以使用文本编辑器。");
         if (!CanEditText(asset))
@@ -54,7 +60,7 @@ public sealed class TextAssetEditService(AssetEditService edits)
                 asset.LogicalPath ?? "-", asset.SourcePath ?? "-", asset.UnityPathId?.ToString() ?? "-");
             throw new NotSupportedException(BundleAssetHint);
         }
-        var bytes = await edits.ReadCurrentBytesAsync(project, assetId, cancellationToken);
+        var bytes = await edits.ReadCurrentBytesAsync(project, asset, cancellationToken);
         // 形状校验：宁可拒绝，也不要把二进制塞进 WPF 文本框（实测 26.5 秒卡死）。
         if (LooksLikeBinary(bytes))
         {
@@ -80,7 +86,7 @@ public sealed class TextAssetEditService(AssetEditService edits)
         Log.Info("文本编辑器正文就绪：资源={0}，{1:N0} 字节 → {2:N0} 字符，编码={3}，形态={4}",
             logicalPath.Length > 0 ? logicalPath : "-", bytes.Length, text.Length, encoding.WebName,
             isJson ? "JSON" : "文本");
-        return new(assetId, logicalPath, text, encoding, isJson);
+        return new(asset.AssetId, logicalPath, text, encoding, isJson);
     }
 
     public async Task<AssetReplacementResult> SaveAsync(ModProject project, TextAssetDocument document, string projectDirectory, bool formatJson = false, CancellationToken cancellationToken = default)

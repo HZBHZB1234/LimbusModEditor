@@ -90,4 +90,44 @@ public class AssetDisplayTests
     [Fact]
     public void Split_tree_path_drops_empty_segments()
         => Assert.Equal(["a", "b", "c"], AssetDisplay.SplitTreePath("/a//b/c/"));
+
+    /// <summary>
+    /// <see cref="AssetDisplay.SegmentAt"/> 是目录树展开热路径上的**零数组分配**
+    /// 替代品（原先每条资源一次 <see cref="AssetDisplay.SplitTreePath"/> 会分配一个
+    /// <c>string[]</c>，展开一个 30 万条的根节点就是几十 MB 的瞬时分配）。
+    /// 它必须与 <c>SplitTreePath</c> 的分段口径**逐格一致**，
+    /// 否则树会静默丢段 / 错层 —— 因此这里对真实形态的路径做全量等价比对。
+    /// </summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData("/")]
+    [InlineData("//")]
+    [InlineData("a")]
+    [InlineData("/a")]
+    [InlineData("a/")]
+    [InlineData("/a//b/c/")]
+    [InlineData("assets/assetbundle/ui/icon2.png")]
+    [InlineData("未命名资源/未命名 #-1234567890123456789")]
+    [InlineData("未命名资源/未命名 #0")]
+    [InlineData("Assets/Story/Ishmael.psb")]
+    [InlineData("a/b/c/d/e/f/g")]
+    public void Segment_at_matches_split_tree_path_exactly(string path)
+    {
+        var expected = AssetDisplay.SplitTreePath(path);
+        // 段数与 SplitTreePath 完全一致。
+        AssetDisplay.SegmentAt(path, -1, out var count);
+        Assert.Equal(expected.Length, count);
+
+        // 每一段（含越界返回空）都与数组版逐字一致。
+        for (var i = 0; i < expected.Length + 2; i++)
+        {
+            var span = AssetDisplay.SegmentAt(path, i, out var countAgain);
+            Assert.Equal(count, countAgain); // 顺带验证段数不受索引影响
+            Assert.Equal(i < expected.Length ? expected[i] : string.Empty, span.ToString());
+        }
+
+        // 负索引与远超段数的索引都返回空，不得抛。
+        Assert.True(AssetDisplay.SegmentAt(path, int.MinValue, out _).IsEmpty);
+        Assert.True(AssetDisplay.SegmentAt(path, int.MaxValue, out _).IsEmpty);
+    }
 }

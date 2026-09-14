@@ -47,17 +47,18 @@ public sealed class AssetTreeNode
         var leaves = new List<(string Name, AssetRecord Asset)>();
         foreach (var asset in Assets)
         {
-            // 每条资源只解析一次显示路径分段（原先 SegmentAt 与 SegmentCount
-            // 各自 SplitTreePath 一次；全展开时这一项是树构建的主要开销）。
-            var segments = AssetDisplay.SplitTreePath(AssetDisplay.TreePath(asset));
-            if (segmentIndex >= segments.Length) continue;
-            var segment = segments[segmentIndex];
-            var remaining = segmentIndex + 1 >= segments.Length;
-            if (remaining) leaves.Add((segment, asset));
+            // 每条资源只解析一次显示路径分段，且**不分配分段数组**
+            // （AssetDisplay.SegmentAt 走 span：原先 SplitTreePath 会为每条资源
+            // 分配一个 string[]；全展开时这是树构建的主要开销）。
+            var segment = AssetDisplay.SegmentAt(AssetDisplay.TreePath(asset), segmentIndex, out var segmentCount);
+            if (segment.IsEmpty) continue;
+            var name = segment.ToString();
+            var remaining = segmentIndex + 1 >= segmentCount;
+            if (remaining) leaves.Add((name, asset));
             else
             {
-                if (!directories.TryGetValue(segment, out var bucket))
-                    directories[segment] = bucket = [];
+                if (!directories.TryGetValue(name, out var bucket))
+                    directories[name] = bucket = [];
                 bucket.Add(asset);
             }
         }

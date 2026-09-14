@@ -19,7 +19,14 @@ public sealed class AssetRow
 
     public AssetRecord Asset { get; }
 
-    public Guid AssetId => Asset.AssetId;
+    /// <summary>行身份键 = 资源的 <see cref="AssetRecord.LogicalPath"/>。
+    /// <para>刻意<b>不用</b> <see cref="AssetRecord.AssetId"/>：那是
+    /// <c>Guid.NewGuid()</c> 初始化属性，每次重建记录（回灌 / 按页重新物化）
+    /// 都会得到新值，一旦列表改成从索引库分页取记录，以 AssetId 为键的
+    /// 「选中恢复 / 精确跳转」会全部失配。LogicalPath 实测全库唯一
+    /// （1,275,623 行 = 1,275,623 个 DISTINCT），且与
+    /// <c>EditOperation.targetPath</c> 同形，是稳定的行身份。</para></summary>
+    public string LogicalPath => Asset.LogicalPath;
 
     /// <summary>叶子名（m_Container 最后一段 / 导入路径文件名 / 类型兜底名）。</summary>
     public string Name => _name ??= AssetDisplay.DisplayName(Asset);

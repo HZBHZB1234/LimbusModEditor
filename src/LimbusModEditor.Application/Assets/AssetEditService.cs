@@ -71,7 +71,7 @@ public sealed class AssetEditService
             if (fileName.StartsWith(".", StringComparison.Ordinal)) continue; // skip sidecar/temp files
             if (!byFileName.TryGetValue(fileName, out var asset)) { filesWithoutAsset.Add(fileName); continue; }
             if (onlyUnreplaced && asset.Metadata.ContainsKey("replacementPath")) { skipped++; continue; }
-            await ReplaceFromFileAsync(project, asset.AssetId, file, projectDirectory, cancellationToken);
+            await ReplaceFromFileAsync(project, asset, file, projectDirectory, cancellationToken);
             matchedAssets.Add(asset.AssetId);
             matched++;
         }
@@ -83,26 +83,49 @@ public sealed class AssetEditService
         return new BatchReplacementReport(matched, filesWithoutAsset, assetsWithoutFile, skipped);
     }
 
+    /// <summary>按 AssetId 在项目里找资源。**这是编辑热路径上的一处 O(N) 陷阱**：
+    /// 百万级索引（真实规模 1,275,623 条）下每点一次「替换 / 编辑文本 / 撤销」
+    /// 都要线性扫一遍全表。调用方几乎都已经持有 <see cref="AssetRecord"/>，
+    /// 应当优先走各方法的实体重载；本方法只为「手上只有 Guid」的旧调用点
+    /// （与既有测试的 <see cref="KeyNotFoundException"/> 契约）保留。</summary>
+    private static AssetRecord FindAsset(ModProject project, Guid assetId)
+        => project.Assets.FirstOrDefault(x => x.AssetId == assetId)
+           ?? throw new KeyNotFoundException($"未找到资源: {assetId}");
+
     public Task<AssetReplacementResult> ReplaceFromBytesAsync(
         ModProject project, Guid assetId, ReadOnlyMemory<byte> data,
         string suggestedExtension, string projectDirectory,
         CancellationToken cancellationToken = default)
+        => ReplaceFromBytesAsync(project, FindAsset(project, assetId), data, suggestedExtension,
+            projectDirectory, cancellationToken);
+
+    /// <summary>实体重载：调用方已持有资源对象，不需要在全项目里线性查找。</summary>
+    public Task<AssetReplacementResult> ReplaceFromBytesAsync(
+        ModProject project, AssetRecord asset, ReadOnlyMemory<byte> data,
+        string suggestedExtension, string projectDirectory,
+        CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(project);
+        ArgumentNullException.ThrowIfNull(asset);
         ArgumentNullException.ThrowIfNull(data);
         var extension = string.IsNullOrWhiteSpace(suggestedExtension) ? ".bin" : suggestedExtension;
         if (!extension.StartsWith('.')) extension = "." + extension;
         var temporaryRoot = Path.Combine(Path.GetFullPath(projectDirectory), "edits", "assets");
         Directory.CreateDirectory(temporaryRoot);
-        var source = Path.Combine(temporaryRoot, $"{assetId:N}{extension}");
-        return ReplaceFromBytesCoreAsync(project, assetId, data, source, cancellationToken);
+        var source = Path.Combine(temporaryRoot, $"{asset.AssetId:N}{extension}");
+        return ReplaceFromBytesCoreAsync(project, asset, data, source, cancellationToken);
     }
 
-    public async Task<byte[]> ReadCurrentBytesAsync(
+    public Task<byte[]> ReadCurrentBytesAsync(
         ModProject project, Guid assetId, CancellationToken cancellationToken = default)
+        => ReadCurrentBytesAsync(project, FindAsset(project, assetId), cancellationToken);
+
+    /// <summary>实体重载：见 <see cref="FindAsset"/> 的 O(N) 说明。</summary>
+    public async Task<byte[]> ReadCurrentBytesAsync(
+        ModProject project, AssetRecord asset, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(project);
-        var asset = project.Assets.FirstOrDefault(x => x.AssetId == assetId)
-            ?? throw new KeyNotFoundException($"未找到资源: {assetId}");
+        ArgumentNullException.ThrowIfNull(asset);
         if (TryGetReplacementFile(asset, out var replacement))
         {
             Log.Debug("读取资源当前内容（替换文件）：资源={0}，替换文件={1}（{2} 字节）",
@@ -130,18 +153,27 @@ public sealed class AssetEditService
         return await File.ReadAllBytesAsync(path, cancellationToken);
     }
 
-    public async Task<AssetReplacementResult> ReplaceFromFileAsync(
+    public Task<AssetReplacementResult> ReplaceFromFileAsync(
         ModProject project,
         Guid assetId,
         string replacementPath,
         string projectDirectory,
         CancellationToken cancellationToken = default)
+        => ReplaceFromFileAsync(project, FindAsset(project, assetId), replacementPath, projectDirectory,
+            cancellationToken);
+
+    /// <summary>实体重载：见 <see cref="FindAsset"/> 的 O(N) 说明。</summary>
+    public async Task<AssetReplacementResult> ReplaceFromFileAsync(
+        ModProject project,
+        AssetRecord asset,
+        string replacementPath,
+        string projectDirectory,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(project);
+        ArgumentNullException.ThrowIfNull(asset);
         ArgumentException.ThrowIfNullOrWhiteSpace(replacementPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(projectDirectory);
-        var asset = project.Assets.FirstOrDefault(x => x.AssetId == assetId)
-            ?? throw new KeyNotFoundException($"未找到资源: {assetId}");
         var source = Path.GetFullPath(replacementPath);
         if (!File.Exists(source)) throw new FileNotFoundException("替换文件不存在。", source);
 
@@ -183,7 +215,7 @@ public sealed class AssetEditService
     }
 
     private async Task<AssetReplacementResult> ReplaceFromBytesCoreAsync(
-        ModProject project, Guid assetId, ReadOnlyMemory<byte> data,
+        ModProject project, AssetRecord asset, ReadOnlyMemory<byte> data,
         string source, CancellationToken cancellationToken)
     {
         var temporary = source + ".tmp";
@@ -197,14 +229,12 @@ public sealed class AssetEditService
         {
             if (File.Exists(temporary)) File.Delete(temporary);
         }
-        return await RecordReplacementAsync(project, assetId, source, cancellationToken);
+        return await RecordReplacementAsync(project, asset, source, cancellationToken);
     }
 
     private async Task<AssetReplacementResult> RecordReplacementAsync(
-        ModProject project, Guid assetId, string stored, CancellationToken cancellationToken)
+        ModProject project, AssetRecord asset, string stored, CancellationToken cancellationToken)
     {
-        var asset = project.Assets.FirstOrDefault(x => x.AssetId == assetId)
-            ?? throw new KeyNotFoundException($"未找到资源: {assetId}");
         var info = new FileInfo(stored);
         await using var hashInput = File.OpenRead(stored);
         var hash = Convert.ToHexString(await SHA256.HashDataAsync(hashInput, cancellationToken));
@@ -236,10 +266,13 @@ public sealed class AssetEditService
     /// （位于项目 edits/assets 下）会被删除；替换前的显示大小由
     /// originalSize 还原。资源本身没有编辑时返回 false。</summary>
     public bool ClearEdits(ModProject project, Guid assetId, string? projectDirectory = null)
+        => ClearEdits(project, FindAsset(project, assetId), projectDirectory);
+
+    /// <summary>实体重载：见 <see cref="FindAsset"/> 的 O(N) 说明。</summary>
+    public bool ClearEdits(ModProject project, AssetRecord asset, string? projectDirectory = null)
     {
         ArgumentNullException.ThrowIfNull(project);
-        var asset = project.Assets.FirstOrDefault(x => x.AssetId == assetId)
-            ?? throw new KeyNotFoundException($"未找到资源: {assetId}");
+        ArgumentNullException.ThrowIfNull(asset);
         if (!HasEdits(asset)) return false;
 
         if (asset.Metadata.TryGetValue("replacementPath", out var stored) && !string.IsNullOrWhiteSpace(stored))

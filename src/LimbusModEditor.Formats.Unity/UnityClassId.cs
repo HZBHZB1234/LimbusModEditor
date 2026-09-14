@@ -121,6 +121,17 @@ public static class UnityClassId
         return ByName(typeName);
     }
 
+    /// <summary>按 class id 映射；未覆盖时**回退到扫描时已经识别出的类型**。
+    /// <para>扫描时若类型树给出了类名，索引行里存的 <c>type</c> 就是这个兜底值，
+    /// 所以「从索引列拼显示路径」（<c>AssetDisplay.CacheRowDisplayPath</c>）与
+    /// 「构造 AssetRecord」两条路必须用**同一个**回退规则，否则同一行的显示名
+    /// 会在两处不一致（检索命中的与列表显示的就不是同一条）。</para></summary>
+    public static AssetType Map(int typeId, AssetType fallback)
+    {
+        var mapped = Map(typeId);
+        return mapped == AssetType.Unknown ? fallback : mapped;
+    }
+
     /// <summary>按类型表类名映射（大小写不敏感）。只认已支持的类名，
     /// 其余返回 Unknown（不猜）。</summary>
     public static AssetType ByName(string typeName)

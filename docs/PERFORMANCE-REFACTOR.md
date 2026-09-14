@@ -132,8 +132,189 @@ dotnet test tests/LimbusModEditor.Domain.Tests --no-restore --filter FullyQualif
 本次本地证据位于 `artifacts/performance/`：`before/metrics.json`、`final/metrics.json`、
 `export-original/export-read.json`、前后 catalog JSON 和测试结果；该目录由 git 忽略。
 
+## 全量常驻改为查询化的可行性实测（2026-09-14）
+
+上节遗留的「UI 仍把全部引用资产物化为 `AssetRecord`」这一项，做了一轮**只读**实测，
+只量代价、没有改 `src/`。测量对象是同一份真实索引库副本（`assets` 1,275,623 行 /
+`bundles` 1,471 / `strings` 1,462 / 52.8 MiB），全部改动都做在 `%TEMP%` 的副本上。
+
+### 前提：缓存引用资产的字段本来就在库里
+
+`UnityCacheScanService.BuildRecord` 只是把索引列**拼装**成 `AssetRecord`：
+`LogicalPath` = `outer_key/inner_key/container/pathId.typeId`，`Account`/`Bundle`/`SourcePath`/
+`ContainerPath`/`UnityPathId`/`UnityTypeId`/`Size` 全是列，`Metadata` 里的 `bundleIndex`、
+`cacheOuter`、`cacheInner`、`reference`、`catalogBaseline`、`containerEntry`、`staticBundle`
+也全部来自列。**因此查询化不需要新增任何对象数据**，只需要派生列与索引。
+
+`LogicalPath` 实测在全库唯一（1,275,623 行 = 1,275,623 个 DISTINCT），可以当稳定身份键
+与分页全序的尾键；它与 `EditOperation.targetPath` 同形。
+
+### 排序键不能编码下推 SQL —— 这是本轮最重要的结论
+
+`AssetDisplay.ComparePaths/CompareNames` 是自定义自然序（数字段按数值比较），
+SQLite 只有 BINARY/NOCASE。把自然序编码成「数字段长度前缀 + 字符」的键后，
+BINARY 序看起来等价，但**在真实数据上失效**：
+
+| 方案 | 随机 20 万对符号不一致 | 磁盘增量 | 页定位（第 5,000 页 / 末页） |
+|---|---:|---:|---:|
+| 编码排序键 + 覆盖索引 | **87,821 对 / 43.9%** | +494.4 MiB | 497 / 699 ms |
+| 编码排序键（非覆盖索引） | 同上 | +787.3 MiB | 9,859 / 12,186 ms |
+| **物化稠密名次（rank）** | **0（按构造）** | **+140.6 MiB** | **0.3 / 0.3 ms** |
+
+原因是行分布：**96% 的行显示名形如 `未命名资源/未命名 #<pathId>`**（`container_entry`
+非空只有 51,376 行），而 `pathId` 可以为负、也可以是 19 位长整数。参考比较器在
+「数字段 vs `-`」处按**原始码点**比较（`-` = 0x2D < `0` = 0x30），任何「给数字段加前缀」
+的编码都会把数字排在前面 → 顺序反转。同类字符还有 `空格 . , +` 等所有码点小于
+`0x30` 的字符。抽样还给出 `"a0b"` 与 `"ab"` 在参考比较器下**相等**（零数字段被
+`TrimStart('0')` 归零），编码方案无法表达。
+
+⇒ 安全做法是**把顺序本身物化**：用现有 C# 比较器全量排序，写回一个稠密整数名次列
+`r`（0…N-1），查询期 `ORDER BY r` 走整数索引。零语义偏差、索引键 8 字节、
+**不需要注册自定义 collation**（那会让建索引付出 O(N log N) 次 interop 回调）。
+
+### 分页：不需要 OFFSET，也不需要 keyset
+
+名次是稠密的，所以第 k 页就是一次区间定位：
+
+```sql
+SELECT ... WHERE r >= k*200 AND r < k*200 + 200 ORDER BY r
+```
+
+| 页 | 名次区间 | 同一索引上的 OFFSET |
+|---|---:|---:|
+| 第 1 页 | 0.2 ms | 0.7 ms |
+| 第 1,250 页 | 0.2 ms | 26.6 ms |
+| 第 5,000 页 | 0.3 ms | 171.4 ms |
+| 末页 | 0.3 ms | — |
+| keyset 续页 | 0.7 ms | — |
+
+**页定位耗时与页深无关**，因此「第 N / M 页 + 跳页」的 UI 形态是安全的，
+不需要退回「只能上一页/下一页」。分段扫描的代价才是关键：`OFFSET` 在**非覆盖**索引上
+是 O(offset) 次回表随机读（9,859 ms @1,000,000），在**覆盖**索引上是纯索引游走（497 ms）。
+
+### 代价与边界
+
+- **回填成本**：`ALTER TABLE ADD COLUMN` 是纯增量（实测 0.00 s，**不 drop、不重扫**）；
+  回填两列 1,275,623 行 26.5 s（48,080 行/秒）。**绝不能改 `SchemaVersion`** —— 那会
+  `DROP TABLE` 并迫使全量重扫。
+- **排序成本**：Python 复刻全量排序 271.5 s，是 C# 的上界；C# 同算法预计 2–6 s，
+  且发生在扫描期（本就在内存里排一次），不在查询路径上。
+- **子串搜索是唯一比内存方案慢的地方**：`LIKE '%x%'` 全表扫描 220–1,250 ms，
+  且**提高 `cache_size` 几乎无效**（8 MB → 256 MB 只从 1,249 ms 变到 1,209 ms，
+  开销在逐行比较而非缺页）。若要更快只能上 FTS5 trigram（会增加大量索引体积，本轮未测）。
+  可接受的替代是防抖 + 后台查询 + 明确的忙碌反馈。
+- **不能下推到 SQL 的部分**：① `HasUsableReplacement` 是 `File.Exists`（文件系统事实，
+  数量受限于替换编辑数）；② 任何内容解码（预览、哈希、Spine、静态表）本来就要按需读盘；
+  ③ `EditState`（含 `Conflict`/`Invalid`）是项目态而非目录态。
+- **覆盖规则**：实体化后的资产在索引库里**仍有行**，查询必须让项目态优先 ——
+  这正好等于 `RehydrateFromIndexAsync` 现有的 `byPath.TryAdd`（既有记录优先）语义，
+  落到 SQL 是「按 `LogicalPath` 左连接项目态临时表」。实测真实项目态很小
+  （`MyMod.lmeproj`：`assets[]` 395 条全部 materialized / `edits[]` 1 条），
+  每次查询重建这张临时表也不值一提。
+- **铁律影响（必须显式承认）**：索引库从「只影响速度」变成「列表的必需投影」。
+  删除它仍只是重扫、不影响正确性，但 UI 必须给出明确的「索引缺失 → 需重新扫描」状态，
+  不能再让它静默退化成空列表。
+
+### 复现
+
+`logs/probe_sql_only.py`（字段完备性 + 唯一性 + 首个编码方案）、
+`logs/probe_sql_only2.py`（精简编码方案 + cache_size 灵敏度 + 保序性反例）、
+`logs/probe_sql_only3.py`（名次方案 + 页定位）。三个脚本都只读打开原库，
+只在 `%TEMP%\lme-sqlprobe*` 的副本上做结构改动，输出在同名 `.out.txt`。
+
+## 派生层定案：名次表 + FTS5 trigram（S2 实测，2026-09-14）
+
+上一节的结论是「物化稠密名次 `r`，查询期 `ORDER BY r`」。S2 把它落成了**纯增量扩容**：
+只 `CREATE ... IF NOT EXISTS`，**不动 `assets` 表、不动 `SchemaVersion`** —— 老用户的缓存库
+不需要重扫那 1,471 个 bundle。上节写的「若要更快只能上 FTS5 trigram（本轮未测）」到这里补测并定案。
+
+### 最终结构
+
+```sql
+CREATE TABLE catalog_rank (r INTEGER PRIMARY KEY, bundle_id, bundle_index) WITHOUT ROWID;
+CREATE VIRTUAL TABLE asset_fts USING fts5(dp, content='', detail=none, columnsize=0, tokenize='trigram');
+CREATE TABLE derived_state (k TEXT PRIMARY KEY, v TEXT NOT NULL);   -- revision='d1' + rows
+```
+
+- **名次不写成 `assets.r` 列**：`UPDATE assets SET r=?` 实测 43–50 µs/行 → 55–65 s（127 万行）；
+  而 `catalog_rank` 用多行 `VALUES` 批量插入 4.7–9.5 µs/行 → **5.9 s**。顺带的好处是 `assets`
+  的 schema 完全不动，迁移只剩 `CREATE`，零 DROP 风险。
+- **FTS 的 `rowid` 直接用名次**，所以检索命中的 rowid 就是名次，排序/分页零转换。
+  代价是名次属于**整表全序**，任何一行增删都会挪动它后面的名次 ⇒ `catalog_rank` 与 `asset_fts`
+  **必须在同一个事务里一起重建**，否则「搜到的行」会指向「另一条资源」。
+- **FTS 只索引 `dp`（显示路径），绝不索引 `lp`**：实测 `lp` 形如
+  `<32位16进制>/<32位16进制>/CAB-<32位16进制>/<pathId>.<typeId>`，除编号外**全是机器哈希**，
+  没有任何用户会手打的文本；可搜内容（`Assets/Animation/SD/10612_Honglu_RCorp/…`）只在
+  `container_entry` → `dp`。实测 `dp+lp` @ `detail=full` 净 **+855.1 MiB / 灌入 161.4 s**；
+  `dp` @ `detail=none` 净 **+39.79 MiB / 灌入 28.7 s**。`src`（SourcePath）同样排除
+  —— 它只比 `lp` 多一层固定前后缀，搜它约等于搜整个库。
+- `content=''`（contentless）**采用**，但有三条必须照着写的约束（都是实测踩出来的）：
+  ① **清空只能用专用指令**：`DELETE FROM asset_fts`（带不带 `WHERE` 都一样）直接报
+  `asset_fts: table does not support scanning`；正确写法是
+  `INSERT INTO asset_fts(asset_fts) VALUES('delete-all')`（可重复调用，之后重插与检索都正常，
+  `integrity-check` 通过 —— `logs/probe_fts_clear.py`）。
+  ② **不能从索引里把文本读回来**（同样是 `table does not support scanning`）。这一条**我们不需要**：
+  复核是拿命中的 `rowid`（= 名次）回到 `catalog_rank`/`assets` 的列上**重新算**显示路径
+  （`ReadDisplayKeysByRank`），从不读 FTS 表的原文 —— 这也是 contentless 能用的前提。
+  ③ **不能 `rebuild`**（contentless 没有可重建的源）。
+  省下来的体积很实在：contentless `dp` 净 **+42.3 MiB / 灌 15.6 s**，vs 存储原文的 `detail=none,columnsize=0`
+  **+113.8 MiB / 灌 21.8 s**。代价是「搜到的不等于索引里的原文」这件事完全由复核兜住。
+
+### 检索：候选是超集，必须复核
+
+`detail=none` 不存位置 ⇒ **不支持裸短语查询**（直接报 `phrase queries are not supported (detail!=full)`）。
+唯一可用写法是把查询串切成 3 字符窗口、**每窗加双引号**、再用 `AND` 连起来：
+
+```text
+needle = anim/icon2  →  "ani" AND "nim" AND "im/" AND "m/i" AND "/ic" AND "ico" AND "con" AND "on2"
+```
+
+这样得到**只是超集**：含全部词项 ≠ 含连续子串（例：`assets/icon/on2/x.png` 同时含
+`ico`/`con`/`on2`，却没有 `icon2`）。所以必须把候选行读回来算显示路径、用 `OrdinalIgnoreCase`
+判子串做**精确复核**。复核与列表显示、派生层回填**共用同一个函数**
+（`AssetDisplay.CacheRowDisplayPath`）—— 这样「搜到的」严格等于「看到的」。
+
+- 实测 trigram **跨空白建词项**（`"本 #"` 是合法词项），逐窗口加引号是必须的：
+  裸写的多词查询会被当成短语，而 `detail=none` 直接报错。
+- 查询串 **短于 3 字符**时索引里取不到任何词项 ⇒ 退化为流式全表扫描（实测 1.5–3 s，不物化记录）。
+- 复核用的 `Contains(..., OrdinalIgnoreCase)` 是**字面量**匹配，没有 `LIKE` 的 `_`/`%` 通配语义。
+  实测拿 `LIKE` 当判据会**多算**：`'%cg_40%'` 命中 35 条，而真正的子串命中是 33 条
+  （SQLite 的 `_` 是单字符通配符）⇒ 复核口径必须用 `Contains`，不能用 `LIKE`。
+- 实测「FTS 候选 → 复核后」：`Personality` 1,638 候选（8.6 ms）→ 1,638 命中（20.1 ms）；
+  `cg_40` 33 → 33。
+
+### 实测（真实规模副本）
+
+| 项 | 值 |
+|---|---|
+| 索引库体积 | 46.5 → **138.7 MiB**（`assets` 55.22 / `catalog_rank` 19.19 / `asset_fts_data` 39.79） |
+| 单页读取 | **1.35 / 1.58 / 1.68 ms**（首页 / 中段 / 末页 —— 与页深无关） |
+| 名次重建 | **5.9 s**（DELETE + 重插） |
+| 检索索引重建 | **27.8 s** |
+| 每次缓存变化合计 | **≈ 34 s**，且只在缓存真的变过之后发生一次 |
+| 排序打平 | 显示路径并列的行数（靠 `LogicalPath` 才分先后） |
+
+### 维护策略
+
+- `PersistAll` 只**失效**：在同一事务里 `DELETE FROM derived_state`（回滚也保持一致）。
+- `EnsureDerived` **按需重建**：`revision` 或 `rows` 不符才动手，否则零成本返回 ——
+  所以每次扫描后都能放心调一次。
+- **查询路径另有廉价自愈闸门**：查询前只读一行状态，不对就补建。没有它会出现**静默错答**
+  ——「索引写完就被杀掉」时 `ReadPage` 返回空页、`SearchRanks` 返回零命中，用户看到的是
+  「资源没了」而不是「还在建」。这条闸门也让「索引库是列表的必需投影」这条铁律有兜底：
+  删库仍然只影响速度。
+
+### 复现
+
+`logs/probe_final_shape.py`（定案尺寸与耗时）、`logs/probe_rank_table.py`（名次表 vs 逐条 UPDATE）、
+`logs/probe_fts_maint.py`（contentless 的删除/重建限制）、`logs/probe_shapes.py`（`lp`/`dp` 实形）、
+`logs/probe_sql_only7.py`（用 `page_count/freelist_count` 量真实体积）、
+`logs/probe_trigram_space.py`（跨空白词项）、`logs/probe_trigram_sem.py`（`LIKE` 判据不可靠）、
+`logs/probe_bulk.py`（多行 VALUES 对 FTS5 虚表同样可用）。
+
 ## 仍存在的开销
 
 UI 仍会把全部引用资产物化为 `AssetRecord`，没有改成数据库分页查询；百万级资产的常驻
-集合、路径和元数据仍占较多内存。其他四个工作台/派生缓存没有改表布局。XZ 压缩与
-Unity 重打包仍由原库处理；本次不改变加载器格式或扩展未知 Unity 格式的写回支持。
+集合、路径和元数据仍占较多内存。**迁移可行的形态与实测代价见上一节**：派生列 + 稠密名次，
+磁盘约 +141 MiB 换掉约 1,250.9 MiB 常驻堆。其他四个工作台/派生缓存没有改表布局。
+XZ 压缩与 Unity 重打包仍由原库处理；本次不改变加载器格式或扩展未知 Unity 格式的写回支持。

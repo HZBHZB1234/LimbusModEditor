@@ -265,6 +265,7 @@ public sealed class UnityCacheScanService
             Log.Debug("跳过资产合并段：项目与索引逐条一致={0} · 本次无需解析的 bundle={1}（未对账、未重建资产表）",
                 projectMatchesIndex, !results.Any(x => !x.FromCache));
             PersistIndex(store, entries, results, cancellationToken);
+            EnsureDerivedIndex(store, progress, cancellationToken);
             RegisterCacheSource(project, cacheDirectory, ref cacheSourceRegistered);
             Log.Info("资源扫描结束（纯索引命中）：bundle {0} 个（解析 {1} · 索引命中 {2}）· 资产未变",
                 total, scanned, indexed);
@@ -429,6 +430,7 @@ public sealed class UnityCacheScanService
         progress?.Report(new UnityCacheScanProgress(total, total, string.Empty, scanned, indexed,
             Phase: "正在写入索引库…"));
         PersistIndex(store, entries, results, cancellationToken);
+        EnsureDerivedIndex(store, progress, cancellationToken);
         Log.Info("Unity 缓存扫描结束：bundle {0} 个（解析 {1} · 索引命中 {2}）· 新增资产 {3} · 更新资产 {4} · 诊断 {5} 条 · 跳过对账={6}",
             total, scanned, indexed, added, updated, diagnostics.Count, !reconcileIndexHits);
         return new UnityCacheScanResult(total, scanned, indexed, added, updated, diagnostics,
@@ -591,7 +593,6 @@ public sealed class UnityCacheScanService
         string dataPath, string outerKey, string innerKey, UnityCacheIndexRow item, bool staticBundle,
         string sourcePackagePath, string? logicalPath = null)
     {
-        var mappedType = UnityClassId.Map(item.TypeId);
         var record = new AssetRecord
         {
             LogicalPath = logicalPath ?? $"{outerKey}/{innerKey}/{item.Container}/{item.PathId}.{item.TypeId}",
@@ -601,9 +602,11 @@ public sealed class UnityCacheScanService
             Bundle = innerKey,
             UnityPathId = item.PathId,
             UnityTypeId = item.TypeId,
-            // 按 TypeId 应用当前映射；类映射扩充无需重新解析 bundle。
-            // ref-type 伪 ID 可能只有类型树类名能解析，保留扫描时已识别的类型。
-            Type = mappedType == AssetType.Unknown ? item.Type : mappedType,
+            // 按 TypeId 应用当前映射（未覆盖时回退到扫描时识别出的类型）；类映射扩充
+            // 无需重新解析 bundle。ref-type 伪 ID 只有类型树类名能解析，保留扫描时已识别的类型。
+            // **回退规则必须与 AssetDisplay.CacheRowDisplayPath 用同一个重载**：索引列
+            // 拼出来的显示路径（检索索引、按页取行）与这里构造的记录要指向同一条资源。
+            Type = UnityClassId.Map(item.TypeId, item.Type),
             Size = item.Size,
             Metadata =
             {
@@ -660,6 +663,38 @@ public sealed class UnityCacheScanService
         {
             // 缓存写失败不影响扫描结果（下次冷扫描重建）。
             Log.Error(ex, "索引库持久化失败（本次扫描结果不受影响，下次冷扫描会重建）：磁盘条目 {0} 个", entries.Count);
+        }
+    }
+
+    /// <summary>
+    /// 派生层（目录名次 + 检索索引）的重建。放在索引持久化之后、同一个后台流程里。
+    /// <para>只在「行集真的变过 / 首次建库 / 派生层修订号变了」时才有活干，其余情况
+    /// 读一行状态就返回 —— 所以可以每次扫描都调。真实规模实测一次重建三十余秒
+    /// （名次 ~6 s + 检索索引 ~28 s），只在缓存真的变过之后发生。</para>
+    /// <para>失败不影响扫描结果：派生层是纯派生物，下次扫描会重试（缓存只影响速度）。</para>
+    /// </summary>
+    private static void EnsureDerivedIndex(
+        UnityCacheSqliteIndexStore? store,
+        IProgress<UnityCacheScanProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        if (store is null) return;
+        try
+        {
+            var watch = Stopwatch.StartNew();
+            var result = store.EnsureDerived(progress, cancellationToken);
+            if (result.Rebuilt)
+                Log.Info("资源索引派生层重建完成：{0:N0} 条资源 · 显示路径打平 {1:N0} 条 · 用时 {2:0.0} 秒",
+                    result.Rows, result.Ties, result.Elapsed.TotalSeconds);
+            else
+                Log.Debug("资源索引派生层已是最新：{0:N0} 条 · 检查用时 {1:0.0} 毫秒",
+                    result.Rows, watch.Elapsed.TotalMilliseconds);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                                       or Microsoft.Data.Sqlite.SqliteException)
+        {
+            // 派生层重建失败只影响「按页浏览/子串检索」的可用时间，不影响扫描本身。
+            Log.Error(ex, "资源索引派生层重建失败（下次扫描会重试，缓存只影响速度）");
         }
     }
 

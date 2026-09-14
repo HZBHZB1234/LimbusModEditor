@@ -1,4 +1,5 @@
 using LimbusModEditor.Domain.Assets;
+using LimbusModEditor.Formats.Unity;
 
 namespace LimbusModEditor.Application.Assets;
 
@@ -53,16 +54,7 @@ public static class AssetDisplay
     public static string DisplayFolder(AssetRecord asset)
     {
         ArgumentNullException.ThrowIfNull(asset);
-        if (IsCacheReference(asset))
-        {
-            var container = ContainerEntry(asset);
-            if (container.Length == 0) return UnnamedFolder;
-            return container.Contains('/') ? container[..container.LastIndexOf('/')] : string.Empty;
-        }
-        // 导入的旧式资源：LogicalPath 即可读路径；剥掉结尾的 pathId.typeId 叶子。
-        var path = asset.LogicalPath.Trim().TrimEnd('/');
-        if (LooksLikeTechnicalLeaf(path)) path = path[..path.LastIndexOf('/')];
-        return path.Contains('/') ? path[..path.LastIndexOf('/')] : string.Empty;
+        return DisplayPartsOf(asset).Folder;
     }
 
     /// <summary>叶子名：m_Container 路径最后一段；读不出名字（空 / 纯编号）时
@@ -70,18 +62,95 @@ public static class AssetDisplay
     public static string DisplayName(AssetRecord asset)
     {
         ArgumentNullException.ThrowIfNull(asset);
-        var name = LeafCandidate(asset);
-        return LooksLikeTechnicalLeaf(name) || name.Length == 0 ? FallbackName(asset) : name;
+        return DisplayPartsOf(asset).Name;
     }
 
     /// <summary>树/搜索共用的完整显示路径 = 文件夹 + 叶子名。
     /// 恰好是「像文件夹一样逐段展开」的那条路径。</summary>
     public static string TreePath(AssetRecord asset)
     {
-        var folder = DisplayFolder(asset);
-        var name = DisplayName(asset);
+        ArgumentNullException.ThrowIfNull(asset);
+        var (folder, name) = DisplayPartsOf(asset);
         return folder.Length == 0 ? name : $"{folder}/{name}";
     }
+
+    /// <summary>
+    /// 显示路径的两段（文件夹 + 叶子名）——**唯一实现**。
+    /// <para>AssetRecord 重载（<see cref="TreePath"/> / <see cref="DisplayFolder"/> /
+    /// <see cref="DisplayName"/>）与「直接从索引库的列算」的
+    /// <see cref="DisplayPartsOf(bool, string, string?, AssetType, long?)"/> 都走这里，
+    /// 所以「内存里读一条记录」与「按页从 SQL 拼一条记录」永远不会出现两套口径。</para>
+    /// </summary>
+    public static (string Folder, string Name) DisplayPartsOf(AssetRecord asset)
+    {
+        ArgumentNullException.ThrowIfNull(asset);
+        return IsCacheReference(asset)
+            ? DisplayPartsOf(true, string.Empty, ContainerEntry(asset), asset.Type, asset.UnityPathId)
+            : DisplayPartsOf(false, asset.LogicalPath, null, asset.Type, asset.UnityPathId);
+    }
+
+    /// <summary>
+    /// 显示路径的纯列形态：输入的**全部是索引库的列**（<c>container_entry</c> /
+    /// <c>path_id</c> / <c>type</c> / 拼接出的 LogicalPath），不需要构造 AssetRecord ——
+    /// 127 万条记录全物化要 1,250.9 MiB 托管堆，而派生列回填只需要这条路径字符串。
+    /// <list type="bullet">
+    /// <item><paramref name="isCacheReference"/> = true（扫描索引的缓存引用资源）时取
+    /// <paramref name="containerEntry"/> = Unity m_Container 的游戏内资源路径。</item>
+    /// <item>false（导入的旧式资源）时把 <paramref name="logicalPath"/> 当可读路径，
+    /// 结尾若恰好是 <c>pathId.typeId</c> 形态则剥掉那一段。</item>
+    /// </list>
+    /// </summary>
+    public static (string Folder, string Name) DisplayPartsOf(
+        bool isCacheReference, string logicalPath, string? containerEntry, AssetType type, long? pathId)
+    {
+        if (isCacheReference)
+        {
+            var container = (containerEntry ?? string.Empty).Trim().TrimEnd('/');
+            if (container.Length == 0) return (UnnamedFolder, FallbackName(type, pathId));
+            var name = LeafOf(container);
+            var folder = container.Contains('/') ? container[..container.LastIndexOf('/')] : string.Empty;
+            return (folder, name.Length == 0 || LooksLikeTechnicalLeaf(name) ? FallbackName(type, pathId) : name);
+        }
+        // 导入的旧式资源：LogicalPath 即可读路径；剥掉结尾的 pathId.typeId 叶子。
+        var path = (logicalPath ?? string.Empty).Trim().TrimEnd('/');
+        // 原先对「单段且形如 123.45」的路径会 path[..-1] 抛 ArgumentOutOfRange；顺手挡住
+        // （没有 '/' 就没有可剥的叶子，按原样当名字即可）。
+        if (path.Contains('/') && LooksLikeTechnicalLeaf(path)) path = path[..path.LastIndexOf('/')];
+        var leaf = path.Contains('/') ? path[(path.LastIndexOf('/') + 1)..] : path;
+        var parent = path.Contains('/') ? path[..path.LastIndexOf('/')] : string.Empty;
+        return (parent, leaf.Length == 0 || LooksLikeTechnicalLeaf(leaf) ? FallbackName(type, pathId) : leaf);
+    }
+
+    /// <summary><see cref="TreePath"/> 的纯列版本（见
+    /// <see cref="DisplayPartsOf(bool, string, string?, AssetType, long?)"/>）。</summary>
+    public static string TreePathOf(
+        bool isCacheReference, string logicalPath, string? containerEntry, AssetType type, long? pathId)
+    {
+        var (folder, name) = DisplayPartsOf(isCacheReference, logicalPath, containerEntry, type, pathId);
+        return folder.Length == 0 ? name : $"{folder}/{name}";
+    }
+
+    /// <summary>
+    /// **索引行**（缓存引用资产）的显示路径 —— 「按页从 SQL 的列拼出来」与
+    /// 「从索引回灌成 AssetRecord 再算」的**唯一出处**。
+    /// <para>三处必须完全一致，否则会出现「搜到的」与「看到的」不是同一条：
+    /// ① 列表/树显示；② 派生层填检索索引；③ 检索候选的精确复核。
+    /// ⑵⑶ 都直接调本函数，⑴ 走 <see cref="TreePath(AssetRecord)"/> —— 两者在
+    /// <see cref="DisplayPartsOf(bool, string, string?, AssetType, long?)"/> 处汇合。</para>
+    /// <para>类型按「class id 优先、索引行里存的类型兜底」解析
+    /// （见 <c>UnityClassId.Map(int, AssetType)</c>）：ref-type 伪 class id
+    /// （SpriteAtlas 等）只有类型树类名能解析，此时索引行里的 <c>type</c>
+    /// 才是有效值。</para>
+    /// </summary>
+    public static string CacheRowDisplayPath(int typeId, AssetType storedType, long pathId, string? containerEntry)
+        => TreePathOf(true, string.Empty, containerEntry,
+            UnityClassId.Map(typeId, storedType), pathId);
+
+    /// <summary>路径的最后一段（不含 '/'）；空串进空串出。</summary>
+    private static string LeafOf(string path)
+        => path.Length == 0 ? string.Empty
+         : path.Contains('/') ? path[(path.LastIndexOf('/') + 1)..]
+         : path;
 
     /// <summary>用户友好的资源路径（用于提示/详情），等价 TreePath。</summary>
     public static string DisplayPath(AssetRecord asset) => TreePath(asset);
@@ -127,19 +196,6 @@ public static class AssetDisplay
         return $"{outer}/{inner}".Trim('/');
     }
 
-    private static string LeafCandidate(AssetRecord asset)
-    {
-        if (IsCacheReference(asset))
-        {
-            var container = ContainerEntry(asset);
-            if (container.Length == 0) return string.Empty;
-            return container.Contains('/') ? container[(container.LastIndexOf('/') + 1)..] : container;
-        }
-        var path = asset.LogicalPath.Trim().TrimEnd('/');
-        if (LooksLikeTechnicalLeaf(path)) path = path[..path.LastIndexOf('/')];
-        return path.Contains('/') ? path[(path.LastIndexOf('/') + 1)..] : path;
-    }
-
     /// <summary>「123.45」形态的纯内部编号段（pathId.typeId）。</summary>
     private static bool LooksLikeTechnicalLeaf(string segment)
     {
@@ -158,10 +214,10 @@ public static class AssetDisplay
         return seenDot;
     }
 
-    private static string FallbackName(AssetRecord asset)
+    private static string FallbackName(AssetType type, long? pathId)
     {
-        var label = TypeLabel(asset.Type);
-        return asset.UnityPathId is { } id ? $"{label} #{id}" : label;
+        var label = TypeLabel(type);
+        return pathId is { } id ? $"{label} #{id}" : label;
     }
 
     public const string UnnamedFolder = "未命名资源";
@@ -287,6 +343,28 @@ public static class AssetDisplay
 
     /// <summary><see cref="CompareNames"/> 的比较器实例（树 / 列表排序共用）。</summary>
     public static IComparer<string> ComparerInstance { get; } = Comparer<string>.Create(CompareNames);
+
+    /// <summary>
+    /// 资源目录查询的**全序**：先按显示路径的自然序（<see cref="ComparePaths"/>），
+    /// 再按 LogicalPath 的序数不区分大小写比较兜底。
+    /// <para>与 <c>AssetSearchService.SortByKeys</c> 的默认分支
+    /// （<c>OrderBy(Key, PathComparer).ThenBy(LogicalPath, OrdinalIgnoreCase)</c>）
+    /// 完全同序。LogicalPath 实测全库唯一（1,275,623 行 = 1,275,623 个 DISTINCT），
+    /// 所以这是一个**严格全序、无并列** —— 因此可以直接物化成稠密名次
+    /// <c>r ∈ [0,N)</c>，让「第 k 页」变成一次 O(log n) 的整数区间定位，
+    /// 既不需要 OFFSET 也不需要自定义 collation。</para>
+    /// <para><b>这是目录全序的「参考实现」</b>：派生层为了不分配、不装箱，把同样的两段比较
+    /// 拆成了就地排序（<c>UnityCacheSqliteIndexStore.SortCatalogOrder</c>），
+    /// 并由测试用<b>本函数</b>当场重算一遍来守住两者同序 —— 手写期望值守不住这种等价。</para>
+    /// </summary>
+    public static int CompareCatalogOrder(
+        string? displayPathA, string? logicalPathA, string? displayPathB, string? logicalPathB)
+    {
+        var byPath = ComparePaths(displayPathA, displayPathB);
+        return byPath != 0
+            ? byPath
+            : string.Compare(logicalPathA, logicalPathB, StringComparison.OrdinalIgnoreCase);
+    }
 
     /// <summary>显示路径分段（TreePath 的目录段）。</summary>
     public static string[] SplitTreePath(string path)

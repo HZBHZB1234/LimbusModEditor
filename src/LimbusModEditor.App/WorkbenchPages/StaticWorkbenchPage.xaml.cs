@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Threading;
 using LimbusModEditor.Application.AppConfig;
+using LimbusModEditor.Application.Relations;
 using LimbusModEditor.Application.StaticMods;
 using LimbusModEditor.Application.Texts;
 using LimbusModEditor.Domain.Diagnostics;
@@ -29,7 +30,7 @@ namespace LimbusModEditor.App;
 /// 不再有 5000 行截断；另有「与官方版本差异」页显示 RFC6902 摘要。</item>
 /// </list>
 /// </summary>
-public partial class StaticWorkbenchPage : UserControl, ISearchableWorkbench
+public partial class StaticWorkbenchPage : UserControl, ISearchableWorkbench, IReferenceRevealable
 {
     /// <summary>宿主跳转过来的关键词过滤（<see cref="ISearchableWorkbench"/>）。</summary>
     public void ApplySearchKeyword(string keyword)
@@ -37,6 +38,75 @@ public partial class StaticWorkbenchPage : UserControl, ISearchableWorkbench
         var text = keyword ?? string.Empty;
         _search.Text = text;
         _search.CaretIndex = text.Length;
+    }
+
+    /// <summary>
+    /// 精确跳转（<see cref="IReferenceRevealable"/>）：载荷第 0 段是静态表的<b>容器路径</b>
+    /// ——它正是 <see cref="StaticTableEntry.Key"/> 的口径（空容器时退回 <c>name|pathId</c>）。
+    ///
+    /// <para><b>为什么优先走列表视图</b>：dataClass 树的子层是惰性物化的，直接去树里找叶子
+    /// 常常什么都找不到（这正是 <see cref="RestoreTreeSelection"/> 只在「重建后仍展开」时可靠的原因）。
+    /// 所以先试列表（扁平全量，一定有那一行），列表挂不上再物化树、最后才退化为直接载入。</para>
+    /// </summary>
+    public bool Reveal(string payload)
+    {
+        var container = RelationDeepLink.Part(payload, 0);
+        if (string.IsNullOrWhiteSpace(container))
+        {
+            ApplySearchKeyword(RelationDeepLink.KeywordOf(payload));
+            return false;
+        }
+
+        var entry = _tables.FirstOrDefault(x => string.Equals(x.Key, container, StringComparison.OrdinalIgnoreCase));
+        if (entry is null)
+        {
+            Log.Warn("静态页精确跳转：索引里没有容器路径为「{0}」的表，退化为关键词过滤", container);
+            ApplySearchKeyword(RelationDeepLink.KeywordOf(payload));
+            return false;
+        }
+
+        var selected = false;
+        if (_viewMode != StaticViewMode.List
+            && _tableList.ItemsSource is IEnumerable<TableRow> rows
+            && rows.FirstOrDefault(r => string.Equals(r.Entry.Key, entry.Key, StringComparison.OrdinalIgnoreCase)) is { } row)
+        {
+            // 列表选中会经 SelectionChanged → SelectTableAsync，与用户手点完全同一条路径。
+            _tableList.SelectedItem = row;
+            _tableList.ScrollIntoView(row);
+            selected = true;
+        }
+        if (!selected && _viewMode == StaticViewMode.Tree) selected = TrySelectTableInTree(entry);
+        if (!selected)
+        {
+            _ = SelectTableAsync(entry);
+            selected = true;
+        }
+
+        Shell.SetStatus($"已定位到静态表：{entry.DataClass}/{entry.FileName}（{entry.SizeLabel}）");
+        Log.Info("静态页精确跳转命中：{0}", entry.Key);
+        return selected;
+    }
+
+    /// <summary>树视图里物化 dataClass 子层后选中目标表；找不到返回 false（不是异常）。</summary>
+    private bool TrySelectTableInTree(StaticTableEntry entry)
+    {
+        foreach (var root in _tableTree.Items)
+        {
+            if (root is not TreeViewItem node) continue;
+            if (!string.Equals(DataClassKeyOf(node.Tag), entry.DataClass, StringComparison.Ordinal)) continue;
+            MaterializeDataClass(node, null);
+            node.IsExpanded = true;
+            foreach (var child in node.Items.OfType<TreeViewItem>())
+            {
+                if (child.Tag is not StaticTableEntry leaf) continue;
+                if (!string.Equals(leaf.Key, entry.Key, StringComparison.OrdinalIgnoreCase)) continue;
+                child.IsSelected = true;
+                child.BringIntoView();
+                return true;
+            }
+        }
+        Log.Debug("静态页精确跳转：树里没找到目标表（dataClass={0}），改用列表 / 直接载入", entry.DataClass);
+        return false;
     }
 
     private static readonly Logger Log = LogManager.GetCurrentClassLogger();

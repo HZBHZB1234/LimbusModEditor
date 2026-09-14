@@ -10,6 +10,7 @@ using LimbusModEditor.Application.AppConfig;
 using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Application.Build;
 using LimbusModEditor.Application.Formats;
+using LimbusModEditor.Application.Relations;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Domain.Diagnostics;
 using LimbusModEditor.Domain.Formats;
@@ -40,7 +41,7 @@ namespace LimbusModEditor.App;
 /// <para><b>索引是加速旁路</b>：删掉 <c>cache/bank-index.db</c> 后两个视图的数据与筛选结果
 /// 完全一致，只是每次进页面要重新解析 1531 个 bank（冷建 ~19s，热读 ~0.9s）。</para>
 /// </summary>
-public partial class BankWorkbenchPage : UserControl, ISearchableWorkbench
+public partial class BankWorkbenchPage : UserControl, ISearchableWorkbench, IReferenceRevealable
 {
     /// <summary>宿主跳转过来的关键词过滤（<see cref="ISearchableWorkbench"/>）。</summary>
     public void ApplySearchKeyword(string keyword)
@@ -48,6 +49,54 @@ public partial class BankWorkbenchPage : UserControl, ISearchableWorkbench
         var text = keyword ?? string.Empty;
         _search.Text = text;
         _search.CaretIndex = text.Length;
+    }
+
+    /// <summary>
+    /// 精确跳转（<see cref="IReferenceRevealable"/>）：载荷 = <c>bank 路径 \0 样本名</c>
+    /// ——关联图里音频侧的口径就是「样本名里带某个 id」，所以样本名是能唯一定位的那一段。
+    ///
+    /// <para>本页的搜索框是<b>同步</b>过滤（<c>TextChanged → ApplyFilter</c>，没有防抖），
+    /// 所以「先填样本名过滤 → 再在结果行集里选中」是一步到位的，不需要跨异步等结果。</para>
+    /// </summary>
+    public bool Reveal(string payload)
+    {
+        var bankPath = RelationDeepLink.Part(payload, 0);
+        var sampleName = RelationDeepLink.Part(payload, 1);
+        if (string.IsNullOrWhiteSpace(sampleName))
+        {
+            ApplySearchKeyword(bankPath);
+            return false;
+        }
+
+        ApplySearchKeyword(sampleName);
+        // 先按「样本名 + bank 路径」精确匹配；退一步只按样本名（同名样本可能分布在多个 bank）。
+        var row = _viewSamples.FirstOrDefault(x =>
+                      string.Equals(x.Name, sampleName, StringComparison.OrdinalIgnoreCase)
+                      && !string.IsNullOrWhiteSpace(bankPath)
+                      && string.Equals(x.BankPath, bankPath, StringComparison.OrdinalIgnoreCase))
+                  ?? _viewSamples.FirstOrDefault(x =>
+                      string.Equals(x.Name, sampleName, StringComparison.OrdinalIgnoreCase));
+        if (row is null)
+        {
+            Log.Warn("音频页精确跳转未命中：样本「{0}」（bank={1}）不在当前筛选结果里", sampleName, bankPath);
+            return false;
+        }
+
+        // 选中入口与用户手动点总表一致：置 _isSelecting 挡住重入事件，再走同一套 LoadEditorForSample。
+        if (_viewMode != BankViewMode.AudioList) Shell.SetViewMode(WorkbenchViewMode.List);
+        _isSelecting = true;
+        try
+        {
+            _audioGrid.SelectedItem = row;
+            _audioGrid.ScrollIntoView(row);
+            _selectedSample = row;
+            SelectBank(row.BankPath, loadEditor: false);
+            LoadEditorForSample(row);
+        }
+        finally { _isSelecting = false; }
+        RefreshActionButtons();
+        Log.Info("音频页精确跳转命中：{0}", row.LocationLabel);
+        return true;
     }
 
     private static readonly Logger Log = LogManager.GetCurrentClassLogger();

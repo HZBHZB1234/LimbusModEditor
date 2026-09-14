@@ -14,6 +14,12 @@
     <ProjectReference Include="..\LimbusModEditor.Domain\LimbusModEditor.Domain.csproj" />
     <ProjectReference Include="..\LimbusModEditor.Editing\LimbusModEditor.Editing.csproj" />
     <ProjectReference Include="..\LimbusModEditor.Formats.Unity\LimbusModEditor.Formats.Unity.csproj" />
+    <!--
+      Spine 4.0 骨骼动画离线渲染（vendored spine-csharp + SkiaSharp）。
+      应用层只负责「找到骨架/图集/贴图素材 + 把渲染出的帧贴到界面」，
+      真正的解析与绘制都在这个类库里（net8.0，无 WPF 依赖）。
+    -->
+    <ProjectReference Include="..\LimbusModEditor.SpineRuntime\LimbusModEditor.SpineRuntime.csproj" />
   </ItemGroup>
 
   <ItemGroup>

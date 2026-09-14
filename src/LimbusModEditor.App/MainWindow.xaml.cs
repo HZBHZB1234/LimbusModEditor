@@ -8,6 +8,7 @@ using LimbusModEditor.Application.Build;
 using LimbusModEditor.Application.Debugging;
 using LimbusModEditor.Application.Formats;
 using LimbusModEditor.Application.Projects;
+using LimbusModEditor.Application.Relations;
 using LimbusModEditor.Application.Scanning;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Domain.Diagnostics;
@@ -169,6 +170,50 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IWorkbenchHost
         }
         SetStatus($"已切到 {pageKey} 工作台；该页不支持自动过滤，请在搜索框输入「{keyword}」。");
         Log.Debug("页面间搜索跳转（目标页不支持搜索）：pageKey={0}，关键词={1}", pageKey, keyword ?? "-");
+    }
+
+    /// <summary>
+    /// 切到某页并<b>精确定位到那一行</b>（IWorkbenchHost，plan-11 深化）：预设卡片详情的「打开」用。
+    ///
+    /// <para>优先把载荷交给目标页的 <see cref="IReferenceRevealable"/>；目标页没实现、或它
+    /// 明确表示定位不到（返回 false）时，退化为按关键词过滤——关键词优先用调用方给的
+    /// <paramref name="fallbackKeyword"/>，没给就从载荷的<b>最后一段</b>推
+    /// （<see cref="RelationDeepLink.KeywordOf"/>：样本名 / 记录键 / 键路径）。</para>
+    /// </summary>
+    public bool RevealReference(string pageKey, string payload, string? fallbackKeyword = null)
+    {
+        if (string.IsNullOrWhiteSpace(pageKey)) return false;
+        ShowPage(pageKey);
+
+        var page = _pages.TryGetValue(pageKey, out var found) ? found : null;
+        // 走精确载荷：目标页自己知道自己能不能选中（筛选隐藏 / 热修改名时会返回 false）。
+        if (page is IReferenceRevealable revealable && !string.IsNullOrEmpty(payload))
+        {
+            bool revealed;
+            try
+            {
+                revealed = revealable.Reveal(payload);
+            }
+            catch (Exception ex)
+            {
+                // 关联图是旁路：目标页定位时出任何意外都不能让「打开」这个动作崩掉，
+                // 退化成关键词过滤即可（并把原因留在日志里）。
+                revealed = false;
+                Log.Warn(ex, "精确跳转失败，退化为关键词过滤：pageKey={0}，载荷长度={1}", pageKey, payload.Length);
+            }
+            if (revealed)
+            {
+                Log.Debug("页面间精确跳转：pageKey={0}，载荷段数={1}", pageKey, RelationDeepLink.Decode(payload).Count);
+                return true;
+            }
+            Log.Debug("页面间精确跳转未命中，退化为关键词过滤：pageKey={0}", pageKey);
+        }
+
+        var keyword = !string.IsNullOrWhiteSpace(fallbackKeyword)
+            ? fallbackKeyword
+            : RelationDeepLink.KeywordOf(payload);
+        ShowWorkbenchSearch(pageKey, keyword);
+        return false;
     }
 
     private UserControl? CreatePage(string key) => key switch

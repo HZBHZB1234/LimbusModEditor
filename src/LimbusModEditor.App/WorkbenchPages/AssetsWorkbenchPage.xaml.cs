@@ -26,9 +26,16 @@ namespace LimbusModEditor.App;
 /// <see cref="OnProjectRefreshed"/> 驱动。plan-03 已移除手动导入入口，plan-04
 /// 加入可拖拽的预览列与占比持久化。
 /// </summary>
-public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench
+public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IReferenceRevealable
 {
     private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
+    /// <summary>
+    /// 待定位的资源（精确跳转用）。搜索是<b>异步</b>的（过滤 + 排序在后台线程，
+    /// 见 <see cref="RunSearchAsync"/>），所以「先选中」不可能成功——只能把目标记在这里，
+    /// 等这一代搜索结果挂上列表后再选中并滚到它。null = 没有待定位目标。
+    /// </summary>
+    private Guid? _pendingRevealAssetId;
 
     private readonly IWorkbenchHost _host;
     private readonly AssetSearchService _search = new();
@@ -37,6 +44,10 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench
     private readonly SpriteMetadataEditService _spriteEdits = new();
     private readonly UnityFieldEditService _unityFieldEdits = new();
     private readonly AssetPreviewRegistry _previewRegistry;
+    // Spine 动画预览的素材解析（plan-11 深化）：与预览注册表**共用同一个** SpinePreviewService，
+    // 于是「同目录索引」只建一份；两个入口（资源页的 Spine 预览 / 卡片详情的 Spine 行）
+    // 看到的图集与贴图口径必然一致。
+    private readonly SpineAnimationSourceService _spineAnimationSource;
     // 关联资源反查门面（plan-11 派生库）：只读 cache/relation-index.db，缺库时返回空 + 原因，
     // 绝不抛异常 —— 关联是旁路信息，缺了不该把资源预览搞崩。
     private readonly RelationQueryService _relations;
@@ -94,10 +105,12 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench
         PreviewColumnHost.MinHeight = PreviewColumnMinHeight;
         // plan-05：预览提供者管线（FMOD 目录每次现取，设置改动后立即生效）。
         // plan-11：再挂一个 Spine 预览服务（资源列表每次现取，项目换了自动失效）。
+        var spinePreview = new SpinePreviewService(() =>
+            (IReadOnlyList<AssetRecord>?)host.Project?.Assets ?? Array.Empty<AssetRecord>());
+        _spineAnimationSource = new SpineAnimationSourceService(spinePreview);
         _previewRegistry = AssetPreviewRegistry.CreateDefault(
             () => host.Env.EffectiveFmodLibraryDirectory(host.Project),
-            new SpinePreviewService(() =>
-                (IReadOnlyList<AssetRecord>?)host.Project?.Assets ?? Array.Empty<AssetRecord>()));
+            spinePreview);
         // 关联资源板块的数据源：库路径与启动扫描用的同一份（cache/relation-index.db）。
         // 构造 RelationStore 只建目录、不开连接；真正读库在选中资源后按需发生。
         _relations = new RelationQueryService(new RelationStore(host.Env.CacheDirectory));
@@ -549,13 +562,36 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench
             return;
         }
         _lastResults = results;
-        var selectedId = (AssetList.SelectedItem as AssetRow)?.AssetId;
+        // 精确跳转优先于「上次选中的资源」：它带的是用户刚点的那条关联，更该被保住。
+        var revealId = _pendingRevealAssetId;
+        _pendingRevealAssetId = null;
+        var selectedId = revealId ?? (AssetList.SelectedItem as AssetRow)?.AssetId;
         AssetList.ItemsSource = rows;
         if (selectedId is { } id && AssetList.ItemsSource is IEnumerable<AssetRow> rows2)
         {
             var restored = rows2.FirstOrDefault(x => x.AssetId == id);
-            if (restored is not null) AssetList.SelectedItem = restored;
+            if (restored is not null)
+            {
+                AssetList.SelectedItem = restored;
+                AssetList.ScrollIntoView(restored);
+            }
             else Log.Warn("搜索后恢复选中失败：AssetId={0} 不在本代际 {1} 条结果中", id, results.Count);
+        }
+        if (revealId is { } revealedId)
+        {
+            if (results.FirstOrDefault(x => x.AssetId == revealedId) is { } revealed)
+            {
+                // 两个视图共用一个选中入口（ApplyAssetSelection）：树模式下即使行没挂上，
+                // 右侧预览也必须切到这条资源，否则「跳过来了但还显示上一个」。
+                ApplyAssetSelection(revealed);
+                _host.SetStatus($"已定位到资源：{AssetDisplay.DisplayPath(revealed)}");
+                Log.Info("资源页精确跳转命中：{0}", AssetDisplay.DisplayPath(revealed));
+            }
+            else
+            {
+                Log.Warn("资源页精确跳转未命中：AssetId={0} 不在本代际 {1} 条结果中（可能被筛选条件排除）",
+                    revealedId, results.Count);
+            }
         }
         AssetCountText.Text = results.Count == project.Assets.Count
             ? project.Assets.Count.ToString()
@@ -564,7 +600,12 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench
             generation, results.Count, project.Assets.Count, rows.Count);
         // 目录树视图：按最新搜索结果重建根层（展开仍是惰性的）。
         // 根层已在后台线程构建好（见上面的 Task.Run），这里只做 UI 映射。
-        if (_treeMode) RebuildTree(roots);
+        if (_treeMode)
+        {
+            RebuildTree(roots);
+            // 树是惰性物化的：根层重建后还得把目标叶子选中（并展开路径），否则「跳过来」看不见东西。
+            if (revealId is { } treeRevealId) RestoreTreeSelection(treeRevealId);
+        }
     }
 
     // ── 选中与预览 ───────────────────────────────────────────────────
@@ -847,6 +888,34 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench
         SearchBox.Text = text;
         _searchTimer.Stop();
         _ = RunSearchAsync();
+    }
+
+    /// <summary>
+    /// 精确跳转（<see cref="IReferenceRevealable"/>）：载荷第 0 段是资源的<b>容器路径</b>
+    /// ——关联图里资源侧的口径就是容器路径。
+    ///
+    /// <para>为什么还要先过滤：40 万行资源里目标那一行<b>不在当前结果集</b>就没法选中，
+    /// 所以顺序是「按路径过滤 → 搜索结果挂上列表后选中」（见
+    /// <see cref="_pendingRevealAssetId"/> 与 <see cref="RunSearchAsync"/>）。</para>
+    /// </summary>
+    public bool Reveal(string payload)
+    {
+        var container = RelationDeepLink.Part(payload, 0);
+        if (string.IsNullOrWhiteSpace(container)) return false;
+
+        var asset = _host.Project?.Assets.FirstOrDefault(a => string.Equals(
+            AssetDisplay.ContainerEntryPath(a), container, StringComparison.OrdinalIgnoreCase));
+        if (asset is null)
+        {
+            Log.Warn("资源页精确跳转：项目里没有容器路径为「{0}」的资源，退化为关键词过滤", container);
+            ApplySearchKeyword(container);
+            return false;
+        }
+
+        _pendingRevealAssetId = asset.AssetId;
+        ApplySearchKeyword(container);
+        Log.Debug("资源页精确跳转已受理：{0} → AssetId={1}", container, asset.AssetId);
+        return true;
     }
 
     // ── 预览视图构建（按 Kind 切换；全部只读，plan-05）──────────────────
@@ -1371,16 +1440,30 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench
     }
 
     /// <summary>
-    /// Spine 预览（plan-11）：上面放「图集页 + 区域框」叠加图（有就放），下面放结构行
-    /// （骨架版本 / 画布 / 动画清单 / 图集页区域 / 骨骼表）。
+    /// Spine 预览（plan-11 / plan-11 深化）：上面放「图集页 + 区域框」叠加图（有就放），
+    /// 下面放结构行（骨架版本 / 画布 / 动画清单 / 图集页区域 / 骨骼表）。
     ///
-    /// <para><b>为什么不是动画播放</b>：仓库里没有 Spine 运行时，播动画要自己实现蒙皮 /
-    /// 网格变形 / 动画混合 / 约束求值；这里给的是能确证的事实 + 图集怎么切的可视化，
-    /// 导出走「Spine 资源导出」（卡片流页 / 关联资源区），交给外部 Spine 工具看。</para>
+    /// <para><b>动画播放去哪了</b>：本视图给的是「能确证的事实 + 图集怎么切」；真的把骨架
+    /// 画出来播，走上面的「动画预览…」按钮（<see cref="SpineAnimationPreviewWindow"/>，
+    /// 渲染由 <c>LimbusModEditor.SpineRuntime</c> 完成）。分成两处是因为这个视图是
+    /// <c>AssetPreview</c> 的**只读快照**（没有资源记录、也不该开始跑 30fps 的循环）。</para>
+    ///
+    /// <para>导出仍走「Spine 资源导出」（卡片流页 / 关联资源区），交给外部 Spine 工具。</para>
     /// </summary>
     private UIElement BuildSpineView(AssetPreview preview)
     {
         var panel = new StackPanel();
+
+        // 动画预览入口：只在当前确实选中了一个资源时给（预览是异步的，选中项可能已经变了）。
+        if (_selectedAsset is { } spineAsset)
+        {
+            var play = WorkbenchShell.CreateButton("▶ 动画预览…", (_, _) => PreviewSpineAnimation(spineAsset));
+            play.ToolTip = "用内置 Spine 运行时渲染并播放这个骨架的动画（可切动画 / 拖时间轴）。";
+            play.HorizontalAlignment = HorizontalAlignment.Left;
+            play.Margin = new Thickness(0, 0, 0, 6);
+            panel.Children.Add(play);
+        }
+
         if (preview.ImagePng is not null)
         {
             var bitmap = LoadBitmap(preview.ImagePng);
@@ -1404,6 +1487,23 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench
         }
         panel.Children.Add(BuildRowsView(preview.Rows));
         return panel;
+    }
+
+    /// <summary>
+    /// 打开 Spine 动画预览窗口。素材解析失败（缺骨架 / 缺图集 / 读取失败）时只弹一条说明性
+    /// 消息——不让「点一下预览」变成静默无反应。
+    /// </summary>
+    private void PreviewSpineAnimation(AssetRecord asset)
+    {
+        var (source, error) = _spineAnimationSource.Resolve(asset);
+        if (source is null)
+        {
+            Log.Warn("Spine 动画预览不可用：{0}（{1}）", error, AssetDisplay.DisplayPath(asset));
+            MessageBox.Show(Window.GetWindow(this), error ?? "无法解析该 Spine 资源的动画素材。",
+                "Spine 动画预览", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        SpineAnimationPreviewWindow.ShowFor(Window.GetWindow(this), source);
     }
 
     private static UIElement BuildHexView(string? text)

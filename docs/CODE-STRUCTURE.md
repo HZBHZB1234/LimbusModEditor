@@ -19,7 +19,7 @@
 
 Limbus Mod Editor 是一个 **Windows-only 的 C#/.NET 8 + WPF 桌面工作台**，
 用于给《Limbus Company》做模组：读取真实游戏数据（Unity 缓存 bundle / FMOD bank /
-lang 文本 / 静态数据表）→ 在五个工作台里浏览与编辑（资源 / 音频 / 文本 / 静态数据 / **人格卡片流**）
+lang 文本 / 静态数据表）→ 在五个工作台里浏览与编辑（资源 / 音频 / 文本 / 静态数据 / **预设卡片流**）
 → 一键导出加载器可消费的
 模组包（`.carra` / `.bank` / `.rebank` / `.staticmod` / lang 补丁）→ 或直接铺到游戏
 目录做调试（带逐文件备份与还原）。
@@ -31,27 +31,28 @@ lang 文本 / 静态数据表）→ 在五个工作台里浏览与编辑（资�
 
 ## 2. 项目分层与依赖方向
 
-`LimbusModEditor.slnx` 声明 12 个 src 项目 + 2 个测试项目。依赖方向严格单向
-（下层永不引用上层）：
+`LimbusModEditor.slnx` 声明 13 个 src 项目 + 2 个测试项目
+（另有 `tests/LimbusModEditor.SpineRuntime.Tests`，**刻意独立、不进 `.slnx`**，见 §10）。
+依赖方向严格单向（下层永不引用上层）：
 
 ```
                         ┌──────────────────────────────┐
                         │  App（WPF, net8.0-windows）   │  ← 界面、页面宿主、对话框
-                        └───────────────┬──────────────┘
-                    ┌────────────┬──────┴────────┬───────────────┐
-                    ▼            ▼               ▼               ▼
-              Application  Infrastructure      Editing      Formats.Unity
-             （编排/服务层） （路径安全等基础）  （图像编解码） （Unity 后端）
-                    │            │               │               │
-      ┌─────────────┼────────────┴───────────────┴───────────────┤
-      ▼             ▼            ▼            ▼            ▼      ▼
- Formats.Carra  Formats.Bank Formats.Rebank Formats.Lunartique ─┘
-      └─────────────┴────────────┴────────────┴──────┬─────────┘
-                                                     ▼
-                                        Formats.Abstractions
-                                                     │
-                                                     ▼
-                                                  Domain（共享基础：模型 + 日志约定）
+                        └──┬──────┬───────┬────────┬─────────────┬───────────┐
+                           │      │       │        │             │
+                           ▼      ▼       ▼        ▼             ▼
+                    Application Infra  Editing Formats.Unity SpineRuntime
+                   （编排/服务）(路径) （图像） （Unity 后端）（Spine 渲染·叶子）
+                           │      │       │        │
+      ┌────────────────────┼──────┴───────┴────────┴──────────────────────┐
+      ▼            ▼              ▼              ▼                        ▼
+ Formats.Carra  Formats.Bank  Formats.Rebank  Formats.Lunartique  Formats.Abstractions
+                                                                          │
+                                                                          ▼
+                                          Domain（共享基础：模型 + 日志约定）
+
+   SpineRuntime 是只被 App 引用的叶子（net8.0、无 WPF 依赖）：自带 vendored spine-csharp 4.0
+   与 SkiaSharp，不引用本仓库任何项目，故不在上面的「下层」链里。
 ```
 
 | 项目 | TFM | 关键 NuGet | 角色 |
@@ -60,6 +61,7 @@ lang 文本 / 静态数据表）→ 在五个工作台里浏览与编辑（资�
 | `LimbusModEditor.Formats.Abstractions` | net8.0 | 无 | 格式插件唯一接口契约 `IModFormatHandler` |
 | `LimbusModEditor.Infrastructure` | net8.0 | 无 | 基础实现（当前只有 `SafePathService`，且**未被调用**，见 §9） |
 | `LimbusModEditor.Editing` | net8.0 | ImageSharp 3.1.11 + NLog | Unity 纹理 ↔ PNG 编解码、图集切分/回填、缩略图 |
+| `LimbusModEditor.SpineRuntime` | net8.0 | SkiaSharp 3.119.0（+ vendored spine-csharp 4.0 源码） | Spine 4.0 骨骼动画**离线渲染**（叶子项目，只被 App 引用）。**刻意覆盖 `Nullable=disable` + `TreatWarningsAsErrors=false`**（vendored 官方源码非 nullable 标注；逐文件说明见 `docs/PROJECT-INDEX.md` §5.2） |
 | `LimbusModEditor.Formats.Unity` | net8.0 | AssetsTools.NET 3.0.5 + NLog | Unity bundle/SerializedFile 唯一后端（不手写解析器） |
 | `LimbusModEditor.Formats.Carra` | net8.0 | Joveler.Compression.XZ 5.0.2 + SharpCompress 0.38.0 + NLog | Carra/Carra2 容器 |
 | `LimbusModEditor.Formats.Bank` | net8.0 | NLog（P/Invoke 运行时绑 FMOD C ABI） | FMOD bank/FSB5 索引层 + 音频编解码抽象 |
@@ -70,6 +72,7 @@ lang 文本 / 静态数据表）→ 在五个工作台里浏览与编辑（资�
 | `LimbusModEditor.Cli` | net8.0 | NLog | 三个子命令的命令行入口 |
 | `tests/LimbusModEditor.Domain.Tests` | net8.0 | xunit 2.9.3 | 行为测试主战场（引用 Domain/Editing/Application/Formats.Unity） |
 | `tests/LimbusModEditor.Format.Tests` | net8.0 | xunit 2.9.3 + AssetsTools.NET | 格式层与真实样本测试 |
+| `tests/LimbusModEditor.SpineRuntime.Tests` | net8.0 | xunit 2.9.2 + SkiaSharp | Spine 渲染类库的合成数据测试（7 例）。**刻意不进 `.slnx`**（`Nullable=disable` + 不警告即失败，避免把 vendored 源码历史警告卷进 solution 测试） |
 
 **依赖原则：优先用成熟第三方库，分层不构成拒绝引库的理由**（铁律 §3-12）。通用能力
 （日志、压缩、图像、Unity 解析、SQLite）一律用库；自研只留「本工具特有编排」。
@@ -93,8 +96,9 @@ Windows 下默认 `RuntimeIdentifier=win-x64`、`CopyLocalLockFileAssemblies=tru
 | 界面与页面 | `src/LimbusModEditor.App/`（`MainWindow` + `WorkbenchPages/` + 对话框） |
 | 格式包（Carra/Bank/Rebank/Lunartique） | `src/LimbusModEditor.Formats.*/` |
 | 缓存库（五个 SQLite：四源 + 一派生） | `src/LimbusModEditor.Application/Caching/` + `Scanning/` + `Texts/` + `StaticMods/` + `Assets/BankIndex*` + `Relations/` |
-| 跨资源关联（人格 ↔ 资源） | `src/LimbusModEditor.Application/Relations/`（分析器 / 派生缓存 / 查询门面 / 卡片流展示层） |
-| Spine 文本（骨架 / 图集）解析、预览、导出 | `src/LimbusModEditor.Application/Spine/`（`SpineModels.cs` 纯解析 → `SpinePreviewService` 结构+布局叠加图 → `SpineExportService` 导出三件套；**没有 Spine 运行时，不播放动画**） |
+| 跨资源关联（6 类别对象 ↔ 资源） | `src/LimbusModEditor.Application/Relations/`（`RelationCategories` 六类别 / `SubjectRelationAnalyzer` / 派生缓存 `RelationStore` / 查询门面 / 卡片流展示层 `PresetWorkbenchService` / 精确跳转载荷 `RelationDeepLink`） |
+| Spine：解析 / 静态预览 / 导出 / 找素材 | `src/LimbusModEditor.Application/Spine/`（`SpineModels.cs` 纯解析 → `SpinePreviewService` 结构 + 布局叠加图 → `SpineExportService` 导出三件套 → `SpineAnimationSourceService` 找齐动画素材） |
+| Spine：骨骼动画**真播放** | `src/LimbusModEditor.SpineRuntime/`（vendored spine-csharp 4.0 + SkiaSharp：`SpineDocument.TryCreate` / `SpineFrameRenderer.RenderFrame`）→ `App/SpineAnimationPreviewWindow.cs` |
 | 导出流水线 | `Domain/Formats/ExportLayout.cs` + `Application/Build/ModExportPlanService.cs` + `ModPackExportService.cs` |
 | 调试应用（写游戏目录） | `Application/Debugging/ModApplyService.cs` + `StaticModApplyService.cs` + `DebugApplyService.cs` |
 
@@ -116,11 +120,16 @@ Windows 下默认 `RuntimeIdentifier=win-x64`、`CopyLocalLockFileAssemblies=tru
   在 `CreatePage` 注册 key + 在 `MainWindow.xaml` 活动栏加一个 `RadioButton` + `SyncActivityBar:196` 补映射
   + `NeedsProject:213` 决定是否要项目。
 - **跨页搜索跳转**：`ShowWorkbenchSearch(pageKey, keyword):159` 切页后，若目标页实现
-  `ISearchableWorkbench` 就把关键词送进去自动过滤（卡片流详情里的「打开」按钮靠这条链路；
-  目标页不支持时只在状态栏说明，不报错）。
+  `ISearchableWorkbench` 就把关键词送进去自动过滤（目标页不支持时只在状态栏说明，不报错）。
+- **跨页精确跳转（plan-11 深化）**：`RevealReference(pageKey, payload, fallbackKeyword)` 优先让目标页
+  按**精确载荷**（`RelationDeepLink` 口径）选中并滚到那一行；目标页没实现 `IReferenceRevealable`
+  或 `Reveal` 返回 false 时，**退化为** `ShowWorkbenchSearch(pageKey, fallbackKeyword ?? KeywordOf(payload))`
+  （至少把关键词填好）。载荷 → `App/WorkbenchPages/IReferenceRevealable.cs`；四页实现：
+  `AssetsWorkbenchPage`（容器路径）/ `BankWorkbenchPage`（bank+样本名）/ `TextWorkbenchPage`（相对路径+键路径）/
+  `StaticWorkbenchPage`（容器路径+记录键）。**`Reveal` 不得抛异常**（关联图是旁路）。
 - **宿主契约**：`App/WorkbenchPages/IWorkbenchHost.cs`。页面通过构造函数拿 `IWorkbenchHost`
   （项目、项目文件、`AppEnvironment`、`LangEdits`/`StaticEdits` 编辑集会话、状态栏、
-  刷新、保存、`ShowPage`/`ShowWorkbenchSearch`），**不允许反向依赖 `MainWindow` 具体类型**。
+  刷新、保存、`ShowPage`/`ShowWorkbenchSearch`/`RevealReference`），**不允许反向依赖 `MainWindow` 具体类型**。
 - **无项目遮罩**：`NoProjectOverlay`（`MainWindow.xaml:152`）只遮页面宿主；
   `NeedsProject(key)`（`MainWindow.xaml.cs:213`）决定哪些页面需要项目，设置/教程页始终可用。
 - **启动顺序**（性能敏感）：构造函数只做 `InitializeComponent` + 建资源页；
@@ -142,7 +151,7 @@ Windows 下默认 `RuntimeIdentifier=win-x64`、`CopyLocalLockFileAssemblies=tru
 | 音频 | `WorkbenchPages/BankWorkbenchPage.xaml(.cs)` | bank 树 + 跨 bank 样本总表 + 试听 + FSB 替换 + bank 导出 |
 | 文本 | `WorkbenchPages/TextWorkbenchPage.xaml(.cs)` | lang 文件树 + 键值树（就地编辑）+ 源文本预览 + 搜索 |
 | 静态 | `WorkbenchPages/StaticWorkbenchPage.xaml(.cs)` | 静态数据表索引/搜索 + JSON 文档编辑 + staticmod 产物 |
-| 卡片流 | `WorkbenchPages/PresetWorkbenchPage.xaml(.cs)` | **人格下滑卡片流**（预设视图）：卡片封面 + 点进详情按类别看全部关联资源、逐行跳工作台、Spine 行可导出。挑选/排序全在 `Application/Relations/PersonaPresetService.cs` |
+| 卡片流 | `WorkbenchPages/PresetWorkbenchPage.xaml(.cs)` | **预设下滑卡片流**（**6 类别切换**：人格 / 敌人 / 异想体 / 播报员 / E.G.O 装备 / E.G.O 饰品）：卡片（封面 + 一句话预览 + 强度标签）+ 点进详情按类别看全部关联资源、**每行内联预览**、逐行「打开」走 `RevealReference` **精确跳转**、Spine 行可「▶ 动画预览…」（`SpineAnimationPreviewWindow`）与「导出…」。挑选/排序/行载荷全在 `Application/Relations/PresetWorkbenchService.cs` |
 
 公共骨架：`WorkbenchPages/WorkbenchShell.xaml(.cs)`（列宽/视图模式/分节/滚轮接线）、
 `WorkbenchPages/TreeExpansionState.cs`（**树展开态回放**，四页共用）、
@@ -196,8 +205,9 @@ ProjectService.LoadAsync(.lmeproj)     Application/Projects/ProjectService.cs
     → AssetSearchService.Search(query)        过滤 + 排序（可后台线程，快照式）
     → AssetDisplay                           显示路径/名称/中文类型与状态标签（容器视图口径）
     → AssetTreeBuilder                       按显示路径逐段惰性建树
-    → AssetPreviewRegistry → IAssetPreviewProvider  七形态预览（图像/文本/JSON行/音频/摘要/脚本/十六进制）
-    → RelationQueryService.DescribeSubjectsForAsset  关联资源板块（反查「这资源属于哪些人格」，走 relation-index.db 反向索引）
+    → AssetPreviewRegistry → IAssetPreviewProvider  多形态预览（图像/Sprite 合成/音频/文本/JSON行/对象字段树/摘要/材质/着色器/视频/图集/Spine/十六进制）
+    → RelationQueryService.DescribeSubjectsForAsset  关联资源板块（反查「这资源属于哪些对象」，6 类别，走 relation-index.db 反向索引）
+    → IReferenceRevealable.Reveal(payload)          别的页 / 卡片详情点「打开」时，按精确载荷选中并滚到那一行
 ```
 
 **关键口径区分**（曾出错，务必分清）：
@@ -293,9 +303,13 @@ ProjectService.LoadAsync(.lmeproj)     Application/Projects/ProjectService.cs
 | 24 | 编辑集自身的 `Changed` 已驱动刷新，调用方**不得再手动刷新一次** | 四个页面 + `LangEditSession`/`StaticEditSession` | 同一次保存重建两遍树（历史缺陷） |
 | 25 | **全表谓词里不许把 `File.Exists` 排在廉价判据之前**，且惰性 `GroupBy` 链**必须先物化再计数** | `Application/Build/UnityCacheExportService.IsEditedCacheAsset`、`UnityBundleBuildService.Build`、`UnitySerializedFileBuildService.BuildAsync` | 回灌后项目有 127 万条资产：一次全表 `File.Exists` ≈ 44 s，同一条谓词被跑 4 遍 → 导出 7 分钟（实测，见 `STATUS.md` §6.2.1） |
 | 26 | **内置编辑器只吃松散文件**：bundle 内对象的 `SourcePath` 是整个 AssetBundle 容器，不能当正文读 | `Application/Assets/AssetEditService.ReadCurrentBytesAsync`、`TextAssetEditService.CanEditText`（App 侧按钮置灰 + 中文说明） | 双击 bundle 内 TextAsset → 2.26 MB 二进制进 `TextBox`，排版 26.5 秒 → 界面「未响应」被强杀（历史报障，且**没有** crash 日志） |
-| 27 | **Spine 只做文本解析与静态预览，不播放动画**：能确证的是骨架结构、动画清单（名字/时长/关键帧数）、图集页与区域，外加「图集页 + 区域框」叠加图 | `Application/Spine/SpineModels.cs`（纯解析）、`SpinePreviewService.cs` | 有人以为「Spine 预览可以播动画」而去接一个不存在的运行时；真正播放需要完整蒙皮/网格变形/动画混合/约束求值 |
+| 27 | **Spine 的「解析/静态预览」与「动画播放」是两条链**：文本解析 + 结构/布局叠加图在 `Application/Spine/`（不依赖运行时）；动画**真播放**必须走 `LimbusModEditor.SpineRuntime`（vendored spine-csharp 4.0 + SkiaSharp），App 只负责把渲染出的帧贴到界面 | `Application/Spine/SpineModels.cs` / `SpinePreviewService.cs` / `SpineAnimationSourceService.cs`；`LimbusModEditor.SpineRuntime`（`SpineDocument.TryCreate` / `SpineFrameRenderer.RenderFrame`） | 以为「加个预览 provider 就能播动画」；或把渲染细节漏进 App、在 Application 里直接引 spine-csharp 类型（破坏分层） |
 | 28 | **Spine 三件套靠「容器路径的目录」定位**（骨架 + `.atlas.txt` + 页贴图同目录）；索引只收**带容器路径**的资源 | `Application/Spine/SpinePreviewService.cs`（`SpineSiblingIndex`） | 拼不出同目录就既看不到图集布局图、也导出不齐三件套 |
 | 29 | **Spine 导出不是 `ExportSlot`**：模组导出只装「被修改过的资源」，给外部工具查看属独立动作 | `Application/Spine/SpineExportService.cs`、`Build/ModExportPlanService.cs`（槽位定义） | 把「导出查看」混进模组产物，破坏「只装改动」的语义 |
+| 30 | **关联对象 id 必须带类别前缀** `<category>:<key>`（走 `SubjectIds.Make/CategoryOf/KeyOf`），且**类别一律由资源目录前缀判定**，绝不「扫 5 位数字窗口」 | `Application/Relations/RelationCategories.cs`、`SubjectRelationAnalyzer.cs` | 敌人 4 位段与异常/事件 id 真的撞车（实测含 `90005`）；E.G.O 资源侧 20xxx 数字会造「幽灵 EGO」（只认 lang `Egos.json`）；E.G.O 饰品要 `id % 10000` 归一化 |
+| 31 | **`IReferenceRevealable.Reveal` 允许失败（返回 false），但不得抛异常**；宿主必须退化为关键词过滤 | `App/WorkbenchPages/IReferenceRevealable.cs` + `MainWindow.RevealReference` | 关联图是旁路：定位不到就崩页面、或静默什么都不做（用户以为按钮坏了） |
+| 32 | **精确跳转载荷（`RelationDeepLink`）是纯数据**：不参与判重、不影响关联图正确性 → 改它**不需要** `FormatVersion` +1 | `Application/Relations/RelationDeepLink.cs` | 误以为必须动派生库版本；或把载荷塞进判重键导致同一关联重复/丢失 |
+| 33 | **改「抽哪些事实 / 怎么算关联 / 类别 id 归一化 / 新增并填充列 / 跨链关系名」必须把 `RelationIndexSource.FormatVersion` +1**；仅改 UI 怎么用现有列、或 SQLite 加列本身（轻量迁移）**不**需要 | `Application/Relations/RelationModels.cs`（`FormatVersion`）、`Caching/WorkbenchCacheSchema.cs` | 旧派生库被当成新鲜的，卡片流 / 关联资源显示旧数据且不重建 |
 
 ---
 
@@ -309,7 +323,7 @@ ProjectService.LoadAsync(.lmeproj)     Application/Projects/ProjectService.cs
 | `<程序目录>/cache/bank-index.db` | bank 头信息 + 逐样本行 | `Application/Assets/BankIndexStore.cs` |
 | `<程序目录>/cache/text-index.db` | lang 文件级索引 + 命中（`index_meta.language_prefix`） | `Application/Texts/TextIndexStore.cs` |
 | `<程序目录>/cache/static-tables.db` | 静态表元数据 + 按需有界正文缓存 | `Application/StaticMods/StaticTableIndexStore.cs` |
-| `<程序目录>/cache/relation-index.db` | **派生**关联图（人格 ↔ 跨资源链接 + 反向索引） | `Application/Relations/RelationStore.cs`（由 `PersonaRelationIndexService` 从上面四个库派生） |
+| `<程序目录>/cache/relation-index.db` | **派生**关联图（**6 类别**对象 ↔ 跨资源链接 + 反向索引 `subjects_by_ref` + 显式跨资源边 `xref`） | `Application/Relations/RelationStore.cs`（由 `PersonaRelationIndexService` 从上面四个库派生） |
 | `<程序目录>/projects/<名>/` | 新建项目的默认位置 | `Application/Build/NewModTemplateService.cs` |
 | `<项目>/<名>.lmeproj` | 项目文档（`ModProject` JSON） | `Application/Projects/ProjectService.cs` |
 | `<项目>/sources/cache/<外>_<内>.bundle` | 编辑过的缓存 bundle 实体化副本 | `Application/Scanning/UnityCacheMaterializationService.cs` |
@@ -326,7 +340,7 @@ ProjectService.LoadAsync(.lmeproj)     Application/Projects/ProjectService.cs
 | `bank-index.db` | 目录签名 `0:mtimeTicks`（源键 = 目录全路径小写） | 逐 bank 文件 `(size_bytes, mtime_ticks)`，只删该 bank 的 `samples` 行；行集对账删已消失文件 | `WorkbenchCacheSchema` 建表脚本 |
 | `static-tables.db` | **内层内容哈希**（小写） | 源变即整库重建；正文缓存 LRU 淘汰（上限 64MB，淘汰到 80%） | 同上 |
 | `text-index.db` | 内容口径版本 + 活动语言目录签名 + **`config.json` 内容哈希**（切语言必须用内容哈希，size/mtime 不可靠） | 整库 / 单文件 `(size,mtime_ticks)` / 行集不一致整表重建 | `TextIndexStore.IndexFormatVersion = "v4"`（v1 首版 → v2 不收录根级 `config.json` → v3 口径去根文件夹 → v4 并入活动语言目录名 + `language_prefix`） |
-| `relation-index.db`（**派生**） | 上面**四个库的语义签名拼接**（`RelationIndexSource.From`）：unity=bundles 计数+最大 mtime+总字节；bank=目录签名；static=内层内容哈希；text=内容口径版本+目录签名+config 哈希+语言目录 | 任一上游签名变 → **整库重建**（关联图整体由四库决定） | `RelationIndexSource.FormatVersion = "v1"`（**改「抽哪些事实 / 怎么算关联」时必须 +1**，否则旧派生库会被当成新鲜的） |
+| `relation-index.db`（**派生**） | 上面**四个库的语义签名拼接**（`RelationIndexSource.From`）：unity=bundles 计数+最大 mtime+总字节；bank=目录签名；static=内层内容哈希；text=内容口径版本+目录签名+config 哈希+语言目录 | 任一上游签名变 → **整库重建**（关联图整体由四库决定） | `RelationIndexSource.FormatVersion = "v3"`（**改「抽哪些事实 / 怎么算关联 / 键口径 / 新增并填充列 / 跨链关系名」时必须 +1**，否则旧派生库会被当成新鲜的）。业务表：`subjects` / `links` / `subjects_by_ref` / `xref` |
 
 > **派生库的源签名不用库文件 mtime**：WAL 下写事务未必改主库 mtime（只写 `-wal`），拿它判「源变没变」会漏判；
 > 四个上游的语义签名才是各自服务真实使用的判据。
@@ -396,10 +410,14 @@ ProjectService.LoadAsync(.lmeproj)     Application/Projects/ProjectService.cs
 | **预览卡死 / 预览看不到下面** | `Application/Assets/Preview/AssetPreviewProviders.cs`（截断闸门） | `App/WorkbenchPages/AssetsWorkbenchPage.xaml.cs`（JSON 树闸门、`WrapPreview`）、`Assets/AssetPropertyService.cs`（会再读一次正文）、不变量 §6-21 |
 | **资源工作台又出现 static-data** | `Application/Scanning/UnityCacheScanService.cs`（标记补写/清除规则） | `Application/Assets/AssetSearchService.cs`（三道判据）、`StaticMods/StaticBundleLocator.cs`（`LooksLikeStaticBundle` + `LooksLikeStaticTablePath`）、不变量 §6-20 |
 | **树突然折叠回初始形态** | `App/WorkbenchPages/TreeExpansionState.cs`（key 回放） | 四页的 `RebuildTree` 与 `_expandedTreeKeys`、`Loaded` 守卫、不变量 §6-22~24 |
-| **改「资源之间怎么关联 / 新增预设类别（EGO、异常…）」** | `Application/Relations/PersonaRelationAnalyzer.cs`（抽取事实 + 建链接；`RelationCategories` 加类别） | 改完把 `RelationIndexSource.FormatVersion` +1；`RelationQueryService`（查询门面）、`Relations/RelationStore.cs`（表结构）、`Scanning/StartupScanService`（第 6 步） |
-| **改卡片流页的卡片/详情展示（封面挑哪张、分组顺序、「打开」跳哪页）** | `Application/Relations/PersonaPresetService.cs`（**纯逻辑，改这里而不是页面**） | `App/WorkbenchPages/PresetWorkbenchPage.xaml.cs`（只做装配与并发/代际守卫）、`PersonaPresetServiceTests.cs` |
+| **改「资源之间怎么关联 / 新增预设类别（除 6 类之外）」** | `Application/Relations/RelationCategories.cs`（加类别 + 中文标签 + `All`）、`SubjectRelationAnalyzer.cs`（抽取事实 + 建链接 + id 归一化） | 改完把 `RelationIndexSource.FormatVersion` +1（不变量 §6-33）；`RelationQueryService`（查询门面）、`Relations/RelationStore.cs`（表结构）、`Scanning/StartupScanService`（第 6 步） |
+| **改卡片流页的卡片/详情展示（封面挑哪张、分组顺序、行预览、「打开」跳哪）** | `Application/Relations/PresetWorkbenchService.cs`（**纯逻辑，改这里而不是页面**） | `App/WorkbenchPages/PresetWorkbenchPage.xaml.cs`（只做装配与并发/代际守卫）、`PresetWorkbenchServiceTests.cs` |
+| **卡片详情 / 关联资源点「打开」后没跳到那一行** | `Application/Relations/RelationDeepLink.cs`（载荷口径）、目标页的 `IReferenceRevealable.Reveal` | `App/MainWindow.xaml.cs` 的 `RevealReference`（失败会退化为关键词）、不变量 §6-31~32 |
 | **Spine 预览/导出异常（不显示预览、没有布局图、导不出文件）** | `Application/Spine/SpinePreviewService.cs`、`SpineExportService.cs` | `SpineModels.cs`（内容判定）、`RelationDisplayRules.IsSpinePath`（路径粗筛）、`AssetPreviewRegistry.CreateDefault`（是否注册了 provider）、不变量 §6-27~29 |
+| **Spine 动画播放不工作（白图 / 报错 / 缺页）** | `Application/Spine/SpineAnimationSourceService.cs`（找素材，中文错误）、`LimbusModEditor.SpineRuntime`（`SpineDocument.TryCreate` / `SpineFrameRenderer.RenderFrame`） | `App/SpineAnimationPreviewWindow.cs`（播帧）、页贴图解码走 `ReadBundleSpriteComposite`（Sprite）而非 `ReadTexturePng`、不变量 §6-27 |
 | **新增/修改预览形态** | `Application/Assets/Preview/AssetPreview.cs`（`AssetPreviewKind` + `AssetPreviewRegistry.CreateDefault` 注册顺序） | `AssetsWorkbenchPage.BuildPreviewView`（App 侧 switch 也要加分支）、不变量 §6-21 |
+| **某种资源预览退化成十六进制** | `AssetPreviewProviders.ScriptPreviewProvider.CanPreview`（现覆盖 MonoBehaviour / MonoScript **+ Component / GameObject / ScriptableObject**） | 该类型是否已有 provider、`AssetPreviewRegistry.CreateDefault` 注册顺序 |
+| **图片（尤其 Sprite）预览不出图** | 解码入口：Sprite 走 `ReadBundleSpriteComposite`，Texture2D 才走 `ReadTexturePng`（`TryDecodeImagePng`） | `asset.Type == AssetType.Sprite && ContainerPath` 是否存在、`UnityPathId` 是否为空 |
 
 ---
 
@@ -414,9 +432,14 @@ ProjectService.LoadAsync(.lmeproj)     Application/Projects/ProjectService.cs
 - **mipmap 只到「布局与切片」**：`Editing/Images/UnityTextureCodec.cs` 的 `ToImage`/`FromPng`
   只处理 level 0。
 - **`App` 项目没有测试工程**：任何需要被测试覆盖的逻辑都应下沉到 `Application`。
-  （卡片流的封面挑选与分组顺序就是按这条沉到 `Relations/PersonaPresetService.cs` 的。）
-- **仓库里没有 Spine 运行时**：`Application/Spine/` 只做**文本解析 + 静态结构预览 + 原样导出**，
-  不播放动画、不做蒙皮/网格变形/约束求值。要「真正预览动画」等于引入一整套运行时，属于新工程。
+  （卡片流的类别计数/封面挑选/分组顺序/行载荷就是按这条沉到 `Relations/PresetWorkbenchService.cs` 的。）
+- **`Application/Spine/` 不含渲染器**：它只做**文本解析 + 静态结构预览 + 原样导出 + 找齐素材**。
+  骨骼动画**真播放**由独立叶子项目 `LimbusModEditor.SpineRuntime`（vendored spine-csharp 4.0 + SkiaSharp）
+  承担；App 只把 `SpineFrameRenderer` 出来的帧贴到界面。**解析层与渲染层不得互相渗透**
+  （Application 不引 spine-csharp 类型、App 不写渲染逻辑）。
+- **`LimbusModEditor.slnx` 有一个刻意例外**：`tests/LimbusModEditor.SpineRuntime.Tests` 不进清单
+  （它 `Nullable=disable` + 不警告即失败，并入会让「跑整个 solution 测试」卷进 vendored 源码的历史警告）。
+  验收时单独 `dotnet test tests/LimbusModEditor.SpineRuntime.Tests`。
 - **不要**：手写完整 Unity 解析器、伪造/分发 FMOD 专有 DLL、把未知对象静默转成「成功输出」、
   在无真实样本时宣称格式兼容、用宽泛递归删除或跳过备份去写用户游戏目录。
 
@@ -426,10 +449,11 @@ ProjectService.LoadAsync(.lmeproj)     Application/Projects/ProjectService.cs
 
 ```text
 dotnet build LimbusModEditor.slnx --no-restore --nologo
-dotnet test  LimbusModEditor.slnx --no-build --nologo
-# 建议按工程分开跑（并行时两个工程互相抢磁盘，墙钟断言最先受影响）
-dotnet test tests/LimbusModEditor.Domain.Tests  -c Debug --no-build --nologo
-dotnet test tests/LimbusModEditor.Format.Tests  -c Debug --no-build --nologo
+dotnet test  LimbusModEditor.slnx --no-build --nologo      # 只跑 slnx 内的工程（Domain + Format）
+# 建议按工程分开跑（并行时互相抢磁盘，墙钟断言最先受影响）
+dotnet test tests/LimbusModEditor.Domain.Tests       -c Debug --no-build --nologo   # 661 例
+dotnet test tests/LimbusModEditor.Format.Tests       -c Debug --no-build --nologo   # 74 例
+dotnet test tests/LimbusModEditor.SpineRuntime.Tests -c Debug --no-build --nologo   # 7 例（刻意不在 slnx 内）
 dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r win-x64 --self-contained false -o artifacts/publish-win-x64 --no-restore
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/publish.ps1
 ```

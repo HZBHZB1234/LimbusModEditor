@@ -543,26 +543,39 @@ public sealed class TextPreviewProvider : IAssetPreviewProvider
     }
 }
 
-/// <summary>MonoBehaviour / MonoScript：只读字段树 + 脚本来源信息。</summary>
+/// <summary>
+/// 对象字段树预览：MonoBehaviour / MonoScript / Component / GameObject / ScriptableObject
+/// —— 一律走「读 Unity 对象的字段树」这条通道。
+///
+/// <para><b>为什么把 Component / GameObject 也纳进来</b>：它们原先没有任何提供者接手，
+/// 于是一路掉到十六进制兜底——用户看到的是「这个资源加载不出预览」。而字段树读取本来就是
+/// 通用的（<c>ReadBundleObjectFields</c> 按对象结构展开，不依赖是不是脚本），
+/// Transform / MeshRenderer / Animator 这些组件照样能列出字段与引用，比十六进制有信息量得多。</para>
+///
+/// <para>脚本类元信息（程序集 / 类型树缺失原因）只有 MonoBehaviour / MonoScript 才有，
+/// 读不到就跳过那几行，不影响字段树本身。</para>
+/// </summary>
 public sealed class ScriptPreviewProvider : IAssetPreviewProvider
 {
     private static readonly Logger Log = LogManager.GetCurrentClassLogger();
 
-    public string Name => "脚本字段树";
+    public string Name => "对象字段树";
 
     public bool CanPreview(AssetRecord asset)
-        => asset.Type is AssetType.MonoBehaviour or AssetType.MonoScript && PreviewRead.IsBundleAsset(asset);
+        => (asset.Type is AssetType.MonoBehaviour or AssetType.MonoScript
+                or AssetType.Component or AssetType.GameObject or AssetType.ScriptableObject)
+           && PreviewRead.IsBundleAsset(asset);
 
     public Task<AssetPreview?> PreviewAsync(AssetRecord asset, IProgress<string>? progress, CancellationToken cancellationToken)
         => Task.Run<AssetPreview?>(() =>
         {
-            using var scope = Log.Scope("脚本字段树预览");
+            using var scope = Log.Scope("对象字段树预览");
             var service = new UnityAssetService();
             var pathId = asset.UnityPathId!.Value;
             var fields = service.ReadBundleObjectFields(asset.SourcePath!, asset.ContainerPath!, pathId, cancellationToken);
             if (fields.Count == 0)
             {
-                Log.Debug("脚本字段树预览：读不到对象字段（PathId {0}），交给后续 provider：bundle {1}，容器 {2}",
+                Log.Debug("对象字段树预览：读不到对象字段（PathId {0}），交给后续 provider：bundle {1}，容器 {2}",
                     pathId, asset.SourcePath ?? "-", asset.ContainerPath ?? "-");
                 return null;
             }
@@ -580,14 +593,14 @@ public sealed class ScriptPreviewProvider : IAssetPreviewProvider
                     if (script.TypeTreeMissingReason is not null)
                         rows.Add(new AssetPreviewRow("类型树", script.TypeTreeMissingReason, 0, Highlight: true));
                 }
-                Log.Debug("脚本字段树预览：脚本信息 {0}，PathId {1}，已加 {2} 行元信息。",
+                Log.Debug("对象字段树预览：脚本信息 {0}，PathId {1}，已加 {2} 行元信息。",
                     script is null ? "不可读" : $"可读（{script.ClassName ?? "-"}）", pathId, rows.Count);
             }
             catch (Exception ex) { /* 脚本信息尽力而为 */
                 Log.Warn(ex, "脚本信息读取失败，仅显示字段树（尽力而为分支）：bundle {0}，PathId {1}", asset.SourcePath ?? "-", pathId);
             }
             rows.AddRange(PreviewRead.Flatten(fields[0]));
-            Log.Info("脚本字段树预览完成：形态 Rows，字段树行 {0} 条，资源「{1}」。", rows.Count, AssetDisplay.DisplayPath(asset));
+            Log.Info("对象字段树预览完成：形态 Rows，字段树行 {0} 条，资源「{1}」。", rows.Count, AssetDisplay.DisplayPath(asset));
             return new AssetPreview(AssetPreviewKind.Rows,
                 $"只读字段树 · {AssetDisplay.TypeLabel(asset.Type)} · Path {pathId}（编辑请用「Unity 字段编辑」）",
                 Rows: rows);

@@ -50,6 +50,9 @@ $RECYCLE.BIN/
 *.bak
 *.swp
 *~
+# WPF 构建期临时工程（XAML 编译用，正常构建后自行删除；偶发残留不入库）
+*_wpftmp.csproj
+*_wpftmp.*
 # 索引/表缓存（运行时生成，可随时删除重建；unity-cache-index.db 等）
 cache/
 

@@ -278,6 +278,88 @@ public class AssetPreviewRegistryTests : IDisposable
         Assert.True(named > 0, "60 个真实 bundle 里应能扫到带容器名的资源");
     }
 
+    /// <summary>
+    /// 字段树 provider 的覆盖面对齐：Component / GameObject / ScriptableObject 也必须有 provider 接手。
+    /// 它们原先没有任何 provider（既不是 MonoBehaviour 也不是 Mesh/Animation/Font），
+    /// 于是一路掉到十六进制兜底 —— 用户看到的就是「这个资源加载不出预览」。
+    /// </summary>
+    [Fact]
+    public void Field_tree_provider_claims_components_and_game_objects_not_just_scripts()
+    {
+        var file = Path.Combine(_root, "coverage.bundle");
+        File.WriteAllText(file, "x");
+        var provider = new ScriptPreviewProvider();
+
+        foreach (var type in new[]
+                 {
+                     AssetType.Component, AssetType.GameObject, AssetType.ScriptableObject, AssetType.MonoBehaviour,
+                 })
+            Assert.True(provider.CanPreview(Bundle(type, file, isBundle: true)), $"{type} 应交给字段树 provider");
+
+        Assert.False(provider.CanPreview(Bundle(AssetType.Component, file, isBundle: false)),
+            "非 bundle 资源读不到字段树，不该被接管");
+        Assert.False(provider.CanPreview(Bundle(AssetType.Texture, file, isBundle: true)),
+            "纹理有自己的 provider，不该被字段树抢走");
+    }
+
+    private static AssetRecord Bundle(AssetType type, string file, bool isBundle)
+    {
+        var asset = new AssetRecord { Type = type, SourcePath = file, UnityPathId = 42 };
+        asset.Metadata["unityBundle"] = isBundle ? "true" : "false";
+        return asset;
+    }
+
+    /// <summary>
+    /// 真实缓存上的覆盖率护栏：GameObject / Component 必须得到<b>字段树</b>预览，
+    /// 而不是掉到十六进制兜底（那正是用户报的「有些资源加载不出东西」）。
+    ///
+    /// <para><b>为什么这两类值得单独钉</b>：真实索引里 Component 是<b>数量最多</b>的一类
+    /// （51 万个，占全体约四成），GameObject 也有 22 万个；而它们原先没有任何 provider 接手
+    /// ——既不是 MonoBehaviour，也不是 Mesh/Animation/Font——于是一路掉到十六进制。</para>
+    /// </summary>
+    [Fact]
+    public async Task Real_cache_components_and_game_objects_preview_as_field_trees()
+    {
+        var cacheRoot = FindRealCacheRoot();
+        if (cacheRoot is null) return; // 无真实样本：跳过（本机装了游戏/Unity 缓存时才会真跑）
+
+        var service = new UnityAssetService();
+        var registry = AssetPreviewRegistry.CreateDefault();
+        var rows = new HashSet<AssetType>();
+        var kinds = new Dictionary<string, int>(StringComparer.Ordinal);
+        var candidates = new HashSet<AssetType>();
+
+        foreach (var bundle in EnumerateBundles(cacheRoot, limit: 40))
+        {
+            IReadOnlyList<AssetRecord> objects;
+            try { objects = service.ScanBundle(bundle); }
+            catch (Exception) { continue; }
+            foreach (var asset in objects)
+            {
+                if (asset.Type is not (AssetType.Component or AssetType.GameObject)) continue;
+                candidates.Add(asset.Type);
+                if (rows.Contains(asset.Type)) continue;
+
+                var preview = await registry.PreviewAsync(asset);
+                var key = $"{asset.Type}/{preview.Kind}";
+                kinds[key] = kinds.GetValueOrDefault(key) + 1;
+                if (preview.Kind == AssetPreviewKind.Rows && rows.Add(asset.Type))
+                {
+                    Assert.True(preview.Rows is { Count: > 0 }, $"{asset.Type} 的字段树不该为空");
+                    Assert.Contains("字段树", preview.InfoLine);
+                }
+            }
+            if (rows.Count == 2) break;
+        }
+
+        var stats = string.Join("、", kinds.OrderBy(x => x.Key).Select(x => $"{x.Key}={x.Value}"));
+        // 缓存里根本没扫到这两类对象时不能「假装通过」——那会让这条护栏变成摆设。
+        Assert.True(candidates.Count > 0,
+            "本机 Unity 缓存取样里没有 Component / GameObject 对象，这条护栏无法验证（检查 EnumerateBundles 的取样口径）。");
+        Assert.True(rows.Count > 0,
+            $"真实缓存里 Component / GameObject 应至少有一类能得到字段树预览，实际：{stats}");
+    }
+
     private static string? FindRealCacheRoot()
     {
         var overrideDir = Environment.GetEnvironmentVariable("LME_UNITY_CACHE_DIR");

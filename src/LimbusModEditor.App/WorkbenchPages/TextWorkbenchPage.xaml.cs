@@ -4,6 +4,7 @@ using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Threading;
+using LimbusModEditor.Application.Relations;
 using LimbusModEditor.Application.Texts;
 using LimbusModEditor.Domain.Diagnostics;
 using LimbusModEditor.Domain.Projects;
@@ -94,7 +95,7 @@ public sealed record TextHitRow(LangTextSearchHit Hit, string DisplayPath)
 /// <para><b>缓存只是加速旁路</b>：删掉 <c>cache/text-index.db</c> 功能完全不受影响，
 /// 只是每次进页面要重新读全部 lang 文件。</para>
 /// </summary>
-public sealed partial class TextWorkbenchPage : UserControl, ISearchableWorkbench
+public sealed partial class TextWorkbenchPage : UserControl, ISearchableWorkbench, IReferenceRevealable
 {
     /// <summary>宿主跳转过来的关键词过滤（<see cref="ISearchableWorkbench"/>）：
     /// 填进搜索框即可，后续防抖 + 后台搜索由既有的 TextChanged 链路负责。</summary>
@@ -103,6 +104,39 @@ public sealed partial class TextWorkbenchPage : UserControl, ISearchableWorkbenc
         var text = keyword ?? string.Empty;
         _search.Text = text;
         _search.CaretIndex = text.Length;
+    }
+
+    /// <summary>
+    /// 精确跳转（<see cref="IReferenceRevealable"/>）：载荷 = <c>相对路径 \0 键路径</c>
+    /// ——关联图里文本侧的口径就是「语言目录下的相对路径」，键路径是 JSON 里的定位
+    /// （如 <c>battle_break_10201_1.dlg</c>）。
+    ///
+    /// <para>本页已经有一整套「选中文件 + 跳到键」的实现（<see cref="SelectFileAsync"/>，
+    /// 命中结果列表点进去走的就是它），所以这里不重写定位逻辑，只负责把两段载荷拆出来交给它
+    /// ——与「从命中列表点进去」得到完全一致的体验。</para>
+    /// </summary>
+    public bool Reveal(string payload)
+    {
+        var relativePath = RelationDeepLink.Part(payload, 0);
+        if (string.IsNullOrWhiteSpace(relativePath))
+        {
+            ApplySearchKeyword(RelationDeepLink.KeywordOf(payload));
+            return false;
+        }
+
+        if (FindFileByPath(relativePath) is null)
+        {
+            // 关联图里的路径可能来自另一个语言目录 / 已被热修改名：填关键词让用户至少看到相近项。
+            Log.Warn("文本页精确跳转：文件不在当前清单里（{0}），退化为关键词过滤", relativePath);
+            ApplySearchKeyword(RelationDeepLink.KeywordOf(payload));
+            return false;
+        }
+
+        var keyPath = RelationDeepLink.Part(payload, 1);
+        if (string.IsNullOrWhiteSpace(keyPath)) ApplySearchKeyword(relativePath);
+        _ = SelectFileAsync(relativePath, string.IsNullOrWhiteSpace(keyPath) ? null : keyPath);
+        Log.Info("文本页精确跳转命中：{0}（键路径={1}）", relativePath, string.IsNullOrWhiteSpace(keyPath) ? "-" : keyPath);
+        return true;
     }
 
     private static readonly Logger Log = LogManager.GetCurrentClassLogger();

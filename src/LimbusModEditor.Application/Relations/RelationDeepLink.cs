@@ -47,6 +47,26 @@ public static class RelationDeepLink
         return index >= 0 && index < parts.Count ? parts[index] : string.Empty;
     }
 
+    /// <summary>
+    /// 把载荷退化成一个「人能用的搜索关键词」——目标页不支持精确跳转时用它做兜底。
+    ///
+    /// <para><b>为什么取最后一段</b>：载荷是「容器在前、子定位在后」的口径——
+    /// 文本 = <c>相对路径 \0 键路径</c>、静态 = <c>容器路径 \0 记录键</c>、
+    /// 音频 = <c>bank 路径 \0 样本名</c>。最后一段总是<b>最具体</b>的那一层
+    /// （样本名 / 记录键 / 键路径），拿它当关键词命中率最高；只有一段时（资源级载荷）
+    /// 就整段返回。空段不算数（<see cref="ForText"/> 的键路径可以是空串）。</para>
+    /// </summary>
+    public static string KeywordOf(string? payload)
+    {
+        var parts = Decode(payload);
+        for (var i = parts.Count - 1; i >= 0; i--)
+        {
+            var part = parts[i];
+            if (!string.IsNullOrEmpty(part)) return part;
+        }
+        return string.Empty;
+    }
+
     private static string Join(string head, string? tail)
         => string.IsNullOrEmpty(tail) ? head : string.Concat(head, Separator.ToString(), tail);
 }

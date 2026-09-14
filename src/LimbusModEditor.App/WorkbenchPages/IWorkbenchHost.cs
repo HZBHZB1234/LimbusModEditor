@@ -51,4 +51,21 @@ public interface IWorkbenchHost
     /// <param name="pageKey">目标页 key（<c>assets</c> / <c>bank</c> / <c>text</c> / <c>static</c>）。</param>
     /// <param name="keyword">过滤关键词（容器路径 / 文件名 / 样本名 / 人格 id）。</param>
     void ShowWorkbenchSearch(string pageKey, string keyword);
+
+    /// <summary>
+    /// 跳到某个工作台并<b>精确定位到那一行</b>（plan-11 深化）：预设卡片详情的「打开」用。
+    ///
+    /// <para>与 <see cref="ShowWorkbenchSearch"/> 的区别：后者只把关键词填进搜索框（用户还得自己
+    /// 在结果里再找一遍），本方法把 <c>RelationDeepLink</c> 载荷交给目标页的
+    /// <see cref="IReferenceRevealable"/>，让它直接选中并滚到那一行。</para>
+    ///
+    /// <para>目标页没实现 <see cref="IReferenceRevealable"/>（或定位失败返回 false）时，
+    /// 实现方必须<b>退化为关键词过滤</b>：载荷里的最后一段（样本名 / 键路径 / 文件路径）
+    /// 就是现成的关键词，绝不能静默什么都不做。</para>
+    /// </summary>
+    /// <param name="pageKey">目标页 key（<c>assets</c> / <c>bank</c> / <c>text</c> / <c>static</c>）。</param>
+    /// <param name="payload">精确载荷（<c>RelationDeepLink</c> 编码，可为空 → 退化为不定位）。</param>
+    /// <param name="fallbackKeyword">定位失败时用的关键词；null 时由宿主从载荷推。</param>
+    /// <returns>是否由目标页精确命中（false = 已退化为关键词过滤）。</returns>
+    bool RevealReference(string pageKey, string payload, string? fallbackKeyword = null);
 }

@@ -102,13 +102,16 @@ links(
   PRIMARY KEY(subject_id, kind, ref_key)
 );
 
--- xref：显式跨资源边（问题 5 的产物）
+-- xref：显式跨资源边。**多对多**——一条 from 可对多条 to，一条 to 也可被多条 from 指向
+-- （例：一个 lang 键可同时关联到「音频 + 技能 + 图标」；一个音频可同时关联「台词 + 人格 + 关卡」）
 xref(
-  from_ref TEXT, to_ref TEXT, relation TEXT, confidence TEXT, detail TEXT,
-  PRIMARY KEY(from_ref, to_ref, relation)
+  from_ref TEXT, to_ref TEXT, relation TEXT,
+  from_kind TEXT, to_kind TEXT,     -- 便于不 join 也能筛
+  confidence TEXT, detail TEXT,
+  PRIMARY KEY(from_ref, relation, to_ref)   -- 唯一性只在「同一关系的同一条边」，不限制度数
 );
--- relation ∈ audio->voice_text | static->lang | audio->subject | text->subject
--- confidence ∈ exact | personality_level | chapter_level | ambiguous
+-- relation ∈ audio->voice_text | static->lang | lang->subject | lang->resource | resource->subject
+-- confidence ∈ exact | derived | personality_level | chapter_level | ambiguous
 ```
 
 **为什么 `preview_text` 放进 `links` 而不是每次现读**：卡片流一屏几十张卡、每张几十行，现读 lang/表正文会把 UI 线程打爆；缓存的铁律（只影响速度、不影响正确性）在这里同样成立——删库重建后内容一致。
@@ -166,6 +169,18 @@ if sample.name in voice_index:  preview_text = dlg；confidence = exact
 - 精确未命中时降级到**人格级**（样本名内含 5 位人格 id → 该人格全部台词），标 `personality_level`，UI 用浅色标注「同人格语音」而不是伪装成精确。
 - 敌人/异常文本按**关卡**组织（`Passives_Enemy-a1c5p1`、`AbnormalityGuides-a1c5p3`），无法按 id 精确挂 → 标 `chapter_level`，UI 明确写「按关卡归属」。
 - **图像 → 文本**：本次勘误后 Sprite 清单可用（`Sprite/SkillIcon/<id>01.png`），但「图标 → 技能名」的 id 映射**尚未验证**，列入本阶段的一个探针任务（不达标就不做，不硬凑）。
+
+### 7.3 lang 键覆盖矩阵（问题 8 的核心）
+
+现状只有 3 条规则，`text-index` 里 **362 246 条 hit / 2048 个 lang 文件**中的绝大多数**还没有任何关联**。本阶段的目标不是"再加几条"，而是**先量出覆盖矩阵再补齐**：
+
+1. 按 `text-index.files.rel_path` 的顶层目录 + `hits` 的 `key_path` 形态，把 lang 文件分成若干**家族**（`PersonalityVoiceDlg/`、`Skills.json`、`Passives.json`、`Items`、`Stage*`、`Enemy*`、`Abnormality*`、`Announcer*`、`EGOGift*`、`StoryData/**`(920 文件，体量最大) …）。
+2. 每个家族给出**可达的关联规则**（键内嵌 id？值内嵌 id？文件名内嵌 id？外键指向？），以及**该家族覆盖多少条 hit**。
+3. 输出一张「家族 × 规则 × 覆盖 hit 数」的矩阵，**明确标出覆盖不到的部分与原因**（例如 `StoryData/**` 体量最大但按剧情脚本组织、无稳定实体键 → 可能只能到"章节级"）。
+4. **验收口径**：可关联的 lang hit 占比达到**多数**（矩阵实测后定阈值，写进测试断言），且每条规则都有真实配对样本作证。
+
+**辅助手段**：用《Limbus Company Wiki》（`limbuscompany.fandom.com` / `limbuscompany.wiki.gg`）+ 真实数据互证，锁定各实体的 id 号段与 lang 键命名约定（例如技能 id `personaId*100+skillIndex`、被动 `passiveIDList`、礼物 9001–9814、播报员 id 90001+、EGO 装备 id 20601+）。**wiki 只用于定则与交叉验证，最终以真实数据实测为准**（wiki 版本可能落后于游戏）。
+
 
 **验收**：把 7.1 的三条规则做成纯函数单测（含真实文本样本作为夹具）；真实数据冒烟断言「`preview_text` 非空的音频链接 ≥ 4000 条」「至少 1 个静态表能解出中文 desc」。
 
@@ -286,3 +301,51 @@ Spine Runtimes License 要求：**产品的每个最终用户都必须自行持�
 - **不变量（写进 `CODE-STRUCTURE.md` §6）**：缓存只影响速度；`FormatVersion` 变更必须 +1；跨类别 id 必须带类别前缀；中立路径的歧义 id 不得静默二选一；Reveal 不得污染树展开态。
 - **提交粒度**：每阶段一个 commit（阶段 0 基线 → A → B → C → D → E → F → G），每个 commit 都必须"构建 0 警告 0 错误 + 全绿测试"。
 - **文档**：`PROJECT-INDEX.md`（§8.14/§8.15 扩充、§9.2 页面、§11 计数、§14 症状表）、`CODE-STRUCTURE.md`（目录地图、决策表、不变量）、本文件在完成后移入归档。
+
+---
+
+## 14. 决策记录与追加要求
+
+### 14.1 已拍板
+
+| 决策 | 结论 |
+|---|---|
+| 阶段 F（Spine） | vendoring 官方 spine-csharp 4.0.x 源码 + 自写 SkiaSharp 渲染器做**真运行时预览**；接受 Spine Runtimes License → 附 `THIRD-PARTY-NOTICES.md` + UI 提示 + 版权声明 |
+| 阶段 B 类别 | 敌人 + 异常 + 播报员 + **EGO + E.G.O.Gift** |
+| 本轮范围 | **A–G 全部**，每阶段一个 commit |
+| 关联基数 | **不限制 1:1** → `xref` 多对多，单个键值可关联多条其它数据 |
+| 关联规则覆盖 | 补到**覆盖大部分 lang 键值** |
+
+### 14.2 追加要求（开工后用户补充）
+
+1. **不允许 1:1 限制**：单个键值要能与多条其它数据关联 → 见 §5 `xref` 多对多设计。
+2. **关联规则太少**：要能覆盖**大部分 lang 键值** → 见 §7.3 覆盖矩阵；矩阵数字要进测试。
+3. **参考《Limbus Company Wiki》+ 真实数据搜索**来辅助确定关联 → wiki 仅用于**定则与交叉验证**，最终以真实数据实测为准。
+
+### 14.3 覆盖矩阵实测结果（新增分析）
+
+`text-index` 2048 个 lang 文件 / 362 246 条 hit 的家族与可关联性（详见 `logs/analysis/lang-coverage-matrix.md`）：
+
+| 结论 | 数字 |
+|---|---|
+| 可被现有 + 新增规则关联的 hit | **≈43.9%** |
+| 唯一的结构性盲区 | **`StoryData/**`（约 55.9% 的 hit）**，实测 200 个文件里只有 353 个不重复 id —— 用**局部节点序号** 0..N，**没有稳定实体键** |
+| 其它零散盲区 | ≈0.2%（`BattleHint`、车站名等纯 UI 局部 id） |
+
+**重要反例（已在分析中记录，实现时不得当事实用）**：
+- 「lang 值指向另一个 lang 键」这一设想**不成立**：全量扫描 Value 命中能精确等于其它文件键的 = **0 例**；12297 条"值==id"几乎全是 StoryData 局部序号 0..7 的**号段碰撞假阳性**。
+- 2047/2048 个 lang 文件是 `{"dataList":[...]}` 结构（唯一例外 `Info/version.json`）。
+- 该分析另称「人格 id 实测用 400000+ 而非 10000–12999」——与 `relation-index.subjects`（185 个人格，5 位 id）及 wiki 互证结果冲突，**判为错误**（疑似把技能/被动 id 当人格 id），**不采用**。
+
+**因此对目标口径的修正**：`StoryData/**` 只能做到**角色级 / 章节级**关联（按文件名里的角色 token 挂到该角色，与现有 `AbDlg_<角色>.json` 同法）。
+「覆盖大部分 lang 键值」的验收口径定为：**除 `StoryData/**` 外，可关联 hit 占比达到多数**，且 `StoryData/**` 至少有角色级/章节级关联。
+
+### 14.4 wiki 交叉验证的关键结论（详见 `logs/analysis/wiki-id-spec.md`）
+
+- **wiki 完全没有数字 id 体系**（只记名称/风险等级/分类码）→ **号段只能以真实数据为准**。
+- 技能 / 被动 id = `personalityId * 100 + 序号`；EGO 技能再加 `+11`（已觉醒）/`+21`（未觉醒）。
+- E.G.O.Gift 4 位基础 id（1001–9999）+ 增强偏移 `+10000/+20000` → 5 位（`EGOgift_*.json` 全量 857 条）。
+- EGO id `2` + 角色码 + 变体；**罪孽属性不在 id 内**（独立字段）。
+- 异常：wiki 用字符串分类码（`F-04-03-04`），与游戏 4 位数字 id **是两套体系，不能互转**。
+- 冲突项：wiki 的 Sinner 编号与游戏数据不一致（`11201`=Gregor=码 12）→ **以数据为准**。
+

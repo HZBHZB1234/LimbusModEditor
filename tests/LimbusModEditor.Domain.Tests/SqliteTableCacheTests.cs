@@ -128,14 +128,22 @@ public class SqliteTableCacheTests : IDisposable
             ColumnsOf(text, "files"));
         Assert.Equal(new[] { "rel_path", "kind", "key_path", "snip", "seq" }, ColumnsOf(text, "hits"));
 
-        // relation-index.db：subjects / links / subjects_by_ref（派生关联图）
+        // relation-index.db：subjects / links / subjects_by_ref / xref（派生关联图，口径 v2）
         var relations = SqliteTableCache.Create(WorkbenchCacheKind.ResourceRelations, cacheDirectory);
         relations.EnsureSchema();
-        Assert.Equal(new[] { "subject_id", "subject_kind", "display_name", "subtitle", "character", "sort_key" },
+        Assert.Equal(
+            new[] { "subject_id", "subject_kind", "category_label", "display_name", "subtitle", "character",
+                    "sort_key", "cover_ref", "preview_text", "link_count" },
             ColumnsOf(relations, "subjects"));
-        Assert.Equal(new[] { "subject_id", "category", "kind", "ref_key", "display", "detail", "size_bytes" },
+        Assert.Equal(
+            new[] { "subject_id", "category", "kind", "ref_key", "display", "detail", "size_bytes",
+                    "preview_text", "preview_kind", "media_kind", "duration_sec", "ref_path", "deep_link",
+                    "target_subject_id" },
             ColumnsOf(relations, "links"));
         Assert.Equal(new[] { "ref_key", "subject_id", "category" }, ColumnsOf(relations, "subjects_by_ref"));
+        Assert.Equal(
+            new[] { "from_ref", "to_ref", "relation", "from_kind", "to_kind", "confidence", "detail" },
+            ColumnsOf(relations, "xref"));
 
         // 四个工作台缓存库都落在程序目录的 cache/ 下
         foreach (var path in WorkbenchCachePaths.AllDatabasePaths(cacheDirectory))
@@ -144,6 +152,43 @@ public class SqliteTableCacheTests : IDisposable
             Assert.Equal(cacheDirectory, Path.GetDirectoryName(path));
         }
     }
+
+    /// <summary>
+    /// 关联图必须支持<b>多对多</b>（需求：单个键值可以关联多条数据，不设 1:1 上限）。
+    /// 这条在<b>表结构</b>上钉死：主键里必须包含「另一端」的列，否则同一个起点只能存一条边。
+    /// </summary>
+    [Fact]
+    public void Relation_tables_allow_many_rows_per_key_instead_of_one_to_one()
+    {
+        var cacheDirectory = WorkbenchCachePaths.CacheDirectory(_root);
+        var relations = SqliteTableCache.Create(WorkbenchCacheKind.ResourceRelations, cacheDirectory);
+        relations.EnsureSchema();
+
+        // links：一个对象（subject_id）可以有多条资源 → 主键必须含 ref_key。
+        Assert.Equal(new[] { "subject_id", "kind", "ref_key" }, PrimaryKeyOf(relations, "links"));
+        // xref：一个起点（from_ref）可以有多条边 → 主键必须含 relation + to_ref。
+        Assert.Equal(new[] { "from_ref", "relation", "to_ref" }, PrimaryKeyOf(relations, "xref"));
+        // subjects_by_ref：一个资源可以属于多个对象 → 主键必须含 subject_id。
+        Assert.Equal(new[] { "ref_key", "subject_id" }, PrimaryKeyOf(relations, "subjects_by_ref"));
+        // subjects：对象本身仍然唯一。
+        Assert.Equal(new[] { "subject_id" }, PrimaryKeyOf(relations, "subjects"));
+    }
+
+    /// <summary>主键列（按 <c>PRAGMA table_info</c> 的 pk 序号排序）。</summary>
+    private static IReadOnlyList<string> PrimaryKeyOf(SqliteTableCache store, string table)
+        => store.Read(connection =>
+        {
+            var columns = new List<(int Order, string Name)>();
+            using var command = connection.CreateCommand();
+            command.CommandText = $"PRAGMA table_info({table})";
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                var order = reader.GetInt32(5);
+                if (order > 0) columns.Add((order, reader.GetString(1)));
+            }
+            return (IReadOnlyList<string>)columns.OrderBy(x => x.Order).Select(x => x.Name).ToList();
+        });
 
     private static IReadOnlyList<string> ColumnsOf(SqliteTableCache store, string table)
         => store.Read(connection =>

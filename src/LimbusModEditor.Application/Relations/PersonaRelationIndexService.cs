@@ -129,7 +129,7 @@ public sealed class PersonaRelationIndexService
         Log.Info("关联分析开始：重建关联图（四个上游源有变化）");
         var inputs = BuildInputs(cacheDirectory, staticLocation, languageDirectory, cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
-        var graph = PersonaRelationAnalyzer.Analyze(inputs);
+        var graph = SubjectRelationAnalyzer.Analyze(inputs);
         cancellationToken.ThrowIfCancellationRequested();
         store.PersistGraph(source, graph);
         watch.Stop();
@@ -154,7 +154,11 @@ public sealed class PersonaRelationIndexService
 
         var audio = new List<RelationAudioFact>();
         foreach (var sample in new BankIndexStore(cacheDirectory).ReadAllSamples())
-            audio.Add(new RelationAudioFact(sample.BankPath, sample.Name, sample.CodecName, sample.DataSize));
+            audio.Add(new RelationAudioFact(sample.BankPath, sample.Name, sample.CodecName, sample.DataSize)
+            {
+                SampleRate = sample.SampleRate,
+                SampleCount = (int)Math.Min(sample.SampleCount, int.MaxValue),
+            });
 
         var statics = ReadStaticFacts(staticLocation, cancellationToken);
 
@@ -162,7 +166,11 @@ public sealed class PersonaRelationIndexService
         foreach (var file in new TextIndexStore(cacheDirectory).ReadFiles(languageDirectory))
             langFiles.Add(new RelationLangFact(file.RelativePath, file.KeyCount));
 
-        return new RelationInputs(assets, audio, statics, langFiles);
+        // lang 锚点：语音台词（id → dlg）与被动/EGO/技能的数值 id（→ 中文 name/desc）。
+        // 这是「交叉关联」的关键输入——没有它，音频与静态数据就只能显示文件名。
+        var anchors = LangAnchorReader.Read(languageDirectory, cancellationToken);
+
+        return new RelationInputs(assets, audio, statics, langFiles) { TextAnchors = anchors };
     }
 
     /// <summary>

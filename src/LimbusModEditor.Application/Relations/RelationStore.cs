@@ -27,6 +27,13 @@ public sealed class RelationStore
     /// <summary><c>subjects_by_ref</c> 表名。</summary>
     public const string SubjectsByRefTable = "subjects_by_ref";
 
+    /// <summary>
+    /// <c>xref</c> 表名：**跨资源边**（音频 ⇄ 文本、静态表 ⇄ lang、资源 ⇄ 对象）。
+    /// 与 <c>links</c> 的区别是它描述的是两个<b>资源之间</b>的关系（多对多、双向可查），
+    /// 而 <c>links</c> 描述的是「对象 → 资源」。
+    /// </summary>
+    public const string XrefTable = "xref";
+
     private readonly SqliteTableCache _cache;
 
     /// <param name="cacheDirectory">缓存目录（<c>AppEnvironment.CacheDirectory</c>）。</param>
@@ -125,7 +132,8 @@ public sealed class RelationStore
             var rows = new List<RelationLink>();
             using var command = connection.CreateCommand();
             command.CommandText = $"""
-                SELECT subject_id, category, kind, ref_key, display, detail, size_bytes
+                SELECT subject_id, category, kind, ref_key, display, detail, size_bytes,
+                       preview_text, preview_kind, media_kind, duration_sec, ref_path, deep_link, target_subject_id
                 FROM {LinksTable}
                 WHERE subject_id = $id{(kind is null ? string.Empty : " AND kind = $kind")}
                 ORDER BY kind, ref_key
@@ -136,6 +144,8 @@ public sealed class RelationStore
             while (reader.Read())
             {
                 if (!Enum.TryParse<RelationKind>(reader.GetString(2), out var parsed)) parsed = RelationKind.Unknown;
+                if (!Enum.TryParse<RelationPreviewKind>(reader.IsDBNull(8) ? null : reader.GetString(8), out var strength))
+                    strength = RelationPreviewKind.None;
                 rows.Add(new RelationLink(
                     reader.GetString(0),
                     reader.GetString(1),
@@ -143,10 +153,75 @@ public sealed class RelationStore
                     reader.GetString(3),
                     reader.IsDBNull(4) ? string.Empty : reader.GetString(4),
                     reader.IsDBNull(5) ? null : reader.GetString(5),
-                    reader.GetInt64(6)));
+                    reader.GetInt64(6))
+                {
+                    PreviewText = reader.IsDBNull(7) ? null : reader.GetString(7),
+                    PreviewKind = strength,
+                    MediaKind = reader.IsDBNull(9) ? "other" : reader.GetString(9),
+                    DurationSec = reader.IsDBNull(10) ? null : reader.GetDouble(10),
+                    RefPath = reader.IsDBNull(11) ? null : reader.GetString(11),
+                    DeepLink = reader.IsDBNull(12) ? null : reader.GetString(12),
+                    TargetSubjectId = reader.IsDBNull(13) ? null : reader.GetString(13),
+                });
             }
             return (IReadOnlyList<RelationLink>)rows;
         });
+
+    /// <summary>
+    /// 反查跨资源边：以 <paramref name="fromRef"/> 为起点的全部边（含 <paramref name="relation"/>
+    /// 为 null 时的所有关系）。**返回的是列表**——一条起点可以有多条边，这是设计而非例外。
+    /// </summary>
+    public IReadOnlyList<RelationXref> ReadXrefs(string fromRef, string? relation = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(fromRef);
+        return _cache.Read(connection =>
+        {
+            var rows = new List<RelationXref>();
+            using var command = connection.CreateCommand();
+            command.CommandText = $"""
+                SELECT from_ref, to_ref, relation, from_kind, to_kind, confidence, detail
+                FROM {XrefTable}
+                WHERE from_ref = $ref{(relation is null ? string.Empty : " AND relation = $relation")}
+                ORDER BY relation, to_ref
+                """;
+            command.Parameters.AddWithValue("$ref", fromRef);
+            if (relation is not null) command.Parameters.AddWithValue("$relation", relation);
+            using var reader = command.ExecuteReader();
+            while (reader.Read()) rows.Add(ReadXref(reader));
+            return (IReadOnlyList<RelationXref>)rows;
+        });
+    }
+
+    /// <summary>反查跨资源边：以 <paramref name="toRef"/> 为终点的全部边（多对多的另一侧）。</summary>
+    public IReadOnlyList<RelationXref> ReadXrefsTo(string toRef)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(toRef);
+        return _cache.Read(connection =>
+        {
+            var rows = new List<RelationXref>();
+            using var command = connection.CreateCommand();
+            command.CommandText = $"""
+                SELECT from_ref, to_ref, relation, from_kind, to_kind, confidence, detail
+                FROM {XrefTable} WHERE to_ref = $ref ORDER BY relation, from_ref
+                """;
+            command.Parameters.AddWithValue("$ref", toRef);
+            using var reader = command.ExecuteReader();
+            while (reader.Read()) rows.Add(ReadXref(reader));
+            return (IReadOnlyList<RelationXref>)rows;
+        });
+    }
+
+    private static RelationXref ReadXref(SqliteDataReader reader) => new(
+        reader.GetString(0),
+        reader.GetString(1),
+        reader.GetString(2),
+        reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
+        reader.IsDBNull(4) ? string.Empty : reader.GetString(4),
+        reader.IsDBNull(5) ? string.Empty : reader.GetString(5),
+        reader.IsDBNull(6) ? null : reader.GetString(6));
+
+    /// <summary>跨资源边数（诊断/测试用）。</summary>
+    public int ReadXrefCount() => _cache.Read(static connection => Count(connection, XrefTable));
 
     /// <summary>
     /// 反查：引用了某个资源键的全部对象 id（资源预览的「关联资源」板块用）。
@@ -207,27 +282,38 @@ public sealed class RelationStore
             }
 
             using (var insertSubject = Command(connection, transaction, $"""
-                INSERT INTO {SubjectsTable} (subject_id, subject_kind, display_name, subtitle, character, sort_key)
-                VALUES ($id, $kind, $name, $subtitle, $character, $sort)
+                INSERT INTO {SubjectsTable}
+                    (subject_id, subject_kind, category_label, display_name, subtitle, character, sort_key,
+                     cover_ref, preview_text, link_count)
+                VALUES ($id, $kind, $label, $name, $subtitle, $character, $sort, $cover, $preview, $count)
                 ON CONFLICT(subject_id) DO UPDATE SET
-                    subject_kind = $kind, display_name = $name, subtitle = $subtitle,
-                    character = $character, sort_key = $sort
+                    subject_kind = $kind, category_label = $label, display_name = $name,
+                    subtitle = $subtitle, character = $character, sort_key = $sort,
+                    cover_ref = $cover, preview_text = $preview, link_count = $count
                 """))
             {
                 var id = insertSubject.Parameters.Add("$id", SqliteType.Text);
                 var kind = insertSubject.Parameters.Add("$kind", SqliteType.Text);
+                var label = insertSubject.Parameters.Add("$label", SqliteType.Text);
                 var name = insertSubject.Parameters.Add("$name", SqliteType.Text);
                 var subtitle = insertSubject.Parameters.Add("$subtitle", SqliteType.Text);
                 var character = insertSubject.Parameters.Add("$character", SqliteType.Text);
                 var sort = insertSubject.Parameters.Add("$sort", SqliteType.Text);
+                var cover = insertSubject.Parameters.Add("$cover", SqliteType.Text);
+                var preview = insertSubject.Parameters.Add("$preview", SqliteType.Text);
+                var count = insertSubject.Parameters.Add("$count", SqliteType.Integer);
                 foreach (var subject in graph.Subjects)
                 {
                     id.Value = subject.SubjectId;
                     kind.Value = subject.SubjectKind;
-                    name.Value = subject.DisplayName;
-                    subtitle.Value = subject.Subtitle;
-                    character.Value = subject.Character;
-                    sort.Value = subject.SortKey;
+                    label.Value = Nullable(subject.CategoryLabel);
+                    name.Value = Nullable(subject.DisplayName);
+                    subtitle.Value = Nullable(subject.Subtitle);
+                    character.Value = Nullable(subject.Character);
+                    sort.Value = Nullable(subject.SortKey);
+                    cover.Value = Nullable(subject.CoverRef);
+                    preview.Value = Nullable(subject.PreviewText);
+                    count.Value = subject.LinkCount;
                     insertSubject.ExecuteNonQuery();
                 }
             }
@@ -292,6 +378,8 @@ public sealed class RelationStore
         using var command = Command(connection, transaction, sql);
         command.ExecuteNonQuery();
     }
+
+    private static object Nullable(string? value) => value is null ? DBNull.Value : value;
 
     private static int Count(SqliteConnection connection, string table)
     {

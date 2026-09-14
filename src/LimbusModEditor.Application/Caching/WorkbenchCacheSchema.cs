@@ -123,26 +123,46 @@ public static class WorkbenchCacheSchema
     /// <para>失效规则：源签名 = 四个源签名的拼接（任一源变 → 整库重建）。
     /// 与其它库一样，<b>只存原版事实</b>，编辑集绝不落这里。</para>
     /// </summary>
+    /// <summary>
+    /// 关联图库（<c>relation-index.db</c>，派生库，v2）。
+    ///
+    /// <para>v2 相对 v1 的三处变化（改口径时 <see cref="Relations.RelationIndexSource.FormatVersion"/> 已 +1）：
+    /// ① <c>subject_id</c> 带类别前缀 <c>&lt;category&gt;:&lt;key&gt;</c>（跨类别 id 会真的撞车）；
+    /// ② <c>subjects</c> / <c>links</c> 增加「能预览、能跳转」的载荷列（预览文本 / 强度 / 时长 / 深链）；
+    /// ③ 新增 <c>xref</c> = 显式跨资源边，<b>多对多</b>（一个键可挂多条其它数据）。</para>
+    /// </summary>
     public const string RelationIndexSql = """
         CREATE TABLE IF NOT EXISTS subjects (
-            subject_id   TEXT PRIMARY KEY,
-            subject_kind TEXT NOT NULL,
-            display_name TEXT,
-            subtitle     TEXT,
-            character    TEXT,
-            sort_key     TEXT
+            subject_id     TEXT PRIMARY KEY,
+            subject_kind   TEXT NOT NULL,
+            category_label TEXT,
+            display_name   TEXT,
+            subtitle       TEXT,
+            character      TEXT,
+            sort_key       TEXT,
+            cover_ref      TEXT,
+            preview_text   TEXT,
+            link_count     INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS links (
-            subject_id TEXT NOT NULL,
-            category   TEXT NOT NULL,
-            kind       TEXT NOT NULL,
-            ref_key    TEXT NOT NULL,
-            display    TEXT,
-            detail     TEXT,
-            size_bytes INTEGER NOT NULL,
+            subject_id  TEXT NOT NULL,
+            category    TEXT NOT NULL,
+            kind        TEXT NOT NULL,
+            ref_key     TEXT NOT NULL,
+            display     TEXT,
+            detail      TEXT,
+            size_bytes  INTEGER NOT NULL,
+            preview_text TEXT,
+            preview_kind TEXT,
+            media_kind   TEXT,
+            duration_sec REAL,
+            ref_path     TEXT,
+            deep_link    TEXT,
+            target_subject_id TEXT,
             PRIMARY KEY (subject_id, kind, ref_key)
         );
         CREATE INDEX IF NOT EXISTS ix_links_subject ON links(subject_id, category, kind);
+        CREATE INDEX IF NOT EXISTS ix_links_ref ON links(ref_key);
         CREATE TABLE IF NOT EXISTS subjects_by_ref (
             ref_key    TEXT NOT NULL,
             subject_id TEXT NOT NULL,
@@ -150,6 +170,18 @@ public static class WorkbenchCacheSchema
             PRIMARY KEY (ref_key, subject_id)
         );
         CREATE INDEX IF NOT EXISTS ix_subjects_by_ref ON subjects_by_ref(subject_id);
+        CREATE TABLE IF NOT EXISTS xref (
+            from_ref   TEXT NOT NULL,
+            to_ref     TEXT NOT NULL,
+            relation   TEXT NOT NULL,
+            from_kind  TEXT,
+            to_kind    TEXT,
+            confidence TEXT,
+            detail     TEXT,
+            PRIMARY KEY (from_ref, relation, to_ref)
+        );
+        CREATE INDEX IF NOT EXISTS ix_xref_from ON xref(from_ref, relation);
+        CREATE INDEX IF NOT EXISTS ix_xref_to ON xref(to_ref, relation);
         """;
 
     /// <summary>某库的完整建表脚本（index_meta + 业务表）。</summary>
@@ -172,7 +204,7 @@ public static class WorkbenchCacheSchema
         WorkbenchCacheKind.BankIndex => ["banks", "samples"],
         WorkbenchCacheKind.StaticTables => ["tables", "documents"],
         WorkbenchCacheKind.TextIndex => ["files", "hits"],
-        WorkbenchCacheKind.ResourceRelations => ["subjects", "links", "subjects_by_ref"],
+        WorkbenchCacheKind.ResourceRelations => ["subjects", "links", "subjects_by_ref", "xref"],
         _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "未知的缓存库种类。"),
     };
 }

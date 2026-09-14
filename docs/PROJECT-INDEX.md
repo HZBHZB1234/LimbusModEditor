@@ -182,7 +182,7 @@
 | 引用与依赖 | `ReadObjectReferences` / `ReadBundleObjectReferences` / `ReadObjectDependencies` / `FindReferencers` / `FindBundleReferencers` | PPtr 解析四态（Null/SameFile/ExternalFile/Missing）与反向引用查找 |
 | 重打包验证 | `VerifySerializedReferences` / `VerifyBundleReferences` | 修改前后依赖逐项对照（内部新建独立 backend 读快照，避免缓存污染） |
 | 勘察 | `BundleSerializedFileNames` / `InspectBundle` / `SurveyBundle` / `TryLoadBundleForCrc` | 枚举对象/容器路径/类型名；CRC 口径与加载器一致的全块解压流 |
-| 裸对象 | `ReadSerializedObjects` / `ReadBundleSerializedObject` | 对象原始字节 + **类型表索引**（Carra2 键所需事实） |
+| 裸对象 | `ReadSerializedObjects` / `ReadBundleSerializedObject` / `BundleObjectReader` | 对象原始字节 + **类型表索引**；只读会话在同一 bundle 内复用解包和 SerializedFile，结束立即释放 |
 | 纹理 | `ReadTexture` / `ReadTexturePixelData` / `ReadStreamData` / `ClearStreamData` | 内联像素优先、否则 `.resS` 流；写回内联后**必须**清 `m_StreamData` |
 | Sprite | `ReadSprite` / `ReplaceSpriteMetadata` / `ReplaceBundleSpriteMetadata` | 元数据可读写；**不压平 SpriteAtlas、不改写图集网格** |
 | TextAsset | `ReadBundleTextAsset` | `m_Script` 支持 byteArray / string，其他形态 fail fast |
@@ -218,7 +218,7 @@
 | `CarraModels.cs` | Carra 数据模型与条目读写（键 = 外层键/内层键/pathId/类型表索引；逐条目 XZ） |
 | `CarraArchive.cs` | 探测/读取/写出（zip 容器 + `carra.json` 标记） |
 | `CarraFormatHandler.cs` | 接入格式注册表的探测/导入/校验/导出；导出时从上下文取 XZ 编码器 |
-| `CarraDiffService.cs` | 与基线包比对产出变更清单 |
+| `CarraDiffService.cs` | 与基线包直接比对字节产出变更清单；通过字典选择补丁对象 |
 | `XzCodec.cs` | XZ 编解码抽象：解码用 SharpCompress、编码用 Joveler liblzma；缺原生库时回落「不可用」 |
 
 - **Carra2 键口径**：`<缓存外层键(32hex)>/<内层bundle哈希>/<pathId>.<类型表索引>`，逐条目 XZ。
@@ -314,7 +314,7 @@
 |---|---|
 | `StartupScanService.cs` ★ | **启动扫描总编排**：五库建库校表 → 游戏资源 → 音频 → 静态表 → 文本 → **关联图（派生，六步）**（逐步容错、进度、报告）；缓存清单与诊断的唯一来源。`ScanWorkbenchIndexesAsync` 可只跑后四步（bank/static/text/relations）而不扫资源 |
 | `UnityCacheScanService.cs` ★ | Unity 缓存**引用模式**增量扫描（不复制文件）；容器条目与 catalog 基线写进索引；**静态标记的补写/清除规则在这里**（见要点） |
-| `UnityCacheSqliteIndexStore.cs` | `cache/unity-cache-index.db` 读写（不用 `index_meta`，新鲜度落在 bundle 行；容器条目/静态标记按列轻量迁移） |
+| `UnityCacheSqliteIndexStore.cs` | v2 规范化资源库：整数 bundle 主键、共享字符串表、对象聚簇主键、有名称资源的覆盖索引；同一快照按 bundle 流式读取；事务更新/取消回滚；旧版本缓存整库重建 |
 | `UnityCacheMaterializationService.cs` | 编辑过的引用资源所属 bundle 实体化到项目 `sources/cache/<外>_<内>.bundle` |
 
 - **静态标记的四条规矩**（`UnityCacheScanService`）：① catalog 可用且内层键命中 → 写标记；
@@ -371,7 +371,7 @@
 | `ExportMatrix.cs` | 资产 × 格式的兼容性矩阵（向导启用/禁用目标） |
 | `UnityBundleBuildService.cs` ★ | 把替换/字段编辑/Sprite 元数据应用到 bundle 并重打包（含引用完整性验证）；候选谓词**编辑标记先行 + `.ToArray()` 物化**（见 CODE-STRUCTURE §6-25，改回去会让导出慢 40 秒级） |
 | `UnitySerializedFileBuildService.cs` | 独立 `.assets` 文件版本 |
-| `UnityCacheExportService.cs` ★ | 缓存 bundle → Carra2 一键导出（真实加载器键口径；中间产物落在项目 `builds/unity-bundles/`） |
+| `UnityCacheExportService.cs` ★ | 缓存 bundle → Carra2 一键导出；按源 bundle 分组共享对象读取会话，递增统计进度；中间产物落在项目 `builds/unity-bundles/` |
 | `LunartiqueCarraConversionService.cs` | 由「改后 bundle + 缓存原版 bundle」派生 Lunartique 两侧条目（缺缓存整份跳过并说明） |
 | `ModExportService.cs` | 旧的多格式导出通道（CLI 与若干测试仍用；界面不再暴露，**别顺手删**） |
 | `ProjectBuildService.cs` | 项目级构建（按格式分发 + 导出前校验 + 旧式 overlay） |
@@ -395,7 +395,7 @@
 
 | 文件 | 功能 |
 |---|---|
-| `CatalogFileService.cs` | `catalog.bin` / `catalog_S1.bin` 只读解析（**双布局自校准**：记录区 CRC/size 字段随格式版本整体平移） |
+| `CatalogFileService.cs` | catalog 只读解析：一次线性扫描定位全部 Hash128，复用名称偏移；保留首次命中、双布局 CRC/size 自校准 |
 | `CatalogBaselineService.cs` | vanilla / 修改过 / 不在 catalog / 未知 四态判定（供导入与扫描写基线） |
 
 ### §8.11 `Debugging/`（目录定位、启动、调试应用）
@@ -672,7 +672,7 @@
 | 导出流水线 | `ModExportPlanTests.cs`、`ModPackExportTests.cs`（含进度节流）、`ModExportServiceTests.cs`、`MultiFormatExportTests.cs`、`ExportMatrixTests.cs`、`ExportAdvisorTests.cs`、`BankExportTests.cs`、`LunartiqueConversionTests.cs`、`UnityCacheExportServiceTests.cs` |
 | 导入 | `ModImportServiceTests.cs`、`SourceImportTests.cs`、`GenericZipImportTests.cs` |
 | 项目持久化 | `ProjectPersistenceTests.cs`、`ProjectFileSlimmingTests.cs`、`ProjectBuildServiceTests.cs`、`ProjectAutoConfigureTests.cs`、`NewModTemplateServiceTests.cs` |
-| 扫描与索引 | `StartupScanServiceTests.cs`、`UnityCacheScanServiceTests.cs`、`CacheSignatureTests.cs`、`SqliteTableCacheTests.cs`、`RealFullScanSmokeTests.cs`、`RealStartupScanSmokeTests.cs`、`PerformanceBaselineTests.cs` |
+| 扫描与索引 | `StartupScanServiceTests.cs`、`UnityCacheScanServiceTests.cs`、`UnityCacheSqliteIndexStoreTests.cs`（规范化往返、快照、取消/异常回滚、旧版/缺表重建）、`CacheSignatureTests.cs`、`SqliteTableCacheTests.cs`、`RealFullScanSmokeTests.cs`、`RealStartupScanSmokeTests.cs`、`PerformanceBaselineTests.cs`、`DatabasePerformanceTests.cs`（真实库逐行等价、耗时/分配、导出读取会话、全量冷/热扫描） |
 | 关联图（派生，6 类别） | `SubjectRelationAnalyzerTests.cs`（含「游戏侧角色名拼写错误合并为一组」、6 类别判定、跨资源 `xref` 边、E.G.O 饰品 id 归一化）、`RelationStoreTests.cs`（持久化 + 反向索引 + `xref` 多对多 + `LinksOf`）、`RealRelationIndexSmokeTests.cs`（真实数据门控 `LME_RELATION_SMOKE=1`） |
 | 预设卡片流（展示层） | `PresetWorkbenchServiceTests.cs`（**类别切换器计数**、封面挑立绘优先级 + **能渲染的胜过不能渲染的**、定位键→`AssetRecord` 还原、详情分组用户视角顺序、每行 `TargetFor` 跳哪页 / 用什么载荷） |
 | Spine 解析 / 预览 / 导出 / 素材解析 | `SpineTests.cs`（骨架 4.0 口径：`skins` 数组、动画分组、**首帧无 `time` = 0**、`rotate`/`translate`/`scale` 合帧、槽位 `attachment`+`rgba` 淡入淡出、只收 region 附件且 mesh 计入不支持；图集多页 + `scale`/`orig`/`offsets`/`rotate`；BOM 容忍；同目录索引；布局叠加图**区域外像素不动** + 超长边等比缩小；导出目录名取容器目录末级）、`SpineAnimationSourceServiceTests.cs`（同目录找齐骨架/图集/页贴图、从图集进入结果一致、缺骨架/缺图集给中文错、不跨目录串、未知页返回空字节） |

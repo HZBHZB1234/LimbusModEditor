@@ -1,4 +1,5 @@
 using LimbusModEditor.Formats.Unity;
+using System.IO.Hashing;
 
 namespace LimbusModEditor.Application.Catalog;
 
@@ -26,7 +27,7 @@ public static class CatalogBaselineService
         => text.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f' or >= 'A' and <= 'F');
 
     /// <summary>判定一个 bundle 的 vanilla 基线状态（只读，不修改任何文件）。</summary>
-    public static CatalogBaselineResult Evaluate(CatalogFileService catalog, string bundleDataPath)
+    public static CatalogBaselineResult Evaluate(CatalogFileService catalog, string bundleDataPath, Stream? decompressed = null)
     {
         ArgumentNullException.ThrowIfNull(catalog);
         ArgumentException.ThrowIfNullOrWhiteSpace(bundleDataPath);
@@ -51,7 +52,9 @@ public static class CatalogBaselineService
         if (record.Crc is not { } expectedCrc)
             return new(CatalogVerdict.Uncertain, inner, "大小一致但记录区缺少 CRC，无法完成对比");
 
-        var crcResult = ComputeBundleCrc(bundleDataPath);
+        // 扫描可借用刚解析过的解压流，避免同一 bundle 为 CRC 再打开、解包一次。
+        var crcResult = decompressed is null ? ComputeBundleCrc(bundleDataPath)
+            : (Crc: (uint?)Crc32Of(decompressed), DecompressedLength: decompressed.Length);
         if (crcResult is null || crcResult.Value.Crc is not { } actualCrc)
             return new(CatalogVerdict.Uncertain, inner, "大小一致但实际 CRC 无法计算（不是可解压的 UnityFS）");
 
@@ -75,25 +78,17 @@ public static class CatalogBaselineService
         return (crc, stream.Length);
     }
 
-    /// <summary>zlib CRC32（IEEE 反射多项式 0xEDB88320），表驱动实现。</summary>
+    /// <summary>zlib/IEEE CRC32。使用运行库优化的流式实现，避免逐字节托管循环。</summary>
     private static uint Crc32Of(Stream stream)
     {
-        var table = new uint[256];
-        for (var i = 0; i < 256; i++)
+        var position = stream.Position;
+        try
         {
-            var value = (uint)i;
-            for (var bit = 0; bit < 8; bit++)
-                value = (value & 1) != 0 ? 0xEDB88320u ^ (value >> 1) : value >> 1;
-            table[i] = value;
+            stream.Position = 0;
+            var crc = new Crc32();
+            crc.Append(stream);
+            return crc.GetCurrentHashAsUInt32();
         }
-        Span<byte> buffer = stackalloc byte[8192];
-        uint crc = 0xFFFFFFFF;
-        int read;
-        while ((read = stream.Read(buffer)) > 0)
-        {
-            for (var i = 0; i < read; i++)
-                crc = table[(crc ^ buffer[i]) & 0xFF] ^ (crc >> 8);
-        }
-        return crc ^ 0xFFFFFFFF;
+        finally { stream.Position = position; }
     }
 }

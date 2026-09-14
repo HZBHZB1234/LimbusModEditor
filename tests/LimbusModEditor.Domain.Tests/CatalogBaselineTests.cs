@@ -43,6 +43,21 @@ public class CatalogBaselineTests : IDisposable
     }
 
     [Fact]
+    public void Borrowed_decompressed_stream_uses_ieee_crc_and_preserves_position()
+    {
+        var catalog = CatalogFileService.Parse(BuildSyntheticCatalog(0xCBF43926, 1024));
+        var directory = Path.Combine(_work, OuterKey, InnerHash);
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "__data");
+        File.WriteAllBytes(path, new byte[1024]);
+        using var stream = new MemoryStream(Encoding.ASCII.GetBytes("123456789"));
+        stream.Position = 3;
+        Assert.Equal(CatalogVerdict.Vanilla, CatalogBaselineService.Evaluate(catalog, path, stream).Verdict);
+        Assert.Equal(3, stream.Position);
+        Assert.True(stream.CanRead);
+    }
+
+    [Fact]
     public void Synthetic_catalog_record_region_is_parsed_exactly()
     {
         var data = BuildSyntheticCatalog(crc: 0xDEADBEEF, size: 123_456);

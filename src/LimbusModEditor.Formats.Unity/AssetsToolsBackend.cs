@@ -677,7 +677,8 @@ public sealed class AssetsToolsBackend : IDisposable
         }
     }
 
-    public IReadOnlyList<UnityAssetDescriptor> InspectBundle(string path)
+    /// <param name="inspectDecompressed">成功解析全部对象后借用解压流；仅在回调期间有效，调用方不能释放该流。</param>
+    public IReadOnlyList<UnityAssetDescriptor> InspectBundle(string path, Action<Stream>? inspectDecompressed = null)
     {
         var inspectWatch = System.Diagnostics.Stopwatch.StartNew();
         var bundle = _manager.LoadBundleFile(path, unpackIfPacked: true) ?? throw new InvalidDataException($"无法读取 Unity Bundle: {path}");
@@ -707,6 +708,7 @@ public sealed class AssetsToolsBackend : IDisposable
                     info.PathId, typeId, info.ByteSize, MapType(typeId, typeName), typeName));
             }
         }
+        inspectDecompressed?.Invoke(bundle.DataStream);
         Log.Debug("勘察 Bundle 完成：{0}，{1} 个对象，耗时 {2} ms", path, assets.Count, inspectWatch.ElapsedMilliseconds);
         return assets;
     }
@@ -882,19 +884,61 @@ public sealed class AssetsToolsBackend : IDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(bundlePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(serializedFileName);
-        if (Log.IsTraceEnabled) Log.Trace("读取 bundle 内对象原始字节：{0}::{1} pathId={2}", bundlePath, serializedFileName, pathId);
-        var loadWatch = System.Diagnostics.Stopwatch.StartNew();
+        // 保留既有调用方按 backend 生命周期复用 AssetsManager 缓存的行为。
         var bundle = _manager.LoadBundleFile(bundlePath, unpackIfPacked: true)
             ?? throw new InvalidDataException($"无法读取 Unity Bundle: {bundlePath}");
         _bundles.Add(bundle);
         var index = bundle.file.GetFileIndex(serializedFileName);
-        if (index < 0 || !bundle.file.IsAssetsFile(index)) throw new KeyNotFoundException($"Bundle 中不存在 SerializedFile: {serializedFileName}");
-        if (Log.IsDebugEnabled)
-            Log.Debug("加载 Bundle（读取对象原始字节，本后端第 {0} 次）：{1}（{2} 字节，内含 {3} 个文件），耗时 {4} ms",
-                _bundles.Count, bundlePath, File.Exists(bundlePath) ? new FileInfo(bundlePath).Length : -1L,
-                bundle.file.GetAllFileNames().Count(), loadWatch.ElapsedMilliseconds);
+        if (index < 0 || !bundle.file.IsAssetsFile(index))
+            throw new KeyNotFoundException($"Bundle 中不存在 SerializedFile: {serializedFileName}");
         var instance = _manager.LoadAssetsFileFromBundle(bundle, serializedFileName, loadDeps: false)
             ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFileName}");
+        return ReadSerializedObject(instance, serializedFileName, pathId);
+    }
+
+    /// <summary>单个 bundle 的只读会话。一次解包，按需缓存 SerializedFile；不跨写入复用，不可并发使用。</summary>
+    public sealed class BundleObjectReader(string bundlePath) : IDisposable
+    {
+        private readonly AssetsManager _manager = new();
+        private readonly Dictionary<string, AssetsFileInstance> _files = new(StringComparer.Ordinal);
+        private BundleFileInstance? _bundle;
+        private bool _disposed;
+        public int BundleLoadCount { get; private set; }
+
+        public UnityBundleSerializedObject Read(string serializedFileName, long pathId)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            ArgumentException.ThrowIfNullOrWhiteSpace(serializedFileName);
+            if (_bundle is null)
+            {
+                _bundle = _manager.LoadBundleFile(bundlePath, unpackIfPacked: true)
+                    ?? throw new InvalidDataException($"无法读取 Unity Bundle: {bundlePath}");
+                BundleLoadCount++;
+            }
+            if (!_files.TryGetValue(serializedFileName, out var instance))
+            {
+                var index = _bundle.file.GetFileIndex(serializedFileName);
+                if (index < 0 || !_bundle.file.IsAssetsFile(index))
+                    throw new KeyNotFoundException($"Bundle 中不存在 SerializedFile: {serializedFileName}");
+                instance = _manager.LoadAssetsFileFromBundle(_bundle, serializedFileName, loadDeps: false)
+                    ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFileName}");
+                _files.Add(serializedFileName, instance);
+            }
+            return ReadSerializedObject(instance, serializedFileName, pathId);
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            _files.Clear();
+            _manager.UnloadAllAssetsFiles(clearCache: true);
+            _manager.UnloadAllBundleFiles();
+        }
+    }
+
+    private static UnityBundleSerializedObject ReadSerializedObject(AssetsFileInstance instance, string serializedFileName, long pathId)
+    {
         var info = instance.file.GetAssetInfo(pathId)
             ?? throw new KeyNotFoundException($"SerializedFile 中不存在 Path ID: {pathId}");
         var types = instance.file.Metadata.TypeTreeTypes;
@@ -913,9 +957,6 @@ public sealed class AssetsToolsBackend : IDisposable
             if (count == 0) throw new EndOfStreamException($"SerializedFile 对象数据不完整: {info.PathId}");
             read += count;
         }
-        if (Log.IsDebugEnabled)
-            Log.Debug("读取 bundle 内对象原始字节完成：{0}::{1} pathId={2}，类型表索引 {3}（class {4}），{5} 字节，耗时 {6} ms",
-                bundlePath, serializedFileName, info.PathId, typeIndex, types[typeIndex].TypeId, data.Length, loadWatch.ElapsedMilliseconds);
         return new(serializedFileName, info.PathId, typeIndex, types[typeIndex].TypeId, types.Count, data);
     }
 

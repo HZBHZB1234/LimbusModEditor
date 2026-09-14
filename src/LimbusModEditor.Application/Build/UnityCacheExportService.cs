@@ -77,61 +77,52 @@ public sealed class UnityCacheExportService
             var bySource = builds.ToDictionary(
                 x => Path.GetFullPath(x.SourcePath), x => x.OutputPath, StringComparer.OrdinalIgnoreCase);
 
-            // 2) 从重打包结果逐对象读回修改后的原始字节，组装 Carra2。
-            //    这一段是同步重活（每个对象都要读一遍 bundle），显式放到后台线程：
-            //    留在 UI 线程上就是「进度窗口弹出后未响应」的直接来源。
+            // 2) 后台按 bundle 读取：组内共享解包与 SerializedFile，组结束立即释放。
             var readWatch = System.Diagnostics.Stopwatch.StartNew();
             var (package, statuses) = await Task.Run(() =>
             {
                 var built = new CarraPackage();
                 var results = new List<ExportAssetStatus>();
-                using var backend = new AssetsToolsBackend();
                 var objectIndex = 0;
-                foreach (var asset in edited)
+                var appliedCount = 0;
+                foreach (var group in edited.GroupBy(x => x.SourcePath is null ? string.Empty : Path.GetFullPath(x.SourcePath), StringComparer.OrdinalIgnoreCase))
                 {
-                    // 取消检查点就在这里：单个对象要从（可能上百 MB 的）bundle 里解析出来，
-                    // 这一步耗时全在 ReadBundleSerializedObject 内部——取消为什么响应慢，看这条 Debug。
-                    if (Log.IsDebugEnabled)
-                        Log.Debug("正在读取重打包后的对象：第 {0}/{1} 个 {2}（已生效 {3} 个，本段已耗时 {4} ms）",
-                            objectIndex + 1, edited.Count, asset.LogicalPath ?? "-",
-                            results.Count(x => x.Status == ExportAssetStatus.Applied), readWatch.ElapsedMilliseconds);
-                    cancellationToken.ThrowIfCancellationRequested();
-                    objectIndex++;
-                    throttled.Report($"[{objectIndex}/{edited.Count}] {asset.LogicalPath}");
-                    if (asset.SourcePath is null ||
-                        !bySource.TryGetValue(Path.GetFullPath(asset.SourcePath), out var repacked))
+                    bySource.TryGetValue(group.Key, out var repacked);
+                    using var reader = repacked is null ? null : new AssetsToolsBackend.BundleObjectReader(repacked);
+                    foreach (var asset in group)
                     {
-                        Log.Warn("跳过缓存对象 {0}：所属 bundle {1} 没有生成重打包结果",
-                            asset.LogicalPath ?? "-", asset.SourcePath ?? "-");
-                        results.Add(new ExportAssetStatus(asset.LogicalPath!, ExportAssetStatus.Skipped, "所属 bundle 没有生成重打包结果。"));
-                        continue;
-                    }
-                    try
-                    {
-                        var raw = backend.ReadBundleSerializedObject(repacked, asset.ContainerPath!, asset.UnityPathId!.Value);
-                        if (raw.Data.Length == 0)
+                        cancellationToken.ThrowIfCancellationRequested();
+                        objectIndex++;
+                        throttled.Report($"[{objectIndex}/{edited.Count}] {asset.LogicalPath}");
+                        if (reader is null)
                         {
-                            Log.Warn("跳过缓存对象 {0}：重打包后对象数据为空（bundle {1}，pathId {2}）",
-                                asset.LogicalPath ?? "-", repacked, asset.UnityPathId!.Value);
-                            results.Add(new ExportAssetStatus(asset.LogicalPath!, ExportAssetStatus.Skipped, "重打包后对象数据为空。"));
+                            Log.Warn("跳过缓存对象 {0}：所属 bundle 没有生成重打包结果", asset.LogicalPath);
+                            results.Add(new ExportAssetStatus(asset.LogicalPath, ExportAssetStatus.Skipped, "所属 bundle 没有生成重打包结果。"));
                             continue;
                         }
-                        var outer = asset.Metadata["cacheOuter"];
-                        var inner = asset.Metadata["cacheInner"];
-                        var key = new CarraObjectKey(outer, inner, asset.UnityPathId!.Value, raw.TypeTableIndex);
-                        built.Entries.Add(CarraEntry.CreateNew(key, raw.Data));
-                        results.Add(new ExportAssetStatus(asset.LogicalPath!, ExportAssetStatus.Applied, null));
-                        if (Log.IsDebugEnabled)
-                            Log.Debug("缓存对象读回成功：{0} → 键 {1}/{2}/{3}.{4}（{5} 字节）",
-                                asset.LogicalPath ?? "-", outer, inner, asset.UnityPathId!.Value,
-                                raw.TypeTableIndex, raw.Data.Length);
+                        try
+                        {
+                            var raw = reader.Read(asset.ContainerPath!, asset.UnityPathId!.Value);
+                            if (raw.Data.Length == 0)
+                            {
+                                results.Add(new ExportAssetStatus(asset.LogicalPath, ExportAssetStatus.Skipped, "重打包后对象数据为空。"));
+                                continue;
+                            }
+                            var key = new CarraObjectKey(asset.Metadata["cacheOuter"], asset.Metadata["cacheInner"],
+                                asset.UnityPathId.Value, raw.TypeTableIndex);
+                            built.Entries.Add(CarraEntry.CreateNew(key, raw.Data));
+                            results.Add(new ExportAssetStatus(asset.LogicalPath, ExportAssetStatus.Applied, null));
+                            appliedCount++;
+                        }
+                        catch (Exception ex)
+                        {
+                            Log.Error(ex, "读取重打包后的对象失败：{0}（bundle {1}，容器 {2}，pathId {3}）",
+                                asset.LogicalPath, repacked ?? "-", asset.ContainerPath ?? "-", asset.UnityPathId!.Value);
+                            results.Add(new ExportAssetStatus(asset.LogicalPath, ExportAssetStatus.Skipped, $"读取修改后对象失败：{ex.Message}"));
+                        }
                     }
-                    catch (Exception ex)
-                    {
-                        Log.Error(ex, "读取重打包后的对象失败：{0}（bundle {1}，容器 {2}，pathId {3}）",
-                            asset.LogicalPath ?? "-", repacked, asset.ContainerPath ?? "-", asset.UnityPathId!.Value);
-                        results.Add(new ExportAssetStatus(asset.LogicalPath!, ExportAssetStatus.Skipped, $"读取修改后对象失败：{ex.Message}"));
-                    }
+                    Log.Debug("bundle 对象读取完成：{0} · 进度 {1}/{2} · 累计生效 {3} · 耗时 {4} ms",
+                        group.Key, objectIndex, edited.Count, appliedCount, readWatch.ElapsedMilliseconds);
                 }
                 return (built, results);
             }, cancellationToken).ConfigureAwait(false);

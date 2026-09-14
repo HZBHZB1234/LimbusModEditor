@@ -1,412 +1,281 @@
-using System.Diagnostics;
-using Microsoft.Data.Sqlite;
 using LimbusModEditor.Domain.Assets;
-using LimbusModEditor.Domain.Diagnostics;
+using Microsoft.Data.Sqlite;
 using NLog;
 
 namespace LimbusModEditor.Application.Scanning;
 
-/// <summary>一条索引资产的行数据（与 bundle 内对象一一对应）。
-/// <see cref="Container"/> 是对象所在 SerializedFile 名（技术键）；
-/// <see cref="ContainerEntry"/> 是 m_Container 的「assets/...」游戏内资源路径
-/// （可空），供文件管理器式资源视图显示。</summary>
 public sealed record UnityCacheIndexRow(
     int BundleIndex, string Container, long PathId, int TypeId, AssetType Type, long Size, string? Baseline,
     string? ContainerEntry = null);
 
-/// <summary>一个 bundle 的索引快照（新鲜度检查 + 资产行）。
-/// <paramref name="StaticBundle"/> = 该 bundle 是静态数据 bundle
-/// （plan-08：static_s1_0_assets_all_*.bundle），随扫描写入索引，
-/// 回灌/热扫描时无需再解析 catalog 即可恢复标记。</summary>
 public sealed record UnityCacheIndexBundle(
     string DataPath, long Size, long MTimeUtcTicks, string Outer, string Inner, bool StaticBundle = false);
 
 /// <summary>
-/// 扫描索引的 SQLite 存储（阶段 C 性能改造）：替代原「一个 164MB JSON 全文件
-/// 重写」的索引缓存。热扫描/回灌从全量 JSON 解析（≈100s）降为流式 SQL 读取
-/// （秒级），扫描写回只增删变化的 bundle，不再整文件重写。
-/// 表结构：<c>bundles</c>（新鲜度 + 归属键）、<c>assets</c>（逐对象行）。
-/// 索引损坏只影响速度不影响正确性：整库删掉重建即可（冷扫描 ≈20s）。
+/// v2 可重建索引：路径和共享字符串只存一次，对象表按整数 bundle/index 聚簇。
+/// 同一快照内流式读取，仅保留共享字典和当前 bundle；更新与淘汰在单个事务内完成。
+/// 版本不符时清空缓存，由扫描器从只读游戏源重建。
 /// </summary>
 public sealed class UnityCacheSqliteIndexStore
 {
     private static readonly Logger Log = LogManager.GetCurrentClassLogger();
-
+    public const int SchemaVersion = 2;
     private readonly string _connectionString;
     private readonly string _dbFile;
+    private readonly object _schemaLock = new();
     private bool _schemaReady;
 
     public UnityCacheSqliteIndexStore(string dbFile)
     {
         _dbFile = Path.GetFullPath(dbFile);
-        var directory = Path.GetDirectoryName(_dbFile);
-        if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
-        _connectionString = new SqliteConnectionStringBuilder { DataSource = _dbFile, Mode = SqliteOpenMode.ReadWriteCreate }.ToString();
+        Directory.CreateDirectory(Path.GetDirectoryName(_dbFile)!);
+        _connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = _dbFile, Mode = SqliteOpenMode.ReadWriteCreate, ForeignKeys = true
+        }.ToString();
     }
 
-    /// <summary>数据库文件是否已存在（不存在 = 需要冷扫描建库）。</summary>
     public bool Exists => File.Exists(_dbFile);
 
     private SqliteConnection Open()
     {
         var connection = new SqliteConnection(_connectionString);
-        connection.Open();
-        return connection;
+        try { connection.Open(); return connection; }
+        catch { connection.Dispose(); throw; }
     }
 
-    /// <summary>
-    /// 读路径专用：先保证表结构存在（每实例一次），再返回连接。
-    ///
-    /// <para><b>为什么读也要建表</b>：连接串是 <c>ReadWriteCreate</c>，
-    /// 「库文件不存在」或「库文件是 0 字节」（上次建库被打断）时连接照样能开，
-    /// 随后 <c>SELECT … FROM bundles</c> 会抛 <c>no such table</c>。
-    /// 索引只是加速旁路，缺表必须被无声补建成空库（= 冷扫描），
-    /// 而不是把「缓存没建成」当业务错误抛给用户。</para>
-    /// </summary>
     private SqliteConnection OpenEnsured()
     {
-        if (!_schemaReady)
-        {
-            EnsureSchema();
-            _schemaReady = true;
-        }
+        EnsureSchema();
         return Open();
     }
 
-    /// <summary>建表（幂等）。写连接顺带开启 WAL，提升并发读与批量写表现。</summary>
     public void EnsureSchema()
     {
-        var watch = Stopwatch.StartNew();
-        var existedBefore = File.Exists(_dbFile);
-        using var connection = Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            PRAGMA journal_mode=WAL;
-            CREATE TABLE IF NOT EXISTS bundles (
-                data_path   TEXT PRIMARY KEY,
-                size        INTEGER NOT NULL,
-                mtime_ticks INTEGER NOT NULL,
-                outer_key   TEXT NOT NULL,
-                inner_key   TEXT NOT NULL
-            ) WITHOUT ROWID;
-            CREATE TABLE IF NOT EXISTS assets (
-                data_path   TEXT NOT NULL,
-                bundle_index INTEGER NOT NULL,
-                container   TEXT NOT NULL,
-                path_id     INTEGER NOT NULL,
-                type_id     INTEGER NOT NULL,
-                type        INTEGER NOT NULL,
-                size        INTEGER NOT NULL,
-                baseline    TEXT
-            );
-            CREATE INDEX IF NOT EXISTS ix_assets_bundle ON assets(data_path, bundle_index);
-            """;
-        command.ExecuteNonQuery();
-        EnsureContainerEntryColumn(connection);
-        EnsureStaticBundleColumn(connection);
-        watch.Stop();
-        Log.Debug("资源索引库建表完成：db={0} · 建前已存在={1} · 用时 {2:0.0} 秒",
-            Path.GetFileName(_dbFile), existedBefore, watch.Elapsed.TotalSeconds);
-    }
-
-    /// <summary>轻量迁移：container_entry 列（m_Container 路径）是后加的。
-    /// 已存在的旧库 ALTER 补列；列已存在 / 无写权限时静默跳过（旧行读出
-    /// null → 显示退回「未命名资源」，重建索引即可补全）。</summary>
-    private static void EnsureContainerEntryColumn(SqliteConnection connection)
-    {
-        using var probe = connection.CreateCommand();
-        probe.CommandText = "SELECT container_entry FROM assets LIMIT 0";
-        try { probe.ExecuteNonQuery(); return; }
-        catch (SqliteException ex)
+        lock (_schemaLock)
         {
-            Log.Debug(ex, "探测 assets.container_entry 列失败（旧库，走 ALTER 补列）：{0}", ex.SqliteErrorCode);
-        }
-        using var alter = connection.CreateCommand();
-        alter.CommandText = "ALTER TABLE assets ADD COLUMN container_entry TEXT";
-        try
-        {
-            alter.ExecuteNonQuery();
-            Log.Info("资源索引库迁移：assets 表已补 container_entry 列");
-        }
-        catch (SqliteException ex)
-        {
-            // 列已存在 / 无写权限：静默跳过（语义保持原样），只留痕。
-            Log.Debug(ex, "补 assets.container_entry 列未生效（列已存在或无写权限，继续用旧行为）：{0}", ex.SqliteErrorCode);
-        }
-    }
-
-    /// <summary>轻量迁移：static_bundle 列（plan-08 静态数据 bundle 标记）是
-    /// 后加的。旧库 ALTER 补列并默认 0；读不到时视为「非静态」。</summary>
-    private static void EnsureStaticBundleColumn(SqliteConnection connection)
-    {
-        using var probe = connection.CreateCommand();
-        probe.CommandText = "SELECT static_bundle FROM bundles LIMIT 0";
-        try { probe.ExecuteNonQuery(); return; }
-        catch (SqliteException ex)
-        {
-            Log.Debug(ex, "探测 bundles.static_bundle 列失败（旧库，走 ALTER 补列）：{0}", ex.SqliteErrorCode);
-        }
-        using var alter = connection.CreateCommand();
-        alter.CommandText = "ALTER TABLE bundles ADD COLUMN static_bundle INTEGER NOT NULL DEFAULT 0";
-        try
-        {
-            alter.ExecuteNonQuery();
-            Log.Info("资源索引库迁移：bundles 表已补 static_bundle 列（旧行默认 0=非静态）");
-        }
-        catch (SqliteException ex)
-        {
-            // 列已存在 / 无写权限：静默跳过（语义保持原样），只留痕。
-            Log.Warn(ex, "补 bundles.static_bundle 列未生效（列已存在或无写权限）：旧索引将把全部 bundle 视为非静态，建议删库重建索引");
+            if (_schemaReady) return;
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA journal_mode=WAL;";
+            command.ExecuteNonQuery();
+            command.CommandText = "PRAGMA user_version;";
+            var reset = Convert.ToInt32(command.ExecuteScalar()) != SchemaVersion;
+            command.CommandText = "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('bundles','assets','strings')";
+            reset |= Convert.ToInt32(command.ExecuteScalar()) != 3;
+            using (var transaction = connection.BeginTransaction())
+            {
+                command.Transaction = transaction;
+                if (reset)
+                {
+                    command.CommandText = "DROP TABLE IF EXISTS assets; DROP TABLE IF EXISTS bundles; DROP TABLE IF EXISTS strings;";
+                    command.ExecuteNonQuery();
+                }
+                command.CommandText = """
+                    CREATE TABLE IF NOT EXISTS bundles (
+                        id INTEGER PRIMARY KEY,
+                        data_path TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                        size INTEGER NOT NULL, mtime_ticks INTEGER NOT NULL,
+                        outer_key TEXT NOT NULL, inner_key TEXT NOT NULL,
+                        static_bundle INTEGER NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS strings (
+                        id INTEGER PRIMARY KEY, value TEXT NOT NULL UNIQUE
+                    );
+                    CREATE TABLE IF NOT EXISTS assets (
+                        bundle_id INTEGER NOT NULL REFERENCES bundles(id) ON DELETE CASCADE,
+                        bundle_index INTEGER NOT NULL,
+                        container_id INTEGER NOT NULL REFERENCES strings(id),
+                        path_id INTEGER NOT NULL, type_id INTEGER NOT NULL,
+                        type INTEGER NOT NULL, size INTEGER NOT NULL,
+                        baseline_id INTEGER REFERENCES strings(id), container_entry TEXT,
+                        PRIMARY KEY(bundle_id, bundle_index)
+                    ) WITHOUT ROWID;
+                    CREATE INDEX IF NOT EXISTS ix_assets_named ON assets(container_entry, type, size)
+                        WHERE container_entry IS NOT NULL AND container_entry <> '';
+                    PRAGMA user_version=2;
+                    """;
+                command.ExecuteNonQuery();
+                transaction.Commit();
+            }
+            // 只在升级时回收旧库的空页；正常扫描不 VACUUM。
+            if (reset)
+            {
+                command.Transaction = null;
+                command.CommandText = "VACUUM;";
+                command.ExecuteNonQuery();
+                Log.Info("资源索引已初始化为 v{0}：{1}（旧缓存需重建）", SchemaVersion, _dbFile);
+            }
+            _schemaReady = true;
         }
     }
 
-    /// <summary>一次性持久化：prune（收缩到本次枚举的条目）+ 全部变化 bundle
-    /// 的 upsert 在**单个事务**里完成（阶段 C2：此前每 bundle 一个事务，
-    /// 1459 次 WAL fsync 把全缓存冷扫描拖到 ≈290s；合并后 fsync 一次，
-    /// synchronous=NORMAL 在 WAL 下不逐事务刷盘——索引可整库重建，安全）。</summary>
-    public void PersistAll(
-        IReadOnlyList<UnityCacheScanEntry> currentEntries,
-        IEnumerable<(UnityCacheIndexBundle Bundle, IReadOnlyList<UnityCacheIndexRow> Rows)> changedBundles)
+    private static SqliteCommand Command(SqliteConnection connection, SqliteTransaction transaction,
+        string sql, params string[] parameters)
     {
-        using var connection = Open();
+        var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = sql;
+        foreach (var name in parameters) command.Parameters.Add(new SqliteParameter(name, DBNull.Value));
+        command.Prepare();
+        return command;
+    }
+
+    public void PersistAll(IReadOnlyList<UnityCacheScanEntry> currentEntries,
+        IEnumerable<(UnityCacheIndexBundle Bundle, IReadOnlyList<UnityCacheIndexRow> Rows)> changedBundles,
+        CancellationToken cancellationToken = default)
+    {
+        using var connection = OpenEnsured();
         using (var pragma = connection.CreateCommand())
         {
             pragma.CommandText = "PRAGMA synchronous=NORMAL";
             pragma.ExecuteNonQuery();
         }
         using var transaction = connection.BeginTransaction();
-        var watch = Stopwatch.StartNew();
-        var writtenBundles = 0;
-        var writtenRows = 0;
-        try
+        var keep = currentEntries.Select(x => x.DataPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var bundles = ReadBundles(connection, transaction);
+        using var delete = Command(connection, transaction, "DELETE FROM bundles WHERE id=$id", "$id");
+        foreach (var (id, bundle) in bundles)
         {
-            var keep = currentEntries.Select(x => x.DataPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var stale = new List<string>();
-            using (var select = connection.CreateCommand())
-            {
-                select.Transaction = transaction;
-                select.CommandText = "SELECT data_path FROM bundles";
-                using var reader = select.ExecuteReader();
-                while (reader.Read())
-                {
-                    var path = reader.GetString(0);
-                    if (!keep.Contains(path)) stale.Add(path);
-                }
-            }
-            using var delete = connection.CreateCommand();
-            delete.Transaction = transaction;
-            delete.CommandText = "DELETE FROM assets WHERE data_path = $p; DELETE FROM bundles WHERE data_path = $p;";
-            var deleteParam = delete.Parameters.Add("$p", SqliteType.Text);
-
-            using var insert = connection.CreateCommand();
-            insert.Transaction = transaction;
-            insert.CommandText = """
-                INSERT INTO assets (data_path, bundle_index, container, path_id, type_id, type, size, baseline, container_entry)
-                VALUES ($p, $i, $c, $pid, $tid, $t, $s, $b, $ce)
-                """;
-            var p = insert.Parameters.Add("$p", SqliteType.Text);
-            var i = insert.Parameters.Add("$i", SqliteType.Integer);
-            var c = insert.Parameters.Add("$c", SqliteType.Text);
-            var pid = insert.Parameters.Add("$pid", SqliteType.Integer);
-            var tid = insert.Parameters.Add("$tid", SqliteType.Integer);
-            var t = insert.Parameters.Add("$t", SqliteType.Integer);
-            var s = insert.Parameters.Add("$s", SqliteType.Integer);
-            var b = insert.Parameters.Add("$b", SqliteType.Text);
-            var ce = insert.Parameters.Add("$ce", SqliteType.Text);
-
-            using var upsert = connection.CreateCommand();
-            upsert.Transaction = transaction;
-            upsert.CommandText = """
-                INSERT INTO bundles (data_path, size, mtime_ticks, outer_key, inner_key, static_bundle)
-                VALUES ($p, $s, $m, $o, $in, $sb)
-                ON CONFLICT(data_path) DO UPDATE SET
-                    size = $s, mtime_ticks = $m, outer_key = $o, inner_key = $in, static_bundle = $sb
-                """;
-            var up = upsert.Parameters.Add("$p", SqliteType.Text);
-            var us = upsert.Parameters.Add("$s", SqliteType.Integer);
-            var um = upsert.Parameters.Add("$m", SqliteType.Integer);
-            var uo = upsert.Parameters.Add("$o", SqliteType.Text);
-            var uin = upsert.Parameters.Add("$in", SqliteType.Text);
-            var usb = upsert.Parameters.Add("$sb", SqliteType.Integer);
-
-            foreach (var path in stale)
-            {
-                deleteParam.Value = path;
-                delete.ExecuteNonQuery();
-            }
-            if (stale.Count > 0)
-                Log.Debug("索引库收缩：删除 {0} 个磁盘上已不存在的 bundle（旧索引条目已淘汰）", stale.Count);
-            foreach (var (bundle, rows) in changedBundles)
-            {
-                deleteParam.Value = bundle.DataPath;
-                delete.ExecuteNonQuery();
-                foreach (var row in rows)
-                {
-                    p.Value = bundle.DataPath;
-                    i.Value = row.BundleIndex;
-                    c.Value = row.Container;
-                    pid.Value = row.PathId;
-                    tid.Value = row.TypeId;
-                    t.Value = (int)row.Type;
-                    s.Value = row.Size;
-                    b.Value = (object?)row.Baseline ?? DBNull.Value;
-                    ce.Value = (object?)row.ContainerEntry ?? DBNull.Value;
-                    insert.ExecuteNonQuery();
-                    writtenRows++;
-                }
-                up.Value = bundle.DataPath;
-                us.Value = bundle.Size;
-                um.Value = bundle.MTimeUtcTicks;
-                uo.Value = bundle.Outer;
-                uin.Value = bundle.Inner;
-                usb.Value = bundle.StaticBundle ? 1 : 0;
-                upsert.ExecuteNonQuery();
-                writtenBundles++;
-                Log.Every(writtenBundles, 5000, LogLevel.Debug,
-                    () => $"索引库写入进度：已写 {writtenBundles} 个 bundle · bundle={bundle.Outer}/{bundle.Inner} · 静态标记={bundle.StaticBundle}");
-            }
-            transaction.Commit();
-            watch.Stop();
-            Log.Debug("索引库批量写完成：磁盘条目 {0} 个 · 收缩删除 {1} 个 · 重写 bundle {2} 个 · 资产行 {3} 行 · 用时 {4:0.0} 秒",
-                currentEntries.Count, stale.Count, writtenBundles, writtenRows, watch.Elapsed.TotalSeconds);
+            if (keep.Contains(bundle.DataPath)) continue;
+            delete.Parameters[0].Value = id;
+            delete.ExecuteNonQuery();
         }
-        catch (Exception ex)
+        var strings = ReadStrings(connection, transaction).ToDictionary(x => x.Value, x => x.Key, StringComparer.Ordinal);
+        using var addString = Command(connection, transaction,
+            "INSERT INTO strings(value) VALUES($v) RETURNING id", "$v");
+        long Intern(string value)
         {
-            transaction.Rollback();
-            Log.Error(ex, "索引库批量写失败（事务已回滚；缓存写失败不影响扫描结果）：db={0} · 磁盘条目 {1} 个 · 已写 bundle {2} 个",
-                Path.GetFileName(_dbFile), currentEntries.Count, writtenBundles);
-            throw;
+            if (strings.TryGetValue(value, out var id)) return id;
+            addString.Parameters[0].Value = value;
+            id = (long)addString.ExecuteScalar()!;
+            strings.Add(value, id);
+            return id;
         }
+        using var upsert = Command(connection, transaction, """
+            INSERT INTO bundles(data_path,size,mtime_ticks,outer_key,inner_key,static_bundle)
+            VALUES($p,$s,$m,$o,$i,$sb)
+            ON CONFLICT(data_path) DO UPDATE SET size=$s,mtime_ticks=$m,outer_key=$o,inner_key=$i,static_bundle=$sb
+            RETURNING id
+            """, "$p", "$s", "$m", "$o", "$i", "$sb");
+        using var clear = Command(connection, transaction, "DELETE FROM assets WHERE bundle_id=$id", "$id");
+        using var insert = Command(connection, transaction, """
+            INSERT INTO assets(bundle_id,bundle_index,container_id,path_id,type_id,type,size,baseline_id,container_entry)
+            VALUES($b,$i,$c,$p,$tid,$t,$s,$bl,$ce)
+            """, "$b", "$i", "$c", "$p", "$tid", "$t", "$s", "$bl", "$ce");
+        var written = 0;
+        foreach (var (bundle, rows) in changedBundles)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!keep.Contains(bundle.DataPath))
+                throw new InvalidDataException($"变化的 bundle 不在本次枚举结果中：{bundle.DataPath}");
+            upsert.Parameters[0].Value = bundle.DataPath;
+            upsert.Parameters[1].Value = bundle.Size;
+            upsert.Parameters[2].Value = bundle.MTimeUtcTicks;
+            upsert.Parameters[3].Value = bundle.Outer;
+            upsert.Parameters[4].Value = bundle.Inner;
+            upsert.Parameters[5].Value = bundle.StaticBundle ? 1 : 0;
+            var bundleId = (long)upsert.ExecuteScalar()!;
+            clear.Parameters[0].Value = bundleId;
+            clear.ExecuteNonQuery();
+            var rowNumber = 0;
+            foreach (var row in rows)
+            {
+                if (rowNumber++ % 1024 == 0) cancellationToken.ThrowIfCancellationRequested();
+                insert.Parameters[0].Value = bundleId;
+                insert.Parameters[1].Value = row.BundleIndex;
+                insert.Parameters[2].Value = Intern(row.Container);
+                insert.Parameters[3].Value = row.PathId;
+                insert.Parameters[4].Value = row.TypeId;
+                insert.Parameters[5].Value = (int)row.Type;
+                insert.Parameters[6].Value = row.Size;
+                insert.Parameters[7].Value = row.Baseline is null ? DBNull.Value : Intern(row.Baseline);
+                insert.Parameters[8].Value = (object?)row.ContainerEntry ?? DBNull.Value;
+                insert.ExecuteNonQuery();
+            }
+            written++;
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        transaction.Commit();
+        Log.Debug("资源索引事务完成：枚举 {0} 个 bundle，重写 {1} 个", currentEntries.Count, written);
     }
 
-    /// <summary>一次查询载入全部 bundle 元数据（1459 行级别，毫秒级）。
-    /// 扫描的新鲜度检查用它做内存字典查找——实测逐 bundle 开连接查询
-    /// （1459 次）会因连接建立开销把并行解析阶段拖慢一个数量级。</summary>
+    private static List<(long Id, UnityCacheIndexBundle Bundle)> ReadBundles(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        using var command = Command(connection, transaction,
+            "SELECT id,data_path,size,mtime_ticks,outer_key,inner_key,static_bundle FROM bundles ORDER BY id");
+        using var reader = command.ExecuteReader();
+        var bundles = new List<(long, UnityCacheIndexBundle)>();
+        while (reader.Read())
+            bundles.Add((reader.GetInt64(0), new(reader.GetString(1), reader.GetInt64(2), reader.GetInt64(3),
+                reader.GetString(4), reader.GetString(5), reader.GetBoolean(6))));
+        return bundles;
+    }
+
+    private static Dictionary<long, string> ReadStrings(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        using var command = Command(connection, transaction, "SELECT id,value FROM strings");
+        using var reader = command.ExecuteReader();
+        var strings = new Dictionary<long, string>();
+        while (reader.Read()) strings.Add(reader.GetInt64(0), reader.GetString(1));
+        return strings;
+    }
+
     public Dictionary<string, UnityCacheIndexBundle> ReadBundleIndex(StringComparer comparer)
     {
-        var index = new Dictionary<string, UnityCacheIndexBundle>(comparer);
-        var watch = Stopwatch.StartNew();
         using var connection = OpenEnsured();
-        EnsureStaticBundleColumn(connection);
-        using var command = connection.CreateCommand();
-        command.CommandText = "SELECT data_path, size, mtime_ticks, outer_key, inner_key, static_bundle FROM bundles";
-        using var reader = command.ExecuteReader();
-        var staticBundles = 0;
-        while (reader.Read())
-        {
-            var bundle = new UnityCacheIndexBundle(reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2),
-                reader.GetString(3), reader.GetString(4), !reader.IsDBNull(5) && reader.GetInt64(5) != 0);
-            index[bundle.DataPath] = bundle;
-            if (bundle.StaticBundle) staticBundles++;
-        }
-        watch.Stop();
-        Log.Debug("读资源索引 bundles 表：{0} 行（静态 bundle {1} 个）· 用时 {2:0.0} 秒 · db={3}",
-            index.Count, staticBundles, watch.Elapsed.TotalSeconds, Path.GetFileName(_dbFile));
-        return index;
+        using var transaction = connection.BeginTransaction(deferred: true);
+        return ReadBundles(connection, transaction).ToDictionary(x => x.Bundle.DataPath, x => x.Bundle, comparer);
     }
 
-    /// <summary>单条流式查询按 bundle 分组读出全部资产行（热扫描合并用；
-    /// 只在有索引命中的 bundle 时调用）。冷扫描完全不需要。
-    /// 不带 ORDER BY：行按 bundle 连续插入，按键聚合即可，省掉 119 万行的
-    /// 排序（组内顺序无关紧要，bundle_index 随行存储）。</summary>
-    public Dictionary<string, List<UnityCacheIndexRow>> ReadAllRowsGrouped(StringComparer comparer)
+    /// <summary>按聚簇主键扫描，无额外排序和整库聚合。可仅实例化指定 bundle。</summary>
+    public IEnumerable<(UnityCacheIndexBundle Bundle, IReadOnlyList<UnityCacheIndexRow> Rows)> ReadAll(
+        IReadOnlySet<string>? dataPaths = null, CancellationToken cancellationToken = default)
     {
-        var grouped = new Dictionary<string, List<UnityCacheIndexRow>>(comparer);
-        var watch = Stopwatch.StartNew();
         using var connection = OpenEnsured();
-        EnsureContainerEntryColumn(connection);
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT data_path, bundle_index, container, path_id, type_id, type, size, baseline, container_entry
+        using var transaction = connection.BeginTransaction(deferred: true);
+        var bundles = ReadBundles(connection, transaction);
+        if (dataPaths is not null) bundles.RemoveAll(x => !dataPaths.Contains(x.Bundle.DataPath));
+        if (bundles.Count == 0) yield break;
+        var strings = ReadStrings(connection, transaction);
+        // IN 仅包含数据库读出的整数主键；SQLite 按主键查选中范围，不读取其它 bundle。
+        var filter = dataPaths is null ? string.Empty : " WHERE bundle_id IN (" +
+            string.Join(",", bundles.Select(x => x.Id.ToString(System.Globalization.CultureInfo.InvariantCulture))) + ")";
+        using var command = Command(connection, transaction, """
+            SELECT bundle_id,bundle_index,container_id,path_id,type_id,type,size,baseline_id,container_entry
             FROM assets
-            """;
+            """ + filter + " ORDER BY bundle_id,bundle_index");
         using var reader = command.ExecuteReader();
-        var totalRows = 0;
-        while (reader.Read())
+        var hasRow = reader.Read();
+        foreach (var (id, bundle) in bundles)
         {
-            var dataPath = reader.GetString(0);
-            if (!grouped.TryGetValue(dataPath, out var rows))
-                grouped[dataPath] = rows = [];
-            rows.Add(new UnityCacheIndexRow(
-                reader.GetInt32(1),
-                reader.GetString(2),
-                reader.GetInt64(3),
-                reader.GetInt32(4),
-                (AssetType)reader.GetInt32(5),
-                reader.GetInt64(6),
-                reader.IsDBNull(7) ? null : reader.GetString(7),
-                reader.IsDBNull(8) ? null : reader.GetString(8)));
-            totalRows++;
-            Log.Every(totalRows, 200_000, LogLevel.Debug,
-                () => $"读资源索引 assets 表进度：{totalRows} 行 · 已聚合 {grouped.Count} 个 bundle");
+            cancellationToken.ThrowIfCancellationRequested();
+            var rows = new List<UnityCacheIndexRow>();
+            while (hasRow && reader.GetInt64(0) == id)
+            {
+                if (rows.Count % 1024 == 0) cancellationToken.ThrowIfCancellationRequested();
+                rows.Add(new(reader.GetInt32(1), strings[reader.GetInt64(2)], reader.GetInt64(3),
+                        reader.GetInt32(4), (AssetType)reader.GetInt32(5), reader.GetInt64(6),
+                        reader.IsDBNull(7) ? null : strings[reader.GetInt64(7)], reader.IsDBNull(8) ? null : reader.GetString(8)));
+                hasRow = reader.Read();
+            }
+            yield return (bundle, rows);
         }
-        watch.Stop();
-        Log.Debug("读资源索引 assets 表：{0} 行 · 聚合 {1} 个 bundle · 用时 {2:0.0} 秒 · db={3}",
-            totalRows, grouped.Count, watch.Elapsed.TotalSeconds, Path.GetFileName(_dbFile));
-        return grouped;
     }
 
-    /// <summary>一条「有容器路径」的资源行（<c>m_Container</c> 非空）—— 资源关联分析用。</summary>
-    /// <param name="ContainerEntry">游戏内资源路径（用户可读口径）。</param>
-    /// <param name="Type">资产类型。</param>
-    /// <param name="Size">资产字节数。</param>
     public sealed record UnityCacheContainerRow(string ContainerEntry, AssetType Type, long Size);
 
-    /// <summary>
-    /// 只读「有容器路径」的资产行（资源关联分析用）。
-    ///
-    /// <para><b>为什么不能复用 <see cref="ReadAllRowsGrouped"/></b>：真实规模 127 万行里只有
-    /// 约 5.1 万行带 <c>container_entry</c>（实测），而整表读出会把百万级<b>无路径的行</b>
-    /// 全部实例化并按 bundle 聚合成字典（数百 MB 级），对一个只关心「有路径资源」的
-    /// 派生分析完全没必要。这里直接在 SQL 里过滤，并<b>不读</b> baseline / path_id 等
-    /// 分析用不到的列。</para>
-    /// </summary>
     public IReadOnlyList<UnityCacheContainerRow> ReadContainerRows()
     {
-        var watch = Stopwatch.StartNew();
         using var connection = OpenEnsured();
-        EnsureContainerEntryColumn(connection);
-        var rows = new List<UnityCacheContainerRow>();
         using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT container_entry, type, size
-            FROM assets
+            SELECT container_entry,type,size FROM assets
             WHERE container_entry IS NOT NULL AND container_entry <> ''
             """;
         using var reader = command.ExecuteReader();
-        while (reader.Read())
-            rows.Add(new UnityCacheContainerRow(reader.GetString(0), (AssetType)reader.GetInt32(1), reader.GetInt64(2)));
-        watch.Stop();
-        Log.Debug("读资源索引「有容器路径」的资产行：{0} 行 · 用时 {1:0.0} 秒 · db={2}",
-            rows.Count, watch.Elapsed.TotalSeconds, Path.GetFileName(_dbFile));
+        var rows = new List<UnityCacheContainerRow>();
+        while (reader.Read()) rows.Add(new(reader.GetString(0), (AssetType)reader.GetInt32(1), reader.GetInt64(2)));
         return rows;
-    }
-
-    /// <summary>整库读出（回灌用）： bundles 全表 + assets 按 data_path 聚合，
-    /// 不带 ORDER BY（省掉 119 万行排序；组内顺序无关紧要，bundle_index 随行
-    /// 存储，聚合按键分组不依赖物理顺序）。调用方逐 bundle 重建 AssetRecord。</summary>
-    public IEnumerable<(UnityCacheIndexBundle Bundle, IReadOnlyList<UnityCacheIndexRow> Rows)> ReadAll()
-    {
-        using var connection = OpenEnsured();
-        var bundles = new List<UnityCacheIndexBundle>();
-        EnsureStaticBundleColumn(connection);
-        using (var command = connection.CreateCommand())
-        {
-            command.CommandText = "SELECT data_path, size, mtime_ticks, outer_key, inner_key, static_bundle FROM bundles";
-            using var reader = command.ExecuteReader();
-            while (reader.Read())
-                bundles.Add(new UnityCacheIndexBundle(reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2),
-                    reader.GetString(3), reader.GetString(4), !reader.IsDBNull(5) && reader.GetInt64(5) != 0));
-        }
-        Log.Debug("整库读出 bundles 表：{0} 行（静态 bundle {1} 个）· db={2}",
-            bundles.Count, bundles.Count(x => x.StaticBundle), Path.GetFileName(_dbFile));
-        var grouped = ReadAllRowsGrouped(StringComparer.OrdinalIgnoreCase);
-        foreach (var bundle in bundles)
-        {
-            var rows = grouped.TryGetValue(bundle.DataPath, out var found)
-                ? found
-                : (IReadOnlyList<UnityCacheIndexRow>)Array.Empty<UnityCacheIndexRow>();
-            yield return (bundle, rows);
-        }
     }
 }

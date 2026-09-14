@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using LimbusModEditor.Domain.Diagnostics;
 using NLog;
 
@@ -29,7 +28,7 @@ public static class CarraDiffService
                 continue;
             }
             var oldData = old.ReadData();
-            if (!SHA256.HashData(oldData).AsSpan().SequenceEqual(SHA256.HashData(data)))
+            if (!oldData.AsSpan().SequenceEqual(data))
                 changes.Add(new(item.Key, oldData, data, false));
             Log.Every(index, 200, LogLevel.Debug, () => $"Carra 差异比对进度：已比对 {index} 个对象，当前 {item.Key.LogicalPath}");
         }
@@ -41,13 +40,14 @@ public static class CarraDiffService
     {
         using var scope = Log.Scope("Carra 生成差分包");
         var patch = new CarraPackage();
+        var byKey = modified.Entries.ToDictionary(x => x.Key.LogicalPath, StringComparer.Ordinal);
         var index = 0L;
         foreach (var change in Compare(original, modified))
         {
             // A patch package can preserve the modified compressed bytes when the
             // editor has not re-encoded the object yet. Structured encoders can
             // later call ReplaceCompressedData before export.
-            var source = modified.Entries.First(x => x.Key.LogicalPath == change.Key.LogicalPath);
+            var source = byKey[change.Key.LogicalPath];
             patch.Entries.Add(source);
             index++;
             Log.Every(index, 200, LogLevel.Debug, () => $"Carra 差分包累计：第 {index} 个对象 {change.Key.LogicalPath}（新增 {change.IsAdded}）");

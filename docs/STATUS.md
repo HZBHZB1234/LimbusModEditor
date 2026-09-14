@@ -1,5 +1,10 @@
 # 项目现状与待办（STATUS）
 
+> 2026-09-14：资源索引升级为不兼容的 v2 格式，旧缓存首次运行自动重建。
+> 已重构资源库、启动扫描/回灌、catalog 解析与 Carra2 对象读回；真实数据对比、
+> 验证结果和限制见 [性能重构报告](PERFORMANCE-REFACTOR.md)。下文旧性能数字保留为历史记录。
+> 本轮 solution 回归为 **746 项全通过（Domain 672 + Format 74）**，并显式完成真实全量扫描与六步骤启动验证。
+
 > 接手入口文档：先读本文，再读 `docs/CODE-STRUCTURE.md`（结构与不变量）与
 > `docs/PROJECT-INDEX.md`（逐文件功能索引），最后按需查 `docs/USAGE.md`（用户手册）、
 > `docs/REALDATA-VERIFY.md`（真实数据验证证据）、`docs/REVIEW.md`（自审与风险）、

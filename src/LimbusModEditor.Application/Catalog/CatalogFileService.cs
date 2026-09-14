@@ -91,25 +91,35 @@ public sealed class CatalogFileService
     public static CatalogFileService Parse(byte[] data, string? filePath = null)
     {
         var names = new SortedSet<string>(StringComparer.Ordinal);
+        var nameOffsets = new Dictionary<string, int>(StringComparer.Ordinal);
         foreach (Match match in BundleNamePattern.Matches(Encoding.ASCII.GetString(data)))
         {
             var name = match.Value;
             // 与 LCTA parse_catalog 一致：过滤超长名与纯哈希名（外层键文件名）
             if (name.Length >= 200 || PureHashNamePattern.IsMatch(name)) continue;
             names.Add(name);
+            nameOffsets.TryAdd(name, match.Index);
         }
 
         // 先定位全部 Hash128 记录区（外层键读取与布局无关）
         var regions = new List<(string Name, string Inner, int Hit)>();
+        var wanted = new Dictionary<Guid, (string Name, string Inner)>();
         foreach (var name in names)
         {
             var innerMatch = InnerHashPattern.Match(name);
             if (!innerMatch.Success) continue;
             var inner = innerMatch.Groups[1].Value.ToLowerInvariant();
-            if (regions.Any(x => x.Inner == inner)) continue; // 同内容多平台名共享记录
-            var hit = IndexOf(data, HexToBytes(inner), 0);
-            if (hit >= 0) regions.Add((name, inner, hit));
+            wanted.TryAdd(new Guid(Convert.FromHexString(inner)), (name, inner));
         }
+
+        // 固定 16 字节键：一次线性扫描定位所有 Hash128，保留首次命中的原有语义。
+        // 不按 bundle 数重复扫描 catalog，也不为每个窗口分配 byte[]。
+        for (var offset = 0; offset <= data.Length - 16 && wanted.Count != 0; offset++)
+        {
+            if (wanted.Remove(new Guid(data.AsSpan(offset, 16)), out var target))
+                regions.Add((target.Name, target.Inner, offset));
+        }
+        regions.Sort((a, b) => StringComparer.Ordinal.Compare(a.Name, b.Name));
 
         // 记录布局在格式版本间整体平移：按「大小值合理占比」在候选布局中自校准
         (uint CrcOffset, uint SizeOffset) layout = CandidateLayouts[0];
@@ -129,7 +139,7 @@ public sealed class CatalogFileService
         foreach (var (name, inner, hit) in regions)
         {
             var outer = ReadOuterKey(data, hit);
-            if (outer is null) outer = FindNearbyOuterKey(data, name); // core.py 启发式兜底
+            if (outer is null) outer = FindNearbyOuterKey(data, name, nameOffsets[name]); // core.py 启发式兜底
             if (TryReadCrcSize(data, hit, layout, out var crc, out var size))
                 records[inner] = new CatalogBundleRecord(name, inner, outer, crc, size);
             else
@@ -168,37 +178,11 @@ public sealed class CatalogFileService
         return size is >= 1024 and <= 500_000_000;
     }
 
-    private static string? FindNearbyOuterKey(byte[] data, string name)
+    private static string? FindNearbyOuterKey(byte[] data, string name, int index)
     {
-        var nameBytes = Encoding.ASCII.GetBytes(name);
-        var index = IndexOf(data, nameBytes, 0);
-        if (index < 0) return null;
-        var window = data.AsSpan(index + nameBytes.Length, Math.Min(200, data.Length - index - nameBytes.Length));
+        var window = data.AsSpan(index + name.Length, Math.Min(200, data.Length - index - name.Length));
         var match = OuterKeyPattern.Match(Encoding.ASCII.GetString(window));
         return match.Success ? match.Groups[1].Value.ToLowerInvariant() : null;
     }
 
-    private static byte[] HexToBytes(string hex)
-    {
-        var bytes = new byte[hex.Length / 2];
-        for (var i = 0; i < bytes.Length; i++)
-            bytes[i] = Convert.ToByte(hex.Substring(i * 2, 2), 16);
-        return bytes;
-    }
-
-    private static int IndexOf(byte[] haystack, byte[] needle, int from)
-    {
-        for (var i = from; i <= haystack.Length - needle.Length; i++)
-        {
-            var match = true;
-            for (var j = 0; j < needle.Length; j++)
-            {
-                if (haystack[i + j] == needle[j]) continue;
-                match = false;
-                break;
-            }
-            if (match) return i;
-        }
-        return -1;
-    }
 }

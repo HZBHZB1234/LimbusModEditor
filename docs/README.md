@@ -15,6 +15,7 @@
 | 想知道界面怎么用、操作步骤、故障排查 | `USAGE.md` |
 | 关心写回链路是否被真实验证过、严重缺陷的根因 | `REALDATA-VERIFY.md` |
 | 关心自审发现、设计变更风险、性能量化 | `REVIEW.md` |
+| 查看资源库 v2、启动分析与导出读取的真实性能对比及复现步骤 | `PERFORMANCE-REFACTOR.md` |
 | 想查「为什么是这个口径 / 为什么不做某件事」 | `ARCHIVE-DESIGN-NOTES.md` |
 | 想看实现历史与后续方向的长文记录 | `ROADMAP.md` |
 | 项目门面（三步工作流、格式边界、CLI、打包） | `../README.md` |

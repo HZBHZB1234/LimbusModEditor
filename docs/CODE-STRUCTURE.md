@@ -67,7 +67,7 @@ lang 文本 / 静态数据表）→ 在五个工作台里浏览与编辑（资�
 | `LimbusModEditor.Formats.Bank` | net8.0 | NLog（P/Invoke 运行时绑 FMOD C ABI） | FMOD bank/FSB5 索引层 + 音频编解码抽象 |
 | `LimbusModEditor.Formats.Rebank` | net8.0 | NLog | .rebank 差分包 |
 | `LimbusModEditor.Formats.Lunartique` | net8.0 | SharpCompress 0.38.0 + NLog | Lunartique 安装/卸载配对包 |
-| `LimbusModEditor.Application` | net8.0 | Microsoft.Data.Sqlite 8.0.11 + ImageSharp + NLog | WPF 无关的服务编排层（**能被直接单测**） |
+| `LimbusModEditor.Application` | net8.0 | Microsoft.Data.Sqlite 8.0.11 + System.IO.Hashing 8.0.0 + ImageSharp + NLog | WPF 无关的服务编排层；Hashing 用于 IEEE CRC32 流式校验（**能被直接单测**） |
 | `LimbusModEditor.App` | net8.0-windows | WPF-UI 4.3.0 + NLog | 界面（**没有测试工程**，逻辑要下沉到 Application 才能测） |
 | `LimbusModEditor.Cli` | net8.0 | NLog | 三个子命令的命令行入口 |
 | `tests/LimbusModEditor.Domain.Tests` | net8.0 | xunit 2.9.3 | 行为测试主战场（引用 Domain/Editing/Application/Formats.Unity） |
@@ -168,6 +168,15 @@ Windows 下默认 `RuntimeIdentifier=win-x64`、`CopyLocalLockFileAssemblies=tru
 
 ### 5.1 启动 → 扫描（每次启动都跑）
 
+**2026-09-14 资源库 v2**：`unity-cache-index.db` 的 `user_version=2`；`bundles.id`
+为整数键，`strings` 去重容器名/基线文字，`assets` 以 `(bundle_id,bundle_index)` 为
+`WITHOUT ROWID` 主键。路径只在 bundle 表保存；有名称资源使用部分覆盖索引。
+旧版本或缺少业务表会整体失效，不能把缺失对象行的 bundle 当作命中。更新、淘汰与取消
+在同一事务中完成；读回使用同一只读快照，逐 bundle 消费，不再聚合整库中间行。
+冷解析最多并行 4 个 bundle，只产出紧凑索引行，合并时才构造资产；目录字符串按 bundle 共享。
+直接消费后端 descriptor，基线 CRC 借用该次解包流并使用 System.IO.Hashing；不再二次解包。
+基准与复现步骤见 `PERFORMANCE-REFACTOR.md`，本节后面的历史耗时以该报告为准。
+
 ```
 MainWindow ctor
   └─ ShowPage("assets")  ← 只建页面，不碰磁盘
@@ -216,6 +225,11 @@ ProjectService.LoadAsync(.lmeproj)     Application/Projects/ProjectService.cs
 （显示层消费）。两者不可混用。
 
 ### 5.3 编辑 → 导出（plan-16 的流水线）
+
+Carra2 对象读回按源 bundle 分组，每组持有一个 `AssetsToolsBackend.BundleObjectReader`，
+只解包一次并复用 SerializedFile，结束立即释放。会话只读、不可并发、不跨重打包写入复用；
+单对象接口保持按 backend 生命周期复用内部缓存。对象字节、类型表索引及逐对象失败报告的契约不变。
+catalog 用固定 16 字节键集合做一次线性扫描；Carra 差异比较直接比较字节，补丁按键查找。
 
 ```
 编辑动作四类：

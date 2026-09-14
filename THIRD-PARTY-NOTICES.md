@@ -1,5 +1,10 @@
 # 第三方依赖声明 / Third-Party Notices
 
+## System.IO.Hashing
+
+NuGet `System.IO.Hashing` 8.0.0（Microsoft/.NET），用于流式 IEEE CRC32 校验。
+许可证为 [MIT](https://github.com/dotnet/runtime/blob/main/LICENSE.TXT)，通过 PackageReference 引用，未修改上游源码。
+
 本仓库中包含以「vendor（ vendored，源码直接复制）」方式引入的第三方代码，集中存放于
 `third_party/` 目录。以下逐项说明来源、许可证、引入方式及本仓库对其所做的改动。
 

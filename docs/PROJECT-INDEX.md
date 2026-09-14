@@ -636,7 +636,7 @@
 
 ### §11.3 不要顺手改的测试约定
 
-- **两个测试工程都不引用 `LimbusModEditor.App`**：页面行为只被「镜像约定」测试间接守住——
+- **三个测试工程都不引用 `LimbusModEditor.App`**：页面行为只被「镜像约定」测试间接守住——
   `AssetFilterComboSentinelTests` ↔ `AssetsWorkbenchPage` 的筛选哨兵（防下拉空白）、
   `BankTreeRulesTests` ↔ `BankWorkbenchPage.RebuildTree`（防空树）、
   `UiStateServiceTests` 的列宽合并 ↔ `WorkbenchShell.SavePreviewWidth`。

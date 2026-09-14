@@ -135,6 +135,90 @@ public sealed class RelationStoreTests : IDisposable
         Assert.NotEqual(baseline.Signature, Source(text: "x").Signature);
     }
 
+    /// <summary>
+    /// **每一列都要往返**。这条测试的存在理由：v2 加了 10 个列 + 一张 xref 表，
+    /// 而「建表有列、写入语句忘了带上」不会报错——只会静默存成 NULL，
+    /// 表现成「卡片没有预览、跳不过去、跨资源边一条都没有」。
+    /// 所以这里逐列断言，而不是只数行数。
+    /// </summary>
+    [Fact]
+    public void Persist_round_trips_every_v2_column_and_the_xref_table()
+    {
+        var store = NewStore();
+        var source = Source();
+        store.EnsureSource(source);
+
+        var subject = new RelationSubject(
+            "ego:20101", RelationCategories.Ego, "乌瞰刀", "李箱的基础E.G.O装备", string.Empty, "020101")
+        {
+            CategoryLabel = "E.G.O 装备",
+            CoverRef = "Assets/Sprite/Unit/Profile/Ego/20101.png",
+            PreviewText = "乌瞰刀",
+            LinkCount = 2,
+        };
+        const string bank = @"C:\game\Voice_Default_S5.bank";
+        const string sample = "get_20101_1";
+        var text = new RelationLink(
+            "ego:20101", RelationCategories.Ego, RelationKind.Text, "Egos.json", "Egos.json", "E.G.O 装备定义", 5)
+        {
+            PreviewText = "乌瞰刀",
+            PreviewKind = RelationPreviewKind.Exact,
+            MediaKind = "text",
+            RefPath = "Egos.json",
+            DeepLink = RelationDeepLink.ForText("Egos.json", "20101"),
+            TargetSubjectId = "ego:20101",
+        };
+        var audio = new RelationLink(
+            "ego:20101", RelationCategories.Ego, RelationKind.Audio, bank + "\u0000" + sample, sample, "Vorbis · 100 B", 100)
+        {
+            PreviewKind = RelationPreviewKind.Derived,
+            MediaKind = "audio",
+            DurationSec = 2.5,
+            RefPath = bank,
+            DeepLink = RelationDeepLink.ForAudio(bank, sample),
+        };
+        var xref = new RelationXref("Egos.json", "ego:20101", RelationXrefKinds.TextToSubject,
+            "text", "subject", nameof(RelationPreviewKind.Exact), "乌瞰刀");
+
+        store.PersistGraph(source, new RelationGraph([subject], [text, audio]) { Xrefs = [xref] });
+
+        var readSubject = Assert.Single(store.ReadSubjects());
+        Assert.Equal("ego:20101", readSubject.SubjectId);
+        Assert.Equal(RelationCategories.Ego, readSubject.SubjectKind);
+        Assert.Equal("E.G.O 装备", readSubject.CategoryLabel);
+        Assert.Equal("乌瞰刀", readSubject.DisplayName);
+        Assert.Equal("李箱的基础E.G.O装备", readSubject.Subtitle);
+        Assert.Equal("Assets/Sprite/Unit/Profile/Ego/20101.png", readSubject.CoverRef);
+        Assert.Equal("乌瞰刀", readSubject.PreviewText);
+        Assert.Equal(2, readSubject.LinkCount);
+
+        var links = store.ReadLinks("ego:20101");
+        var readText = Assert.Single(links, x => x.Kind == RelationKind.Text);
+        Assert.Equal(RelationPreviewKind.Exact, readText.PreviewKind);
+        Assert.Equal("乌瞰刀", readText.PreviewText);
+        Assert.Equal("text", readText.MediaKind);
+        Assert.Equal("Egos.json", readText.RefPath);
+        Assert.Equal("20101", RelationDeepLink.Part(readText.DeepLink, 1));
+        Assert.Equal("ego:20101", readText.TargetSubjectId);
+        Assert.Null(readText.DurationSec);
+
+        var readAudio = Assert.Single(links, x => x.Kind == RelationKind.Audio);
+        Assert.Equal(RelationPreviewKind.Derived, readAudio.PreviewKind);
+        Assert.Equal("audio", readAudio.MediaKind);
+        Assert.Equal(2.5, readAudio.DurationSec!.Value);
+        Assert.Equal(bank, readAudio.RefPath);
+
+        // 跨资源边：落库、可双向查、可按关系过滤。
+        Assert.Equal(1, store.ReadXrefCount());
+        var edge = Assert.Single(store.ReadXrefs("Egos.json"));
+        Assert.Equal("ego:20101", edge.ToRef);
+        Assert.Equal(RelationXrefKinds.TextToSubject, edge.Relation);
+        Assert.Equal("乌瞰刀", edge.Detail);
+        Assert.Equal(nameof(RelationPreviewKind.Exact), edge.Confidence);
+        Assert.Single(store.ReadXrefsTo("ego:20101"));
+        Assert.Empty(store.ReadXrefs("Egos.json", RelationXrefKinds.AudioToSubject));
+    }
+
     [Fact]
     public void LinksOf_filters_and_orders_by_kind_then_ref()
     {

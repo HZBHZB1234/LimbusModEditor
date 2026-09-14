@@ -28,9 +28,29 @@ public static class RelationCategories
     /// 静态表的 <c>imgStr</c> 也是这个口径。</summary>
     public const string Announcer = "announcer";
 
+    /// <summary>
+    /// E.G.O 装备。键 = 5 位 id（<c>20101</c>–<c>21210</c>）。
+    ///
+    /// <para><b>权威来源只有 lang 的 <c>Egos.json</c></b>：实测资源侧有 17 个 20xxx 数字
+    /// （侵蚀/觉醒后缀等）并不在 <c>Egos.json</c> 里，拿资源当身份源会造出「幽灵 EGO」。</para>
+    /// </summary>
+    public const string Ego = "ego";
+
+    /// <summary>
+    /// E.G.O 饰品。键 = <b>归一化后的 4 位基准 id</b>（<c>1001</c>–<c>9995</c>）。
+    ///
+    /// <para><b>为什么必须归一化</b>：lang 里同一个饰品会在 id 上分层——
+    /// <c>9701</c> / <c>19701</c> / <c>29701</c> 是同一个饰品（实测 +10000 / +20000 的层偏移），
+    /// 图标用的是基准 4 位 id。规则：<c>key = id % 10000</c>（仅当归一化后仍是 4 位时成立）。</para>
+    ///
+    /// <para><b>为什么必须带类别前缀</b>：4 位 id 空间是与异想体<b>共用</b>的
+    /// （当前实测交集为 0，但空间共享是事实），当全局唯一键迟早会撞。</para>
+    /// </summary>
+    public const string EgoGift = "ego_gift";
+
     /// <summary>全部类别（顺序即 UI 里的切换顺序）。</summary>
     public static readonly IReadOnlyList<string> All =
-        [Persona, Enemy, Abnormality, Announcer];
+        [Persona, Enemy, Abnormality, Announcer, Ego, EgoGift];
 
     /// <summary>类别的中文名（卡片流页的类别切换、状态栏用）。</summary>
     public static string Label(string category) => category switch
@@ -39,6 +59,8 @@ public static class RelationCategories
         Enemy => "敌人单位",
         Abnormality => "异想体",
         Announcer => "播报员",
+        Ego => "E.G.O 装备",
+        EgoGift => "E.G.O 饰品",
         _ => category,
     };
 

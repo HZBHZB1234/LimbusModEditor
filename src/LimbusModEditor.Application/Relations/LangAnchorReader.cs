@@ -24,8 +24,20 @@ public static class LangAnchorReader
     /// <summary>语音子目录（相对语言目录）。</summary>
     private static readonly string[] VoiceDirectories = ["PersonalityVoiceDlg", "EGOVoiceDig"];
 
-    /// <summary>语言根下带数值 id 的表（id → name/desc）。</summary>
-    private static readonly string[] EntityTables = ["Passives.json", "Skills.json", "Egos.json"];
+    /// <summary>语言根下带数值 id 的表（文件名 → 锚点类别）。</summary>
+    private static readonly (string FileName, string Table)[] EntityTables =
+    [
+        ("Passives.json", RelationAnchorTables.Passive),
+        ("Skills.json", RelationAnchorTables.Skill),
+        ("Egos.json", RelationAnchorTables.Ego),
+    ];
+
+    /// <summary>
+    /// 语言根下前缀匹配的实体表。E.G.O 饰品实测有 26 个文件
+    /// （<c>EGOgift_MirrorDungeon.json</c> / <c>EGOgift_StoryDungeon-*.json</c> …），
+    /// 没有单一入口文件，所以只能按前缀收。
+    /// </summary>
+    private const string EgoGiftPrefix = "EGOgift";
 
     /// <summary>读全部锚点；语言目录为空/不存在时返回空列表。</summary>
     public static IReadOnlyList<RelationTextAnchor> Read(string? languageDirectory, CancellationToken cancellationToken = default)
@@ -41,10 +53,20 @@ public static class LangAnchorReader
                 ReadVoiceFile(file, Path.GetRelativePath(languageDirectory, file), anchors);
         }
 
-        foreach (var name in EntityTables)
+        foreach (var (name, table) in EntityTables)
         {
             var file = Path.Combine(languageDirectory, name);
-            if (File.Exists(file)) ReadEntityFile(file, name, anchors);
+            if (File.Exists(file)) ReadEntityFile(file, name, table, anchors);
+        }
+
+        foreach (var file in EnumerateJson(languageDirectory, cancellationToken))
+        {
+            var name = Path.GetFileName(file);
+            if (!name.StartsWith(EgoGiftPrefix, StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (EntityTables.Any(x => string.Equals(x.FileName, name, StringComparison.OrdinalIgnoreCase)))
+                continue;
+            ReadEntityFile(file, name, RelationAnchorTables.EgoGift, anchors);
         }
 
         return anchors;
@@ -79,15 +101,17 @@ public static class LangAnchorReader
         {
             var id = ReadString(entry, "id");
             if (string.IsNullOrEmpty(id)) continue;
-            anchors.Add(new RelationTextAnchor(id, relativePath, null, ReadString(entry, "desc"), ReadString(entry, "dlg")));
+            anchors.Add(new RelationTextAnchor(id, relativePath, null, ReadString(entry, "desc"),
+                ReadString(entry, "dlg"), RelationAnchorTables.Voice));
         }
     }
 
     /// <summary>
     /// 实体表：<c>Passives.json</c> / <c>Egos.json</c> 是 <c>{id,name,desc}</c>；
-    /// <c>Skills.json</c> 把中文放在 <c>levelList[0].name/desc</c>（实测）。
+    /// <c>Skills.json</c> 把中文放在 <c>levelList[0].name/desc</c>；
+    /// <c>EGOgift*.json</c> 是 <c>{id,name,desc,simpleDesc[]}</c>（均为实测）。
     /// </summary>
-    private static void ReadEntityFile(string file, string relativePath, List<RelationTextAnchor> anchors)
+    private static void ReadEntityFile(string file, string relativePath, string table, List<RelationTextAnchor> anchors)
     {
         using var document = TryParse(file);
         if (document is null) return;
@@ -111,7 +135,7 @@ public static class LangAnchorReader
                 name ??= ReadString(first, "name");
                 desc ??= ReadString(first, "desc");
             }
-            anchors.Add(new RelationTextAnchor(id, relativePath, name, desc, null));
+            anchors.Add(new RelationTextAnchor(id, relativePath, name, desc, null, table));
         }
     }
 

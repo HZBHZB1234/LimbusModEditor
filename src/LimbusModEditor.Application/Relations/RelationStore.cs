@@ -97,7 +97,8 @@ public sealed class RelationStore
             var rows = new List<RelationSubject>();
             using var command = connection.CreateCommand();
             command.CommandText = $"""
-                SELECT subject_id, subject_kind, display_name, subtitle, character, sort_key
+                SELECT subject_id, subject_kind, display_name, subtitle, character, sort_key,
+                       category_label, cover_ref, preview_text, link_count
                 FROM {SubjectsTable} ORDER BY sort_key
                 """;
             using var reader = command.ExecuteReader();
@@ -108,7 +109,15 @@ public sealed class RelationStore
                     reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
                     reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
                     reader.IsDBNull(4) ? string.Empty : reader.GetString(4),
-                    reader.IsDBNull(5) ? reader.GetString(0) : reader.GetString(5)));
+                    reader.IsDBNull(5) ? reader.GetString(0) : reader.GetString(5))
+                {
+                    // v2 的四列必须读回来：封面、卡片正面预览、角标数、类别名。
+                    // 少了它们，UI 就只能自己重算（重算口径一旦不一致，卡片与详情会互相打脸）。
+                    CategoryLabel = NullableText(reader, 6) ?? string.Empty,
+                    CoverRef = NullableText(reader, 7),
+                    PreviewText = NullableText(reader, 8),
+                    LinkCount = reader.IsDBNull(9) ? 0 : reader.GetInt32(9),
+                });
             return (IReadOnlyList<RelationSubject>)rows;
         });
 
@@ -270,6 +279,7 @@ public sealed class RelationStore
             Execute(connection, transaction, $"DELETE FROM {SubjectsTable}");
             Execute(connection, transaction, $"DELETE FROM {LinksTable}");
             Execute(connection, transaction, $"DELETE FROM {SubjectsByRefTable}");
+            Execute(connection, transaction, $"DELETE FROM {XrefTable}");
 
             using (var meta = Command(connection, transaction, """
                 INSERT INTO index_meta (source_key, signature) VALUES ($key, $signature)
@@ -319,14 +329,26 @@ public sealed class RelationStore
             }
 
             using var insertLink = Command(connection, transaction, $"""
-                INSERT INTO {LinksTable} (subject_id, category, kind, ref_key, display, detail, size_bytes)
-                VALUES ($id, $category, $kind, $ref, $display, $detail, $size)
+                INSERT INTO {LinksTable}
+                    (subject_id, category, kind, ref_key, display, detail, size_bytes,
+                     preview_text, preview_kind, media_kind, duration_sec, ref_path, deep_link, target_subject_id)
+                VALUES ($id, $category, $kind, $ref, $display, $detail, $size,
+                        $previewText, $previewKind, $mediaKind, $duration, $refPath, $deepLink, $target)
                 ON CONFLICT(subject_id, kind, ref_key) DO UPDATE SET
-                    category = $category, display = $display, detail = $detail, size_bytes = $size
+                    category = $category, display = $display, detail = $detail, size_bytes = $size,
+                    preview_text = $previewText, preview_kind = $previewKind, media_kind = $mediaKind,
+                    duration_sec = $duration, ref_path = $refPath, deep_link = $deepLink,
+                    target_subject_id = $target
                 """);
             using var insertRef = Command(connection, transaction, $"""
                 INSERT INTO {SubjectsByRefTable} (ref_key, subject_id, category) VALUES ($ref, $id, $category)
                 ON CONFLICT(ref_key, subject_id) DO UPDATE SET category = $category
+                """);
+            using var insertXref = Command(connection, transaction, $"""
+                INSERT INTO {XrefTable} (from_ref, to_ref, relation, from_kind, to_kind, confidence, detail)
+                VALUES ($from, $to, $relation, $fromKind, $toKind, $confidence, $detail)
+                ON CONFLICT(from_ref, relation, to_ref) DO UPDATE SET
+                    from_kind = $fromKind, to_kind = $toKind, confidence = $confidence, detail = $detail
                 """);
             var linkId = insertLink.Parameters.Add("$id", SqliteType.Text);
             var linkCategory = insertLink.Parameters.Add("$category", SqliteType.Text);
@@ -335,9 +357,23 @@ public sealed class RelationStore
             var linkDisplay = insertLink.Parameters.Add("$display", SqliteType.Text);
             var linkDetail = insertLink.Parameters.Add("$detail", SqliteType.Text);
             var linkSize = insertLink.Parameters.Add("$size", SqliteType.Integer);
+            var linkPreviewText = insertLink.Parameters.Add("$previewText", SqliteType.Text);
+            var linkPreviewKind = insertLink.Parameters.Add("$previewKind", SqliteType.Text);
+            var linkMediaKind = insertLink.Parameters.Add("$mediaKind", SqliteType.Text);
+            var linkDuration = insertLink.Parameters.Add("$duration", SqliteType.Real);
+            var linkRefPath = insertLink.Parameters.Add("$refPath", SqliteType.Text);
+            var linkDeepLink = insertLink.Parameters.Add("$deepLink", SqliteType.Text);
+            var linkTarget = insertLink.Parameters.Add("$target", SqliteType.Text);
             var refRef = insertRef.Parameters.Add("$ref", SqliteType.Text);
             var refId = insertRef.Parameters.Add("$id", SqliteType.Text);
             var refCategory = insertRef.Parameters.Add("$category", SqliteType.Text);
+            var xrefFrom = insertXref.Parameters.Add("$from", SqliteType.Text);
+            var xrefTo = insertXref.Parameters.Add("$to", SqliteType.Text);
+            var xrefRelation = insertXref.Parameters.Add("$relation", SqliteType.Text);
+            var xrefFromKind = insertXref.Parameters.Add("$fromKind", SqliteType.Text);
+            var xrefToKind = insertXref.Parameters.Add("$toKind", SqliteType.Text);
+            var xrefConfidence = insertXref.Parameters.Add("$confidence", SqliteType.Text);
+            var xrefDetail = insertXref.Parameters.Add("$detail", SqliteType.Text);
             foreach (var link in graph.Links)
             {
                 linkId.Value = link.SubjectId;
@@ -347,12 +383,33 @@ public sealed class RelationStore
                 linkDisplay.Value = link.Display;
                 linkDetail.Value = (object?)link.Detail ?? DBNull.Value;
                 linkSize.Value = link.SizeBytes;
+                linkPreviewText.Value = Nullable(link.PreviewText);
+                // 强度按**名字**落库（不是数字）：枚举加成员时不会让旧库的语义整体错位。
+                linkPreviewKind.Value = Nullable(link.PreviewKind.ToString());
+                linkMediaKind.Value = Nullable(link.MediaKind);
+                linkDuration.Value = (object?)link.DurationSec ?? DBNull.Value;
+                linkRefPath.Value = Nullable(link.RefPath);
+                linkDeepLink.Value = Nullable(link.DeepLink);
+                linkTarget.Value = Nullable(link.TargetSubjectId);
                 insertLink.ExecuteNonQuery();
 
                 refRef.Value = link.RefKey;
                 refId.Value = link.SubjectId;
                 refCategory.Value = link.Category;
                 insertRef.ExecuteNonQuery();
+            }
+
+            // 跨资源边：多对多（一个 from_ref 可以有多条），所以这里是独立的表、独立的循环。
+            foreach (var xref in graph.Xrefs)
+            {
+                xrefFrom.Value = xref.FromRef;
+                xrefTo.Value = xref.ToRef;
+                xrefRelation.Value = xref.Relation;
+                xrefFromKind.Value = Nullable(xref.FromKind);
+                xrefToKind.Value = Nullable(xref.ToKind);
+                xrefConfidence.Value = Nullable(xref.Confidence);
+                xrefDetail.Value = Nullable(xref.Detail);
+                insertXref.ExecuteNonQuery();
             }
         });
     }
@@ -380,6 +437,10 @@ public sealed class RelationStore
     }
 
     private static object Nullable(string? value) => value is null ? DBNull.Value : value;
+
+    /// <summary>读一列可空文本：NULL → null（与空串区分开，空串是「有值但为空」）。</summary>
+    private static string? NullableText(SqliteDataReader reader, int ordinal)
+        => reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
 
     private static int Count(SqliteConnection connection, string table)
     {

@@ -201,6 +201,61 @@ public class SqliteTableCacheTests : IDisposable
             return columns;
         });
 
+    /// <summary>
+    /// 表结构升级必须<b>自愈</b>：建表脚本全是 <c>CREATE TABLE IF NOT EXISTS</c>，
+    /// 表一旦存在脚本就不会改它的结构。真实事故：关联图 v1 → v2 给 <c>subjects</c> 加了列，
+    /// 旧库仍以「老结构 + 新签名」被复用 → 查询报 <c>no such column</c>，
+    /// 更糟的是被当成新鲜缓存返回<b>空结论</b>。
+    /// </summary>
+    [Fact]
+    public void Stale_table_structure_is_dropped_and_rebuilt_so_new_columns_appear()
+    {
+        const string oldSchema = """
+            CREATE TABLE IF NOT EXISTS items (
+                id   INTEGER PRIMARY KEY,
+                name TEXT NOT NULL
+            );
+            """;
+        const string newSchema = """
+            CREATE TABLE IF NOT EXISTS items (
+                id    INTEGER PRIMARY KEY,
+                name  TEXT NOT NULL,
+                extra TEXT
+            );
+            """;
+
+        var path = DbPath("drift.db");
+        var old = new SqliteTableCache(path, WorkbenchCacheSchema.IndexMetaSql + "\n" + oldSchema);
+        old.EnsureSchema();
+        Assert.True(old.EnsureSource("k", "sig-1")); // 首次：库是空的 → 必须重建
+        InsertItems(old, 5);
+        Assert.Equal(5, CountItems(old));
+
+        // 「升级程序」：同一个库文件 + 新脚本。
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        var upgraded = new SqliteTableCache(path, WorkbenchCacheSchema.IndexMetaSql + "\n" + newSchema);
+        upgraded.EnsureSchema();
+
+        Assert.Contains("extra", ColumnNamesOf(upgraded, "items"));
+        // 旧数据随旧表一起作废（缓存只是加速，重建即可）。
+        Assert.Equal(0, CountItems(upgraded));
+        // 关键：新鲜度声明必须一起作废，否则下一次仍会把空表当「源未变」复用。
+        Assert.True(upgraded.EnsureSource("k", "sig-1"));
+        // 源确实没变时照常复用（自愈不能把「复用」整个废掉）。
+        Assert.False(upgraded.EnsureSource("k", "sig-1"));
+    }
+
+    private static IReadOnlyList<string> ColumnNamesOf(SqliteTableCache store, string table)
+        => store.Read(connection =>
+        {
+            var names = new List<string>();
+            using var command = connection.CreateCommand();
+            command.CommandText = $"PRAGMA table_info(\"{table}\")";
+            using var reader = command.ExecuteReader();
+            while (reader.Read()) names.Add(reader.GetString(1));
+            return (IReadOnlyList<string>)names;
+        });
+
     // ── 单事务批量写往返 ─────────────────────────────────────────────
 
     [Fact]

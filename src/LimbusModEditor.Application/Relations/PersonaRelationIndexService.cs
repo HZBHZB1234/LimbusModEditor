@@ -13,22 +13,24 @@ namespace LimbusModEditor.Application.Relations;
 
 /// <summary>一次关联分析的结果。</summary>
 /// <param name="Rebuilt">是否真的重跑了分析（false = 源未变，直接复用缓存）。</param>
-/// <param name="SubjectCount">对象（人格）数。</param>
+/// <param name="SubjectCount">对象数（人格 / 敌人 / 异想体 / 播报员 / E.G.O 装备 / E.G.O 饰品 合计）。</param>
 /// <param name="LinkCount">关联边数。</param>
 /// <param name="Elapsed">本次耗时（复用缓存时是读计数的耗时）。</param>
 /// <param name="Detail">中文细节（状态栏/日志用）。</param>
 public sealed record RelationIndexResult(
     bool Rebuilt, int SubjectCount, int LinkCount, TimeSpan Elapsed, string Detail)
 {
-    /// <summary>中文摘要。</summary>
-    public string Describe() => Rebuilt
-        ? $"已重建关联图：{SubjectCount} 个人格 · {LinkCount:N0} 条关联 · 用时 {Elapsed.TotalSeconds:0.0} 秒"
-        : $"{SubjectCount} 个人格 · {LinkCount:N0} 条关联（源未变，直接复用）";
+    /// <summary>
+    /// 中文摘要。**直接用 <see cref="Detail"/>**：那里已经带了类别分解与跨资源边数
+    /// （由 <see cref="PersonaRelationIndexService"/> 组装）。在这里另拼一份就会与真实
+    /// 计数口径分叉——曾经就这样把「1312 个对象」显示成「1312 个人格」。
+    /// </summary>
+    public string Describe() => $"{Detail} · 用时 {Elapsed.TotalSeconds:0.0} 秒";
 }
 
 /// <summary>
-/// 人格关联分析的编排：<b>在四个索引库都就绪之后</b>，把它们的原版事实读出来交给
-/// <see cref="PersonaRelationAnalyzer"/>，产出「人格 id ⇄ 资源」关联图并落
+/// 关联分析的编排：<b>在四个索引库都就绪之后</b>，把它们的原版事实读出来交给
+/// <see cref="SubjectRelationAnalyzer"/>，产出「对象 ⇄ 资源」关联图并落
 /// <c>cache/relation-index.db</c>。
 ///
 /// <para><b>输入来自四个库</b>（都不新增解析逻辑，只读既有缓存）：</para>
@@ -119,10 +121,10 @@ public sealed class PersonaRelationIndexService
             var subjects = TryReadCount(store.ReadSubjectCount);
             var links = TryReadCount(store.ReadLinkCount);
             watch.Stop();
-            Log.Debug("关联图已是最新（四个上游源未变）：{0} 个人格 · {1} 条关联 · 用时 {2:0.0} 秒",
+            Log.Debug("关联图已是最新（四个上游源未变）：{0} 个对象 · {1} 条关联 · 用时 {2:0.0} 秒",
                 subjects, links, watch.Elapsed.TotalSeconds);
             return new RelationIndexResult(false, subjects, links, watch.Elapsed,
-                $"{subjects} 个人格 · {links:N0} 条关联（源未变，直接复用）");
+                $"{subjects} 个对象 · {links:N0} 条关联（源未变，直接复用）");
         }
 
         // ── ③ 读四个库的事实 → 分析 → 落库 ──
@@ -133,11 +135,31 @@ public sealed class PersonaRelationIndexService
         cancellationToken.ThrowIfCancellationRequested();
         store.PersistGraph(source, graph);
         watch.Stop();
-        Log.Info("关联分析结束：{0} 个人格 · {1:N0} 条关联 · 资源行 {2:N0} · 音频样本 {3:N0} · 静态表 {4:N0} · lang 文件 {5:N0} · 用时 {6:0.0} 秒",
-            graph.Subjects.Count, graph.Links.Count, inputs.Assets.Count, inputs.Audio.Count,
-            inputs.StaticTables.Count, inputs.LangFiles.Count, watch.Elapsed.TotalSeconds);
+        Log.Info("关联分析结束：{0} 个对象（{1}） · {2:N0} 条关联 · {3:N0} 条跨资源边 · " +
+                 "资源行 {4:N0} · 音频样本 {5:N0} · 静态表 {6:N0} · lang 文件 {7:N0} · 锚点 {8:N0} · 用时 {9:0.0} 秒",
+            graph.Subjects.Count, DescribeCategories(graph.Subjects), graph.Links.Count, graph.Xrefs.Count,
+            inputs.Assets.Count, inputs.Audio.Count, inputs.StaticTables.Count, inputs.LangFiles.Count,
+            inputs.TextAnchors.Count, watch.Elapsed.TotalSeconds);
         return new RelationIndexResult(true, graph.Subjects.Count, graph.Links.Count, watch.Elapsed,
-            $"已重建关联图：{graph.Subjects.Count} 个人格 · {graph.Links.Count:N0} 条关联");
+            $"已重建关联图：{graph.Subjects.Count} 个对象（{DescribeCategories(graph.Subjects)}） · " +
+            $"{graph.Links.Count:N0} 条关联 · {graph.Xrefs.Count:N0} 条跨资源边");
+    }
+
+    /// <summary>
+    /// 把对象按类别汇总成「人格 185 · 敌人单位 239 · …」这样一段短文本。
+    /// 类别是<b>动态</b>的（分析器产出什么就是什么），所以按 <see cref="RelationCategories.All"/>
+    /// 的顺序排、未知类别排在最后，绝不因为「表里没有」就丢掉一个类别。
+    /// </summary>
+    private static string DescribeCategories(IReadOnlyList<RelationSubject> subjects)
+    {
+        if (subjects.Count == 0) return "空图";
+        var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var subject in subjects)
+            counts[subject.SubjectKind] = counts.TryGetValue(subject.SubjectKind, out var n) ? n + 1 : 1;
+
+        var ordered = RelationCategories.All.Where(counts.ContainsKey)
+            .Concat(counts.Keys.Where(x => !RelationCategories.IsKnown(x)).Order(StringComparer.Ordinal));
+        return string.Join(" · ", ordered.Select(x => $"{RelationCategories.Label(x)} {counts[x]}"));
     }
 
     /// <summary>把四个库的原版事实读成一个分析输入包。</summary>

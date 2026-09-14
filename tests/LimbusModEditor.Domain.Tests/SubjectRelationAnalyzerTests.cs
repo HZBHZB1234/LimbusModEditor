@@ -319,7 +319,8 @@ public sealed class SubjectRelationAnalyzerTests
             ],
             anchors:
             [
-                new RelationTextAnchor(sample, "PersonalityVoiceDlg/Voice_Faust_LCB_10201.json", null, "自身混乱", "台词原文"),
+                new RelationTextAnchor(sample, "PersonalityVoiceDlg/Voice_Faust_LCB_10201.json", null, "自身混乱", "台词原文",
+                    RelationAnchorTables.Voice),
             ]);
 
         var graph = SubjectRelationAnalyzer.Analyze(inputs);
@@ -354,7 +355,8 @@ public sealed class SubjectRelationAnalyzerTests
                 new RelationStaticFact("Assets/x/passive/passive.json", "passive", "passive",
                     "{\"id\":1010101,\"personality\":10201}", 2048),
             ],
-            anchors: [new RelationTextAnchor("1010101", "Passives.json", "穿刺抵抗", "受到的穿刺伤害降低", null)]);
+            anchors: [new RelationTextAnchor("1010101", "Passives.json", "穿刺抵抗", "受到的穿刺伤害降低", null,
+                RelationAnchorTables.Passive)]);
 
         var graph = SubjectRelationAnalyzer.Analyze(inputs);
 
@@ -399,7 +401,8 @@ public sealed class SubjectRelationAnalyzerTests
             assets: [new RelationAssetFact(SdPrefab, AssetType.GameObject, 1)],
             lang: [new RelationLangFact("AbDlg_Faust.json", 2)],
             audio: [new RelationAudioFact(@"C:\game\V.bank", sample, "Vorbis", 1)],
-            anchors: [new RelationTextAnchor(sample, "PersonalityVoiceDlg/x.json", null, null, "第一句台词")]);
+            anchors: [new RelationTextAnchor(sample, "PersonalityVoiceDlg/x.json", null, null, "第一句台词",
+                RelationAnchorTables.Voice)]);
 
         var graph = SubjectRelationAnalyzer.Analyze(inputs);
 
@@ -420,6 +423,110 @@ public sealed class SubjectRelationAnalyzerTests
 
         Assert.Equal(41, graph.Links.Count(x => x.SubjectId == "persona:10201"));
     }
+
+    // ── E.G.O 装备 / E.G.O 饰品 ─────────────────────────────────────
+
+    [Fact]
+    public void Ego_identity_comes_from_the_lang_definition_and_links_its_resources()
+    {
+        // 权威来源实测：lang 的 Egos.json（id 5 位、20101 起）。
+        // 资源（立绘/EgoBanner/技能图）只负责「链接」，不负责「定义身份」。
+        var inputs = Inputs(
+            assets:
+            [
+                new RelationAssetFact("Assets/Sprite/Unit/Profile/Ego/20101.png", AssetType.Sprite, 10),
+                new RelationAssetFact("Assets/UI/EgoBanner/20101.png", AssetType.Sprite, 20),
+            ],
+            anchors: [new RelationTextAnchor("20101", "Egos.json", "乌瞰刀", "李箱的基础E.G.O装备", null,
+                RelationAnchorTables.Ego)]);
+
+        var graph = SubjectRelationAnalyzer.Analyze(inputs);
+
+        var ego = Assert.Single(graph.Subjects);
+        Assert.Equal("ego:20101", ego.SubjectId);
+        Assert.Equal(RelationCategories.Ego, ego.SubjectKind);
+        Assert.Equal("E.G.O 装备", ego.CategoryLabel);
+        Assert.Equal("乌瞰刀", ego.DisplayName);
+        Assert.Equal("李箱的基础E.G.O装备", ego.Subtitle);
+
+        // lang 文件本身是定义处 → 一条精确强度的文本关联。
+        var text = Assert.Single(graph.Links, x => x.Kind == RelationKind.Text);
+        Assert.Equal("Egos.json", text.RefKey);
+        Assert.Equal(RelationPreviewKind.Exact, text.PreviewKind);
+        Assert.Equal("乌瞰刀", text.PreviewText);
+        Assert.Equal("20101", RelationDeepLink.Part(text.DeepLink, 1));
+
+        // 资源图挂上了（Profile/Ego 路径自带类别标记 → 无歧义）。
+        Assert.Contains(graph.Links, x => x.RefKey == "Assets/Sprite/Unit/Profile/Ego/20101.png");
+
+        // 跨资源边：文本 → 对象，且是「一个文件对多个对象」的那种多对多。
+        var edge = Assert.Single(graph.Xrefs, x => x.Relation == RelationXrefKinds.TextToSubject);
+        Assert.Equal("Egos.json", edge.FromRef);
+        Assert.Equal("ego:20101", edge.ToRef);
+    }
+
+    [Fact]
+    public void Ego_is_never_invented_from_a_resource_number_that_lang_does_not_list()
+    {
+        // 实测：资源侧有 17 个 20xxx 数字（侵蚀/觉醒后缀）并不在 Egos.json 里。
+        // 拿资源当身份源会造出「幽灵 EGO」——所以 20121 不得成为对象。
+        var inputs = Inputs(
+            assets:
+            [
+                new RelationAssetFact("Assets/Sprite/Unit/Profile/Ego/20101.png", AssetType.Sprite, 10),
+                new RelationAssetFact("Assets/Sprite/ErosionAppearance_20121.png", AssetType.Sprite, 10),
+            ],
+            anchors: [new RelationTextAnchor("20101", "Egos.json", "乌瞰刀", null, null, RelationAnchorTables.Ego)]);
+
+        var graph = SubjectRelationAnalyzer.Analyze(inputs);
+
+        Assert.Single(graph.Subjects);
+        Assert.DoesNotContain(graph.Links, x => x.RefKey.Contains("20121", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Ego_gift_ids_are_normalised_to_the_four_digit_base_and_layered_ids_merge()
+    {
+        // 实测：同一个饰品在 lang 里是 9701 / 19701 / 29701（+10000 / +20000 分层）。
+        // 不归一化会把一个饰品拆成三个对象。
+        var inputs = Inputs(
+            assets: [new RelationAssetFact("Assets/Sprite/EgoGiftIcon/9701.png", AssetType.Sprite, 5)],
+            anchors:
+            [
+                new RelationTextAnchor("9701", "EGOgift_MirrorDungeon.json", "火热多汁琵琶腿", "施加3层烧伤", null,
+                    RelationAnchorTables.EgoGift),
+                new RelationTextAnchor("19701", "EGOgift_StoryDungeon.json", "火热多汁琵琶腿", null, null,
+                    RelationAnchorTables.EgoGift),
+            ]);
+
+        var graph = SubjectRelationAnalyzer.Analyze(inputs);
+
+        var gift = Assert.Single(graph.Subjects);
+        Assert.Equal("ego_gift:9701", gift.SubjectId);
+        Assert.Equal("E.G.O 饰品", gift.CategoryLabel);
+        Assert.Equal("火热多汁琵琶腿", gift.DisplayName);
+
+        // 两个 lang 文件都指向同一个对象（多对一的那一侧）。
+        Assert.Equal(2, graph.Links.Count(x => x.Kind == RelationKind.Text));
+        Assert.Equal(2, graph.Xrefs.Count(x => x.Relation == RelationXrefKinds.TextToSubject));
+
+        // 图标按基准 4 位 id 挂上；路径自带 EgoGiftIcon 标记 → 不会被当成异想体。
+        var icon = Assert.Single(graph.Links, x => x.RefKey == "Assets/Sprite/EgoGiftIcon/9701.png");
+        Assert.Equal("ego_gift:9701", icon.SubjectId);
+    }
+
+    [Theory]
+    [InlineData(9701, "9701")]
+    [InlineData(19701, "9701")]
+    [InlineData(29701, "9701")]
+    [InlineData(1001, "1001")]
+    [InlineData(9995, "9995")]
+    // EGO 的 20101 落到 101（不是 4 位）→ 判为「不是饰品 id」，宁可丢掉也不造假。
+    [InlineData(20101, null)]
+    [InlineData(101, null)]
+    [InlineData(0, null)]
+    public void Gift_key_normalisation_is_pinned(int rawId, string? expected)
+        => Assert.Equal(expected, RelationEntityKeys.GiftKeyOf(rawId));
 
     // ── 关联键编码 ───────────────────────────────────────────────────
 
@@ -449,8 +556,8 @@ public sealed class SubjectRelationAnalyzerTests
     }
 
     [Fact]
-    public void Relation_format_version_is_v2()
-        => Assert.Equal("v2", RelationIndexSource.FormatVersion);
+    public void Relation_format_version_is_v3()
+        => Assert.Equal("v3", RelationIndexSource.FormatVersion);
 
     // ── 纯规则 ───────────────────────────────────────────────────────
 

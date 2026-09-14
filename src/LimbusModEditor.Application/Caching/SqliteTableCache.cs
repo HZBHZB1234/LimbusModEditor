@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Microsoft.Data.Sqlite;
 using NLog;
 
@@ -109,11 +110,113 @@ public sealed class SqliteTableCache
             if (Log.IsTraceEnabled)
                 Log.Trace("表缓存完整性探测：db={0} · sqlite_master 对象数={1}", Path.GetFileName(_dbFile), tableCount);
         }
+        HealSchemaDrift(connection);
         using var command = connection.CreateCommand();
         command.CommandText = "PRAGMA journal_mode=WAL;\n" + _schemaSql;
         command.ExecuteNonQuery();
         if (Log.IsDebugEnabled)
             Log.Debug("表缓存建表脚本已执行（WAL + CREATE TABLE IF NOT EXISTS）：db={0}", Path.GetFileName(_dbFile));
+    }
+
+    // ── 表结构漂移自愈 ───────────────────────────────────────────────
+
+    /// <summary><c>CREATE TABLE IF NOT EXISTS &lt;表&gt; (&lt;列…&gt;);</c> 的解析（建表脚本是受控格式）。</summary>
+    private static readonly Regex CreateTablePattern = new(
+        @"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+(?<table>[A-Za-z_][A-Za-z0-9_]*)\s*\((?<body>.*?)\)\s*;",
+        RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
+
+    /// <summary>表定义里不是列名的行首关键字（表级约束）。</summary>
+    private static readonly HashSet<string> TableConstraintKeywords =
+        new(StringComparer.OrdinalIgnoreCase) { "PRIMARY", "UNIQUE", "FOREIGN", "CONSTRAINT", "CHECK", "KEY" };
+
+    /// <summary>
+    /// 表结构漂移自愈：**已存在**的表的列集缺了当前脚本声明的列时，把该表丢掉重建。
+    ///
+    /// <para><b>为什么必须有这一层</b>：建表脚本全是 <c>CREATE TABLE IF NOT EXISTS</c>——
+    /// 表一旦存在，脚本就<b>不会</b>把它的结构改成新的。只要某个库的列集变过
+    /// （真实案例：关联图 v1 → v2 给 <c>subjects</c> 加了 <c>category_label</c>、给 <c>links</c>
+    /// 加了预览列、新增了 <c>xref</c> 表），盘上的旧库就会以「老结构 + 新签名」的状态继续被复用，
+    /// 轻则查询报 <c>no such column</c>，重则被当成新鲜缓存返回<b>空结论</b>——
+    /// 缓存只该影响速度，绝不该改变结论。</para>
+    ///
+    /// <para><b>判据取「缺列」而不是「列集完全相等」</b>：脚本解析只要漏读一列就永远不会
+    /// 触发自愈（安全方向），而「旧表缺新列」正是唯一会让读写直接失败的情形。
+    /// 一旦发生漂移，连同 <c>index_meta</c> 一起清空——数据没了，新鲜度声明必须同时作废，
+    /// 否则下一次仍会把空表当「源未变」复用。</para>
+    /// </summary>
+    private void HealSchemaDrift(SqliteConnection connection)
+    {
+        var expected = ExpectedColumns(_schemaSql);
+        if (expected.Count == 0) return;
+
+        var drifted = new List<string>();
+        foreach (var (table, columns) in expected)
+        {
+            var actual = ActualColumns(connection, table);
+            if (actual.Count == 0) continue;                        // 表还不存在 → 交给建表脚本
+            if (columns.All(actual.Contains)) continue;             // 声明的列都在 → 无漂移
+            drifted.Add(table);
+        }
+        if (drifted.Count == 0) return;
+
+        using (var transaction = connection.BeginTransaction())
+        {
+            foreach (var table in drifted)
+            {
+                using var drop = connection.CreateCommand();
+                drop.Transaction = transaction;
+                drop.CommandText = $"DROP TABLE IF EXISTS \"{table}\"";
+                drop.ExecuteNonQuery();
+            }
+            using var clearMeta = connection.CreateCommand();
+            clearMeta.Transaction = transaction;
+            clearMeta.CommandText = "DELETE FROM index_meta";
+            clearMeta.ExecuteNonQuery();
+            transaction.Commit();
+        }
+        Log.Warn("表缓存结构已过时，已丢弃重建（数据随表一起作废）：db={0} · 表={1}",
+            Path.GetFileName(_dbFile), string.Join(", ", drifted));
+    }
+
+    /// <summary>从建表脚本里解析出「表 → 声明的列名」。</summary>
+    private static Dictionary<string, HashSet<string>> ExpectedColumns(string script)
+    {
+        var map = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (Match match in CreateTablePattern.Matches(script))
+        {
+            var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var raw in match.Groups["body"].Value.Split('\n'))
+            {
+                var line = raw.Trim();
+                if (line.Length == 0) continue;
+                var tokens = line.Split([' ', '\t', ','], StringSplitOptions.RemoveEmptyEntries);
+                if (tokens.Length == 0) continue;
+                var name = tokens[0].Trim('"', '`', '[', ']');
+                if (name.Length == 0 || TableConstraintKeywords.Contains(name)) continue;
+                columns.Add(name);
+            }
+            if (columns.Count > 0) map[match.Groups["table"].Value] = columns;
+        }
+        return map;
+    }
+
+    /// <summary>读一张表实际存在的列名（表不存在时返回空集）。</summary>
+    private HashSet<string> ActualColumns(SqliteConnection connection, string table)
+    {
+        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using var command = connection.CreateCommand();
+        command.CommandText = $"PRAGMA table_info(\"{table}\")";
+        try
+        {
+            using var reader = command.ExecuteReader();
+            while (reader.Read()) columns.Add(reader.GetString(1));
+        }
+        catch (SqliteException ex)
+        {
+            // 读不到结构（库损坏等）→ 交回「无漂移」，让既有的删库重建路径去处理。
+            Log.Debug(ex, "读表结构失败（按无漂移处理）：db={0} · 表={1}", Path.GetFileName(_dbFile), table);
+        }
+        return columns;
     }
 
     /// <summary>轻量迁移：列不存在则 <c>ALTER TABLE ADD COLUMN</c>；已存在（或补列失败）
@@ -300,6 +403,10 @@ public sealed class SqliteTableCache
     /// <para><paramref name="languagePrefix"/> 是「条目相对哪个子目录」（plan-16 §5 的活动语言
     /// 目录前缀）。它与签名一起写入、一起对账：**前缀变了同样整库重建**，因为条目口径以它为基准，
     /// 前缀与行集不匹配就会把文件路径拼到错误的位置。</para>
+    ///
+    /// <para><b>「源变了」只清数据、不动结构</b>：结构是否跟得上当前脚本由
+    /// <see cref="HealSchemaDrift"/> 单独负责（<see cref="EnsureSchema"/> 里已经跑过）。
+    /// 两件事各有单一负责人，避免「谁该负责重建」在两条路径上出现分歧。</para>
     ///
     /// <para>这就是「源目录换（共享配置改游戏目录）即整体失效重建」的唯一实现。</para></summary>
     public bool EnsureSource(string sourceKey, string signature, string languagePrefix = "")

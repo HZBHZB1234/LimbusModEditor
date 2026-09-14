@@ -33,13 +33,27 @@ public static class SubjectRelationAnalyzer
     private const int MinIdDigits = 4;
     private const int MaxIdDigits = 5;
 
-    /// <summary>类别权威来源的路径标记（只有这些路径才会<b>创造</b>身份）。</summary>
-    private static readonly (string Marker, string Category)[] AuthorityMarkers =
+    /// <summary>
+    /// <b>创造身份</b>的路径标记——只有这些路径会让一个对象「存在」。
+    /// 判据是「这个路径本身就是一份实体清单」：Appearance 预制体一个文件对应一个实体。
+    /// </summary>
+    private static readonly (string Marker, string Category)[] IdentityMarkers =
     [
         ("/Prefab/SD/Personality/", RelationCategories.Persona),
         ("/Prefab/SD/Enemy/", RelationCategories.Enemy),
         ("/Prefab/SD/Abnormality/", RelationCategories.Abnormality),
+    ];
+
+    /// <summary>
+    /// <b>只用于给路径提示类别</b>（绝不创造身份）的标记。
+    /// 用途：路径自带类别标记时，同号 id 的歧义可以直接消解（<c>Sprite/EgoGiftIcon/9701.png</c>
+    /// 一定是饰品 9701，不用再问「9701 是饰品还是异想体」）。
+    /// </summary>
+    private static readonly (string Marker, string Category)[] PathCategoryMarkers =
+    [
         ("/Sprite/BattleAnnouncer/", RelationCategories.Announcer),
+        ("/Sprite/EgoGiftIcon/", RelationCategories.EgoGift),
+        ("/Sprite/Unit/Profile/Ego/", RelationCategories.Ego),
     ];
 
     /// <summary>角色名 → （规范英文名, 中文名）。中文名只用于显示；
@@ -181,6 +195,13 @@ public static class SubjectRelationAnalyzer
     private sealed record Identity(string Category, string Key, string Character, string Style)
     {
         public string SubjectId => SubjectIds.Make(Category, Key);
+
+        /// <summary>lang 里给出的权威名称（E.G.O 装备/饰品的显示名来自这里）。
+        /// 空 = 该类别没有 lang 名称，显示名按类别规则算。</summary>
+        public string Name { get; init; } = string.Empty;
+
+        /// <summary>lang 里给出的补充说明（如「李箱的基础E.G.O装备」）——当副标题用。</summary>
+        public string Note { get; init; } = string.Empty;
     }
 
     /// <summary>把「事实 → 关联图」的过程收在一个可变构造器里，避免到处传中间集合。</summary>
@@ -201,6 +222,7 @@ public static class SubjectRelationAnalyzer
             ReadPersonaIdentities();
             ReadPrefabIdentities();
             ReadAnnouncerIdentities();
+            ReadAnchorIdentities();
             BuildNumericIndex();
             LinkAssets();
             LinkAudio();
@@ -269,6 +291,71 @@ public static class SubjectRelationAnalyzer
                 _identities[identity.SubjectId] = _identities[identity.SubjectId] with { Style = style };
         }
 
+        /// <summary>
+        /// 权威来源：<c>Egos.json</c>（E.G.O 装备）与 <c>EGOgift*.json</c>（E.G.O 饰品）。
+        /// 只有这两类锚点的 id 集合「就是实体清单」，所以由它们创造身份；
+        /// 被动/技能/语音的数值 id 只是外键，绝不能当实体清单用（会造出幽灵对象）。
+        /// </summary>
+        private void ReadAnchorIdentities()
+        {
+            foreach (var anchor in _inputs.TextAnchors)
+            {
+                switch (anchor.Table)
+                {
+                    case RelationAnchorTables.Ego:
+                        if (!TryParseId(anchor.Anchor, out _)) continue;
+                        RegisterAnchorIdentity(RelationCategories.Ego, anchor.Anchor, anchor);
+                        break;
+
+                    case RelationAnchorTables.EgoGift:
+                        // 分层 id 归一化到 4 位基准键：9701 / 19701 / 29701 是同一个饰品。
+                        if (!TryParseId(anchor.Anchor, out var raw)) continue;
+                        var giftKey = RelationEntityKeys.GiftKeyOf(raw);
+                        if (giftKey is null) continue;
+                        RegisterAnchorIdentity(RelationCategories.EgoGift, giftKey, anchor);
+                        break;
+                }
+            }
+        }
+
+        /// <summary>
+        /// 建（或补齐）一个由 lang 锚点定义的身份，并顺手把「文件 → 对象」这条边记下来。
+        /// <b>补齐而不覆盖</b>：同一个实体常被多个 lang 文件提到，先到的名字更权威。
+        /// </summary>
+        private void RegisterAnchorIdentity(string category, string key, RelationTextAnchor anchor)
+        {
+            var subjectId = SubjectIds.Make(category, key);
+            if (!_identities.TryGetValue(subjectId, out var existing))
+            {
+                _identities[subjectId] = new Identity(category, key, string.Empty, string.Empty)
+                {
+                    Name = anchor.Name ?? string.Empty,
+                    Note = anchor.Desc ?? string.Empty,
+                };
+            }
+            else
+            {
+                var updated = existing;
+                if (updated.Name.Length == 0 && !string.IsNullOrWhiteSpace(anchor.Name))
+                    updated = updated with { Name = anchor.Name };
+                if (updated.Note.Length == 0 && !string.IsNullOrWhiteSpace(anchor.Desc))
+                    updated = updated with { Note = anchor.Desc };
+                if (!ReferenceEquals(updated, existing)) _identities[subjectId] = updated;
+            }
+
+            // lang 文件本身就是该实体的定义处 → 一条精确强度的文本关联 + 一条跨资源边。
+            AddLink(category, key, RelationKind.Text, anchor.RelativePath, anchor.RelativePath,
+                RelationCategories.Label(category) + "定义", anchor.Anchor.Length,
+                previewText: anchor.Name ?? anchor.Body,
+                previewKind: RelationPreviewKind.Exact,
+                mediaKind: "text",
+                refPath: anchor.RelativePath,
+                deepLink: RelationDeepLink.ForText(anchor.RelativePath, anchor.Anchor),
+                targetSubjectId: subjectId);
+            AddXref(anchor.RelativePath, subjectId, RelationXrefKinds.TextToSubject,
+                "text", "subject", nameof(RelationPreviewKind.Exact), anchor.Name);
+        }
+
         /// <summary>敌人 / 异想体身份：只认 <c>Prefab/SD/(Enemy|Abnormality)/&lt;id&gt;_…Appearance.prefab</c>。</summary>
         private void ReadPrefabIdentities()
         {
@@ -276,9 +363,9 @@ public static class SubjectRelationAnalyzer
             {
                 var entry = asset.ContainerEntry;
                 if (string.IsNullOrEmpty(entry)) continue;
-                foreach (var (marker, category) in AuthorityMarkers)
+                foreach (var (marker, category) in IdentityMarkers)
                 {
-                    if (category == RelationCategories.Persona || category == RelationCategories.Announcer) continue;
+                    if (category == RelationCategories.Persona) continue;
                     if (!entry.Contains(marker, StringComparison.OrdinalIgnoreCase)) continue;
                     var rest = TrimPrefix(entry[(entry.IndexOf(marker, StringComparison.OrdinalIgnoreCase) + marker.Length)..], "Fools_");
                     var tokens = WithoutExtension(rest).Split('_', StringSplitOptions.RemoveEmptyEntries);
@@ -599,7 +686,7 @@ public static class SubjectRelationAnalyzer
                     identity.SubjectId,
                     identity.Category,
                     DisplayNameOf(identity),
-                    identity.Style,
+                    SubtitleOf(identity),
                     string.IsNullOrEmpty(identity.Character) ? string.Empty : EnglishNameOf(identity.Character),
                     SortKeyOf(identity))
                 {
@@ -650,6 +737,11 @@ public static class SubjectRelationAnalyzer
 
         private static string DisplayNameOf(Identity identity)
         {
+            // E.G.O 装备 / 饰品：显示名只认 lang 里的权威名称（如「乌瞰刀」），
+            // 不去猜、也不拿 id 当名字。lang 缺名称时退回 id。
+            if (identity.Category is RelationCategories.Ego or RelationCategories.EgoGift)
+                return string.IsNullOrWhiteSpace(identity.Name) ? identity.Key : identity.Name;
+
             if (identity.Category == RelationCategories.Persona)
             {
                 var display = Characters.TryGetValue(identity.Character, out var mapped) ? mapped.Chinese : identity.Character;
@@ -664,6 +756,12 @@ public static class SubjectRelationAnalyzer
             // 敌人 / 异想体：显示名用文件名里的名字 token（原样，不猜）。
             return string.IsNullOrEmpty(identity.Character) ? identity.Key : identity.Character;
         }
+
+        /// <summary>副标题：E.G.O 类用 lang 的说明（如「李箱的基础E.G.O装备」），其余用风格 token。</summary>
+        private static string SubtitleOf(Identity identity)
+            => identity.Category is RelationCategories.Ego or RelationCategories.EgoGift
+                ? identity.Note
+                : identity.Style;
 
         private static string EnglishNameOf(string character)
             => Characters.TryGetValue(character, out var mapped) ? mapped.English : character;
@@ -741,7 +839,9 @@ public static class SubjectRelationAnalyzer
         /// <summary>路径自带的类别标记（权威来源目录），没有返回 null。</summary>
         private static string? CategoryFromPath(string entry)
         {
-            foreach (var (marker, category) in AuthorityMarkers)
+            foreach (var (marker, category) in IdentityMarkers)
+                if (entry.Contains(marker, StringComparison.OrdinalIgnoreCase)) return category;
+            foreach (var (marker, category) in PathCategoryMarkers)
                 if (entry.Contains(marker, StringComparison.OrdinalIgnoreCase)) return category;
             return null;
         }

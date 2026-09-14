@@ -1,3 +1,4 @@
+using System.Globalization;
 using LimbusModEditor.Domain.Assets;
 
 namespace LimbusModEditor.Application.Relations;
@@ -149,8 +150,63 @@ public static class RelationXrefKinds
     /// <summary>静态表记录 → lang 记录（数值 id 外键链）。</summary>
     public const string StaticToLang = "static->lang";
 
+    /// <summary>lang 文件 → 对象。用于「这个 lang 文件定义了哪些对象」（<c>Egos.json</c> → 112 个 EGO）；
+    /// 是<b>多对多</b>：一个文件定义多个对象，一个对象也可能被多个文件提到。</summary>
+    public const string TextToSubject = "text->subject";
+
     /// <summary>资源 → 对象（含中立路径的歧义关联）。</summary>
     public const string ResourceToSubject = "resource->subject";
+}
+
+/// <summary>
+/// <see cref="RelationTextAnchor.Table"/> 的取值。只有 <see cref="Ego"/> 与 <see cref="EgoGift"/>
+/// 是「权威来源」（它们的 id 集合就是该类别的实体清单）；其余只是可展示文本。
+/// </summary>
+public static class RelationAnchorTables
+{
+    /// <summary>人格语音台词（<c>PersonalityVoiceDlg/</c>、<c>EGOVoiceDig/</c>）。不创造身份。</summary>
+    public const string Voice = "voice";
+
+    /// <summary>被动（<c>Passives.json</c>）。数值 id 是外键、不是实体清单。</summary>
+    public const string Passive = "passive";
+
+    /// <summary>技能（<c>Skills.json</c>）。同上。</summary>
+    public const string Skill = "skill";
+
+    /// <summary>E.G.O 装备（<c>Egos.json</c>）——<b>权威来源</b>。</summary>
+    public const string Ego = "ego";
+
+    /// <summary>E.G.O 饰品（<c>EGOgift*.json</c>）——<b>权威来源</b>。</summary>
+    public const string EgoGift = "ego_gift";
+}
+
+/// <summary>
+/// 实体键的归一化规则（把 lang 里的「原始 id」变成关联图里的「类别内唯一键」）。
+/// 纯函数、可单测——因为「归一化错了」会静默把两个实体合成一个，必须在测试里钉死。
+/// </summary>
+public static class RelationEntityKeys
+{
+    /// <summary>
+    /// E.G.O 饰品在 lang 里的分层步长。实测同一个饰品会出现
+    /// <c>9701</c> / <c>19701</c> / <c>29701</c>（+10000 / +20000 的层偏移），
+    /// 图标只用基准 4 位 id。
+    /// </summary>
+    public const int GiftLayerSize = 10000;
+
+    /// <summary>基准 id 的下界（实测 1001–9995）。低于它的归一到不到 4 位，判为「不是饰品 id」。</summary>
+    private const int GiftBaseMinimum = 1000;
+
+    /// <summary>
+    /// 把 lang 里的饰品 id 归一化成 4 位基准键。
+    /// <para><b>归一化后不是 4 位就返回 null</b>（例如把 EGO 的 <c>20101</c> 误当饰品 →
+    /// <c>101</c>）：宁可丢掉一条也不造一个假实体。</para>
+    /// </summary>
+    public static string? GiftKeyOf(int rawId)
+    {
+        if (rawId <= 0) return null;
+        var baseId = rawId % GiftLayerSize;
+        return baseId < GiftBaseMinimum ? null : baseId.ToString(CultureInfo.InvariantCulture);
+    }
 }
 
 /// <summary>一条 lang 里可被当成「锚点」的事实：一个 id 对应的可展示内容。</summary>
@@ -159,8 +215,15 @@ public static class RelationXrefKinds
 /// <param name="Name">名称（被动/EGO 的 <c>name</c>）；语音为 null。</param>
 /// <param name="Desc">描述（语音的 <c>desc</c> 如「自身混乱」；被动/EGO 的 <c>desc</c> 描述）。</param>
 /// <param name="Body">正文（语音的 <c>dlg</c> 台词原文）。</param>
+/// <param name="Table">
+/// 锚点来自哪一类表：<c>voice</c>（语音台词，<b>不创造身份</b>）/ <c>passive</c> / <c>skill</c> /
+/// <c>ego</c> / <c>ego_gift</c>。
+/// <para><b>为什么必须显式带上</b>：只有 <c>ego</c> 与 <c>ego_gift</c> 两种锚点是
+/// 「权威来源」（它们的 id 集合就是该类别的实体清单）；其余只是可展示文本。
+/// 靠「文件名叫什么」去猜会让改名的 lang 文件静默失去权威性。</para>
+/// </param>
 public sealed record RelationTextAnchor(
-    string Anchor, string RelativePath, string? Name, string? Desc, string? Body);
+    string Anchor, string RelativePath, string? Name, string? Desc, string? Body, string Table);
 
 /// <summary>分析输入：Unity 资源索引里**有容器路径**的资源事实（容器路径是用户可读口径）。</summary>
 public sealed record RelationAssetFact(string ContainerEntry, AssetType Type, long SizeBytes);
@@ -247,12 +310,16 @@ public sealed record RelationInputs(
 public sealed record RelationIndexSource(string SourceKey, string Signature)
 {
     /// <summary>
-    /// 关联图的口径版本。只要「抽哪些事实 / 怎么算关联 / 表结构」变了就 +1，
+    /// 关联图的口径版本。只要「抽哪些事实 / 怎么算关联 / 表结构 / 落库的列」变了就 +1，
     /// 旧的派生库不能继续被当成新鲜的。
     /// <para><b>v1 → v2</b>：subject_id 加类别前缀（多类别）、links 增加预览与跳转载荷、
-    /// 新增 <c>xref</c> 表、新增 lang 锚点输入。</para>
+    /// 新增 <c>xref</c> 表、新增 lang 锚点输入、新增 E.G.O 装备/饰品两个类别。</para>
+    /// <para><b>v2 → v3</b>：修好 <c>PersistGraph</c>——v2 期间 <c>xref</c> 一条都没落库、
+    /// <c>links</c> 的 7 个新列全被写成 NULL（建表有列、写入语句忘了带上，不报错）。
+    /// 盘上已有的 v2 签名对应的是<b>残缺图</b>，所以必须换口径号强制重建一次；
+    /// 不换的话旧库会被判定「源未变」直接复用，缺口永远补不上。</para>
     /// </summary>
-    public const string FormatVersion = "v2";
+    public const string FormatVersion = "v3";
 
     /// <summary>由四个上游源的签名构造。</summary>
     /// <param name="unitySignature">资源索引（Unity 缓存 bundle 集合）的签名。</param>

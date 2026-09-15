@@ -74,7 +74,7 @@ public sealed class AssetCatalogTests : IDisposable
     private static IReadOnlyList<UnityCacheIndexRow> RowsOf()
         => [.. Template.Select((row, index) =>
             new UnityCacheIndexRow(index, row.Container, row.PathId, row.TypeId, row.Type, row.Size,
-                row.Baseline, row.ContainerEntry))];
+                row.Baseline, row.ContainerEntry, AssetStaticClassifier.RowBits(row.ContainerEntry)))];
 
     private UnityCacheSqliteIndexStore NewStore()
     {
@@ -114,6 +114,38 @@ public sealed class AssetCatalogTests : IDisposable
             Assert.Equal((long)expected.Count, actual.TotalCount);
             AssertSameRows(expected, actual.Items, Describe(query));
         }
+    }
+
+    /// <summary>
+    /// 「默认视图隐藏静态数据表」必须真的生效，而且**只**隐藏静态行 —— 这是用户最初要求
+    /// 过滤的那个功能（十几万条美术资源里混着两千多条游戏数据表）。判据是扫描期算好落进
+    /// <c>assets.static_kind</c> 的位掩码，所以这里同时钉住三件事：三种静态形态各自被认出来、
+    /// 默认视图的命中数正好是「全部 − 静态」、非静态行一条都没被误伤。
+    /// </summary>
+    [Fact]
+    public async Task Default_view_hides_static_tables_only()
+    {
+        var harness = await NewHarnessAsync();
+        var staticPaths = harness.Project.Assets
+            .Where(AssetSearchService.IsStaticTable)
+            .Select(x => x.LogicalPath)
+            .ToArray();
+        // 三种形态（位1 catalog 标记 / 位2 bundle 名 / 位4 容器路径）在数据集里都必须有样本，
+        // 否则本用例会在「判据漏了一整类」时假装通过。
+        Assert.Contains(harness.Project.Assets, x => AssetStaticClassifier.Of(x).HasFlag(StaticKind.CatalogMark));
+        Assert.Contains(harness.Project.Assets, x => AssetStaticClassifier.Of(x).HasFlag(StaticKind.BundleName));
+        Assert.Contains(harness.Project.Assets, x => AssetStaticClassifier.Of(x).HasFlag(StaticKind.ContainerPath));
+
+        var shown = harness.Catalog.Page(new AssetSearchQuery(), 0, int.MaxValue);
+        var all = harness.Catalog.Page(new AssetSearchQuery { ShowStaticTables = true }, 0, int.MaxValue);
+        Assert.Equal((long)harness.Project.Assets.Count, all.TotalCount);
+        Assert.Equal((long)staticPaths.Length, all.TotalCount - shown.TotalCount);
+        Assert.DoesNotContain(shown.Items, AssetSearchService.IsStaticTable);
+        Assert.All(staticPaths, path => Assert.Contains(all.Items, x => x.LogicalPath == path));
+
+        // 与旧搜索同一结论：两条路径对「藏了哪些、留了哪些」必须逐行同序。
+        var legacy = harness.Search.Search(harness.Project, new AssetSearchQuery());
+        Assert.Equal(legacy.Select(x => x.LogicalPath), shown.Items.Select(x => x.LogicalPath));
     }
 
     /// <summary>分页不改变顺序：按任意页大小拼接必须等于整份结果。</summary>
@@ -278,7 +310,9 @@ public sealed class AssetCatalogTests : IDisposable
     public async Task Locate_finds_the_same_row_that_paging_returns()
     {
         var harness = await NewHarnessAsync();
-        var unfiltered = new AssetSearchQuery();
+        // 「无筛选」必须显式说清楚：默认视图（`new AssetSearchQuery()`）现在**隐藏静态数据表**，
+        // 它已经不是无筛选了。全局名次 == 命中集下标这条等式只在真的不加条件时成立。
+        var unfiltered = new AssetSearchQuery { ShowStaticTables = true };
         foreach (var asset in harness.Project.Assets)
         {
             var location = harness.Catalog.Locate(asset.LogicalPath);
@@ -291,12 +325,17 @@ public sealed class AssetCatalogTests : IDisposable
         }
 
         // 有筛选的视图里，看不到的记录没有下标 —— 但全局名次仍然拿得到。
-        // 原本用「默认视图隐藏静态数据表」演示这一点，那条筛选已移除（2026-09-15）；
-        // 改用资源页默认的「仅容器内」这条稳定维度（支撑对象这个维度不会随产品决定消失）。
+        // 这里两条筛选各压一半：默认视图只藏静态行（静态行仍有全局名次），
+        // 「仅容器内」这条稳定维度藏掉支撑对象。
         var containerOnly = new AssetSearchQuery { HasContainerEntry = true };
         var support = harness.Project.Assets.First(x => x.UnityPathId == 10);
         Assert.NotNull(harness.Catalog.Locate(support.LogicalPath));
         Assert.Null(harness.Catalog.IndexIn(containerOnly, support.LogicalPath));
+        var staticAsset = harness.Project.Assets.First(x => AssetSearchService.IsStaticTable(x));
+        Assert.NotNull(harness.Catalog.Locate(staticAsset.LogicalPath));
+        Assert.Null(harness.Catalog.IndexIn(new AssetSearchQuery(), staticAsset.LogicalPath));
+        Assert.NotNull(harness.Catalog.IndexIn(new AssetSearchQuery { ShowStaticTables = true },
+            staticAsset.LogicalPath));
         Assert.Equal((long?)null, harness.Catalog.IndexIn(unfiltered, "nope"));
 
         Assert.Null(harness.Catalog.Locate("导入的旧式资源/名字.id"));
@@ -357,8 +396,10 @@ public sealed class AssetCatalogTests : IDisposable
     {
         var filters = new AssetSearchQuery[]
         {
-            new(),                                              // 默认视图
+            new(),                                              // 默认视图（隐藏静态数据表）
+            new() { ShowStaticTables = true },                  // 勾了「显示静态数据表」
             new() { HasContainerEntry = true },                 // 资源页默认勾选的那个
+            new() { HasContainerEntry = true, ShowStaticTables = true },
             new() { HasContainerEntry = false },
             new() { Text = "cg_0" },                            // 命中显示路径
             new() { Text = "CG_10" },                           // 大小写不敏感
@@ -406,7 +447,7 @@ public sealed class AssetCatalogTests : IDisposable
            $" · 路径 {query.UnityPathId?.ToString() ?? "-"} · 类 {query.UnityTypeId?.ToString() ?? "-"}" +
            $" · 大小 [{query.MinSize?.ToString() ?? "-"}..{query.MaxSize?.ToString() ?? "-"}]" +
            $" · 有替换 {query.HasReplacement?.ToString() ?? "-"} · 有条目 {query.HasContainerEntry?.ToString() ?? "-"}" +
-           $" · 状态 {query.State?.ToString() ?? "-"} · 排序 {query.Sort}";
+           $" · 静态表 {query.ShowStaticTables} · 状态 {query.State?.ToString() ?? "-"} · 排序 {query.Sort}";
 
     private static void AssertSameRows(
         IReadOnlyList<AssetRecord> expected, IReadOnlyList<AssetRecord> actual, string because)

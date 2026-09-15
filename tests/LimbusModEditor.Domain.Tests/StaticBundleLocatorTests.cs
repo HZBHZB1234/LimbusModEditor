@@ -137,17 +137,22 @@ public class StaticBundleLocatorTests : IDisposable
             AssetStaticClassifier.Of(asset).HasFlag(StaticKind.CatalogMark),
             $"catalog 内层键命中却没写位1：{AssetDisplay.DisplayPath(asset)}"));
 
-        // 资源工作台默认视图（2026-09-15 起恢复「按静态数据筛选」）之外，全量搜索仍应看到它们：
-        // 静态数据表本来就该能在资源工作台里查到并编辑。
+        // 资源工作台默认视图隐藏静态数据表（2026-09 恢复这条产品决定；判据不再是运行时
+        // 逐行重算，而是扫描期落库的 static_kind）——上面已经钉住「这一整个 bundle 都是静态」，
+        // 所以默认搜索里应当**一条都不剩**，勾上「显示静态数据表」必须原样全部回来。
         var search = new AssetSearchService();
-        Assert.Equal(project.Assets.Count, search.Search(project.Assets.ToArray(), new AssetSearchQuery()).Count);
+        Assert.Empty(search.Search(project.Assets.ToArray(), new AssetSearchQuery()));
+        Assert.Equal(project.Assets.Count,
+            search.Search(project.Assets.ToArray(), new AssetSearchQuery(ShowStaticTables: true)).Count);
 
         // 回灌（打开旧项目）后结论必须仍在：索引持久化了 static_kind。
         var rehydrated = new ModProject { Name = "Rehydrate" };
         var added = await service.RehydrateFromIndexAsync(rehydrated);
         Assert.Equal(project.Assets.Count, added);
         Assert.All(rehydrated.Assets, asset => Assert.True(AssetStaticClassifier.IsStatic(AssetStaticClassifier.Of(asset))));
-        Assert.Equal(rehydrated.Assets.Count, search.Search(rehydrated.Assets.ToArray(), new AssetSearchQuery()).Count);
+        Assert.Empty(search.Search(rehydrated.Assets.ToArray(), new AssetSearchQuery()));
+        Assert.Equal(rehydrated.Assets.Count,
+            search.Search(rehydrated.Assets.ToArray(), new AssetSearchQuery(ShowStaticTables: true)).Count);
     }
 
     /// <summary>

@@ -433,15 +433,15 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
         RequestSearch();
     }
 
-    /// <summary>复选框类筛选（「仅显示容器内资源」/「仅已替换」）：XAML 里的
+    /// <summary>复选框类筛选（「仅显示容器内资源」/「显示静态数据表」/「仅已替换」）：XAML 里的
     /// 初始 IsChecked 会在解析期间就触发 Checked，此时 <see cref="_searchTimer"/>
     /// 还没建好（构造函数在 InitializeComponent 之后才赋值），必须跳过。</summary>
     private void Filter_Changed(object sender, RoutedEventArgs e)
     {
         if (_searchTimer is null || _host.Project is null) return;
-        if (Log.IsDebugEnabled) Log.Debug("用户勾选复选框筛选：容器内={0}，仅已替换={1}，发送者={2}",
-            ContainerOnlyFilter?.IsChecked == true, ReplacedOnlyFilter?.IsChecked == true,
-            (sender as FrameworkElement)?.Name ?? "-");
+        if (Log.IsDebugEnabled) Log.Debug("用户勾选复选框筛选：容器内={0}，显示静态表={1}，仅已替换={2}，发送者={3}",
+            ContainerOnlyFilter?.IsChecked == true, ShowStaticFilter?.IsChecked == true,
+            ReplacedOnlyFilter?.IsChecked == true, (sender as FrameworkElement)?.Name ?? "-");
         RequestSearch();
     }
 
@@ -463,6 +463,7 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
         StateFilter.SelectedIndex = -1;
         SortFilter.SelectedIndex = 0;
         ContainerOnlyFilter.IsChecked = true;
+        ShowStaticFilter.IsChecked = false;
         MinSizeFilter.Text = string.Empty;
         MaxSizeFilter.Text = string.Empty;
         ReplacedOnlyFilter.IsChecked = false;
@@ -520,12 +521,13 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
         if (long.TryParse(MaxSizeFilter.Text.Trim(), out var maxSize) && maxSize > 0) maxKb = maxSize * 1024;
         var sort = (AssetSortKind)Math.Clamp(SortFilter?.SelectedIndex ?? 0, 0, 4);
         Log.Debug("构造搜索条件：关键词长度={0}，类型={1}，状态={2}，最小={3} KB，最大={4} KB，"
-            + "仅已替换={5}，排序={6}，仅容器内={7}",
+            + "仅已替换={5}，排序={6}，仅容器内={7}，显示静态表={8}",
             SearchBox?.Text?.Length ?? 0,
             selectedType?.ToString() ?? "-", selectedState?.ToString() ?? "-",
             minKb?.ToString() ?? "-", maxKb?.ToString() ?? "-",
             ReplacedOnlyFilter?.IsChecked == true, sort,
-            ContainerOnlyFilter?.IsChecked == true);
+            ContainerOnlyFilter?.IsChecked == true,
+            ShowStaticFilter?.IsChecked == true);
         return new AssetSearchQuery(
             SearchBox?.Text,
             selectedType,
@@ -537,7 +539,8 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
             maxKb,
             ReplacedOnlyFilter!.IsChecked,
             sort,
-            ContainerOnlyFilter?.IsChecked == true ? true : null);
+            ContainerOnlyFilter?.IsChecked == true ? true : null,
+            ShowStaticFilter?.IsChecked == true);
     }
 
     /// <summary>下拉筛选的当前值：未选择、以及列表首项「（全部…）」一律返回

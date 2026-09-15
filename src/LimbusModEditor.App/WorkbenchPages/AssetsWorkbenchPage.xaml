@@ -57,6 +57,15 @@
                     <CheckBox x:Name="ContainerOnlyFilter" Content="仅显示容器内资源" VerticalAlignment="Center" Margin="10,0,0,0"
                               IsChecked="True" Checked="Filter_Changed" Unchecked="Filter_Changed"
                               ToolTip="只列出能在游戏容器（m_Container）里找到的资源，即游戏真正加载的那些。"/>
+                    <!--
+                        静态数据表（Assets/Resources_moved/StaticData/static-data/*）是游戏的数据表
+                        （技能/关卡/道具等），不是美术资源 —— 它们混在十几万条资源里会让列表没法用，
+                        所以默认不出现。判据在扫描期算好落进索引列（assets.static_kind 位掩码），
+                        勾选只是把「排除静态」那条下推条件去掉，不重新逐行判定。
+                    -->
+                    <CheckBox x:Name="ShowStaticFilter" Content="显示静态数据表" VerticalAlignment="Center" Margin="10,0,0,0"
+                              IsChecked="False" Checked="Filter_Changed" Unchecked="Filter_Changed"
+                              ToolTip="静态数据表是游戏的配置数据（static-data/*.json），默认隐藏；勾选后可与普通资源一起查找、预览、编辑。"/>
                     <Button Content="清除筛选" Click="ClearFilters_Click" Margin="10,0,0,0" Padding="10,3"/>
                 </WrapPanel>
                 <Expander DockPanel.Dock="Top" Header="高级筛选" Foreground="{StaticResource WbTextMutedBrush}" Margin="0,0,0,8">

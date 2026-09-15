@@ -50,9 +50,10 @@ public readonly record struct AssetCatalogEntry(int Rank, int ExtraIndex)
 
 /// <summary>
 /// 项目态覆盖的取值来源：按 LogicalPath 给出**项目里已经存在的**那条记录。
-/// <para>为什么需要它：索引库只有扫描时的事实（类型、大小、容器、bundle 归属），
+/// <para>为什么需要它：索引库只有扫描时的事实（类型、大小、容器、bundle 归属、静态结论），
 /// 而资源列表要显示的事实里有一半属于**项目态** —— 编辑状态、已实体化的本地副本路径、
-/// 替换文件、静态标记的最终结论。索引 + 项目态覆盖才是列表看到的记录。</para>
+/// 替换文件。索引 + 项目态覆盖才是列表看到的记录（静态结论以索引为权威，见
+/// <see cref="AssetCatalog.MergeProjectState"/>）。</para>
 /// <para>实现要保证「查不到」是廉价且正确的：S3a 阶段 <see cref="ModProject.Assets"/> 仍
 /// 全量常驻，所以现成的实现会建一份全量字典；等集合收窄成「只含项目态记录」之后，
 /// 同一份实现自然变轻，调用点不用改。</para>
@@ -381,7 +382,11 @@ public sealed class AssetCatalog
             MaxSize: query.MaxSize,
             Container: query.Container,
             HasContainerEntry: query.HasContainerEntry,
-            Text: text));
+            Text: text,
+            // 勾了「显示静态数据表」= 不加静态条件（全部可见）；没勾 = 只要非静态。
+            // 下推与内存判据（AssetSearchService.Matches）用的是同一个结论，
+            // 所以 SQL 这边不必留「超集」余量 —— 两边完全同义。
+            IsStatic: query.ShowStaticTables ? null : false));
         var extras = _state.ProjectOnly;
         // 「按名称」的排序就是目录全序本身（catalog_rank 的 r 就是按它算出来的），
         // 所以没有补充集时这条路径既不排序、也不算排序键 —— 省掉每条一次的显示路径分配。
@@ -432,8 +437,11 @@ public sealed class AssetCatalog
     /// <item>已实体化（元数据里没有 <c>reference=true</c>）时，<c>SourcePath</c> 指本地副本，
     /// 项目才是权威；同时摘掉 <c>reference</c> 标记（与实体化时的写法一致）。</item>
     /// <item>元数据整体以项目记录为准：索引里没有的（<c>replacementPath</c> 等）要带过来，
-    /// 而索引里有的那些，项目记录本来就是扫描写进去的同一份 —— 唯一可能不同的是
-    /// 扫描后来**清除**过的静态标记，那种情况下保留项目的才是对的。</item>
+    /// 而索引里有的那些，项目记录本来就是扫描写进去的同一份。</item>
+    /// <item><b>唯一的例外是静态结论</b>（<c>staticBundle</c>）：它由**索引**当权威 ——
+    /// 项目记录可能是几个月前保存的 <c>.lmeproj</c>（里面还写着老形态的 <c>"true"</c>，
+    /// 或者带着一次性误判），而索引每次扫描/迁移都会重算。整体覆盖会让「列表按索引
+    /// 隐藏静态表、预览按记录判静态」这种错位重新出现。</item>
     /// </list>
     /// </summary>
     public static AssetRecord MergeProjectState(AssetRecord indexed, AssetRecord state)
@@ -450,7 +458,12 @@ public sealed class AssetCatalog
             indexed.SourcePath = state.SourcePath;
             indexed.Metadata.Remove("reference");
         }
-        foreach (var pair in state.Metadata) indexed.Metadata[pair.Key] = pair.Value;
+        foreach (var pair in state.Metadata)
+        {
+            if (string.Equals(pair.Key, UnityCacheScanService.StaticBundleMetadataKey, StringComparison.Ordinal))
+                continue;
+            indexed.Metadata[pair.Key] = pair.Value;
+        }
         return indexed;
     }
 }

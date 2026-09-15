@@ -9,6 +9,10 @@ using NLog;
 
 namespace LimbusModEditor.Application.Scanning;
 
+/// <param name="ContainerEntry">容器条目（可读的游戏内路径）；无条目时为 <see langword="null"/>。</param>
+/// <param name="StaticKind">这一行的**行级**静态位。生产者必须用
+/// <c>AssetStaticClassifier.RowBits(ContainerEntry)</c> 算出来（扫描期就这一步），
+/// 空着不会报错但会让这一行的静态结论丢失 —— 即「资源列表里又冒出静态数据表」。</param>
 public sealed record UnityCacheIndexRow(
     int BundleIndex, string Container, long PathId, int TypeId, AssetType Type, long Size, string? Baseline,
     string? ContainerEntry = null, StaticKind StaticKind = StaticKind.None);
@@ -24,13 +28,14 @@ public sealed record UnityCacheIndexBundle(
 /// <summary>
 /// 可以交给 SQLite 判的索引列条件（资源列表筛选下推的入参）。
 ///
-/// <para><b>除 <see cref="Type"/> 外，这里的每一条都只是「不漏行」的保证</b>：SQL 侧筛出来的
-/// 是超集，调用方必须再走一遍完整判据。理由是索引列只记录扫描时的事实 ——
-/// 编辑状态、替换文件是否存在、静态判定（含 catalog 缺席时的 bundle 名兜底）都不在库里。</para>
+/// <para><b>绝大多数条件都只是「不漏行」的保证</b>：SQL 侧筛出来的是超集，调用方必须再走
+/// 一遍完整判据。理由是索引列只记录扫描时的事实 —— 编辑状态、替换文件是否存在都不在库里。</para>
 ///
-/// <para><see cref="Type"/> 是例外：它的 SQL 形态与目录类型**完整等价**，因为一行索引的
-/// 目录类型只由 <c>type_id</c>（认得的 class id）与 <c>type</c>（类型树兜底）两个列决定，
-/// 二者合起来正好覆盖（见 <see cref="UnityClassId.ClassIdsOf"/>）。</para>
+/// <para><see cref="Type"/> 与 <see cref="IsStatic"/> 是例外：它们的 SQL 形态与目录判据
+/// <b>完整等价</b>。<see cref="Type"/> 是因为一行索引的目录类型只由 <c>type_id</c>（认得的
+/// class id）与 <c>type</c>（类型树兜底）两个列决定；<see cref="IsStatic"/> 是因为静态判据
+/// 已经**在扫描期算完落进 <c>assets.static_kind</c>**（见
+/// <c>AssetStaticClassifier</c>），查询期只比一次整数，两侧不可能给出不同答案。</para>
 ///
 /// <para><see cref="Text"/> 走派生层检索索引：<c>FTS(dp∪lp)</c> 是旧
 /// <c>AssetSearchService.MatchesText</c>（dp ∪ lp ∪ src）的超集，所以不会漏行；退化的
@@ -44,7 +49,8 @@ public sealed record UnityCacheIndexFilter(
     long? MaxSize = null,
     string? Container = null,
     bool? HasContainerEntry = null,
-    string? Text = null);
+    string? Text = null,
+    bool? IsStatic = null);
 
 /// <summary>
 /// v2 可重建索引：路径和共享字符串只存一次，对象表按整数 bundle/index 聚簇。
@@ -878,8 +884,13 @@ public sealed class UnityCacheSqliteIndexStore
 
     /// <summary>
     /// 按 <b>索引列</b>筛出候选名次（<b>升序</b>）。资源列表「筛选下推」的入口：能在 SQL 里判的
-    /// 条件全部交给 SQLite，只把库里根本没有的事实（编辑状态、替换文件是否存在、静态判定）
+    /// 条件全部交给 SQLite，只把库里根本没有的事实（编辑状态、替换文件是否存在）
     /// 留给调用方在内存里复核。
+    ///
+    /// <para><b>静态判据现在也在库里</b>（<see cref="UnityCacheIndexFilter.IsStatic"/>）：
+    /// 它是扫描期算好落进 <c>assets.static_kind</c> 的位掩码合成值，查询期只做一次整数比较。
+    /// 在这之前它是运行时逐行重算三道字符串判据 —— 每查一次列表 1.8 s，这正是老功能
+    /// 「时灵时不灵 + 卡」的代价。</para>
     ///
     /// <para>与 <see cref="SearchRanks"/> 的分工：后者是「只按文本搜、并当场复核文本」的完整
     /// 答案；本方法是「多条件筛选的候选集」，文本那一部分复用同一张检索索引，但**不在这里
@@ -971,9 +982,25 @@ public sealed class UnityCacheSqliteIndexStore
         {
             // trim：元数据侧写的是「非空才写 containerEntry」，空白串在记录上等于没有条目，
             // 所以两侧都按 trim 后是否为空判，避免「SQL 说有条目、内存说没有」。
+            //
+            // **「有条目」那一支刻意不写 trim**（2026-09 实测）：部分索引 ix_assets_named 的
+            // 谓词是 `IS NOT NULL AND <> ''`，而 `trim(coalesce(...)) <> ''` 与它**不匹配** ⇒
+            // planner 用不上索引，退化成「全扫 127 万名次表 + 逐行 PK 探」，默认视图实测
+            // 1,300.9 ms → 62.7/157 ms（约 8×）。两者只在「空白串 / 带前后空格」上不同：
+            // 真库这类行**为 0**，而这种差异方向是**多带行**（SQL 超集、内存判据复核掉），
+            // 不是漏行。「无条目」那一支保持 trim（它本来就用不上那个部分索引，无代价）。
             conditions.Add(hasContainerEntry
-                ? "trim(coalesce(a.container_entry,'')) <> ''"
+                ? "a.container_entry IS NOT NULL AND a.container_entry <> ''"
                 : "trim(coalesce(a.container_entry,'')) = ''");
+            needsAssets = true;
+        }
+        if (filter.IsStatic is { } isStatic)
+        {
+            // 静态判据（2026-09 恢复）：索引列 static_kind 是扫描期算好的位掩码合成值，
+            // 所以这里是一次整数比较 —— `= 0` 精确匹配 ix_assets_named 的**前置**列
+            // （静态行只占 0.22%，前置让「隐藏静态」成为一次前缀区间扫：实测 157 ms，
+            // 对照：换回运行时的表达式判据 1,844.7 ms）。
+            conditions.Add(isStatic ? "a.static_kind <> 0" : "a.static_kind = 0");
             needsAssets = true;
         }
         var needsStrings = !string.IsNullOrEmpty(filter.Container);

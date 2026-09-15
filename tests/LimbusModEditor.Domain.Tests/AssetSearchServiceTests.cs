@@ -184,18 +184,24 @@ public class AssetSearchServiceTests : IDisposable
     }
 
     [Fact]
-    public void Static_bundle_metadata_no_longer_filters_the_list()
+    public void Static_bundle_metadata_hides_the_asset_from_the_default_view()
     {
-        // plan-08 的「资源工作台默认隐藏静态数据表」已按用户决定移除（2026-09-15）：
-        // 静态数据表本来就该能在资源工作台里看到并编辑。
-        // staticBundle 标记本身仍写在记录上（预览通道与静态工作台在用），但它不再是搜索判据。
+        // 资源工作台默认隐藏静态数据表（2026-09 恢复这条产品决定）。判据只有一份
+        // ——扫描期落进索引 static_kind 的位掩码，记录元数据里的 staticBundle 是同一结论的
+        // 另一种读法。这里刻意写**老形态** "true"：旧 .lmeproj 里存的就是它，
+        // AssetStaticClassifier.Parse 必须兼容，否则打开旧项目时静态表会「时灵时不灵」地冒出来。
         var project = ContainerProject();
         var staticAsset = project.Assets.First();
         staticAsset.Metadata[UnityCacheScanService.StaticBundleMetadataKey] = "true";
         var service = new AssetSearchService();
 
-        var found = service.Search(project.Assets.ToArray(), new AssetSearchQuery());
-        Assert.Contains(found, x => x.AssetId == staticAsset.AssetId);
-        Assert.Equal(project.Assets.Count, found.Count);
+        var hidden = service.Search(project.Assets.ToArray(), new AssetSearchQuery());
+        Assert.DoesNotContain(hidden, x => x.AssetId == staticAsset.AssetId);
+        Assert.Equal(project.Assets.Count - 1, hidden.Count);
+
+        // 勾上「显示静态数据表」= 这条判据完全不参与筛选，其余资源不受影响。
+        var shown = service.Search(project.Assets.ToArray(), new AssetSearchQuery(ShowStaticTables: true));
+        Assert.Contains(shown, x => x.AssetId == staticAsset.AssetId);
+        Assert.Equal(project.Assets.Count, shown.Count);
     }
 }

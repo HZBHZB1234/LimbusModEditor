@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using LimbusModEditor.Application.StaticMods;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Domain.Diagnostics;
 using LimbusModEditor.Domain.Projects;
@@ -17,7 +18,8 @@ public sealed record AssetSearchQuery(
     long? MaxSize = null,
     bool? HasReplacement = null,
     AssetSortKind Sort = AssetSortKind.Name,
-    bool? HasContainerEntry = null);
+    bool? HasContainerEntry = null,
+    bool ShowStaticTables = false);
 
 public sealed class AssetSearchService
 {
@@ -39,12 +41,12 @@ public sealed class AssetSearchService
         if (query.MaxSize is < 0) throw new ArgumentException("MaxSize 不能为负（负值曾经静默关闭上限）。", nameof(query));
         var text = query.Text?.Trim();
         using var scope = Log.Scope("资源搜索");
-        Log.Info("搜索开始：文本「{0}」，类型 {1}，状态 {2}，容器「{3}」，UnityPathId {4}，UnityTypeId {5}，大小 [{6}..{7}]，有替换 {8}，有容器条目 {9}，排序 {10}",
+        Log.Info("搜索开始：文本「{0}」，类型 {1}，状态 {2}，容器「{3}」，UnityPathId {4}，UnityTypeId {5}，大小 [{6}..{7}]，有替换 {8}，有容器条目 {9}，显示静态表 {10}，排序 {11}",
             text ?? "-", query.Type?.ToString() ?? "-", query.State?.ToString() ?? "-", query.Container ?? "-",
             query.UnityPathId?.ToString() ?? "-", query.UnityTypeId?.ToString() ?? "-",
             query.MinSize?.ToString() ?? "-", query.MaxSize?.ToString() ?? "-",
             query.HasReplacement?.ToString() ?? "-", query.HasContainerEntry?.ToString() ?? "-",
-            query.Sort);
+            query.ShowStaticTables, query.Sort);
         var startTimestamp = Stopwatch.GetTimestamp();
         // 单趟过滤（不再用 LINQ 谓词链：40 万级下每个委托调用都要付出闭包
         // 取值与迭代器状态机开销），命中集先物化再排序。
@@ -80,8 +82,16 @@ public sealed class AssetSearchService
         if (query.MaxSize is { } maxSize && asset.Size > maxSize) return false;
         if (query.HasReplacement is { } hasReplacement && HasUsableReplacement(asset) != hasReplacement) return false;
         if (query.HasContainerEntry is { } hasContainerEntry && HasContainerEntry(asset) != hasContainerEntry) return false;
+        // 静态数据表默认不出现在列表里（它们是游戏的数据表，不是美术资源 ——
+        // 「十二万条里混着 2,801 条静态表」正是用户最初要求过滤的原因）。
+        // 判据只有一份：AssetStaticClassifier（扫描期落库 + 记录元数据），
+        // 与 ReadCandidateRanks 的 `static_kind = 0` 是同一个结论。
+        if (!query.ShowStaticTables && AssetStaticClassifier.IsStatic(AssetStaticClassifier.Of(asset))) return false;
         return true;
     }
+
+    /// <summary>这条资源是不是静态数据表（与列表筛选同一份判据，供调用方复用）。</summary>
+    public static bool IsStaticTable(AssetRecord asset) => AssetStaticClassifier.IsStatic(AssetStaticClassifier.Of(asset));
 
     /// <summary>
     /// 列表排序的**预计算键**：排序只需要这几个字段，而 <see cref="AssetRecord"/>

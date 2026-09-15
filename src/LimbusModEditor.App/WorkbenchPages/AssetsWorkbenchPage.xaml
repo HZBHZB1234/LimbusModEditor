@@ -57,9 +57,6 @@
                     <CheckBox x:Name="ContainerOnlyFilter" Content="仅显示容器内资源" VerticalAlignment="Center" Margin="10,0,0,0"
                               IsChecked="True" Checked="Filter_Changed" Unchecked="Filter_Changed"
                               ToolTip="只列出能在游戏容器（m_Container）里找到的资源，即游戏真正加载的那些。"/>
-                    <CheckBox x:Name="ShowStaticFilter" Content="显示静态数据表" VerticalAlignment="Center" Margin="10,0,0,0"
-                              Checked="Filter_Changed" Unchecked="Filter_Changed"
-                              ToolTip="静态数据 bundle（static_s1_0_assets_all_*）里的表默认不在资源工作台显示，请到「🧩 静态数据工作台」编辑；勾选后此处也可见。"/>
                     <Button Content="清除筛选" Click="ClearFilters_Click" Margin="10,0,0,0" Padding="10,3"/>
                 </WrapPanel>
                 <Expander DockPanel.Dock="Top" Header="高级筛选" Foreground="{StaticResource WbTextMutedBrush}" Margin="0,0,0,8">

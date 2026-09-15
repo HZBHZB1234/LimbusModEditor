@@ -520,6 +520,9 @@ Lunartique→对象级 Carra/目录来源支持，其余禁用并给出原因）
   扫描按内层键 O(1) 打 `staticBundle` 标记并持久化到索引，`AssetSearchQuery`
   新增 `ShowStaticTables` 默认过滤）。前后对照矩阵见
   `docs/plans/REALDATA-VERIFY.md`。
+  （**2026-09-15 回退**：`ShowStaticTables` 与配套的 `StaticVerdictCache` /
+  `IsStaticBundleAsset` / UI 复选框已按用户决定整体移除 —— 静态数据表在资源工作台里
+  正常可见；标记与 `StaticBundleLocator` 保留，预览通道、静态工作台、关系索引仍需要。）
 - **预览管线（plan-05）**：`IAssetPreviewProvider` + `AssetPreviewRegistry`
   （Texture → Sprite → Audio → Text → Script → Summary → Hex 兜底），七种形态
   （图像缩放/平移/棋盘格/原图↔替换图、文本行号 + JSON 树、音频波形 + 试听、

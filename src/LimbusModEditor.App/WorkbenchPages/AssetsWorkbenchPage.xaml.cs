@@ -415,9 +415,9 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
     private void Filter_Changed(object sender, RoutedEventArgs e)
     {
         if (_searchTimer is null || _host.Project is null) return;
-        if (Log.IsDebugEnabled) Log.Debug("用户勾选复选框筛选：容器内={0}，仅已替换={1}，显示静态数据表={2}，发送者={3}",
+        if (Log.IsDebugEnabled) Log.Debug("用户勾选复选框筛选：容器内={0}，仅已替换={1}，发送者={2}",
             ContainerOnlyFilter?.IsChecked == true, ReplacedOnlyFilter?.IsChecked == true,
-            ShowStaticFilter?.IsChecked == true, (sender as FrameworkElement)?.Name ?? "-");
+            (sender as FrameworkElement)?.Name ?? "-");
         RequestSearch();
     }
 
@@ -433,8 +433,7 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
 
     private void ClearFilters_Click(object sender, RoutedEventArgs e)
     {
-        Log.Info("用户点击「清除筛选」：重置全部筛选条件（显示静态数据表={0} → False）",
-            ShowStaticFilter?.IsChecked == true);
+        Log.Info("用户点击「清除筛选」：重置全部筛选条件。");
         SearchBox.Text = string.Empty;
         TypeFilter.SelectedIndex = -1;
         StateFilter.SelectedIndex = -1;
@@ -443,7 +442,6 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
         MinSizeFilter.Text = string.Empty;
         MaxSizeFilter.Text = string.Empty;
         ReplacedOnlyFilter.IsChecked = false;
-        ShowStaticFilter!.IsChecked = false;
         _searchTimer.Stop();
         // 上面这些赋值会经 Filter_Changed 触发防抖搜索；这里要求「立刻」重跑，
         // 避免用户看到清除筛选后仍然空白的旧结果。
@@ -493,14 +491,13 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
         if (long.TryParse(MinSizeFilter.Text.Trim(), out var minSize) && minSize > 0) minKb = minSize * 1024;
         if (long.TryParse(MaxSizeFilter.Text.Trim(), out var maxSize) && maxSize > 0) maxKb = maxSize * 1024;
         var sort = (AssetSortKind)Math.Clamp(SortFilter?.SelectedIndex ?? 0, 0, 4);
-        // ① 关键线索：静态数据表是否被显式包含（默认 False = 隐藏 static-data）。
         Log.Debug("构造搜索条件：关键词长度={0}，类型={1}，状态={2}，最小={3} KB，最大={4} KB，"
-            + "仅已替换={5}，排序={6}，仅容器内={7}，显示静态数据表={8}",
+            + "仅已替换={5}，排序={6}，仅容器内={7}",
             SearchBox?.Text?.Length ?? 0,
             selectedType?.ToString() ?? "-", selectedState?.ToString() ?? "-",
             minKb?.ToString() ?? "-", maxKb?.ToString() ?? "-",
             ReplacedOnlyFilter?.IsChecked == true, sort,
-            ContainerOnlyFilter?.IsChecked == true, ShowStaticFilter?.IsChecked == true);
+            ContainerOnlyFilter?.IsChecked == true);
         return new AssetSearchQuery(
             SearchBox?.Text,
             selectedType,
@@ -512,9 +509,7 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
             maxKb,
             ReplacedOnlyFilter!.IsChecked,
             sort,
-            ContainerOnlyFilter?.IsChecked == true ? true : null,
-            // plan-08：静态数据 bundle 的资源默认隐藏（勾选「显示静态数据表」后可见）。
-            ShowStaticTables: ShowStaticFilter?.IsChecked == true);
+            ContainerOnlyFilter?.IsChecked == true ? true : null);
     }
 
     /// <summary>下拉筛选的当前值：未选择、以及列表首项「（全部…）」一律返回

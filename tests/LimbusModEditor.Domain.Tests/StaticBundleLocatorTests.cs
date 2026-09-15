@@ -133,19 +133,17 @@ public class StaticBundleLocatorTests : IDisposable
         Assert.True(result.AddedAssets > 0);
         Assert.All(project.Assets, asset => Assert.Equal("true", asset.Metadata[UnityCacheScanService.StaticBundleMetadataKey]));
 
-        // 资源工作台默认视图（不传 ShowStaticTables）看不到静态资源。
+        // 资源工作台不再按静态数据筛选（2026-09-15）：staticBundle 标记只作为记录保留，
+        // 静态数据表本来就该能在资源工作台里看到并编辑。
         var search = new AssetSearchService();
-        Assert.Empty(search.Search(project.Assets.ToArray(), new AssetSearchQuery()));
-        // 勾选「显示静态数据表」后可见。
-        var shown = search.Search(project.Assets.ToArray(), new AssetSearchQuery(ShowStaticTables: true));
-        Assert.Equal(project.Assets.Count, shown.Count);
+        Assert.Equal(project.Assets.Count, search.Search(project.Assets.ToArray(), new AssetSearchQuery()).Count);
 
         // 回灌（打开旧项目）后标记必须仍在：索引持久化了 static_bundle。
         var rehydrated = new ModProject { Name = "Rehydrate" };
         var added = await service.RehydrateFromIndexAsync(rehydrated);
         Assert.Equal(project.Assets.Count, added);
         Assert.All(rehydrated.Assets, asset => Assert.Equal("true", asset.Metadata[UnityCacheScanService.StaticBundleMetadataKey]));
-        Assert.Empty(search.Search(rehydrated.Assets.ToArray(), new AssetSearchQuery()));
+        Assert.Equal(rehydrated.Assets.Count, search.Search(rehydrated.Assets.ToArray(), new AssetSearchQuery()).Count);
     }
 
     /// <summary>
@@ -170,66 +168,6 @@ public class StaticBundleLocatorTests : IDisposable
     /// <summary>真实静态 bundle 名（本机 catalog 实测口径）：前缀 + 32 位内容哈希。</summary>
     private const string StaticBundleName = "static_s1_0_assets_all_abcdef0123456789abcdef0123456789.bundle";
 
-    /// <summary>
-    /// 关键回归：资源工作台在**没有** <c>staticBundle</c> 元数据标记时，
-    /// 依然要把静态数据 bundle 的资源默认隐藏（走 bundle 名兜底）。
-    /// </summary>
-    [Fact]
-    public void Default_search_hides_static_assets_even_without_the_metadata_flag()
-    {
-        var project = new ModProject { Name = "NoFlag" };
-        // 模拟旧索引 / catalog 缺失的扫描结果：没有 staticBundle 标记。
-        project.Assets.Add(new Domain.Assets.AssetRecord
-        {
-            LogicalPath = $"{OuterKey}/{InnerHash}/CAB-x/1.49",
-            SourcePath = Path.Combine(_root, "nope", "__data"),
-            ContainerPath = "CAB-x",
-            Account = OuterKey,
-            Bundle = StaticBundleName,
-            UnityPathId = 1,
-            UnityTypeId = 49,
-            Type = Domain.Assets.AssetType.Text,
-            Metadata = { ["unityBundle"] = "true" },
-        });
-        var search = new AssetSearchService();
-        Assert.Empty(search.Search(project.Assets.ToArray(), new AssetSearchQuery()));
-        Assert.Single(search.Search(project.Assets.ToArray(), new AssetSearchQuery(ShowStaticTables: true)));
-    }
-
-    /// <summary>
-    /// 关键回归（2026-09 真实数据）：游戏更新换键后，旧版本静态 bundle 会以
-    /// 「裸哈希目录」留在 Unity 缓存里（本机实测 <c>62d6e466…</c>（9/3）与 catalog 里的
-    /// <c>fa6984…</c>（9/10）同外层键、同 CAB、内容同源）。这种资源的 bundle 名只是
-    /// 32 位内容哈希、元数据标记也不会命中 —— 前两道判据同时失效，static-data 又出现在
-    /// 资源工作台里。它的容器路径恒为
-    /// <c>Assets/Resources_moved/StaticData/static-data/&lt;类&gt;/&lt;文件&gt;.json</c>，
-    /// 判定必须靠这条不依赖 catalog 的路径事实把它隐藏。
-    /// </summary>
-    [Fact]
-    public void Default_search_hides_stale_cache_static_assets_by_container_path()
-    {
-        var project = new ModProject { Name = "StaleCache" };
-        project.Assets.Add(new Domain.Assets.AssetRecord
-        {
-            LogicalPath = $"{OuterKey}/62d6e466f528b73cf836882c2a786cc2/CAB-f0c1a8cf/1.49",
-            SourcePath = Path.Combine(_root, "stale", "__data"),
-            ContainerPath = "CAB-f0c1a8cf301ccdcbe041bb35c6769a32",
-            Account = OuterKey,
-            Bundle = "62d6e466f528b73cf836882c2a786cc2",
-            UnityPathId = 1,
-            UnityTypeId = 49,
-            Type = Domain.Assets.AssetType.Text,
-            Metadata =
-            {
-                ["unityBundle"] = "true",
-                ["containerEntry"] = "Assets/Resources_moved/StaticData/static-data/battle-exp-dungeon/battle-exp-dungeon-03-a1c6p3.json",
-            },
-        });
-        var search = new AssetSearchService();
-        Assert.Empty(search.Search(project.Assets.ToArray(), new AssetSearchQuery()));
-        Assert.Single(search.Search(project.Assets.ToArray(), new AssetSearchQuery(ShowStaticTables: true)));
-    }
-
     /// <summary>反向保护：普通资源的容器路径前缀不是静态数据，不能被路径判据误伤。</summary>
     [Theory]
     [InlineData("Assets/Prefab/Unit/unit-01.prefab", false)]
@@ -241,31 +179,41 @@ public class StaticBundleLocatorTests : IDisposable
         => Assert.Equal(expected, StaticBundleLocator.LooksLikeStaticTablePath(containerEntry));
 
     /// <summary>
-    /// catalog 不可用时（本机没有 catalog），扫描必须**保留**静态 bundle 的标记，
-    /// 而不是把已有标记清掉（早先的写法会清除，导致资源工作台又列出 static-data）。
+    /// catalog 不可用时扫描必须**保留**记录上已有的 <c>staticBundle</c> 标记，
+    /// 而不是把它清掉 —— 清除只在「本次真的拿到过 catalog 内层键集合」时才被允许
+    /// （<c>mayClearStatic</c>）；否则一台没有 catalog 的机器上，一次「什么都没变」的
+    /// 扫描就会把旧索引留下的标记全抹掉。
+    /// <para>标记的消费者只剩预览通道与静态工作台（资源列表已不按它筛选，2026-09-15），
+    /// 所以这里只锚定「扫描不误清」这一件事。</para>
     /// </summary>
     [Fact]
-    public async Task Scan_keeps_static_flag_when_the_catalog_is_unavailable()
+    public async Task Scan_without_a_catalog_keeps_the_existing_static_flag()
     {
         var bundle = FindSmallRealBundle();
         if (bundle is null) return; // 无真实缓存样本：跳过
 
-        // 只有一个名字像静态 bundle 的缓存条目，**没有任何 catalog**。
-        // 扫描索引只记内层哈希，但 AssetRecord.Bundle 保留的是条目目录名口径 →
-        // 这里直接用静态全名当内层目录名，覆盖「名字可判」这条兜底路径。
+        // 单个缓存条目、**没有任何 catalog**，且内层目录名是**裸哈希**（名字判据不命中）——
+        // 于是「标记存活」只可能来自「不清除 + 保留记录上已有的标记」这条路径。
         var cache = Path.Combine(_root, "cache-nocatalog");
-        var entry = Path.Combine(cache, OuterKey, StaticBundleName);
+        var entry = Path.Combine(cache, OuterKey, InnerHash);
         Directory.CreateDirectory(entry);
         File.Copy(bundle, Path.Combine(entry, "__data"));
 
         var project = new ModProject { Name = "NoCatalog" };
         var service = new UnityCacheScanService(Path.Combine(_root, "index2", "idx.json"));
         var result = await service.ScanIntoProjectAsync(project, cache, gameDirectory: null);
-
         Assert.True(result.AddedAssets > 0);
-        // 元数据标记由 catalog 判定（此处无 catalog → 不写），但页面侧靠 bundle 名兜底隐藏。
-        Assert.Empty(new AssetSearchService().Search(project.Assets.ToArray(), new AssetSearchQuery()));
-        Assert.NotEmpty(new AssetSearchService().Search(project.Assets.ToArray(), new AssetSearchQuery(ShowStaticTables: true)));
+        // 无 catalog（权威判定缺失）且名字不像静态 ⇒ 扫描不写标记。
+        Assert.All(project.Assets, asset =>
+            Assert.False(asset.Metadata.ContainsKey(UnityCacheScanService.StaticBundleMetadataKey)));
+
+        // 模拟旧索引 / 旧项目留下来的标记，再扫一次（bundle 未变化）：
+        // 没有 catalog 就没有资格判定「它不是静态的」，标记必须原样保留。
+        foreach (var asset in project.Assets)
+            asset.Metadata[UnityCacheScanService.StaticBundleMetadataKey] = "true";
+        await service.ScanIntoProjectAsync(project, cache, gameDirectory: null);
+        Assert.All(project.Assets, asset =>
+            Assert.Equal("true", asset.Metadata[UnityCacheScanService.StaticBundleMetadataKey]));
     }
 
     [Fact]

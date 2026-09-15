@@ -184,19 +184,18 @@ public class AssetSearchServiceTests : IDisposable
     }
 
     [Fact]
-    public void Static_bundle_assets_are_hidden_by_default_and_shown_on_request()
+    public void Static_bundle_metadata_no_longer_filters_the_list()
     {
+        // plan-08 的「资源工作台默认隐藏静态数据表」已按用户决定移除（2026-09-15）：
+        // 静态数据表本来就该能在资源工作台里看到并编辑。
+        // staticBundle 标记本身仍写在记录上（预览通道与静态工作台在用），但它不再是搜索判据。
         var project = ContainerProject();
         var staticAsset = project.Assets.First();
         staticAsset.Metadata[UnityCacheScanService.StaticBundleMetadataKey] = "true";
         var service = new AssetSearchService();
 
-        var defaultView = service.Search(project.Assets.ToArray(), new AssetSearchQuery());
-        Assert.DoesNotContain(defaultView, x => x.AssetId == staticAsset.AssetId);
-        Assert.Equal(project.Assets.Count - 1, defaultView.Count);
-
-        var withStatic = service.Search(project.Assets.ToArray(), new AssetSearchQuery(ShowStaticTables: true));
-        Assert.Contains(withStatic, x => x.AssetId == staticAsset.AssetId);
-        Assert.Equal(project.Assets.Count, withStatic.Count);
+        var found = service.Search(project.Assets.ToArray(), new AssetSearchQuery());
+        Assert.Contains(found, x => x.AssetId == staticAsset.AssetId);
+        Assert.Equal(project.Assets.Count, found.Count);
     }
 }

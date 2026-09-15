@@ -377,16 +377,16 @@ needle = anim/icon2  →  "ani" AND "nim" AND "im/" AND "m/i" AND "/ic" AND "ico
 ### 两个必须记住的定位口径
 
 - `Locate(logicalPath)` 给的是**全局名次**。只有「无任何筛选」的视图里它才等于页下标 ——
-  默认视图隐藏静态数据表（`ContainerOnlyFilter` 为勾选 + `ShowStaticTables=false`），
-  两个数就不是一个。
+  资源页默认勾选「仅容器内资源」（`ContainerOnlyFilter`），两个数就不是一个。
 - 要「翻到某一页并选中」用 `IndexIn(query, logicalPath)`，它给的是**命中集内的下标**。
 
 ### 正确性证据
 
 `tests/LimbusModEditor.Domain.Tests/AssetCatalogTests.cs`：数据集 4 bundle × 6 行，维度刻意铺满
-（两种静态判据各占一个 bundle、一行落在 static-data 路径前缀、类型覆盖 class-id 映射 /
-ref-type 伪 id / 映射不到保留类型树结论、**不同 bundle 显示路径故意重名**以压住打平兜底），
-然后 34 种筛选 × 5 种排序 = 170 条查询，逐条断言
+（三种「静态形态」各占一份 —— bundle 名前缀 / `static_bundle` 标记 / static-data 容器路径；
+它们现在必须与普通资源**一样可见**，所以这三个维度留下来当**反误伤**用；类型覆盖
+class-id 映射 / ref-type 伪 id / 映射不到保留类型树结论、**不同 bundle 显示路径故意重名**
+以压住打平兜底），然后 32 种筛选 × 5 种排序 = 160 条查询，逐条断言
 
 - `Page(query, 0, ∞)` 与 `AssetSearchService.Search(project, query)` **逐行逐字段**相等
   （含 `AssetId`）；以及

@@ -474,8 +474,11 @@ public sealed class TextPreviewProvider : IAssetPreviewProvider
                 Text: preview.Text);
         }, cancellationToken);
 
-    /// <summary>是否为静态数据 bundle 里的表（元数据标记 + bundle 名兜底，与
-    /// <c>AssetSearchService.IsStaticBundleAsset</c> 同一口径）。</summary>
+    /// <summary>是否为静态数据 bundle 里的表（元数据标记 + bundle 名 / 文件名 / 容器路径兜底）。
+    /// <para>这条判定曾经与 <c>AssetSearchService.IsStaticBundleAsset</c> 同口径 —— 那时它决定
+    /// 资源列表要不要把静态表藏起来。2026-09-15 后者随「不再按静态数据筛选」一并删除，
+    /// 现在这里是**唯一**一处按「像不像静态表」做决策的地方：只用来把静态表送进专门的
+    /// 预览通道，<b>不再影响可见性</b>。</para></summary>
     private static bool IsStaticTableAsset(AssetRecord asset)
     {
         var hasMetadata = asset.Metadata.TryGetValue(UnityCacheScanService.StaticBundleMetadataKey, out var flag);
@@ -498,8 +501,9 @@ public sealed class TextPreviewProvider : IAssetPreviewProvider
                 fileName ?? "-", asset.SourcePath ?? "-", AssetDisplay.DisplayPath(asset));
             return true;
         }
-        // 第三道判据与 AssetSearchService.IsStaticBundleAsset 保持一致：容器路径前缀。
-        // 缓存里旧版本静态 bundle 只有裸哈希目录名，前两道判据会同时失效。
+        // 第三道判据：容器路径前缀。缓存里旧版本静态 bundle 只剩裸哈希目录名，
+        // 前两道判据（元数据标记 / bundle 名）会同时失效，只能靠这条不依赖 catalog 的
+        // 路径事实兜住（真实数据：62d6e466… 旧版本残留）。
         var containerEntry = AssetDisplay.ContainerEntryPath(asset);
         if (StaticBundleLocator.LooksLikeStaticTablePath(containerEntry))
         {

@@ -13,14 +13,16 @@ namespace LimbusModEditor.Domain.Tests;
 ///
 /// <para>判据刻意是「拿同一份索引造出项目，两条路径当场各算一遍再逐字段比对」，
 /// 而不是手写期望值 —— 手写期望值守不住这种等价：它只会把实现当时的想法抄一遍，
-/// 而这些条件组合（类型映射回退、静态判定的三道判据、文本匹配面、五种排序）里
+/// 而这些条件组合（类型映射回退、文本匹配面、容器条目、五种排序）里
 /// 任何一处口径漂移，在用户那里都只表现为「少了一条 / 多了一条」。</para>
 ///
 /// <para>数据集刻意造得小但维度齐：4 个 bundle × 6 行，其中
-/// ① 两种静态判据各占一个 bundle（bundle 名前缀 / <c>static_bundle</c> 标记）；
-/// ② 有一行的容器路径落在 static-data 前缀里（第三道静态判据）；
-/// ③ 类型覆盖 class-id 映射、ref-type 伪 id、以及**映射不到所以保留类型树结论**三种情形；
-/// ④ 不同 bundle 的显示路径**故意重名**，用来压住「显示路径打平时靠 LogicalPath 兜底」那一段。</para>
+/// ① 三种「静态形态」的输入各占一份（bundle 名以 <c>static_s1_0_assets_all_</c> 开头、
+/// 索引 <c>static_bundle</c> 标记为真、容器路径落在 static-data 前缀里）—— 资源列表
+/// 不再按静态数据筛选之后（2026-09-15），它们必须与普通资源**一样可见**，所以这三个
+/// 维度留在这里是**反误伤**用：任何「顺手把静态表藏起来」的改动都会让逐行等价当场红掉；
+/// ② 类型覆盖 class-id 映射、ref-type 伪 id、以及**映射不到所以保留类型树结论**三种情形；
+/// ③ 不同 bundle 的显示路径**故意重名**，用来压住「显示路径打平时靠 LogicalPath 兜底」那一段。</para>
 /// </summary>
 public sealed class AssetCatalogTests : IDisposable
 {
@@ -161,9 +163,8 @@ public sealed class AssetCatalogTests : IDisposable
     {
         var harness = await NewHarnessAsync();
         var fromIndex = new AssetCatalog(harness.Store, EmptyAssetStateSource.Instance)
-            .Page(new AssetSearchQuery { ShowStaticTables = true }, 0, int.MaxValue);
-        var rehydrated = harness.Search.Search(harness.Project,
-            new AssetSearchQuery { ShowStaticTables = true });
+            .Page(new AssetSearchQuery(), 0, int.MaxValue);
+        var rehydrated = harness.Search.Search(harness.Project, new AssetSearchQuery());
         Assert.Equal((long)rehydrated.Count, fromIndex.TotalCount);
         for (var i = 0; i < rehydrated.Count; i++)
             AssertSameFieldsExceptIdentity(rehydrated[i], fromIndex.Items[i]);
@@ -216,7 +217,7 @@ public sealed class AssetCatalogTests : IDisposable
     public async Task Locate_finds_the_same_row_that_paging_returns()
     {
         var harness = await NewHarnessAsync();
-        var unfiltered = new AssetSearchQuery { ShowStaticTables = true };
+        var unfiltered = new AssetSearchQuery();
         foreach (var asset in harness.Project.Assets)
         {
             var location = harness.Catalog.Locate(asset.LogicalPath);
@@ -228,12 +229,13 @@ public sealed class AssetCatalogTests : IDisposable
             Assert.Equal(asset.LogicalPath, Assert.Single(page.Items).LogicalPath);
         }
 
-        // 默认视图隐藏静态数据表 ⇒ 静态资源在它里面没有下标，但全局名次仍然拿得到。
-        var byDefault = new AssetSearchQuery();
-        var staticAsset = harness.Project.Assets
-            .First(x => x.Metadata.ContainsKey(UnityCacheScanService.StaticBundleMetadataKey));
-        Assert.NotNull(harness.Catalog.Locate(staticAsset.LogicalPath));
-        Assert.Null(harness.Catalog.IndexIn(byDefault, staticAsset.LogicalPath));
+        // 有筛选的视图里，看不到的记录没有下标 —— 但全局名次仍然拿得到。
+        // 原本用「默认视图隐藏静态数据表」演示这一点，那条筛选已移除（2026-09-15）；
+        // 改用资源页默认的「仅容器内」这条稳定维度（支撑对象这个维度不会随产品决定消失）。
+        var containerOnly = new AssetSearchQuery { HasContainerEntry = true };
+        var support = harness.Project.Assets.First(x => x.UnityPathId == 10);
+        Assert.NotNull(harness.Catalog.Locate(support.LogicalPath));
+        Assert.Null(harness.Catalog.IndexIn(containerOnly, support.LogicalPath));
         Assert.Equal((long?)null, harness.Catalog.IndexIn(unfiltered, "nope"));
 
         Assert.Null(harness.Catalog.Locate("导入的旧式资源/名字.id"));
@@ -294,10 +296,8 @@ public sealed class AssetCatalogTests : IDisposable
     {
         var filters = new AssetSearchQuery[]
         {
-            new(),                                              // 默认视图（隐藏静态数据表）
-            new() { ShowStaticTables = true },                  // 含静态数据表
+            new(),                                              // 默认视图
             new() { HasContainerEntry = true },                 // 资源页默认勾选的那个
-            new() { HasContainerEntry = true, ShowStaticTables = true },
             new() { HasContainerEntry = false },
             new() { Text = "cg_0" },                            // 命中显示路径
             new() { Text = "CG_10" },                           // 大小写不敏感
@@ -326,7 +326,7 @@ public sealed class AssetCatalogTests : IDisposable
             new() { HasReplacement = true },
             new() { HasReplacement = false },
             new() { State = AssetEditState.Unchanged },
-            new() { Type = AssetType.Sprite, MinSize = 1_000, ShowStaticTables = true },
+            new() { Type = AssetType.Sprite, MinSize = 1_000 },
             new() { Text = "cg", Type = AssetType.Sprite },
             new() { Text = "inner1", Container = "CAB-1", HasContainerEntry = true },
         };
@@ -345,7 +345,7 @@ public sealed class AssetCatalogTests : IDisposable
            $" · 路径 {query.UnityPathId?.ToString() ?? "-"} · 类 {query.UnityTypeId?.ToString() ?? "-"}" +
            $" · 大小 [{query.MinSize?.ToString() ?? "-"}..{query.MaxSize?.ToString() ?? "-"}]" +
            $" · 有替换 {query.HasReplacement?.ToString() ?? "-"} · 有条目 {query.HasContainerEntry?.ToString() ?? "-"}" +
-           $" · 状态 {query.State?.ToString() ?? "-"} · 看静态表 {query.ShowStaticTables} · 排序 {query.Sort}";
+           $" · 状态 {query.State?.ToString() ?? "-"} · 排序 {query.Sort}";
 
     private static void AssertSameRows(
         IReadOnlyList<AssetRecord> expected, IReadOnlyList<AssetRecord> actual, string because)

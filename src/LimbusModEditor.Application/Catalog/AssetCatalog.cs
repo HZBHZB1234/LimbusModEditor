@@ -235,7 +235,6 @@ public sealed class AssetCatalog
             Container: query.Container,
             HasContainerEntry: query.HasContainerEntry,
             Text: text));
-        var verdicts = query.ShowStaticTables ? null : new AssetSearchService.StaticVerdictCache();
         // 「按名称」的排序就是目录全序本身（catalog_rank 的 r 就是按它算出来的），
         // 所以这条路径既不排序、也不算排序键 —— 省掉每条一次的显示路径分配。
         var byName = query.Sort == AssetSortKind.Name;
@@ -243,7 +242,7 @@ public sealed class AssetCatalog
         foreach (var row in _store.StreamByRanks(ranks))
         {
             var record = Materialize(row);
-            if (!AssetSearchService.Matches(record, query, text, verdicts)) continue;
+            if (!AssetSearchService.Matches(record, query, text)) continue;
             matches.Add(new CatalogMatch(row.Rank, byName ? default : AssetSearchService.BuildSortKey(record)));
         }
         if (!byName)

@@ -319,10 +319,12 @@
 
 - **静态标记的四条规矩**（`UnityCacheScanService`）：① catalog 可用且内层键命中 → 写标记；
   ② **catalog 不可用时没有资格判定「不是静态」** → 不得清除已有标记；
-  ③ bundle 名兜底是第二道防线（`StaticBundleLocator.LooksLikeStaticBundle`）；
-  ④ 容器路径前缀是第三道防线（`LooksLikeStaticTablePath`）—— 游戏更新换键后缓存里会留着
+  ③ bundle 名兜底（`StaticBundleLocator.LooksLikeStaticBundle`）；
+  ④ 容器路径前缀（`LooksLikeStaticTablePath`）—— 游戏更新换键后缓存里会留着
   旧版本静态 bundle（裸哈希目录名，前两道都认不出），只有这条不依赖 catalog 的路径事实认得出。
-  违反 ② 的现象就是「资源工作台又列出 static-data」。
+  **2026-09-15 起**：资源列表不再按静态数据筛选，标记与 ③④ 的兜底判定只由预览通道
+  （`AssetPreviewProviders.IsStaticTableAsset`）消费 —— 目的是让静态表走专门预览，
+  与可见性无关。违反 ② 的现象是「静态表被当普通文本预览卡住界面」（原为「资源工作台又列出 static-data」）。
 
 ### §8.6 `Caching/`（表缓存底座）
 
@@ -742,7 +744,7 @@
 | `cacheOuter` / `cacheInner` | `UnityCacheScanService` / `UnityCacheMaterializationService` | 缓存外层键 / 内层键（Carra2 键与实体化路径） |
 | `containerEntry` | `UnityCacheScanService`、`Formats.Unity/UnityAssetService` | Unity `m_Container` 的游戏内资源路径（**显示层口径**） |
 | `catalogBaseline` | `UnityCacheScanService`、`Assets/ModImportService` | vanilla 基线判定摘要（列表显示用） |
-| `staticBundle` | `UnityCacheScanService`（常量 `StaticBundleMetadataKey`） | `"true"` = 静态数据 bundle 内资源（默认在资源工作台隐藏）；清除只在 catalog 权威判定时发生 |
+| `staticBundle` | `UnityCacheScanService`（常量 `StaticBundleMetadataKey`） | `"true"` = 静态数据 bundle 内资源（**2026-09-15 起不再影响资源列表可见性**，只供预览通道与静态工作台使用）；清除只在 catalog 权威判定时发生 |
 | `unityBundle` / `unitySerializedFile` | `Assets/ModImportService`、`Scanning` | `"true"` = 资产来自 bundle / 独立 `.assets` |
 | `replacementPath` | `Assets/AssetEditService`、UI | 替换文件路径（预览、导出、构建都读它） |
 | `originalSize` | `AssetEditService` | 撤销替换时还原显示大小 |
@@ -773,7 +775,7 @@
 | **点预览就未响应/卡死** | `AssetPreviewProviders.TextPreviewProvider.PreviewCharLimit`（预览规模闸门） | `AssetsWorkbenchPage.WrapPreview`/`IsJsonTreeWorthBuilding`（JSON 树是 UI 线程一次性构造）、`AssetPropertyService`（属性区会再读一次正文） |
 | **双击文本资源后界面卡死（且无 crash 日志）** | `Application/Assets/AssetEditService.ReadCurrentBytesAsync`（**必须**拒绝 bundle 容器）/ `TextAssetEditService.CanEditText`（二进制、超长闸门） | `AssetsWorkbenchPage.EditTextAsset_Click` + `TextAssetEditorWindow`（`TextBox` 装载规模）、`PreviewRead.IsBundleAsset`（判「正文在容器里」） |
 | 预览看不到下面、窗口缩小后没法上下滑动 | `App/WorkbenchPages/AssetsWorkbenchPage.xaml.cs`(`WrapPreview`, `PreviewMaxHeight`) | `WorkbenchShell.xaml` 的 `EditHost`（各页自带的 `ScrollViewer` 才是滚动入口）、`AssetsWorkbenchPage.xaml` 右栏两行的 `Height`（**必须是星号行**：`Auto` 行会让 `ScrollViewer` 永不滚动、并把预览行挤成 0） |
-| **资源工作台仍列出 static-data** | `Application/Scanning/UnityCacheScanService.cs`（`isStaticBundle` / `mayClearStatic`：catalog 不可用时不得清标记） | `AssetSearchService.IsStaticBundleAsset`（bundle 名兜底 + `containerEntry` 路径判据）、`StaticBundleLocator.LooksLikeStaticBundle` / `LooksLikeStaticTablePath` |
+| ~~资源工作台仍列出 static-data~~（**2026-09-15 已废弃**：资源列表不再按静态数据筛选，静态表正常可见） | `Application/Scanning/UnityCacheScanService.cs`（`isStaticBundle` / `mayClearStatic`：标记写入与保留口径） | `AssetPreviewProviders.IsStaticTableAsset`（元数据标记 + bundle 名/文件名/容器路径兜底）、`StaticBundleLocator.LooksLikeStaticBundle` / `LooksLikeStaticTablePath` |
 | **资源预览「关联资源」为空 / 显示「关联图还没建立」** | `Application/Relations/PersonaRelationIndexService.cs`（四源签名比对是否触发重建）、`RelationQueryService.DescribeSubjectsForAsset`（库没建好时返回中文原因，正常不是 bug） | `Scanning/StartupScanService`（第 6 步 `relations` 是否跑过）、`cache/relation-index.db` 是否存在且非空；资源没有 `containerEntry` 时无法定位（属预期） |
 | **同一个人格在关联图里被拆成多组** | `Relations/SubjectRelationAnalyzer.cs` 的 `CharacterAliases`/`NormalizeCharacter`（游戏文件名有拼写错误） | 新增角色别名时同改 `SubjectRelationAnalyzerTests` 的拼写合并用例 |
 | **卡片流页空白 / 点卡片没有内容 / 类别切换里某类为 0** | `Relations/PresetWorkbenchService.cs`（`Categories()` 计数是否全为 0 = 关联库没建好）、`App/WorkbenchPages/PresetWorkbenchPage.xaml.cs` 的 `RebuildCards`/generation 守卫（换项目后旧结果被丢弃是**预期**） | `MainWindow.RefreshProjectState` 是否调了 `OnProjectRefreshed()`、`cache/relation-index.db` 是否存在且非空 |

@@ -1,6 +1,4 @@
 using System.Diagnostics;
-using LimbusModEditor.Application.Scanning;
-using LimbusModEditor.Application.StaticMods;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Domain.Diagnostics;
 using LimbusModEditor.Domain.Projects;
@@ -19,11 +17,7 @@ public sealed record AssetSearchQuery(
     long? MaxSize = null,
     bool? HasReplacement = null,
     AssetSortKind Sort = AssetSortKind.Name,
-    bool? HasContainerEntry = null,
-    /// <summary>plan-08：是否显示静态数据 bundle（static_s1_0_assets_all_*）里的
-    /// 资源。默认 false —— 资源工作台默认视图不出现这些资源，由静态数据工作台
-    /// 专门编辑；旧调用不传该参数即保持「默认隐藏」。</summary>
-    bool ShowStaticTables = false);
+    bool? HasContainerEntry = null);
 
 public sealed class AssetSearchService
 {
@@ -32,8 +26,8 @@ public sealed class AssetSearchService
     public IReadOnlyList<AssetRecord> Search(ModProject project, AssetSearchQuery query)
     {
         ArgumentNullException.ThrowIfNull(project);
-        Log.Debug("资源搜索：对项目快照执行（项目内 {0:N0} 条），文本「{1}」，类型 {2}，容器「{3}」，显示静态数据表={4}。",
-            project.Assets.Count, query.Text ?? "-", query.Type?.ToString() ?? "-", query.Container ?? "-", query.ShowStaticTables);
+        Log.Debug("资源搜索：对项目快照执行（项目内 {0:N0} 条），文本「{1}」，类型 {2}，容器「{3}」。",
+            project.Assets.Count, query.Text ?? "-", query.Type?.ToString() ?? "-", query.Container ?? "-");
         // 快照后交给重载：调用方可以先在 UI 线程取快照，再把过滤排序放到
         // 后台线程，避免大项目（全缓存扫描 40 万级）冻结界面。
         return Search(project.Assets.ToArray(), query);
@@ -45,26 +39,25 @@ public sealed class AssetSearchService
         if (query.MaxSize is < 0) throw new ArgumentException("MaxSize 不能为负（负值曾经静默关闭上限）。", nameof(query));
         var text = query.Text?.Trim();
         using var scope = Log.Scope("资源搜索");
-        Log.Info("搜索开始：文本「{0}」，类型 {1}，状态 {2}，容器「{3}」，UnityPathId {4}，UnityTypeId {5}，大小 [{6}..{7}]，有替换 {8}，有容器条目 {9}，排序 {10}，显示静态数据表 {11}",
+        Log.Info("搜索开始：文本「{0}」，类型 {1}，状态 {2}，容器「{3}」，UnityPathId {4}，UnityTypeId {5}，大小 [{6}..{7}]，有替换 {8}，有容器条目 {9}，排序 {10}",
             text ?? "-", query.Type?.ToString() ?? "-", query.State?.ToString() ?? "-", query.Container ?? "-",
             query.UnityPathId?.ToString() ?? "-", query.UnityTypeId?.ToString() ?? "-",
             query.MinSize?.ToString() ?? "-", query.MaxSize?.ToString() ?? "-",
             query.HasReplacement?.ToString() ?? "-", query.HasContainerEntry?.ToString() ?? "-",
-            query.Sort, query.ShowStaticTables);
+            query.Sort);
         var startTimestamp = Stopwatch.GetTimestamp();
         // 单趟过滤（不再用 LINQ 谓词链：40 万级下每个委托调用都要付出闭包
         // 取值与迭代器状态机开销），命中集先物化再排序。
         var matched = new List<AssetRecord>(Math.Min(1024, assets is ICollection<AssetRecord> collection ? collection.Count : 1024));
-        var staticVerdicts = query.ShowStaticTables ? null : new StaticVerdictCache();
         foreach (var asset in assets)
         {
-            if (Matches(asset, query, text, staticVerdicts)) matched.Add(asset);
+            if (Matches(asset, query, text)) matched.Add(asset);
         }
 
         var ordered = SortByKeys(matched, query.Sort);
         var elapsed = Stopwatch.GetElapsedTime(startTimestamp);
-        Log.Info("搜索完成：命中 {0:N0} 条，耗时 {1:0.#} ms（排序 {2}，显示静态数据表={3}）。",
-            ordered.Length, elapsed.TotalMilliseconds, query.Sort, query.ShowStaticTables);
+        Log.Info("搜索完成：命中 {0:N0} 条，耗时 {1:0.#} ms（排序 {2}）。",
+            ordered.Length, elapsed.TotalMilliseconds, query.Sort);
         return ordered;
     }
 
@@ -74,7 +67,7 @@ public sealed class AssetSearchService
     /// 「分页列表」与「导出/构建/旧搜索」对同一条资源给出不同结论，而这种漂移
     /// 只会在用户那里以「少了一条/多了一条」的形式出现。<paramref name="text"/> 由调用方
     /// 预先 Trim（<see cref="Search(IEnumerable{AssetRecord}, AssetSearchQuery)"/> 就是这么做的）。</para></summary>
-    public static bool Matches(AssetRecord asset, AssetSearchQuery query, string? text, StaticVerdictCache? staticVerdicts)
+    public static bool Matches(AssetRecord asset, AssetSearchQuery query, string? text)
     {
         if (!string.IsNullOrEmpty(text) && !MatchesText(asset, text)) return false;
         if (query.Type is { } type && asset.Type != type) return false;
@@ -87,9 +80,6 @@ public sealed class AssetSearchService
         if (query.MaxSize is { } maxSize && asset.Size > maxSize) return false;
         if (query.HasReplacement is { } hasReplacement && HasUsableReplacement(asset) != hasReplacement) return false;
         if (query.HasContainerEntry is { } hasContainerEntry && HasContainerEntry(asset) != hasContainerEntry) return false;
-        // plan-08：静态数据 bundle 的资源默认不出现在资源工作台（由静态数据
-        // 工作台专门编辑）；勾选「显示静态数据表」后照常出现。
-        if (staticVerdicts is not null && IsStaticBundleAsset(asset, staticVerdicts)) return false;
         return true;
     }
 
@@ -175,73 +165,6 @@ public sealed class AssetSearchService
         var sorted = new AssetRecord[matched.Count];
         for (var i = 0; i < sorted.Length; i++) sorted[i] = matched[order[i]];
         return sorted;
-    }
-
-    /// <summary>静态判定的记忆化容器：静态性主要是 **bundle 级**事实
-    /// （元数据标记 / bundle 名 / 内层键），只有第三道判据与资源自身相关。
-    /// 40 万条资产只对应上千个 bundle，逐条重算等于白烧。
-    /// <para>按页查询（<c>AssetCatalog</c>）与全量搜索共用同一个缓存实例类型，
-    /// 但**各自持有一个实例**：两者跑在不同的时间点，共享反而会把「上一批候选」
-    /// 的判断带进这一批。</para></summary>
-    public sealed class StaticVerdictCache
-    {
-        internal Dictionary<(string Bundle, string InnerKey), bool> BundleLevel { get; } = new();
-        internal Dictionary<string, bool> ContainerLevel { get; } = new(StringComparer.OrdinalIgnoreCase);
-    }
-
-    /// <summary>是否为静态数据 bundle（static_s1_0_assets_all_*）内的资源。
-    ///
-    /// <para><b>两道判据</b>：① 扫描时按 catalog 写入的元数据标记；
-    /// ② 兜底看 bundle 文件名 / 内层键（<see cref="StaticBundleLocator.LooksLikeStaticBundle"/>）。
-    /// 只用 ① 是不够的 —— 标记是「catalog 可用且内层键命中」的产物，catalog 缺失 /
-    /// 版本不符 / 旧索引缺列时就为假，于是资源工作台又把 static-data 的表全列出来。
-    /// bundle 名是不依赖 catalog 的权威事实，因此兜底不会误判。</para>
-    ///
-    /// <para>前两道判据只取决于 bundle（+ 内层键），第三道判据取决于资源自身的
-    /// 容器路径；两段都按 <paramref name="cache"/> 记忆化 —— 这是搜索热路径上
-    /// 每资源一次的字典查找 + 文件名分配 + 前缀匹配，40 万条资产下不可忽略。</para></summary>
-    private static bool IsStaticBundleAsset(AssetRecord asset, StaticVerdictCache cache)
-    {
-        // ① 元数据标记是**每个资源自己的**事实（不能按 bundle 记忆化：同一 bundle 里
-        //    只要有一个资源带标记就把整包判成静态，会把普通资源一起藏掉）。
-        if (asset.Metadata.TryGetValue(UnityCacheScanService.StaticBundleMetadataKey, out var flag)
-            && string.Equals(flag, "true", StringComparison.OrdinalIgnoreCase))
-            return true;
-
-        // ② bundle 名 / 内层键兜底：同一 bundle（= 同一内层键）的结论必然相同，按 bundle 记忆化。
-        var innerKey = asset.Metadata.TryGetValue("cacheInner", out var inner) ? inner : string.Empty;
-        var bundle = asset.Bundle ?? string.Empty;
-        if (!cache.BundleLevel.TryGetValue((bundle, innerKey), out var bundleStatic))
-        {
-            bundleStatic = StaticBundleLocator.LooksLikeStaticBundle(asset.Bundle)
-                || StaticBundleLocator.LooksLikeStaticBundle(innerKey);
-            cache.BundleLevel[(bundle, innerKey)] = bundleStatic;
-            // 兜底生效（元数据标记未命中）意味着扫描时的 catalog 判定缺失：这条必须留痕
-            // （按 bundle 记一次即可，逐资源重复同一条告警对排查没有增量信息）。
-            if (bundleStatic)
-                Log.Warn("静态判定：元数据标记未命中，由 bundle 名/内层键兜底判定为静态数据（bundle「{0}」，cacheInner「{1}」）——catalog 可能缺失/版本不符/旧索引缺列。",
-                    asset.Bundle ?? "-", innerKey);
-        }
-        if (bundleStatic) return true;
-
-        // ③ 资源自身的游戏内容器路径（不依赖 catalog / bundle 名）：缓存目录名只是内层
-        //    内容哈希，游戏更新换键后旧静态 bundle 会以裸哈希目录留在缓存里，前两道判据
-        //    同时失效（真实数据：62d6e466… 旧版本残留）。判定只取决于容器路径字符串，
-        //    用元数据原始值当记忆化键，避免为查缓存先分配一次 Trim 后的字符串。
-        if (!asset.Metadata.TryGetValue("containerEntry", out var rawEntry) || string.IsNullOrEmpty(rawEntry)) return false;
-        if (!cache.ContainerLevel.TryGetValue(rawEntry, out var byContainerPath))
-        {
-            var containerEntry = AssetDisplay.ContainerEntryPath(asset);
-            byContainerPath = StaticBundleLocator.LooksLikeStaticTablePath(containerEntry);
-            cache.ContainerLevel[rawEntry] = byContainerPath;
-            if (byContainerPath)
-                Log.Warn("静态判定：元数据与 bundle 名均未命中，由资源路径兜底判定为静态数据（容器路径「{0}」，bundle「{1}」）——缓存里存在旧版本静态 bundle。",
-                    containerEntry, asset.Bundle ?? "-");
-            else if (Log.IsTraceEnabled)
-                Log.Trace("静态判定结论：非静态（bundle 名「{0}」、内层键「{1}」、容器路径「{2}」均不匹配）。",
-                    asset.Bundle ?? "-", innerKey, containerEntry);
-        }
-        return byContainerPath;
     }
 
     /// <summary>对象是否在 m_Container 表里有游戏内资源路径（文件管理器视图

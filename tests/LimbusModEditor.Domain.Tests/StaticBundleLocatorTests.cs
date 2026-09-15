@@ -131,18 +131,22 @@ public class StaticBundleLocatorTests : IDisposable
         var result = await service.ScanIntoProjectAsync(project, cache, gameDirectory);
 
         Assert.True(result.AddedAssets > 0);
-        Assert.All(project.Assets, asset => Assert.Equal("true", asset.Metadata[UnityCacheScanService.StaticBundleMetadataKey]));
+        // 结论是位掩码（位1 catalog 标记 / 位2 bundle 名 / 位4 容器路径），所以断言判据本身，
+        // 不断言某个具体字符串 —— 位4 是否同时命中取决于这个真实 bundle 里有哪些容器路径。
+        Assert.All(project.Assets, asset => Assert.True(
+            AssetStaticClassifier.Of(asset).HasFlag(StaticKind.CatalogMark),
+            $"catalog 内层键命中却没写位1：{AssetDisplay.DisplayPath(asset)}"));
 
-        // 资源工作台不再按静态数据筛选（2026-09-15）：staticBundle 标记只作为记录保留，
-        // 静态数据表本来就该能在资源工作台里看到并编辑。
+        // 资源工作台默认视图（2026-09-15 起恢复「按静态数据筛选」）之外，全量搜索仍应看到它们：
+        // 静态数据表本来就该能在资源工作台里查到并编辑。
         var search = new AssetSearchService();
         Assert.Equal(project.Assets.Count, search.Search(project.Assets.ToArray(), new AssetSearchQuery()).Count);
 
-        // 回灌（打开旧项目）后标记必须仍在：索引持久化了 static_bundle。
+        // 回灌（打开旧项目）后结论必须仍在：索引持久化了 static_kind。
         var rehydrated = new ModProject { Name = "Rehydrate" };
         var added = await service.RehydrateFromIndexAsync(rehydrated);
         Assert.Equal(project.Assets.Count, added);
-        Assert.All(rehydrated.Assets, asset => Assert.Equal("true", asset.Metadata[UnityCacheScanService.StaticBundleMetadataKey]));
+        Assert.All(rehydrated.Assets, asset => Assert.True(AssetStaticClassifier.IsStatic(AssetStaticClassifier.Of(asset))));
         Assert.Equal(rehydrated.Assets.Count, search.Search(rehydrated.Assets.ToArray(), new AssetSearchQuery()).Count);
     }
 
@@ -203,17 +207,18 @@ public class StaticBundleLocatorTests : IDisposable
         var service = new UnityCacheScanService(Path.Combine(_root, "index2", "idx.json"));
         var result = await service.ScanIntoProjectAsync(project, cache, gameDirectory: null);
         Assert.True(result.AddedAssets > 0);
-        // 无 catalog（权威判定缺失）且名字不像静态 ⇒ 扫描不写标记。
+        // 无 catalog（权威判定缺失）且名字不像静态 ⇒ 扫描不写结论。
         Assert.All(project.Assets, asset =>
             Assert.False(asset.Metadata.ContainsKey(UnityCacheScanService.StaticBundleMetadataKey)));
 
-        // 模拟旧索引 / 旧项目留下来的标记，再扫一次（bundle 未变化）：
-        // 没有 catalog 就没有资格判定「它不是静态的」，标记必须原样保留。
+        // 模拟旧索引 / 旧项目留下来的标记（老版本写的就是字符串 "true"），再扫一次
+        // （bundle 未变化）：没有 catalog 就没有资格判定「它不是静态的」，
+        // 结论必须原样保留 —— 老形态 "true" 会被归一到位1（catalog 标记）。
         foreach (var asset in project.Assets)
             asset.Metadata[UnityCacheScanService.StaticBundleMetadataKey] = "true";
         await service.ScanIntoProjectAsync(project, cache, gameDirectory: null);
         Assert.All(project.Assets, asset =>
-            Assert.Equal("true", asset.Metadata[UnityCacheScanService.StaticBundleMetadataKey]));
+            Assert.Equal(StaticKind.CatalogMark, AssetStaticClassifier.Of(asset)));
     }
 
     [Fact]

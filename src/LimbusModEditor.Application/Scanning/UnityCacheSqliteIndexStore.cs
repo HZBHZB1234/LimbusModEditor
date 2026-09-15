@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using LimbusModEditor.Application.Assets;
+using LimbusModEditor.Application.StaticMods;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Domain.Diagnostics;
 using LimbusModEditor.Formats.Unity;
@@ -10,10 +11,15 @@ namespace LimbusModEditor.Application.Scanning;
 
 public sealed record UnityCacheIndexRow(
     int BundleIndex, string Container, long PathId, int TypeId, AssetType Type, long Size, string? Baseline,
-    string? ContainerEntry = null);
+    string? ContainerEntry = null, StaticKind StaticKind = StaticKind.None);
 
 public sealed record UnityCacheIndexBundle(
-    string DataPath, long Size, long MTimeUtcTicks, string Outer, string Inner, bool StaticBundle = false);
+    string DataPath, long Size, long MTimeUtcTicks, string Outer, string Inner,
+    StaticKind StaticKind = StaticKind.None)
+{
+    /// <summary>是不是静态数据 bundle（= 位非零）。保留布尔读法，调用方不必关心位的细节。</summary>
+    public bool StaticBundle => StaticKind != StaticKind.None;
+}
 
 /// <summary>
 /// 可以交给 SQLite 判的索引列条件（资源列表筛选下推的入参）。
@@ -125,6 +131,22 @@ public sealed class UnityCacheSqliteIndexStore
                 // 老库会留着只有 dp 的旧形状，写入端却已按 (rowid,dp,lp) 插，直接报
                 // "table asset_fts has no column named lp"。派生层是可丢弃的（重建只花
                 // 几十秒、不需要重扫 bundle），所以列名不符就直接 DROP 重建。
+                // ── 就地迁移（**绝不 +1 SchemaVersion**）────────────────────────
+                // 老 v2 库缺 assets.static_kind，且 ix_assets_named 是旧列序。两件事都必须
+                // 在下面那段 CREATE 之前处理：新建索引的 DDL 里已经用了这一列。
+                // 只加列 / 换索引，不 DROP 表、不重扫 1,471 个 bundle —— 结论可以就地算出来：
+                // bundles.static_bundle 与 assets.container_entry 都已在库里。
+                var staticKindAdded = false;
+                if (!reset)
+                {
+                    staticKindAdded = EnsureStaticKindColumn(connection, command);
+                    if (NamedIndexOrderDiffers(connection))
+                    {
+                        Log.Info("ix_assets_named 列序与当前选型不符（static_kind 需前置），摘掉按新形态重建");
+                        command.CommandText = "DROP INDEX IF EXISTS ix_assets_named;";
+                        command.ExecuteNonQuery();
+                    }
+                }
                 if (SearchIndexColumnsDiffer(connection))
                 {
                     Log.Info("检索索引形状与修订 {0} 不符，丢弃重建（派生层可丢弃，不影响 assets）",
@@ -150,10 +172,26 @@ public sealed class UnityCacheSqliteIndexStore
                         path_id INTEGER NOT NULL, type_id INTEGER NOT NULL,
                         type INTEGER NOT NULL, size INTEGER NOT NULL,
                         baseline_id INTEGER REFERENCES strings(id), container_entry TEXT,
+                        static_kind INTEGER NOT NULL DEFAULT 0,
                         PRIMARY KEY(bundle_id, bundle_index)
                     ) WITHOUT ROWID;
-                    CREATE INDEX IF NOT EXISTS ix_assets_named ON assets(container_entry, type, size)
+                    -- ix_assets_named：**筛选下推的主力索引**。谓词与
+                    -- AssetSearchService.HasContainerEntry 的「有容器条目」完全同形
+                    -- （`IS NOT NULL AND <> ''`，不是 trim 形态 —— 后者与部分索引谓词不匹配，
+                    -- planner 会退化成全扫 127 万名次表，实测 1,300 ms vs 157 ms）。
+                    -- **列序以 static_kind 打头**（2026-09 实测选型）：静态行只占 0.22%，
+                    -- 打头之后 `static_kind = 0` 成为前缀约束，默认视图（隐静态）从 191 ms
+                    -- 降到 157 ms；只看静态表走 ix_assets_static，4.2 ms。
+                    -- 代价是「不带静态条件」的查询退化成索引全扫（169 → 172 ms，可忽略：
+                    -- 容器内有条目的行只有 51,376 条，扫完也就几十毫秒）。
+                    CREATE INDEX IF NOT EXISTS ix_assets_named
+                        ON assets(static_kind, container_entry, type, size)
                         WHERE container_entry IS NOT NULL AND container_entry <> '';
+                    -- 静态数据表的专用部分索引：只有静态行在册（真实库 2,802 条），
+                    -- 所以「只看静态数据表」是一次极小的索引扫。
+                    CREATE INDEX IF NOT EXISTS ix_assets_static
+                        ON assets(container_entry, static_kind, type, size)
+                        WHERE static_kind <> 0;
                     -- ── 派生层（分页名次 + 子串检索）──────────────────────────
                     -- catalog_rank：目录全序的稠密名次 r → (bundle_id,bundle_index)。
                     --   r 以主键形态存在，所以「第 k 页」= 一次主键区间扫（实测 1.4 ms/页，
@@ -195,6 +233,13 @@ public sealed class UnityCacheSqliteIndexStore
                     PRAGMA user_version=2;
                     """;
                 command.ExecuteNonQuery();
+                if (staticKindAdded)
+                {
+                    var watch = Stopwatch.StartNew();
+                    var (markedBundles, markedRows) = BackfillStaticKind(connection, transaction);
+                    Log.Info("静态判据就地迁移完成（未重扫）：bundle 级标记 {0} 个 · 行级容器路径标记 {1} 条 · 耗时 {2:0} ms",
+                        markedBundles, markedRows, watch.Elapsed.TotalMilliseconds);
+                }
                 transaction.Commit();
             }
             // 只在升级时回收旧库的空页；正常扫描不 VACUUM。
@@ -220,8 +265,19 @@ public sealed class UnityCacheSqliteIndexStore
         return command;
     }
 
+    /// <summary>
+    /// 把本次扫描的 bundle 与资产写进索引库。
+    ///
+    /// <para><paramref name="bundleKinds"/> 是**本次扫描对每个 bundle 的静态位结论**
+    /// （key = <c>data_path</c>）。它不是可选的装饰：只 upsert「变化过的」bundle 意味着
+    /// 「catalog 判定变了但文件没变」时静态结论永远不会刷新（真实场景：游戏热修换键，
+    /// 旧静态 bundle 留在缓存里、文件字节没动）。所以这里额外做一次**位级刷新** ——
+    /// 对没被重写的 bundle，若结论与库里记的不同，就只改那几位：
+    /// <c>assets.static_kind</c> 的高位（行级容器路径位）原样保留，只替换 bundle 级两位。</para>
+    /// </summary>
     public void PersistAll(IReadOnlyList<UnityCacheScanEntry> currentEntries,
         IEnumerable<(UnityCacheIndexBundle Bundle, IReadOnlyList<UnityCacheIndexRow> Rows)> changedBundles,
+        IReadOnlyDictionary<string, StaticKind>? bundleKinds = null,
         CancellationToken cancellationToken = default)
     {
         using var connection = OpenEnsured();
@@ -259,21 +315,23 @@ public sealed class UnityCacheSqliteIndexStore
             """, "$p", "$s", "$m", "$o", "$i", "$sb");
         using var clear = Command(connection, transaction, "DELETE FROM assets WHERE bundle_id=$id", "$id");
         using var insert = Command(connection, transaction, """
-            INSERT INTO assets(bundle_id,bundle_index,container_id,path_id,type_id,type,size,baseline_id,container_entry)
-            VALUES($b,$i,$c,$p,$tid,$t,$s,$bl,$ce)
-            """, "$b", "$i", "$c", "$p", "$tid", "$t", "$s", "$bl", "$ce");
+            INSERT INTO assets(bundle_id,bundle_index,container_id,path_id,type_id,type,size,baseline_id,container_entry,static_kind)
+            VALUES($b,$i,$c,$p,$tid,$t,$s,$bl,$ce,$sk)
+            """, "$b", "$i", "$c", "$p", "$tid", "$t", "$s", "$bl", "$ce", "$sk");
         var written = 0;
+        var rewritten = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (bundle, rows) in changedBundles)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (!keep.Contains(bundle.DataPath))
                 throw new InvalidDataException($"变化的 bundle 不在本次枚举结果中：{bundle.DataPath}");
+            rewritten.Add(bundle.DataPath);
             upsert.Parameters[0].Value = bundle.DataPath;
             upsert.Parameters[1].Value = bundle.Size;
             upsert.Parameters[2].Value = bundle.MTimeUtcTicks;
             upsert.Parameters[3].Value = bundle.Outer;
             upsert.Parameters[4].Value = bundle.Inner;
-            upsert.Parameters[5].Value = bundle.StaticBundle ? 1 : 0;
+            upsert.Parameters[5].Value = (int)bundle.StaticKind;
             var bundleId = (long)upsert.ExecuteScalar()!;
             clear.Parameters[0].Value = bundleId;
             clear.ExecuteNonQuery();
@@ -290,11 +348,43 @@ public sealed class UnityCacheSqliteIndexStore
                 insert.Parameters[6].Value = row.Size;
                 insert.Parameters[7].Value = row.Baseline is null ? DBNull.Value : Intern(row.Baseline);
                 insert.Parameters[8].Value = (object?)row.ContainerEntry ?? DBNull.Value;
+                // 行里的结论 = bundle 级位（位1|位2，取自本支 bundle 的最终判定）| 行自己的
+                // 容器路径位（位4）。**合成一处写、一处读**：查询期只比这一个整数。
+                insert.Parameters[9].Value = (int)AssetStaticClassifier.Merge(bundle.StaticKind, row.StaticKind);
                 insert.ExecuteNonQuery();
             }
             written++;
         }
         cancellationToken.ThrowIfCancellationRequested();
+        // 静态位的**位级刷新**（只对没被重写的 bundle）。它不改行集，所以刻意**不**清
+        // derived_state：名次与检索索引跟静态位无关，为它触发一次三十余秒的派生层重建
+        // 是纯浪费（那正是老实现里「换了 catalog 之后要等很久」的一部分）。
+        var refreshed = 0;
+        if (bundleKinds is { Count: > 0 })
+        {
+            using var updateBundle = Command(connection, transaction,
+                "UPDATE bundles SET static_bundle=$k WHERE id=$id", "$k", "$id");
+            // 只替换 bundle 级两位（位1|位2），行级的容器路径位（位4）原样保留 ——
+            // 它是逐行事实，与 bundle 标记翻不翻转无关。
+            using var updateRows = Command(connection, transaction,
+                $"UPDATE assets SET static_kind = (static_kind & ~{(int)StaticKind.BundleMask}) | $k WHERE bundle_id=$id",
+                "$k", "$id");
+            foreach (var (id, bundle) in bundles)
+            {
+                if (rewritten.Contains(bundle.DataPath)) continue;
+                if (!bundleKinds.TryGetValue(bundle.DataPath, out var kind) || kind == bundle.StaticKind) continue;
+                updateBundle.Parameters[0].Value = (int)kind;
+                updateBundle.Parameters[1].Value = id;
+                updateBundle.ExecuteNonQuery();
+                updateRows.Parameters[0].Value = (int)kind;
+                updateRows.Parameters[1].Value = id;
+                updateRows.ExecuteNonQuery();
+                refreshed++;
+                Log.Debug("静态位刷新（文件未变，仅结论变）：{0} · {1} → {2}",
+                    bundle.DataPath, AssetStaticClassifier.Describe(bundle.StaticKind),
+                    AssetStaticClassifier.Describe(kind));
+            }
+        }
         if (written > 0)
         {
             // 行集变了 → 目录名次与检索索引同时失效：名次是**整表全序**，
@@ -305,7 +395,8 @@ public sealed class UnityCacheSqliteIndexStore
             stale.ExecuteNonQuery();
         }
         transaction.Commit();
-        Log.Debug("资源索引事务完成：枚举 {0} 个 bundle，重写 {1} 个", currentEntries.Count, written);
+        Log.Debug("资源索引事务完成：枚举 {0} 个 bundle，重写 {1} 个，静态位刷新 {2} 个",
+            currentEntries.Count, written, refreshed);
     }
 
     private static List<(long Id, UnityCacheIndexBundle Bundle)> ReadBundles(SqliteConnection connection, SqliteTransaction transaction)
@@ -316,7 +407,7 @@ public sealed class UnityCacheSqliteIndexStore
         var bundles = new List<(long, UnityCacheIndexBundle)>();
         while (reader.Read())
             bundles.Add((reader.GetInt64(0), new(reader.GetString(1), reader.GetInt64(2), reader.GetInt64(3),
-                reader.GetString(4), reader.GetString(5), reader.GetBoolean(6))));
+                reader.GetString(4), reader.GetString(5), (StaticKind)reader.GetInt32(6))));
         return bundles;
     }
 
@@ -350,7 +441,7 @@ public sealed class UnityCacheSqliteIndexStore
         var filter = dataPaths is null ? string.Empty : " WHERE bundle_id IN (" +
             string.Join(",", bundles.Select(x => x.Id.ToString(System.Globalization.CultureInfo.InvariantCulture))) + ")";
         using var command = Command(connection, transaction, """
-            SELECT bundle_id,bundle_index,container_id,path_id,type_id,type,size,baseline_id,container_entry
+            SELECT bundle_id,bundle_index,container_id,path_id,type_id,type,size,baseline_id,container_entry,static_kind
             FROM assets
             """ + filter + " ORDER BY bundle_id,bundle_index");
         using var reader = command.ExecuteReader();
@@ -364,7 +455,8 @@ public sealed class UnityCacheSqliteIndexStore
                 if (rows.Count % 1024 == 0) cancellationToken.ThrowIfCancellationRequested();
                 rows.Add(new(reader.GetInt32(1), strings[reader.GetInt64(2)], reader.GetInt64(3),
                         reader.GetInt32(4), (AssetType)reader.GetInt32(5), reader.GetInt64(6),
-                        reader.IsDBNull(7) ? null : strings[reader.GetInt64(7)], reader.IsDBNull(8) ? null : reader.GetString(8)));
+                        reader.IsDBNull(7) ? null : strings[reader.GetInt64(7)],
+                        reader.IsDBNull(8) ? null : reader.GetString(8), (StaticKind)reader.GetInt32(9)));
                 hasRow = reader.Read();
             }
             yield return (bundle, rows);
@@ -430,6 +522,133 @@ public sealed class UnityCacheSqliteIndexStore
         while (reader.Read()) columns.Add(reader.GetString(1));
         return columns.Count != 0 && !columns.SequenceEqual(SearchIndexColumns, StringComparer.Ordinal);
     }
+
+    /// <summary><c>ix_assets_named</c> 的列序是否与当前选型不一致（见 EnsureSchema 里的选型说明）。
+    /// 索引不存在、或表不存在时返回 false（下面那段 CREATE 会按新形态建）。</summary>
+    private static bool NamedIndexOrderDiffers(SqliteConnection connection)
+    {
+        // 期望形态：static_kind 打头，让 `static_kind = 0` 成为前缀约束。
+        string[] expected = ["static_kind", "container_entry", "type", "size"];
+        using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA index_info(ix_assets_named)";
+        using var reader = command.ExecuteReader();
+        var columns = new List<string>(expected.Length);
+        while (reader.Read()) columns.Add(reader.GetString(2));
+        return columns.Count != 0 && !columns.SequenceEqual(expected, StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// 给老 v2 库补上 <c>assets.static_kind</c>。返回是否真的加了一次。
+    ///
+    /// <para><c>ALTER TABLE ... ADD COLUMN ... NOT NULL DEFAULT 0</c> 只改表头（SQLite 3.2+ 起
+    /// 不重写数据），实测 15 ms / 127 万行 —— 这是「给索引库扩容」唯一被允许的形态：
+    /// 改 <see cref="SchemaVersion"/> 会 DROP 重建 = 逼用户重扫 1,471 个 bundle（约 34 s + 重解析）。</para>
+    /// </summary>
+    private static bool EnsureStaticKindColumn(SqliteConnection connection, SqliteCommand command)
+    {
+        using (var probe = connection.CreateCommand())
+        {
+            probe.CommandText = "PRAGMA table_info(assets)";
+            using var reader = probe.ExecuteReader();
+            while (reader.Read())
+                if (string.Equals(reader.GetString(1), "static_kind", StringComparison.OrdinalIgnoreCase))
+                    return false;
+        }
+        command.CommandText = "ALTER TABLE assets ADD COLUMN static_kind INTEGER NOT NULL DEFAULT 0;";
+        command.ExecuteNonQuery();
+        return true;
+    }
+
+    /// <summary>
+    /// 就地回填 <c>static_kind</c>（迁移专用，只在列刚被加上时跑一次）。返回
+    /// <c>(bundle 级标记数, 行级容器路径标记数)</c>。
+    ///
+    /// <para><b>为什么不写成纯 SQL</b>：路径判据的本体是 C#（
+    /// <see cref="StaticBundleLocator.LooksLikeStaticTablePath"/>：反斜杠归一 + 前缀/段两条）。
+    /// 在 SQL 里重写一遍就多了一份判据 —— 那正是这次改造要消灭的东西（迁移出来的结论与
+    /// 扫描出来的结论必须是同一个函数算的）。代价是读 51,376 行、写 ~4,200 行，实测
+    /// 数百毫秒级、只发生一次。</para>
+    ///
+    /// <para>两段都**只对位非零的行/包发 UPDATE**：真实库 1,471 个 bundle 里只有 2 个需要动，
+    /// 51,376 个有容器条目的行里只有 2,801 条命中路径判据。</para>
+    /// </summary>
+    private static (int Bundles, int Rows) BackfillStaticKind(
+        SqliteConnection connection, SqliteTransaction transaction)
+    {
+        var bundleBits = new Dictionary<long, StaticKind>();
+        using (var readBundles = Command(connection, transaction,
+            "SELECT id,inner_key,static_bundle FROM bundles"))
+        using (var reader = readBundles.ExecuteReader())
+        {
+            while (reader.Read())
+            {
+                // 老库的 static_bundle 是 bool 语义（1 = catalog 内层键命中）→ 迁到位1；
+                // 位2（bundle 名）由名字现算 —— 名字是稳定事实，与 catalog 是否可用无关。
+                var bits = AssetStaticClassifier.BundleBits(reader.GetInt64(2) != 0, reader.GetString(1));
+                if (AssetStaticClassifier.IsStatic(bits)) bundleBits[reader.GetInt64(0)] = bits;
+            }
+        }
+        var markedBundles = 0;
+        using (var updateBundle = Command(connection, transaction,
+            "UPDATE bundles SET static_bundle=$b WHERE id=$i", "$b", "$i"))
+        using (var markBundleRows = Command(connection, transaction,
+            "UPDATE assets SET static_kind = static_kind | $b WHERE bundle_id=$i", "$b", "$i"))
+        {
+            foreach (var (id, bits) in bundleBits)
+            {
+                updateBundle.Parameters[0].Value = (int)bits;
+                updateBundle.Parameters[1].Value = id;
+                markedBundles += updateBundle.ExecuteNonQuery();
+                markBundleRows.Parameters[0].Value = (int)bits;
+                markBundleRows.Parameters[1].Value = id;
+                markBundleRows.ExecuteNonQuery();
+            }
+        }
+        // 行级：只读「有容器条目」的行（4%），按 bundle 归组后分批打位。
+        var pathHits = new Dictionary<long, List<int>>();
+        using (var readRows = Command(connection, transaction,
+            "SELECT bundle_id,bundle_index,container_entry FROM assets " +
+            "WHERE container_entry IS NOT NULL AND container_entry <> ''"))
+        using (var reader = readRows.ExecuteReader())
+        {
+            while (reader.Read())
+            {
+                if (!AssetStaticClassifier.RowBits(reader.GetString(2)).HasFlag(StaticKind.ContainerPath)) continue;
+                var bundleId = reader.GetInt64(0);
+                if (!pathHits.TryGetValue(bundleId, out var indexes)) pathHits[bundleId] = indexes = [];
+                indexes.Add(reader.GetInt32(1));
+            }
+        }
+        var markedRows = 0;
+        foreach (var (bundleId, indexes) in pathHits)
+        {
+            for (var offset = 0; offset < indexes.Count; offset += StaticBackfillBatch)
+            {
+                var count = Math.Min(StaticBackfillBatch, indexes.Count - offset);
+                var builder = new System.Text.StringBuilder(count * 6 + 128);
+                builder.Append("UPDATE assets SET static_kind = static_kind | ")
+                    .Append((int)StaticKind.ContainerPath)
+                    .Append(" WHERE bundle_id=$b AND bundle_index IN (");
+                using var mark = connection.CreateCommand();
+                mark.Transaction = transaction;
+                mark.Parameters.AddWithValue("$b", bundleId);
+                for (var i = 0; i < count; i++)
+                {
+                    if (i > 0) builder.Append(',');
+                    builder.Append($"$x{i}");
+                    mark.Parameters.AddWithValue($"$x{i}", indexes[offset + i]);
+                }
+                builder.Append(')');
+                mark.CommandText = builder.ToString();
+                markedRows += mark.ExecuteNonQuery();
+            }
+        }
+        return (markedBundles, markedRows);
+    }
+
+    /// <summary>迁移回填时每条 UPDATE 带多少个主键（400 实测比逐条快一个数量级，
+    /// 又远低于 SQLite 的参数上限）。</summary>
+    private const int StaticBackfillBatch = 400;
 
     private static long CatalogKey(long bundleId, int bundleIndex)
         => (bundleId << RidShift) | (uint)bundleIndex;
@@ -1289,7 +1508,7 @@ public sealed class UnityCacheSqliteIndexStore
     private const string PageColumns = """
         SELECT k.r,
                b.data_path, b.size, b.mtime_ticks, b.outer_key, b.inner_key, b.static_bundle,
-               a.bundle_index, s.value, a.path_id, a.type_id, a.type, a.size, bs.value, a.container_entry
+               a.bundle_index, s.value, a.path_id, a.type_id, a.type, a.size, bs.value, a.container_entry, a.static_kind
         FROM catalog_rank k
         JOIN assets a ON a.bundle_id = k.bundle_id AND a.bundle_index = k.bundle_index
         JOIN bundles b ON b.id = a.bundle_id
@@ -1299,13 +1518,16 @@ public sealed class UnityCacheSqliteIndexStore
 
     private static UnityCacheIndexBundle ReadBundle(SqliteDataReader reader, int offset)
         => new(reader.GetString(offset), reader.GetInt64(offset + 1), reader.GetInt64(offset + 2),
-            reader.GetString(offset + 3), reader.GetString(offset + 4), reader.GetBoolean(offset + 5));
+            reader.GetString(offset + 3), reader.GetString(offset + 4), (StaticKind)reader.GetInt32(offset + 5));
 
+    /// <summary>读一行索引资产（<c>offset</c> 指向 <c>bundle_index</c>；<c>static_kind</c> 紧跟
+    /// <c>container_entry</c>，所以它就是 <c>offset+7</c>）。</summary>
     private static UnityCacheIndexRow ReadRow(SqliteDataReader reader, int offset)
         => new(reader.GetInt32(offset), reader.GetString(offset + 1), reader.GetInt64(offset + 2),
             reader.GetInt32(offset + 3), (AssetType)reader.GetInt32(offset + 4), reader.GetInt64(offset + 5),
             reader.IsDBNull(offset + 6) ? null : reader.GetString(offset + 6),
-            reader.IsDBNull(offset + 7) ? null : reader.GetString(offset + 7));
+            reader.IsDBNull(offset + 7) ? null : reader.GetString(offset + 7),
+            (StaticKind)reader.GetInt32(offset + 8));
 
     /// <summary>显示路径比较器（委托 <see cref="AssetDisplay.ComparePaths"/>，零分配）。</summary>
     private sealed class PathComparer : IComparer<string>

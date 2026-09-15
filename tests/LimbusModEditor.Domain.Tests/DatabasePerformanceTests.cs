@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Runtime.Loader;
 using LimbusModEditor.Application.Catalog;
 using LimbusModEditor.Application.Scanning;
+using LimbusModEditor.Application.StaticMods;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Domain.Projects;
 using LimbusModEditor.Formats.Unity;
@@ -95,7 +96,7 @@ public class DatabasePerformanceTests(ITestOutputHelper output)
         var bundles = new List<UnityCacheIndexBundle>();
         using (var reader = command.ExecuteReader())
             while (reader.Read()) bundles.Add(new(reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2),
-                reader.GetString(3), reader.GetString(4), reader.GetBoolean(5)));
+                reader.GetString(3), reader.GetString(4), (StaticKind)reader.GetInt32(5)));
         command.CommandText = "SELECT bundle_index,container,path_id,type_id,type,size,baseline,container_entry FROM assets WHERE data_path=$p ORDER BY bundle_index";
         command.Parameters.Add("$p", SqliteType.Text);
         foreach (var bundle in bundles)

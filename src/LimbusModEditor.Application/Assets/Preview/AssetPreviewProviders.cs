@@ -474,44 +474,48 @@ public sealed class TextPreviewProvider : IAssetPreviewProvider
                 Text: preview.Text);
         }, cancellationToken);
 
-    /// <summary>是否为静态数据 bundle 里的表（元数据标记 + bundle 名 / 文件名 / 容器路径兜底）。
-    /// <para>这条判定曾经与 <c>AssetSearchService.IsStaticBundleAsset</c> 同口径 —— 那时它决定
-    /// 资源列表要不要把静态表藏起来。2026-09-15 后者随「不再按静态数据筛选」一并删除，
-    /// 现在这里是**唯一**一处按「像不像静态表」做决策的地方：只用来把静态表送进专门的
-    /// 预览通道，<b>不再影响可见性</b>。</para></summary>
+    /// <summary>是否为静态数据表（扫描期落库的结论 + 两处不依赖索引的兜底）。
+    /// <para><b>判据本体不在这里</b>：三条判据（catalog 标记 / bundle 名 / 容器路径）在
+    /// <see cref="AssetStaticClassifier"/> 里，扫描期算一次、写进记录元数据与索引列
+    /// （<c>assets.static_kind</c>）。这里只**读**结论，不再自己判 —— 早先它与
+    /// <c>AssetSearchService</c> 各有一份实现，口径一漂就会出现「列表藏了、预览不认」
+    /// 这种只在用户那里才看得见的错位（2026-09 资源列表恢复静态筛选时统一）。</para>
+    /// <para>两处兜底仍然保留，因为它们的输入不来自索引：<c>SourcePath</c> 的文件名
+    /// （已实体化的本地副本）与 <c>Bundle</c> 字段（离线构造的记录）。</para></summary>
     private static bool IsStaticTableAsset(AssetRecord asset)
     {
-        var hasMetadata = asset.Metadata.TryGetValue(UnityCacheScanService.StaticBundleMetadataKey, out var flag);
-        var metadataHit = hasMetadata && string.Equals(flag, "true", StringComparison.OrdinalIgnoreCase);
-        Log.Debug("静态表判定（元数据标记）：键 {0} 存在={1}，值「{2}」→ {3}；输入：bundle「{4}」，SourcePath「{5}」，资源「{6}」",
-            UnityCacheScanService.StaticBundleMetadataKey, hasMetadata, flag ?? "-",
-            metadataHit ? "命中，判定为静态数据" : "未命中",
-            asset.Bundle ?? "-", asset.SourcePath ?? "-", AssetDisplay.DisplayPath(asset));
-        if (metadataHit) return true;
+        var kind = AssetStaticClassifier.Of(asset);
+        if (AssetStaticClassifier.IsStatic(kind))
+        {
+            Log.Debug("静态表判定（记录结论）：{0}；输入：bundle「{1}」，资源「{2}」",
+                AssetStaticClassifier.Describe(kind), asset.Bundle ?? "-", AssetDisplay.DisplayPath(asset));
+            return true;
+        }
         if (StaticBundleLocator.LooksLikeStaticBundle(asset.Bundle))
         {
-            Log.Warn("静态表判定：元数据标记未命中，由 bundle 名兜底判定为静态数据（bundle「{0}」），资源「{1}」——catalog 可能缺失/版本不符/旧索引缺列。",
+            Log.Warn("静态表判定：记录上没有静态结论，由 bundle 名兜底判定为静态数据（bundle「{0}」），资源「{1}」——索引可能缺失/旧版/未回灌。",
                 asset.Bundle ?? "-", AssetDisplay.DisplayPath(asset));
             return true;
         }
         var fileName = asset.SourcePath is { Length: > 0 } path ? Path.GetFileName(path) : null;
         if (StaticBundleLocator.LooksLikeStaticBundle(fileName))
         {
-            Log.Warn("静态表判定：元数据标记未命中，由 SourcePath 文件名兜底判定为静态数据（文件名「{0}」，完整路径「{1}」），资源「{2}」。",
+            Log.Warn("静态表判定：记录上没有静态结论，由 SourcePath 文件名兜底判定为静态数据（文件名「{0}」，完整路径「{1}」），资源「{2}」。",
                 fileName ?? "-", asset.SourcePath ?? "-", AssetDisplay.DisplayPath(asset));
             return true;
         }
-        // 第三道判据：容器路径前缀。缓存里旧版本静态 bundle 只剩裸哈希目录名，
-        // 前两道判据（元数据标记 / bundle 名）会同时失效，只能靠这条不依赖 catalog 的
+        // 第三道判据：容器路径。缓存里旧版本静态 bundle 只剩裸哈希目录名，
+        // 前两道判据（catalog 标记 / bundle 名）会同时失效，只能靠这条不依赖 catalog 的
         // 路径事实兜住（真实数据：62d6e466… 旧版本残留）。
+        // 正常路径下它在扫描期就已经落成了结论（位4），走到这里说明记录不是从索引来的。
         var containerEntry = AssetDisplay.ContainerEntryPath(asset);
         if (StaticBundleLocator.LooksLikeStaticTablePath(containerEntry))
         {
-            Log.Warn("静态表判定：元数据与 bundle 名均未命中，由资源路径兜底判定为静态数据（容器路径「{0}」），资源「{1}」——缓存里存在旧版本静态 bundle。",
+            Log.Warn("静态表判定：结论与 bundle 名均未命中，由资源路径兜底判定为静态数据（容器路径「{0}」），资源「{1}」——缓存里存在旧版本静态 bundle。",
                 containerEntry, AssetDisplay.DisplayPath(asset));
             return true;
         }
-        Log.Debug("静态表判定结论：非静态数据（元数据未命中，bundle 名「{0}」、文件名「{1}」、容器路径「{2}」均不匹配），资源「{3}」。",
+        Log.Debug("静态表判定结论：非静态数据（结论为空，bundle 名「{0}」、文件名「{1}」、容器路径「{2}」均不匹配），资源「{3}」。",
             asset.Bundle ?? "-", fileName ?? "-", containerEntry, AssetDisplay.DisplayPath(asset));
         return false;
     }

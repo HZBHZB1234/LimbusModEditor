@@ -264,7 +264,9 @@ public sealed class UnityCacheScanService
             // 的收缩能力 —— 那由后面的 PersistIndex 完成，与项目资产无关。
             Log.Debug("跳过资产合并段：项目与索引逐条一致={0} · 本次无需解析的 bundle={1}（未对账、未重建资产表）",
                 projectMatchesIndex, !results.Any(x => !x.FromCache));
-            PersistIndex(store, entries, results, cancellationToken);
+            // bundleKinds 传 null：这条路径整段跳过了对账（项目与索引逐条一致、且没有
+            // bundle 需要重新解析），所以本次没有算出任何新的静态结论 —— 没有结论要刷新。
+            PersistIndex(store, entries, results, null, cancellationToken);
             EnsureDerivedIndex(store, progress, cancellationToken);
             RegisterCacheSource(project, cacheDirectory, ref cacheSourceRegistered);
             Log.Info("资源扫描结束（纯索引命中）：bundle {0} 个（解析 {1} · 索引命中 {2}）· 资产未变",
@@ -299,34 +301,45 @@ public sealed class UnityCacheScanService
             ? new Dictionary<string, int>(StringComparer.Ordinal)
             : null;
         var staticBundleDecisions = 0L;
+        // 本次扫描对**每个 bundle**的静态位结论（dataPath → 位）。两个用途：
+        //   ① 写索引时用它而不是解析期的值（解析期只有 catalog 位，权威清除与索引兜底
+        //      都发生在对账阶段）；
+        //   ② 堵住一个实测过的洞：PersistAll 只 upsert **变化过的** bundle（新鲜度 =
+        //      __data 的 size/mtime），而游戏换键后 catalog 判定会变、**文件却没变** ——
+        //      于是 bundles.static_bundle 与 assets.static_kind 都不刷新，表现为
+        //      「静态筛选时灵时不灵」。字典里与旧值不同的那些由 PersistAll 精确改掉。
+        var bundleKinds = new Dictionary<string, StaticKind>(StringComparer.OrdinalIgnoreCase);
         foreach (var (entry, fromCache, cachedBundle, cachedRows) in MergeBatches())
         {
             cancellationToken.ThrowIfCancellationRequested();
-            // 静态标记：以索引里记录的标记为主；catalog 本次已被解析过（有 bundle 解析成功）
-            // 时再用内层键集合补一刀 —— 但**绝不在这里主动触发 catalog 解析**
-            // （见本方法开头的惰性说明）。旧索引/旧项目（没有 static_bundle 语义）由
-            // 项目记录里已有的标记兜底：命中分支里只要记录上已有标记就保留，
-            // 免得一次「什么都没变」的扫描把静态标记全抹掉。
+            // 静态判据按**位**刷新（位1 catalog 标记 / 位2 bundle 名；位4 在行上）。
             //
             // catalog 不可用（未解析 / 解析失败 / 版本不符）时 staticHashes 集合为空，
-            // 此时**没有资格判定「这个 bundle 不是静态的」** —— 早先的写法会据此把
-            // 已有标记全部清除，于是资源工作台又把 static-data 全列出来。
-            // 因此清除只在「本次真的拿到过 catalog 内层键集合」时发生；
-            // 另有 bundle 名兜底（不依赖 catalog）作为第二道防线。
+            // 此时**没有资格判定「位1 不成立」** —— 早先的写法会据此把已有标记全部清除，
+            // 于是资源工作台又把 static-data 全列出来。所以：
+            //   · 位1 = 索引里已记的位1 ∪ 本次 catalog 命中；只有「catalog 权威且确实没命中」
+            //     才抹掉它。索引里已记的位1 是上一次扫描的既成事实，本次没有更强的依据就保留。
+            //   · 位2 = bundle 名（稳定事实，与 catalog 无关）。缓存目录名是裸哈希 ⇒ 位2 在
+            //     本机真实数据上恒不命中，但它是 catalog 缺席时唯一的 bundle 级线索，必须留着。
+            // **不知道 ≠ 不是**：catalog 缺席只影响位1，位2/位4 仍把结论撑住。
+            // 这里**绝不主动触发 catalog 解析**（见本方法开头的惰性说明）。
             var catalogAuthoritative = staticHashesLazy.IsValueCreated;
+            var catalogHit = catalogAuthoritative && staticHashesLazy.Value.Contains(entry.InnerKey);
+            var catalogMark = catalogAuthoritative
+                ? catalogHit
+                : (cachedBundle.StaticKind & StaticKind.CatalogMark) != 0;
             var nameLooksStatic = StaticBundleLocator.LooksLikeStaticBundle(entry.InnerKey);
-            var isStaticBundle = cachedBundle.StaticBundle
-                || nameLooksStatic
-                || (catalogAuthoritative && staticHashesLazy.Value.Contains(entry.InnerKey));
-            var mayClearStatic = catalogAuthoritative && !nameLooksStatic;
+            var bundleKind = AssetStaticClassifier.BundleBits(catalogMark, entry.InnerKey);
+            var mayClearStatic = catalogAuthoritative;
+            bundleKinds[entry.DataPath] = bundleKind;
             if (Log.IsTraceEnabled)
-                Log.Trace("静态标记判定：bundle={0} · 索引标记={1} · 名字像静态={2} · catalog 权威={3} · 判定静态={4} · 允许清除={5} · 来自索引缓存={6} · data={7}",
-                    entry.InnerKey, cachedBundle.StaticBundle, nameLooksStatic, catalogAuthoritative,
-                    isStaticBundle, mayClearStatic, fromCache, entry.DataPath);
+                Log.Trace("静态判据判定：bundle={0} · 索引位={1} · 名字像静态={2} · catalog 权威={3} → 本次={4} · 来自索引缓存={5} · data={6}",
+                    entry.InnerKey, AssetStaticClassifier.Describe(cachedBundle.StaticKind), nameLooksStatic,
+                    catalogAuthoritative, AssetStaticClassifier.Describe(bundleKind), fromCache, entry.DataPath);
             if (staticCounters is not null && staticBundleDecisions++ % 5000 == 0)
-                Log.Debug("静态标记判定进度：已判 {0} 个 bundle · 最近一个 {1}（索引标记={2} · 名字像静态={3} · catalog 权威={4} → 静态={5}）",
-                    staticBundleDecisions, entry.InnerKey, cachedBundle.StaticBundle, nameLooksStatic,
-                    catalogAuthoritative, isStaticBundle);
+                Log.Debug("静态判据判定进度：已判 {0} 个 bundle · 最近一个 {1}（索引位={2} · 名字像静态={3} · catalog 权威={4} → 本次={5}）",
+                    staticBundleDecisions, entry.InnerKey, AssetStaticClassifier.Describe(cachedBundle.StaticKind),
+                    nameLooksStatic, catalogAuthoritative, AssetStaticClassifier.Describe(bundleKind));
             if (fromCache)
             {
                 var sourcePackagePath = Path.GetDirectoryName(entry.DataPath) ?? entry.DataPath;
@@ -338,44 +351,44 @@ public sealed class UnityCacheScanService
                 foreach (var row in cachedRows!)
                 {
                     var logicalPath = $"{entry.OuterKey}/{entry.InnerKey}/{row.Container}/{row.PathId}.{row.TypeId}";
+                    // 行级结论 = bundle 位 | 行自己的位（索引里 store 的就是这个合成值）。
+                    var rowKind = AssetStaticClassifier.Merge(bundleKind, row.StaticKind);
                     if (existingByPath.TryGetValue(logicalPath, out var existingAsset))
                     {
-                        // 已存在：只补/清静态标记（旧项目没有该标记时也能对齐）。
-                        // 记录上已有标记就保留：旧索引（static_bundle 列全是 0）在
-                        // 「什么都没变」的扫描里不该把标记抹掉。
-                        var hadStaticMark = existingAsset.Metadata.ContainsKey(StaticBundleMetadataKey);
-                        var staticForAsset = isStaticBundle
-                            || existingAsset.Metadata.ContainsKey(StaticBundleMetadataKey);
-                        if (staticForAsset) existingAsset.Metadata[StaticBundleMetadataKey] = "true";
-                        else if (mayClearStatic) existingAsset.Metadata.Remove(StaticBundleMetadataKey);
-                        if (Log.IsDebugEnabled) LogStaticMark(staticCounters, logicalPath, isStaticBundle,
-                            staticForAsset && !hadStaticMark,
-                            mayClearStatic && !staticForAsset && hadStaticMark,
+                        // 已存在：只补/清静态结论（旧项目没有该键时也能对齐）。
+                        // 本次没有权威依据（catalog 没解析过）时保留记录里已有的结论 ——
+                        // 一次「什么都不知道」的扫描不该把静态数据放出来。
+                        var hadStaticMark = AssetStaticClassifier.Of(existingAsset) != StaticKind.None;
+                        var finalKind = ApplyStaticKind(existingAsset, rowKind, mayClearStatic);
+                        if (Log.IsDebugEnabled) LogStaticMark(staticCounters, logicalPath, finalKind,
+                            AssetStaticClassifier.IsStatic(finalKind) && !hadStaticMark,
+                            !AssetStaticClassifier.IsStatic(finalKind) && hadStaticMark,
                             "bundle 未变化（索引命中）");
                         updated++;
                         continue;
                     }
-                    var asset = BuildRecord(entry.DataPath, entry.OuterKey, entry.InnerKey, row, isStaticBundle, sourcePackagePath, logicalPath);
+                    var asset = BuildRecord(entry.DataPath, entry.OuterKey, entry.InnerKey, row, rowKind, sourcePackagePath, logicalPath);
                     project.Assets.Add(asset);
                     existingByPath.Add(logicalPath, asset);
                     added++;
-                    if (Log.IsDebugEnabled && isStaticBundle)
-                        LogStaticMark(staticCounters, logicalPath, true, true, false,
+                    if (Log.IsDebugEnabled && AssetStaticClassifier.IsStatic(rowKind))
+                        LogStaticMark(staticCounters, logicalPath, rowKind, true, false,
                             "新增引用记录（bundle 未变化，项目里缺失）");
                 }
             }
             else
             {
                 // 变化过的 bundle（或首轮解析）：整条刷新/新增。
-                foreach (var asset in RebuildRecords(entry.DataPath, entry.OuterKey, entry.InnerKey, cachedRows!, isStaticBundle))
+                foreach (var asset in RebuildRecords(entry.DataPath, entry.OuterKey, entry.InnerKey, cachedRows!, bundleKind))
                 {
+                    var rowKind = AssetStaticClassifier.Of(asset);
                     if (!existingByPath.TryGetValue(asset.LogicalPath, out var existing))
                     {
                         project.Assets.Add(asset);
                         existingByPath.Add(asset.LogicalPath, asset);
                         added++;
-                        if (Log.IsDebugEnabled && isStaticBundle)
-                            LogStaticMark(staticCounters, asset.LogicalPath, true, true, false,
+                        if (Log.IsDebugEnabled && AssetStaticClassifier.IsStatic(rowKind))
+                            LogStaticMark(staticCounters, asset.LogicalPath, rowKind, true, false,
                                 "新增引用记录（bundle 本次重新解析）");
                         continue;
                     }
@@ -400,13 +413,12 @@ public sealed class UnityCacheScanService
                         if (asset.Metadata.TryGetValue("catalogBaseline", out var baseline))
                             existing.Metadata["catalogBaseline"] = baseline;
                     }
-                    // 静态标记随本次判定刷新（补上总是安全的；清除需要 catalog 权威判定，见上）。
-                    var existingHadStaticMark = existing.Metadata.ContainsKey(StaticBundleMetadataKey);
-                    if (isStaticBundle) existing.Metadata[StaticBundleMetadataKey] = "true";
-                    else if (mayClearStatic) existing.Metadata.Remove(StaticBundleMetadataKey);
-                    if (Log.IsDebugEnabled) LogStaticMark(staticCounters, asset.LogicalPath, isStaticBundle,
-                        isStaticBundle && !existingHadStaticMark,
-                        mayClearStatic && !isStaticBundle && existingHadStaticMark,
+                    // 静态结论随本次判定刷新（补上总是安全的；清空需要 catalog 权威依据，见上）。
+                    var existingHadStaticMark = AssetStaticClassifier.Of(existing) != StaticKind.None;
+                    var finalKind = ApplyStaticKind(existing, rowKind, mayClearStatic);
+                    if (Log.IsDebugEnabled) LogStaticMark(staticCounters, asset.LogicalPath, finalKind,
+                        AssetStaticClassifier.IsStatic(finalKind) && !existingHadStaticMark,
+                        !AssetStaticClassifier.IsStatic(finalKind) && existingHadStaticMark,
                         "bundle 本次重新解析");
                     updated++;
                 }
@@ -429,7 +441,7 @@ public sealed class UnityCacheScanService
 
         progress?.Report(new UnityCacheScanProgress(total, total, string.Empty, scanned, indexed,
             Phase: "正在写入索引库…"));
-        PersistIndex(store, entries, results, cancellationToken);
+        PersistIndex(store, entries, results, bundleKinds, cancellationToken);
         EnsureDerivedIndex(store, progress, cancellationToken);
         Log.Info("Unity 缓存扫描结束：bundle {0} 个（解析 {1} · 索引命中 {2}）· 新增资产 {3} · 更新资产 {4} · 诊断 {5} 条 · 跳过对账={6}",
             total, scanned, indexed, added, updated, diagnostics.Count, !reconcileIndexHits);
@@ -446,17 +458,17 @@ public sealed class UnityCacheScanService
     private static void LogStaticMark(
         Dictionary<string, int>? counters,
         string logicalPath,
-        bool isStaticBundle,
+        StaticKind kind,
         bool wrote,
         bool cleared,
         string reason)
     {
         // 计数器只在 Debug 级别开启时创建；这里跟着一起降级为「只打日志、不计数」。
-        var category = cleared ? "清除" : wrote ? "写入" : isStaticBundle ? "保留" : "清除(已无标记)";
+        var category = cleared ? "清除" : wrote ? "写入" : AssetStaticClassifier.IsStatic(kind) ? "保留" : "清除(已无标记)";
         if (counters is null)
         {
             if (cleared && Log.IsWarnEnabled)
-                Log.Warn("清除 staticBundle 标记：{0} · 依据：{1}", logicalPath, reason);
+                Log.Warn("清除 staticBundle 结论：{0} · 依据：{1}", logicalPath, reason);
             return;
         }
         counters.TryGetValue(category, out var counter);
@@ -465,6 +477,29 @@ public sealed class UnityCacheScanService
             Log.Warn("清除 staticBundle 标记：{0} · 依据：{1}（累计 {2} 条）", logicalPath, reason, counter);
         else if (counter == 1 || counter % 5000 == 0)
             Log.Debug("{0} staticBundle 标记：{1} · 依据：{2}（累计 {3} 条）", category, logicalPath, reason, counter);
+    }
+
+    /// <summary>
+    /// 把本次扫描算出的静态结论写回项目记录，返回**写完之后**记录上的结论。三处调用点共用，
+    /// 免得「补键 / 清键 / 保留旧结论」这套规则各写一遍（历史上正是这里口径漂了）。
+    ///
+    /// <para>规则：结论非空就写；结论为空时，<b>只有本次拿到过权威依据</b>
+    /// （<paramref name="mayClear"/>：catalog 已解析）才真的清空 —— 一次「什么都不知道」
+    /// 的扫描不该把静态数据放出来（用户反馈过的「资源工作台仍然包含 static-data」）。
+    /// 反之，没有权威依据时保留记录里已有的结论。</para>
+    /// </summary>
+    private static StaticKind ApplyStaticKind(AssetRecord record, StaticKind kind, bool mayClear)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+        var existing = AssetStaticClassifier.Of(record);
+        var final = AssetStaticClassifier.Merge(kind, mayClear ? StaticKind.None : existing);
+        if (AssetStaticClassifier.IsStatic(final))
+        {
+            record.Metadata[StaticBundleMetadataKey] = AssetStaticClassifier.Format(final);
+            return final;
+        }
+        record.Metadata.Remove(StaticBundleMetadataKey);
+        return StaticKind.None;
     }
 
     /// <summary>登记缓存来源（导出全部会跳过 Directory 来源；缓存写回由
@@ -518,7 +553,7 @@ public sealed class UnityCacheScanService
                 readBundles++;
                 Log.Every(readBundles, 500, LogLevel.Debug,
                     () => $"回灌索引读取进度：已读 {readBundles} 个 bundle · 已合并 {merged.Count} 条资产");
-                foreach (var record in RebuildRecords(bundle.DataPath, bundle.Outer, bundle.Inner, rows, bundle.StaticBundle))
+                foreach (var record in RebuildRecords(bundle.DataPath, bundle.Outer, bundle.Inner, rows, bundle.StaticKind))
                 {
                     if (byPath.TryAdd(record.LogicalPath, record)) merged.Add(record);
                 }
@@ -563,16 +598,24 @@ public sealed class UnityCacheScanService
                 Log.Debug(ex, "vanilla 基线判定失败（基线留空，扫描继续）：{0}", entry.DataPath);
             }
         });
-        var isStaticBundle = staticHashesProvider().Contains(entry.InnerKey);
-        var bundle = new UnityCacheIndexBundle(entry.DataPath, info.Length, info.LastWriteTimeUtc.Ticks, entry.OuterKey, entry.InnerKey, isStaticBundle);
+        // bundle 级判据（位1 catalog 内层键命中 | 位2 bundle 名）在这里一次性算完。
+        // catalog 缺席时 staticHashesProvider 给空集 ⇒ 位1 缺席，但位2/位4 仍然成立 —— 这正是
+        // 位掩码相对于「一个 bool」的意义：**不知道 ≠ 不是**（老功能时灵时不灵的根因）。
+        var bundleKinds = AssetStaticClassifier.BundleBits(staticHashesProvider().Contains(entry.InnerKey), entry.InnerKey);
+        var bundle = new UnityCacheIndexBundle(entry.DataPath, info.Length, info.LastWriteTimeUtc.Ticks,
+            entry.OuterKey, entry.InnerKey, bundleKinds);
         if (Log.IsDebugEnabled)
-            Log.Debug("解析 bundle 成功：{0}/{1} · {2:0.0} KB · 对象 {3} 个 · 静态 bundle={4}",
-                entry.OuterKey, entry.InnerKey, info.Length / 1024.0, descriptors.Count, isStaticBundle);
+            Log.Debug("解析 bundle 成功：{0}/{1} · {2:0.0} KB · 对象 {3} 个 · 静态判定={4}",
+                entry.OuterKey, entry.InnerKey, info.Length / 1024.0, descriptors.Count,
+                AssetStaticClassifier.Describe(bundleKinds));
 
         var rows = new List<UnityCacheIndexRow>(descriptors.Count);
         for (var i = 0; i < descriptors.Count; i++)
         {
             var descriptor = descriptors[i];
+            var containerEntry = string.IsNullOrWhiteSpace(descriptor.ContainerEntryPath)
+                ? null
+                : descriptor.ContainerEntryPath;
             rows.Add(new UnityCacheIndexRow(
                 i,
                 descriptor.ContainerPath,
@@ -581,16 +624,22 @@ public sealed class UnityCacheScanService
                 descriptor.AssetType,
                 descriptor.ByteSize,
                 baselineSummary is { Length: > 0 } ? baselineSummary : null,
-                string.IsNullOrWhiteSpace(descriptor.ContainerEntryPath) ? null : descriptor.ContainerEntryPath));
+                containerEntry,
+                // 行级判据（位4）在解析期就定下：它只依赖这一行自己的容器路径，
+                // 与 catalog 是否可用、bundle 是不是静态都无关。
+                AssetStaticClassifier.RowBits(containerEntry)));
         }
         return (bundle, rows);
     }
 
-    /// <summary>静态数据 bundle 标记的元数据键（plan-08）。</summary>
+    /// <summary>静态数据表标记的元数据键（plan-08）。值是**位掩码的十进制形态**
+    /// （见 <see cref="StaticKind"/>）；老记录里的 <c>"true"</c> 仍被
+    /// <see cref="AssetStaticClassifier.Parse"/> 认作位1。读侧一律走
+    /// <see cref="AssetStaticClassifier.Of"/>，不要自己比字符串。</summary>
     public const string StaticBundleMetadataKey = "staticBundle";
 
     private static AssetRecord BuildRecord(
-        string dataPath, string outerKey, string innerKey, UnityCacheIndexRow item, bool staticBundle,
+        string dataPath, string outerKey, string innerKey, UnityCacheIndexRow item, StaticKind staticKind,
         string sourcePackagePath, string? logicalPath = null, Guid? assetId = null)
     {
         var record = new AssetRecord
@@ -622,15 +671,21 @@ public sealed class UnityCacheScanService
         };
         if (!string.IsNullOrEmpty(item.Baseline)) record.Metadata["catalogBaseline"] = item.Baseline!;
         if (!string.IsNullOrEmpty(item.ContainerEntry)) record.Metadata["containerEntry"] = item.ContainerEntry!;
-        if (staticBundle) record.Metadata[StaticBundleMetadataKey] = "true";
+        if (AssetStaticClassifier.IsStatic(staticKind))
+            record.Metadata[StaticBundleMetadataKey] = AssetStaticClassifier.Format(staticKind);
         return record;
     }
 
+    /// <summary>把一串索引行重建成记录：每行的最终结论 = <paramref name="bundleKind"/>（bundle 级位）
+    /// | 行自己的位。合并在这一处做，调用方不必各自记「还要不要叠 bundle 的位」。</summary>
     private static IEnumerable<AssetRecord> RebuildRecords(
-        string dataPath, string outerKey, string innerKey, IReadOnlyList<UnityCacheIndexRow> rows, bool staticBundle = false)
+        string dataPath, string outerKey, string innerKey, IReadOnlyList<UnityCacheIndexRow> rows,
+        StaticKind bundleKind = StaticKind.None)
     {
         var sourcePackagePath = Path.GetDirectoryName(dataPath) ?? dataPath;
-        foreach (var item in rows) yield return BuildRecord(dataPath, outerKey, innerKey, item, staticBundle, sourcePackagePath);
+        foreach (var item in rows)
+            yield return BuildRecord(dataPath, outerKey, innerKey, item,
+                AssetStaticClassifier.Merge(bundleKind, item.StaticKind), sourcePackagePath);
     }
 
     /// <summary>
@@ -647,7 +702,10 @@ public sealed class UnityCacheScanService
     /// </summary>
     public static AssetRecord BuildReferenceRecord(
         UnityCacheIndexBundle bundle, UnityCacheIndexRow row, string? logicalPath = null, Guid? assetId = null)
-        => BuildRecord(bundle.DataPath, bundle.Outer, bundle.Inner, row, bundle.StaticBundle,
+        => BuildRecord(bundle.DataPath, bundle.Outer, bundle.Inner, row,
+            // 索引里存的 <c>static_kind</c> 已经是「bundle 级位 | 行级位」的合成结论，
+            // 这里再叠一次 bundle 位只是幂等兜底（写入端保证过两者一致）。
+            AssetStaticClassifier.Merge(bundle.StaticKind, row.StaticKind),
             Path.GetDirectoryName(bundle.DataPath) ?? bundle.DataPath, logicalPath, assetId);
 
     // ── 索引持久化（SQLite；单事务批量写，不再整文件/逐 bundle 重写）──
@@ -656,6 +714,7 @@ public sealed class UnityCacheScanService
         UnityCacheSqliteIndexStore? store,
         IReadOnlyList<UnityCacheScanEntry> entries,
         ConcurrentBag<(UnityCacheScanEntry Entry, bool FromCache, UnityCacheIndexBundle Bundle, IReadOnlyList<UnityCacheIndexRow>? Rows)> results,
+        IReadOnlyDictionary<string, StaticKind>? bundleKinds,
         CancellationToken cancellationToken)
     {
         if (store is null)
@@ -667,12 +726,17 @@ public sealed class UnityCacheScanService
         {
             // 只写变化过的 bundle（索引命中的未变化 bundle 无需重写）；
             // 收缩（游戏更新换键后旧索引自然淘汰）与 upsert 在同一事务完成。
+            // 静态位以对账阶段的结论为准（解析期只有 catalog 那一位，见 bundleKinds 的注释）。
             var toWrite = results
                 .Where(x => !x.FromCache && x.Rows is not null)
-                .Select(x => (x.Bundle, x.Rows!))
+                .Select(x => (
+                    bundleKinds is not null && bundleKinds.TryGetValue(x.Bundle.DataPath, out var kind)
+                        ? x.Bundle with { StaticKind = kind }
+                        : x.Bundle,
+                    x.Rows!))
                 .ToList();
             var watch = Stopwatch.StartNew();
-            store.PersistAll(entries, toWrite, cancellationToken);
+            store.PersistAll(entries, toWrite, bundleKinds, cancellationToken);
             watch.Stop();
             Log.Debug("索引库持久化完成：磁盘条目 {0} 个 · 重写 bundle {1} 个 · 用时 {2:0.0} 秒",
                 entries.Count, toWrite.Count, watch.Elapsed.TotalSeconds);

@@ -1,6 +1,7 @@
 using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Application.Catalog;
 using LimbusModEditor.Application.Scanning;
+using LimbusModEditor.Application.StaticMods;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Domain.Projects;
 using LimbusModEditor.Formats.Unity;
@@ -50,12 +51,15 @@ public sealed class AssetCatalogTests : IDisposable
         new("CAB-2", 12, 1, AssetType.Unknown, 42, "基线", "Assets/Prefab/SD/Enemy/10201_xAppearance.prefab"),
     ];
 
-    private static readonly (string Outer, string Inner, bool Static)[] Bundles =
+    /// <summary>测试用的 4 支 bundle：bundle 级静态位由这里给出（位1 catalog / 位2 bundle 名），
+    /// 行级的容器路径位（位4）在行上判。第三支刻意只靠**名字**像静态（真实缓存里
+    /// 目录名是裸哈希 ⇒ 位2 一般不命中，但它是 catalog 缺席时唯一的 bundle 级线索）。</summary>
+    private static readonly (string Outer, string Inner, StaticKind Static)[] Bundles =
     [
-        ("outer1", "inner1", false),
-        ("outer2", "inner2", false),
-        ("outer3", "static_s1_0_assets_all_0123456789abcdef0123456789abcdef", false),
-        ("outer4", "inner4", true),
+        ("outer1", "inner1", StaticKind.None),
+        ("outer2", "inner2", StaticKind.None),
+        ("outer3", "static_s1_0_assets_all_0123456789abcdef0123456789abcdef", StaticKind.BundleName),
+        ("outer4", "inner4", StaticKind.CatalogMark),
     ];
 
     private static string DataPathOf(string root, string outer, string inner)

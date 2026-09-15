@@ -1,5 +1,6 @@
 using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Application.Scanning;
+using LimbusModEditor.Application.StaticMods;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Domain.Projects;
 using Microsoft.Data.Sqlite;
@@ -10,7 +11,7 @@ public sealed class UnityCacheSqliteIndexStoreTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "lme-index-v2-" + Guid.NewGuid().ToString("N"));
     private string Database => Path.Combine(_root, "index.db");
-    private static UnityCacheIndexBundle Bundle(string name) => new(name, 123, 456, "outer", name, true);
+    private static UnityCacheIndexBundle Bundle(string name) => new(name, 123, 456, "outer", name);
     private static UnityCacheScanEntry Entry(string name) => new("outer", name, name);
     private static UnityCacheIndexRow Row(int index, string? baseline = "基线") =>
         new(index, "共享容器", long.MaxValue - index, 49, AssetType.Text, 9876543210, baseline, index == 0 ? "assets/中文.json" : null);
@@ -85,7 +86,7 @@ public sealed class UnityCacheSqliteIndexStoreTests : IDisposable
             yield return (Bundle("a"), new[] { Row(2) });
             cancellation.Cancel();
         }
-        Assert.Throws<OperationCanceledException>(() => store.PersistAll([Entry("a")], Changes(), cancellation.Token));
+        Assert.Throws<OperationCanceledException>(() => store.PersistAll([Entry("a")], Changes(), null, cancellation.Token));
         Assert.Equal(2, store.ReadAll().Count());
         Assert.Equal(Row(0), Assert.Single(store.ReadAll().First().Rows));
     }
@@ -143,7 +144,7 @@ public sealed class UnityCacheSqliteIndexStoreTests : IDisposable
     /// <summary>data_path 取接近真实的形态 —— 否则造不出 SourcePath 的公共前后缀，
     /// 检索的常量规则（命中它 = 所有行）就没法被覆盖。</summary>
     private static UnityCacheIndexBundle SourceBundle(string name)
-        => new($@"C:\缓存根\{name}\__data", 123, 456, "outer", name, true);
+        => new($@"C:\缓存根\{name}\__data", 123, 456, "outer", name);
 
     private static UnityCacheScanEntry SourceEntry(string name)
         => new("outer", name, $@"C:\缓存根\{name}\__data");
@@ -549,6 +550,133 @@ public sealed class UnityCacheSqliteIndexStoreTests : IDisposable
         command.CommandText =
             "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='ix_catalog_rank_bundle'";
         Assert.Equal(1L, Convert.ToInt64(command.ExecuteScalar()));
+    }
+
+    // ── 静态判据落库（2026-09：资源列表恢复「按静态数据筛选」）────────────────
+
+    /// <summary>静态结论是**合成**的：行里存的是 <c>bundle 级位 | 行级位</c> ——
+    /// 查询期只比这一个整数，所以写入端必须把两级判据合在一起（行自己的容器路径位
+    /// 在解析期算、bundle 位在对账期算）。</summary>
+    [Fact]
+    public void Static_kind_is_stored_as_the_union_of_bundle_bits_and_row_bits()
+    {
+        var store = new UnityCacheSqliteIndexStore(Database);
+        var staticRow = new UnityCacheIndexRow(0, "共享容器", 700, 49, AssetType.Text, 10, null,
+            "Assets/Resources_moved/StaticData/static-data/item/item-02.json", StaticKind.ContainerPath);
+        var plainRow = Row(1);
+        store.PersistAll([Entry("a")],
+            [(Bundle("a") with { StaticKind = StaticKind.CatalogMark }, new[] { staticRow, plainRow })]);
+
+        var (bundle, rows) = Assert.Single(store.ReadAll());
+        Assert.Equal(StaticKind.CatalogMark, bundle.StaticKind);
+        Assert.True(bundle.StaticBundle);
+        Assert.Equal(StaticKind.CatalogMark | StaticKind.ContainerPath, rows[0].StaticKind);
+        Assert.Equal(StaticKind.CatalogMark, rows[1].StaticKind);
+    }
+
+    /// <summary>
+    /// 「catalog 判定变了、bundle 文件却没变」时静态结论必须跟着变。
+    ///
+    /// <para>这是老功能「时灵时不灵」的两个根因之一：<see cref="UnityCacheSqliteIndexStore.PersistAll"/>
+    /// 只 upsert **变化过的** bundle（新鲜度 = <c>__data</c> 的 size/mtime），而游戏热修换键后
+    /// catalog 里的静态内层键会变、文件字节却没动 —— 于是索引里的静态结论永远停留在旧值。
+    /// 现在 bundle 级结论由 <c>bundleKinds</c> 单独送进来，位变了就精确改那几位
+    /// （行级的容器路径位原样保留）。</para>
+    /// </summary>
+    [Fact]
+    public void Static_bits_are_refreshed_even_when_the_bundle_file_did_not_change()
+    {
+        var store = new UnityCacheSqliteIndexStore(Database);
+        var staticRow = new UnityCacheIndexRow(0, "共享容器", 700, 49, AssetType.Text, 10, null,
+            "Assets/Resources_moved/StaticData/static-data/item/item-02.json", StaticKind.ContainerPath);
+        store.PersistAll([Entry("a")], [(Bundle("a"), new[] { staticRow })]);
+        Assert.Equal(StaticKind.None, Assert.Single(store.ReadAll()).Bundle.StaticKind);
+
+        // 文件没变 ⇒ 它不在 changedBundles 里，只有结论（catalog 换键后翻转为静态）。
+        store.PersistAll([Entry("a")], [],
+            new Dictionary<string, StaticKind>(StringComparer.OrdinalIgnoreCase)
+            {
+                [Bundle("a").DataPath] = StaticKind.CatalogMark,
+            });
+
+        var (bundle, rows) = Assert.Single(store.ReadAll());
+        Assert.Equal(StaticKind.CatalogMark, bundle.StaticKind);
+        // 行级容器路径位保留（只替换 bundle 级两位）。
+        Assert.Equal(StaticKind.CatalogMark | StaticKind.ContainerPath, Assert.Single(rows).StaticKind);
+    }
+
+    /// <summary>
+    /// 老 v2 库（没有 <c>static_kind</c> 列、<c>ix_assets_named</c> 是旧列序）打开时
+    /// **就地迁移**：加列 + 换索引 + 回填，不 DROP 表、不重扫 bundle、不动
+    /// <c>SchemaVersion</c>，也不清派生层状态（派生层与静态位无关，重建一次要三十余秒）。
+    /// </summary>
+    [Fact]
+    public void An_old_root_v2_database_gains_static_kind_by_an_in_place_migration()
+    {
+        Directory.CreateDirectory(_root);
+        using (var connection = new SqliteConnection($"Data Source={Database}"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            // 直接造出「当前 v2 表结构 + 没有 static_kind」的老库，并留下派生层状态行。
+            command.CommandText = """
+                CREATE TABLE bundles (
+                    id INTEGER PRIMARY KEY,
+                    data_path TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                    size INTEGER NOT NULL, mtime_ticks INTEGER NOT NULL,
+                    outer_key TEXT NOT NULL, inner_key TEXT NOT NULL,
+                    static_bundle INTEGER NOT NULL);
+                CREATE TABLE strings (id INTEGER PRIMARY KEY, value TEXT NOT NULL UNIQUE);
+                CREATE TABLE assets (
+                    bundle_id INTEGER NOT NULL REFERENCES bundles(id) ON DELETE CASCADE,
+                    bundle_index INTEGER NOT NULL,
+                    container_id INTEGER NOT NULL REFERENCES strings(id),
+                    path_id INTEGER NOT NULL, type_id INTEGER NOT NULL,
+                    type INTEGER NOT NULL, size INTEGER NOT NULL,
+                    baseline_id INTEGER REFERENCES strings(id), container_entry TEXT,
+                    PRIMARY KEY(bundle_id, bundle_index)) WITHOUT ROWID;
+                CREATE INDEX ix_assets_named ON assets(container_entry, type, size)
+                    WHERE container_entry IS NOT NULL AND container_entry <> '';
+                CREATE TABLE derived_state (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+                INSERT INTO derived_state(k,v) VALUES('revision','d2'),('rows','2');
+                INSERT INTO bundles(id,data_path,size,mtime_ticks,outer_key,inner_key,static_bundle)
+                    VALUES(1,'a',123,456,'outer','abcdef0123456789abcdef0123456789',1),
+                          (2,'b',123,456,'outer','feedfacefeedfacefeedfacefeedface',0),
+                          (3,'c',123,456,'outer','static_s1_0_assets_all_0123456789abcdef0123456789abcdef',0);
+                INSERT INTO strings(id,value) VALUES(1,'共享容器'),(2,'静态容器');
+                INSERT INTO assets(bundle_id,bundle_index,container_id,path_id,type_id,type,size,container_entry)
+                    VALUES(1,0,1,700,49,1,10,'Assets/Prefab/x.prefab'),
+                          (2,0,2,701,49,1,10,'Assets/Resources_moved/StaticData/static-data/item/item-02.json'),
+                          (2,1,1,702,49,1,10,'Assets/Prefab/y.prefab'),
+                          (3,0,1,703,49,1,10,NULL);
+                PRAGMA user_version=2;
+                """;
+            command.ExecuteNonQuery();
+        }
+
+        var store = new UnityCacheSqliteIndexStore(Database);
+        var batches = store.ReadAll().OrderBy(x => x.Bundle.DataPath).ToArray();
+        Assert.Equal(3, batches.Length);
+        // 位1 来自老库的 static_bundle=1；位2 由 bundle 名现算。
+        Assert.Equal(StaticKind.CatalogMark, batches[0].Bundle.StaticKind);
+        Assert.Equal(StaticKind.None, batches[1].Bundle.StaticKind);
+        Assert.Equal(StaticKind.BundleName, batches[2].Bundle.StaticKind);
+        // 行级位4：只有那一条静态容器路径命中。
+        Assert.Equal(StaticKind.ContainerPath, batches[1].Rows[0].StaticKind);
+        Assert.Equal(StaticKind.None, batches[1].Rows[1].StaticKind);
+
+        using var check = new SqliteConnection($"Data Source={Database}");
+        check.Open();
+        using var verify = check.CreateCommand();
+        verify.CommandText = "SELECT v FROM derived_state WHERE k='revision'";
+        Assert.Equal("d2", verify.ExecuteScalar());
+        verify.CommandText = "PRAGMA user_version";
+        Assert.Equal(2L, Convert.ToInt64(verify.ExecuteScalar()));
+        verify.CommandText = "PRAGMA index_info(ix_assets_named)";
+        using var reader = verify.ExecuteReader();
+        var columns = new List<string>();
+        while (reader.Read()) columns.Add(reader.GetString(2));
+        Assert.Equal(new[] { "static_kind", "container_entry", "type", "size" }, columns);
     }
 
     public void Dispose()

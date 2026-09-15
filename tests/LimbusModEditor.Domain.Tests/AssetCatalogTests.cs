@@ -36,7 +36,10 @@ public sealed class AssetCatalogTests : IDisposable
 
     private static readonly RowSpec[] Template =
     [
-        new("CAB-1", 1, 28, AssetType.Unknown, 100, "基线", "Assets/Animation/SD/cg_01.png"),
+        // 第一条刻意用**负的 path_id**：真实缓存的 path_id 是带符号的 64 位对象 id，
+        // 负值很常见（这个值就是从真实库 r=0 那行抄来的）。它压住 LogicalPath 反解、
+        // 名次定位、以及「lp 写进检索索引再复核」三处对负号的假设。
+        new("CAB-1", -4060527305021521791, 28, AssetType.Unknown, 100, "基线", "Assets/Animation/SD/cg_01.png"),
         new("CAB-1", 2, 213, AssetType.Unknown, 2_000, null, "Assets/Animation/SD/cg_10.png"),
         new("CAB-1", 3, 49, AssetType.Text, 30, "基线", "Assets/Text/表/表-01.json"),
         new("CAB-2", 10, 999_999_999, AssetType.Unknown, 55_000, null, null),

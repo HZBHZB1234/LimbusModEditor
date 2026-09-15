@@ -405,12 +405,106 @@ ref-type 伪 id / 映射不到保留类型树结论、**不同 bundle 显示路�
 （正→反、反→正）。少数类型（`Json`、`ScriptableObject`）没有对应 class id，反向表为空是
 **正确**的 —— SQL 退化成 `assets.type = $t`，而那一列正是它们唯一的出处。
 
+## S3a 修正：让「下推」真的下推（2026-09-15）
+
+S3a 只证明了**等价性**，没在真实规模上量过。用 `logs/run_catalog_probe.py` 在真实库副本
+（1,275,623 行）上一量，默认视图**每页 5.67 s** —— 比要替换掉的旧路径还慢。
+那是「拿内存换时间」的坏交易，所以先把钱花在哪拆开：
+
+| 环节（默认视图：4.86 万候选 → 1 页 200 条） | 修前 | 修后 |
+|---|---|---|
+| ① `ReadCandidateRanks`（候选集 SQL） | **~4.8 s** | **0.76 s** |
+| ② `StreamByRanks` 读回 51,376 行 | 0.835 s | 0.59 s |
+| ③ 每行造 `AssetRecord`（`BuildReferenceRecord`） | +0.46 s | +0.45 s |
+| ④ 判据 `AssetSearchService.Matches` | 0.108 s | 0.067 s |
+| ⑤ `BuildSortKey`（仅非「按名称」排序） | 0.050 s | 0.056 s |
+| **⑦ `Page(默认视图, 0, 200)` 整条链路** | **5,671 ms** | **1,374 ms** |
+
+分配量也说明了同一件事：修前每次取页分配 **152 MiB**（= 5 万条记录的 2.9 KiB/条），
+而这 5 万条里有 48,575 条只是用来「筛掉 2,801 条静态数据」的。
+
+### 根因一：候选集 SQL 每次全扫 127 万行（4.8 s → 0.17 s）
+
+`EXPLAIN QUERY PLAN` 给出的计划是：
+
+```
+SCAN k                                   -- 全扫 catalog_rank
+SEARCH a USING PRIMARY KEY (…)           -- 逐行回表 assets
+SEARCH b USING INTEGER PRIMARY KEY (…)   -- 逐行回表 bundles（条件里根本没用它）
+SEARCH s USING INTEGER PRIMARY KEY (…)   -- 逐行回表 strings
+```
+
+127 万行 × 3 次 B 树查找 = 4.8 s，**筛选条件一点没起作用**。两个原因：
+
+1. **`ORDER BY k.r` 把 planner 钉死在「扫名次表主键」上**。排序需求一写，全扫就成了它
+   眼里最省的计划。去掉之后同一个条件立刻变成两侧 COVERING INDEX。
+2. **`catalog_rank` 上没有 `(bundle_id, bundle_index)` 的索引**，所以「assets 驱动 →
+   反查明次」这条路根本不可用 —— 光在 `assets` 上建部分索引 `ix_assets_named` 是不够的，
+   反查那一步无索引可用，planner 只能放弃。
+
+修法：`CREATE INDEX IF NOT EXISTS ix_catalog_rank_bundle ON catalog_rank(bundle_id, bundle_index)`
+（+16.8 MiB），并且候选集 SQL **不再写 `ORDER BY`**（名次是 int，几万条在内存里排只要几毫秒），
+JOIN 也按需最小化 —— 无条件时连 `assets` 都不碰（`SELECT r FROM catalog_rank` 出 127 万行 39 ms，
+而原来的写法 41.8 s），`bundles` 从前 join 进来却从未在条件里用过。
+
+| 写法 | 计划 | 耗时 |
+|---|---|---|
+| 现状 | `SCAN k` | **3,866 ms** |
+| 加反向索引，但仍 `ORDER BY k.r` | `SCAN k`（planner 不为所动） | 3,448 ms |
+| 加反向索引 + 去掉 `ORDER BY` | a、k 双向 COVERING INDEX | **168 ms** |
+| 同上 + `INDEXED BY` 提示 | 同上 + 临时 B 树 | 157 ms |
+| 把筛选列搬进 `catalog_rank` 宽表 | 窄表全扫 | 249 ms（+22 MiB，需整表重建） |
+
+最后一行是**没有采用**的方案：它更快不了，却要多维护一份冗余事实、每次改列都得重建 127 万行。
+
+### 根因二：`Locate` / `IndexIn` 对负 `path_id` 静默失效
+
+`TryParseLogicalPath` 用 `NumberStyles.None` 解析尾段 `<pathId>.<typeId>`。`path_id` 是
+Unity 的对象 id（带符号 64 位哈希），**真实缓存里有大量负值**，而 `NumberStyles.None`
+拒绝前导负号 ⇒ `FindRank` 对它们永远返回 -1。
+
+症状极隐蔽：列表里明明看得到那条资源，「定位到它 / 精确跳转」无声无息地不生效，日志里
+只有一句「不在本代际的结果中」。**是探针抓到的** —— 对页码 0 的第一条资源调 `Locate`
+直接拿到 `null`，而它的 `path_id` 正是 `-4060527305021521791`。
+
+修法：`NumberStyles.AllowLeadingSign`（仍然拒绝空白 / 千位分隔 / 十六进制 —— 那些真的不像
+索引路径）。测试里把负值直接写进 `AssetCatalogTests` 的模板，让 170 条等价性查询与定位
+测试一起压住它。
+
+### 升级路径
+
+反查索引由建表脚本 `CREATE INDEX IF NOT EXISTS` 保证，**不抬高 `DerivedSchemaRevision`**：
+老库打开时补一个索引即可，实测 `derived_state` 仍是 `d2` ⇒ 既不重建派生层、更不重扫 1471 个
+bundle。派生层重建时则先 `DROP INDEX` 再整批建（逐行维护 127 万行的索引远比整批建贵，
+整批建实测 1.1 s）。
+
+### 剩下的开销（下一步）
+
+修完仍要 **1.37 s/页**，瓶颈已经换到「读回 5 万行 + 为此造 5 万条记录」上。
+两条都不便宜且都必要——因为判据 `Matches` 现在只接受 `AssetRecord`：
+
+- ② 读 51,376 行 ≈ 0.6 s（3 个 JOIN + 4 个字符串列的材料化，约 12 µs/行）；
+- ③ 造 51,376 条记录 ≈ 0.45 s（2.9 KiB/条，其中 `Metadata` 字典与逐行的
+  `Path.GetDirectoryName` 是大头）。
+
+方向是**把判据下沉到行级**：候选只走一个轻投影（判据真正需要的列），命中才造记录，
+且只为最终那一页造。按 ④ 的单价（0.067 s / 5 万条）估，这条路把 1.37 s 压到 **≈ 0.3 s**。
+在此之前，页间复用同一查询的命中集（只留名次）就能让**翻页**本身变成 O(一页)。
+
+### 复现
+
+`logs/run_catalog_probe.py`（真实库副本上一次跑完全部场景，先把库暂存到临时目录，
+`LME_STAGE=1` 强制重新暂存）、`logs/diag_catalog_sql.py`、`logs/diag_catalog_sql2.py`
+（`EXPLAIN QUERY PLAN` + 各写法的耗时对比 + 反查索引/宽表的体积代价）。
+
 ## 仍存在的开销
 
 UI 仍会把全部引用资产物化为 `AssetRecord`，没有改成数据库分页查询；百万级资产的常驻
 集合、路径和元数据仍占较多内存。**迁移可行的形态与实测代价见上一节**：派生列 + 稠密名次，
-磁盘约 +217 MiB（`d2`，含 `lp` 检索）换掉约 1,250.9 MiB 常驻堆。
-**S3a 已经把查询门面做出来并证明与旧搜索逐行等价**，剩下的工作是让列表/树改走它
-（S3b）、再把 `ModProject.Assets` 收窄成「项目态记录」并迁移其余用法（S3c）。
+磁盘约 +217 MiB（`d2`，含 `lp` 检索）+ 16.8 MiB（反查索引）换掉约 1,250.9 MiB 常驻堆。
+**S3a 已把查询门面做出来、证明与旧搜索逐行等价，并修掉了「下推没真下推」与「负 path_id
+定位失效」两个只在真实规模/真实数据上才暴露的问题**（取页 5,671 → 1,374 ms），
+剩下的工作是让列表/树改走它（S3b）、再把 `ModProject.Assets` 收窄成「项目态记录」
+并迁移其余用法（S3c），以及把判据下沉到行级（见上一节末）。
 其他四个工作台/派生缓存没有改表布局。
 XZ 压缩与 Unity 重打包仍由原库处理；本次不改变加载器格式或扩展未知 Unity 格式的写回支持。

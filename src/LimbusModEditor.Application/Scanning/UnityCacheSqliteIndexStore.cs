@@ -163,6 +163,15 @@ public sealed class UnityCacheSqliteIndexStore
                         r INTEGER PRIMARY KEY,
                         bundle_id INTEGER NOT NULL, bundle_index INTEGER NOT NULL
                     ) WITHOUT ROWID;
+                    -- ix_catalog_rank_bundle：(bundle_id,bundle_index) 的反查索引。
+                    --   **没有它筛选就完全下推不了** —— 实测：assets 那边有部分索引
+                    --   ix_assets_named 也没用，因为「assets 驱动 → 反查明次」这一步在
+                    --   catalog_rank 上无索引可用，planner 只能 `SCAN k`（127 万行 ×
+                    --   3 次 B 树查找，实测 3.9–6.0 s/次）。补上这个索引之后同一条件的
+                    --   计划变成 a、k 双向 COVERING INDEX，实测 168 ms（约 25×）。
+                    --   代价：+16.8 MiB，重建时 DROP→批量建（1.1 s）而不是逐行维护。
+                    CREATE INDEX IF NOT EXISTS ix_catalog_rank_bundle
+                        ON catalog_rank(bundle_id, bundle_index);
                     -- asset_fts：索引 **dp（显示路径）+ lp（LogicalPath）** 两列。
                     --   口径来源是旧 AssetSearchService.MatchesText：
                     --     DisplayPath ∪ LogicalPath ∪ SourcePath
@@ -649,13 +658,24 @@ public sealed class UnityCacheSqliteIndexStore
     }
 
     /// <summary>
-    /// 按 <b>索引列</b>筛出候选名次（升序）。资源列表「筛选下推」的入口：能在 SQL 里判的
-    /// 条件全部交给 SQLite（普通条件走聚簇主键扫、文本条件走 FTS 倒排），只把库里根本没有的
-    /// 事实（编辑状态、替换文件是否存在、静态判定）留给调用方在内存里复核。
+    /// 按 <b>索引列</b>筛出候选名次（<b>升序</b>）。资源列表「筛选下推」的入口：能在 SQL 里判的
+    /// 条件全部交给 SQLite，只把库里根本没有的事实（编辑状态、替换文件是否存在、静态判定）
+    /// 留给调用方在内存里复核。
     ///
     /// <para>与 <see cref="SearchRanks"/> 的分工：后者是「只按文本搜、并当场复核文本」的完整
     /// 答案；本方法是「多条件筛选的候选集」，文本那一部分复用同一张检索索引，但**不在这里
     /// 复核** —— 复核由调用方连其它条件一起做，免得同一行被拆成两处判定。</para>
+    ///
+    /// <para><b>为什么不写 <c>ORDER BY k.r</c></b>（这是一个实测踩出来的坑）：
+    /// 排序需求会让 planner 认定「按主键扫名次表」是最省的计划，于是**每次查询都全扫
+    /// 1,275,623 行 catalog_rank 再逐行 join**，实测 3.9–6.0 s —— 筛选下推等于白做
+    /// （连 assets 上的部分索引 <c>ix_assets_named</c> 都用不上，因为反查明次那一步在
+    /// catalog_rank 上没有索引）。去掉 ORDER BY 之后同一个条件变成两侧 COVERING INDEX，
+    /// 实测 168 ms。名次是 int，调用方排序几万条只要几毫秒 —— 这个交换是划算的。</para>
+    ///
+    /// <para>同理 JOIN 也按需最小化：没有 assets 侧条件时连 assets 都不碰
+    /// （<c>SELECT r FROM catalog_rank</c> 实测 39 ms 出 127 万行，而原来的写法
+    /// 41.8 s）；<c>bundles</c> 从前被 join 进来却从未在条件里用过，纯浪费。</para>
     ///
     /// <para>约束：索引行都是扫描产生的缓存引用（<c>reference=true</c>），所以
     /// <see cref="UnityCacheIndexFilter.HasContainerEntry"/> 可以直接落成
@@ -670,6 +690,9 @@ public sealed class UnityCacheSqliteIndexStore
         EnsureDerivedForQuery(connection);
         using var command = connection.CreateCommand();
         var conditions = new List<string>(8);
+        // assets 侧条件（能只看 a 一行判定）—— 有它就说明必须 join assets，
+        // 而且 planner 有机会走 ix_assets_named 的部分索引。
+        var needsAssets = false;
         if (filter.Type is { } type)
         {
             // 目录类型 = Map(type_id, 索引里的 type)，所以「type 列等于目标」与
@@ -691,26 +714,31 @@ public sealed class UnityCacheSqliteIndexStore
                 conditions.Add($"(a.type = $type OR a.type_id IN ({placeholders}))");
             }
             command.Parameters.AddWithValue("$type", (int)type);
+            needsAssets = true;
         }
         if (filter.PathId is { } pathId)
         {
             conditions.Add("a.path_id = $pathId");
             command.Parameters.AddWithValue("$pathId", pathId);
+            needsAssets = true;
         }
         if (filter.TypeId is { } typeId)
         {
             conditions.Add("a.type_id = $typeId");
             command.Parameters.AddWithValue("$typeId", typeId);
+            needsAssets = true;
         }
         if (filter.MinSize is { } minSize)
         {
             conditions.Add("a.size >= $minSize");
             command.Parameters.AddWithValue("$minSize", minSize);
+            needsAssets = true;
         }
         if (filter.MaxSize is { } maxSize)
         {
             conditions.Add("a.size <= $maxSize");
             command.Parameters.AddWithValue("$maxSize", maxSize);
+            needsAssets = true;
         }
         if (!string.IsNullOrEmpty(filter.Container))
         {
@@ -718,6 +746,7 @@ public sealed class UnityCacheSqliteIndexStore
             // 而 LIKE 会把 _ / % 当元字符（`CAB-_` 之类的查询串会变成模糊匹配）。
             conditions.Add("instr(lower(s.value), lower($container)) > 0");
             command.Parameters.AddWithValue("$container", filter.Container);
+            needsAssets = true;
         }
         if (filter.HasContainerEntry is { } hasContainerEntry)
         {
@@ -726,7 +755,9 @@ public sealed class UnityCacheSqliteIndexStore
             conditions.Add(hasContainerEntry
                 ? "trim(coalesce(a.container_entry,'')) <> ''"
                 : "trim(coalesce(a.container_entry,'')) = ''");
+            needsAssets = true;
         }
+        var needsStrings = !string.IsNullOrEmpty(filter.Container);
         if (!string.IsNullOrEmpty(filter.Text))
         {
             var needle = filter.Text.Trim();
@@ -743,13 +774,20 @@ public sealed class UnityCacheSqliteIndexStore
                 }
             }
         }
-        var sql = new System.Text.StringBuilder(360)
-            .Append("SELECT k.r FROM catalog_rank k")
-            .Append(" JOIN assets a ON a.bundle_id = k.bundle_id AND a.bundle_index = k.bundle_index")
-            .Append(" JOIN bundles b ON b.id = a.bundle_id")
-            .Append(" JOIN strings s ON s.id = a.container_id");
+        // 驱动表选择见方法注释：有 assets 侧条件时从 assets 起（能吃到部分索引），
+        // 否则直接扫名次表 —— 无条件时连 assets 都不需要碰。
+        var sql = new System.Text.StringBuilder(360);
+        if (needsAssets)
+        {
+            sql.Append("SELECT k.r FROM assets a")
+                .Append(" JOIN catalog_rank k ON k.bundle_id = a.bundle_id AND k.bundle_index = a.bundle_index");
+            if (needsStrings) sql.Append(" JOIN strings s ON s.id = a.container_id");
+        }
+        else
+        {
+            sql.Append("SELECT k.r FROM catalog_rank k");
+        }
         for (var i = 0; i < conditions.Count; i++) sql.Append(i == 0 ? " WHERE " : " AND ").Append(conditions[i]);
-        sql.Append(" ORDER BY k.r");
         command.CommandText = sql.ToString();
         var ranks = new List<int>();
         using var reader = command.ExecuteReader();
@@ -759,7 +797,11 @@ public sealed class UnityCacheSqliteIndexStore
             if (seen++ % 4096 == 0) cancellationToken.ThrowIfCancellationRequested();
             ranks.Add(reader.GetInt32(0));
         }
-        Log.Debug("候选名次：{0:N0} 条（条件 {1} 个，文本「{2}」）", ranks.Count, conditions.Count, filter.Text ?? "-");
+        // SQL 侧刻意不排序（见方法注释），升序在这里补回来 —— 调用方（分页/树）按「名次升序
+        // = 目录全序」处理结果，返回无序的列表会静默给出乱序的页。
+        ranks.Sort();
+        Log.Debug("候选名次：{0:N0} 条（条件 {1} 个，文本「{2}」，驱动表 {3}）",
+            ranks.Count, conditions.Count, filter.Text ?? "-", needsAssets ? "assets" : "catalog_rank");
         return ranks;
     }
 
@@ -797,10 +839,18 @@ public sealed class UnityCacheSqliteIndexStore
     }
 
     /// <summary>拆 <c>&lt;outerKey&gt;/&lt;innerKey&gt;/&lt;container&gt;/&lt;pathId&gt;.&lt;typeId&gt;</c>。
-    /// 段数不对 / 编号不是十进制整数就当它不是索引里的路径（不猜、不模糊匹配）。</summary>
+    /// 段数不对 / 编号不是十进制整数就当它不是索引里的路径（不猜、不模糊匹配）。
+    /// <para><b>必须允许前导正负号</b>：<c>path_id</c> 是 Unity 的对象 id（内部是带符号的
+    /// 64 位哈希），真实缓存里有<em>大量</em>负值 —— 用 <c>NumberStyles.None</c> 会把它们
+    /// 全部判成「不是索引路径」，于是 <see cref="FindRank"/> 对这些资源永远返回 -1，
+    /// 表现是「精确跳转/定位到某资源」静默失效（列表里明明看得到它）。
+    /// 实测踩到：探针里对页码 0 的第一条资源调 <c>Locate</c> 直接返回 null。</para>
+    /// <para>只放开符号位，仍然拒绝空白、千位分隔、十六进制 —— 那些是真的不像索引路径。</para>
+    /// </summary>
     private static bool TryParseLogicalPath(string? logicalPath, out string outer, out string inner,
         out string container, out long pathId, out int typeId)
     {
+        const System.Globalization.NumberStyles Integer = System.Globalization.NumberStyles.AllowLeadingSign;
         outer = inner = container = string.Empty;
         pathId = 0;
         typeId = 0;
@@ -809,9 +859,9 @@ public sealed class UnityCacheSqliteIndexStore
         if (segments.Length != 4) return false;
         var tail = segments[3].Split('.');
         if (tail.Length != 2) return false;
-        if (!long.TryParse(tail[0], System.Globalization.NumberStyles.None,
+        if (!long.TryParse(tail[0], Integer,
                 System.Globalization.CultureInfo.InvariantCulture, out pathId)) return false;
-        if (!int.TryParse(tail[1], System.Globalization.NumberStyles.None,
+        if (!int.TryParse(tail[1], Integer,
                 System.Globalization.CultureInfo.InvariantCulture, out typeId)) return false;
         outer = segments[0];
         inner = segments[1];
@@ -1012,6 +1062,10 @@ public sealed class UnityCacheSqliteIndexStore
     private static void WriteDerivedLayer(SqliteConnection connection, SqliteTransaction transaction,
         string[] displayPaths, long[] keys, (string Prefix, string Suffix) affixes, CancellationToken cancellationToken)
     {
+        // 反查索引在重建期间先摘掉：127 万行逐行维护索引比整批建贵得多（实测批量建 1.1 s），
+        // 而且下面这一删一插的中间态没有任何读者（派生层要么是旧的、要么是新的）。
+        using (var dropIndex = Command(connection, transaction, "DROP INDEX IF EXISTS ix_catalog_rank_bundle"))
+            dropIndex.ExecuteNonQuery();
         using (var clearRank = Command(connection, transaction, "DELETE FROM catalog_rank"))
             clearRank.ExecuteNonQuery();
         // contentless 表（content=''）**没有原文可扫**，所以 `DELETE FROM asset_fts`
@@ -1022,6 +1076,10 @@ public sealed class UnityCacheSqliteIndexStore
             "INSERT INTO asset_fts(asset_fts) VALUES('delete-all')"))
             clearFts.ExecuteNonQuery();
         InsertRankRows(connection, transaction, keys, cancellationToken);
+        // 名次写完再整批建反查索引（见 WriteDerivedLayer 开头为什么先摘掉）。
+        using (var createIndex = Command(connection, transaction,
+            "CREATE INDEX IF NOT EXISTS ix_catalog_rank_bundle ON catalog_rank(bundle_id, bundle_index)"))
+            createIndex.ExecuteNonQuery();
         InsertSearchRows(connection, transaction, displayPaths, keys, cancellationToken);
         // 先清再写。常规路径下 derived_state 已被 PersistAll 清空，所以这一步看着多余 ——
         // 但**修订号变化**时（如 d1→d2）状态行还在，直接 INSERT 会撞主键

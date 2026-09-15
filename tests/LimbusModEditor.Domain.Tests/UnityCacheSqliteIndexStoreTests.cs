@@ -475,6 +475,82 @@ public sealed class UnityCacheSqliteIndexStoreTests : IDisposable
         Assert.False(upgraded.NeedsDerived());
     }
 
+    /// <summary>
+    /// <c>path_id</c> 是 Unity 的对象 id（内部是**带符号**的 64 位哈希），真实缓存里有大量负值。
+    /// 解析 LogicalPath 尾段时曾经用 <c>NumberStyles.None</c> —— 它拒绝前导负号，于是这些资源的
+    /// <see cref="UnityCacheSqliteIndexStore.FindRank"/> 永远返回 -1。
+    /// <para>症状极隐蔽：列表里明明看得到那条资源，「定位到它 / 精确跳转」却静默失效，
+    /// 日志只有一句「不在本代际的结果中」。真实数据实测踩到（探针里对页码 0 的第一条
+    /// 资源调 <c>Locate</c> 直接拿到 null，而它的 path_id 正是
+    /// <c>-4060527305021521791</c>）。</para>
+    /// </summary>
+    [Fact]
+    public void FindRank_accepts_the_negative_path_ids_that_real_caches_contain()
+    {
+        const long realNegativePathId = -4060527305021521791L;
+        var store = new UnityCacheSqliteIndexStore(Database);
+        store.PersistAll([Entry("a")], [(Bundle("a"), new[]
+        {
+            Row(0) with { PathId = realNegativePathId },
+            Row(1) with { PathId = 42L }
+        })]);
+        Assert.True(store.EnsureDerived().Rebuilt);
+
+        var negative = store.FindRank(AssetDisplay.CacheRowLogicalPath("outer", "a", "共享容器", realNegativePathId, 49));
+        var positive = store.FindRank(AssetDisplay.CacheRowLogicalPath("outer", "a", "共享容器", 42L, 49));
+        Assert.True(negative >= 0, "负的 path_id 必须能定位（NumberStyles.None 会把它判成非法）。");
+        Assert.True(positive >= 0);
+        Assert.NotEqual(negative, positive);
+
+        // 仍然拒绝真的不像索引路径的东西 —— 放开符号位不等于变成模糊匹配。
+        Assert.Equal(-1, store.FindRank("outer/a/共享容器/abc.49"));
+        Assert.Equal(-1, store.FindRank("outer/a/共享容器/- 4.49"));
+        Assert.Equal(-1, store.FindRank("outer/a/共享容器/4.49.0"));
+        Assert.Equal(-1, store.FindRank("outer/a/共享容器/4"));
+        Assert.Equal(-1, store.FindRank("outer/a/b/c/共享容器/4.49"));
+        Assert.Equal(-1, store.FindRank(""));
+        Assert.Equal(-1, store.FindRank(null!));
+    }
+
+    /// <summary>
+    /// 候选集的两个不变量：**名次升序**、以及**反查索引存在**。
+    /// <para>① 升序：SQL 里刻意不写 <c>ORDER BY k.r</c>（一写 planner 就改成全扫名次表，
+    /// 实测 3.9–6.0 s vs 168 ms），所以升序必须由 <see cref="UnityCacheSqliteIndexStore.ReadCandidateRanks"/>
+    /// 自己补 —— 调用方（分页/目录树）按「名次升序 = 目录全序」使用结果，返回乱序会静默给出乱序的页。</para>
+    /// <para>② 反查索引：没有它「assets 驱动 → 反查明次」无索引可用，筛选下推整个失效。
+    /// 它由建表脚本与派生层重建两处 <c>CREATE INDEX IF NOT EXISTS</c> 共同保证，
+    /// 而重建时会先 DROP 再整批建（逐行维护 127 万行比整批建贵得多）。</para>
+    /// </summary>
+    [Fact]
+    public void Candidate_ranks_are_ascending_and_the_reverse_lookup_index_is_in_place()
+    {
+        var store = new UnityCacheSqliteIndexStore(Database);
+        store.PersistAll(
+            [.. Enumerable.Range(0, 4).Select(i => Entry($"b{i}"))],
+            [.. Enumerable.Range(0, 4).Select(i =>
+                (Bundle($"b{i}"), (IReadOnlyList<UnityCacheIndexRow>)new[] { Row(0), Row(1) }))]);
+        Assert.True(store.EnsureDerived().Rebuilt);
+
+        // 只有一个容器条目的那批（每个 bundle 的 Row(0)）。
+        var withEntry = store.ReadCandidateRanks(new UnityCacheIndexFilter(HasContainerEntry: true));
+        Assert.Equal(4, withEntry.Count);
+        Assert.Equal(withEntry.OrderBy(x => x), withEntry);
+
+        // 无任何条件：连 assets 都不碰，直接扫名次表。
+        var all = store.ReadCandidateRanks(new UnityCacheIndexFilter());
+        Assert.Equal(8, all.Count);
+        Assert.Equal(all.OrderBy(x => x), all);
+
+        // 重建之后索引仍在（WriteDerivedLayer 是先 DROP 再建）。
+        Assert.True(store.EnsureDerived().Rebuilt || store.IsDerivedReady());
+        using var connection = new SqliteConnection($"Data Source={Database}");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='ix_catalog_rank_bundle'";
+        Assert.Equal(1L, Convert.ToInt64(command.ExecuteScalar()));
+    }
+
     public void Dispose()
     {
         SqliteConnection.ClearAllPools();

@@ -31,8 +31,12 @@ public sealed class UnityCacheSqliteIndexStore
 
     /// <summary>派生层（分页名次 + 检索索引）的实现修订号。**改了算法或口径就 +1**：
     /// 下次打开时会发现状态不符，在后台重建一次；不改 <see cref="SchemaVersion"/>，
-    /// 所以不会导致整库重扫。</summary>
-    public const string DerivedSchemaRevision = "d1";
+    /// 所以不会导致整库重扫。
+    /// <para>修订历史：<c>d1</c> = 检索索引只含显示路径 <c>dp</c>；<c>d2</c> = 同时含
+    /// <c>lp</c>（LogicalPath）—— 因为旧 <c>AssetSearchService.MatchesText</c> 搜的是
+    /// <c>DisplayPath ∪ LogicalPath ∪ SourcePath</c>，只索引 <c>dp</c> 会让「按 LogicalPath
+    /// 搜」从能搜到变成搜不到。实测 <c>lp</c> 的边际代价 +131.1 MiB / +34.2 s 灌入。</para></summary>
+    public const string DerivedSchemaRevision = "d2";
 
     private readonly string _connectionString;
     private readonly string _dbFile;
@@ -90,6 +94,18 @@ public sealed class UnityCacheSqliteIndexStore
                         """;
                     command.ExecuteNonQuery();
                 }
+                // asset_fts 的形状随修订号变（d1 只有 dp，d2 起是 dp+lp）。而
+                // `CREATE VIRTUAL TABLE IF NOT EXISTS` 对**已存在**的表什么都不做 ——
+                // 老库会留着只有 dp 的旧形状，写入端却已按 (rowid,dp,lp) 插，直接报
+                // "table asset_fts has no column named lp"。派生层是可丢弃的（重建只花
+                // 几十秒、不需要重扫 bundle），所以列名不符就直接 DROP 重建。
+                if (SearchIndexColumnsDiffer(connection))
+                {
+                    Log.Info("检索索引形状与修订 {0} 不符，丢弃重建（派生层可丢弃，不影响 assets）",
+                        DerivedSchemaRevision);
+                    command.CommandText = "DROP TABLE IF EXISTS asset_fts;";
+                    command.ExecuteNonQuery();
+                }
                 command.CommandText = """
                     CREATE TABLE IF NOT EXISTS bundles (
                         id INTEGER PRIMARY KEY,
@@ -121,15 +137,24 @@ public sealed class UnityCacheSqliteIndexStore
                         r INTEGER PRIMARY KEY,
                         bundle_id INTEGER NOT NULL, bundle_index INTEGER NOT NULL
                     ) WITHOUT ROWID;
-                    -- asset_fts：**只索引显示路径 dp**。实测 lp 是
-                    --   「外层哈希/内层哈希/CAB-哈希/pathId.typeId」，除编号外全是机器哈希，
-                    --   没有用户会手打的文本；真正可搜的内容（Assets/Animation/SD/…）全在 dp。
+                    -- asset_fts：索引 **dp（显示路径）+ lp（LogicalPath）** 两列。
+                    --   口径来源是旧 AssetSearchService.MatchesText：
+                    --     DisplayPath ∪ LogicalPath ∪ SourcePath
+                    --   · dp 是可读的游戏内路径（Assets/Animation/SD/…），用户真正会搜的东西。
+                    --   · lp 是「外层哈希/内层哈希/CAB-哈希/pathId.typeId」—— 除编号外全是
+                    --     机器哈希，没人会手打；但旧实现确实能搜到它（以及由它构成的
+                    --     SourcePath），为「行为等价」必须一起索引。边际代价实测
+                    --     +131.1 MiB / +34.2 s 灌入（dp 单列 +49.7 MiB / 10.7 s）。
+                    --   · SourcePath（= bundles.data_path）不必单列索引：实测
+                    --     data_path = <缓存根>\<outer>\<inner>\__data，**可变内容只有
+                    --     outer/inner，而 lp 已含这两段**；只剩缓存根与 \__data 这类
+                    --     所有行都相同的常量（见 SearchRanks 的常量规则）。
                     --   content='' 是 contentless（不存原文副本，体积最小）；detail=none
                     --   只存词项不存位置 —— 因此**不支持裸短语查询**，只能用「手工 AND 词项」
                     --   形态，得到的是超集候选，由调用方复核（见 SearchRanks）。
                     --   rowid = 名次 r：检索命中直接就是名次，排序/分页零转换。
                     CREATE VIRTUAL TABLE IF NOT EXISTS asset_fts USING fts5(
-                        dp, content='', detail=none, columnsize=0, tokenize='trigram'
+                        dp, lp, content='', detail=none, columnsize=0, tokenize='trigram'
                     );
                     CREATE TABLE IF NOT EXISTS derived_state (k TEXT PRIMARY KEY, v TEXT NOT NULL);
                     PRAGMA user_version=2;
@@ -355,6 +380,22 @@ public sealed class UnityCacheSqliteIndexStore
     /// <summary>复核/按名次取行时单批 IN 的行数（真实数据里候选集是数百到数千级）。</summary>
     private const int RankChunk = 400;
 
+    /// <summary><c>asset_fts</c> 的列，**顺序敏感**（<c>PRAGMA table_info</c> 按声明序返回）。
+    /// 只在形状自愈时用来比对，见 <see cref="SearchIndexColumnsDiffer"/>。</summary>
+    private static readonly string[] SearchIndexColumns = ["dp", "lp"];
+
+    /// <summary>已存在的 <c>asset_fts</c> 与当前修订号要求的列形状是否不一致。
+    /// 表不存在时返回 false（没什么可丢的）。</summary>
+    private static bool SearchIndexColumnsDiffer(SqliteConnection connection)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA table_info(asset_fts)";
+        using var reader = command.ExecuteReader();
+        var columns = new List<string>(SearchIndexColumns.Length);
+        while (reader.Read()) columns.Add(reader.GetString(1));
+        return columns.Count != 0 && !columns.SequenceEqual(SearchIndexColumns, StringComparer.Ordinal);
+    }
+
     private static long CatalogKey(long bundleId, int bundleIndex)
         => (bundleId << RidShift) | (uint)bundleIndex;
 
@@ -362,8 +403,13 @@ public sealed class UnityCacheSqliteIndexStore
     private static int BundleIndexOf(long key) => (int)(key & RidMask);
 
     /// <summary><c>derived_state</c> 的快照。<paramref name="Rows"/> = 上次成功建成时的行数，
-    /// -1 表示没有记录。</summary>
-    public sealed record DerivedState(string? Revision, long Rows);
+    /// -1 表示没有记录。
+    /// <para><paramref name="SourcePrefix"/> / <paramref name="SourceSuffix"/> 是所有
+    /// <c>bundles.data_path</c> 的公共前后缀。检索要覆盖旧实现的 <c>SourcePath</c> 字段，
+    /// 而 <c>data_path</c> 的可变内容只有 outer/inner（已含在 <c>lp</c> 里），公共前后缀是
+    /// **所有行都相同**的常量 —— 命中它就等于「没在过滤」，见
+    /// <see cref="SearchRanks"/> 的常量规则。</para></summary>
+    public sealed record DerivedState(string? Revision, long Rows, string? SourcePrefix = null, string? SourceSuffix = null);
 
     /// <summary>一次派生层重建的结果（<paramref name="Rebuilt"/> = false 表示本来就不用重建）。</summary>
     public sealed record DerivedBuildResult(bool Rebuilt, long Rows, int Ties, TimeSpan Elapsed);
@@ -457,11 +503,14 @@ public sealed class UnityCacheSqliteIndexStore
             pragma.CommandText = "PRAGMA synchronous=NORMAL";
             pragma.ExecuteNonQuery();
         }
+        // 公共前后缀要在**开事务之前**读：Microsoft.Data.Sqlite 要求连接上有活动事务时
+        // 每条命令都得显式带上同一个事务对象，而这种只读辅助查询没必要塞进写事务里。
+        var affixes = ReadSourcePathAffixes(connection);
         // 名次与检索索引放在**同一个事务**：检索索引以名次为 rowid，两者不同步就等于
         // 搜到的行指向别的资源。要么都是新的，要么都还是旧的那一份。
         using (var transaction = connection.BeginTransaction())
         {
-            WriteDerivedLayer(connection, transaction, displayPaths, keys, cancellationToken);
+            WriteDerivedLayer(connection, transaction, displayPaths, keys, affixes, cancellationToken);
             transaction.Commit();
         }
         Log.Info("派生层重建完成：{0:N0} 条 · 打平 {1:N0} 条 · 用时 {2:0.0} 秒",
@@ -499,15 +548,19 @@ public sealed class UnityCacheSqliteIndexStore
     }
 
     /// <summary>
-    /// 按**显示路径子串**检索，返回已精确复核的名次（升序）。
-    /// <para>① FTS 候选：trigram 把查询串切成 3 字符窗口手工 AND —— <c>detail=none</c>
-    /// 下裸短语会直接报错，而 AND 出来的只是**超集**（"abcd" 会命中「含 abc、
-    /// 也含 bcd，但两者不相邻」的文本）。</para>
-    /// <para>② 复核：把候选行读回来算显示路径，用 <c>OrdinalIgnoreCase</c> 精确判子串。
-    /// 复核用的是 <see cref="AssetDisplay.CacheRowDisplayPath"/> —— 与列表显示、
-    /// 与派生层回填**同一个函数**，所以「搜到的」严格等于「看到的」。</para>
+    /// 按**子串**检索，返回已精确复核的名次（升序）。
+    /// <para>匹配面与旧 <c>AssetSearchService.MatchesText</c> 等价：
+    /// <c>DisplayPath ∪ LogicalPath ∪ SourcePath</c>，大小写不敏感。</para>
+    /// <para>① FTS 候选：索引里是 <c>dp</c> 与 <c>lp</c> 两列。trigram 把查询串切成
+    /// 3 字符窗口手工 AND —— <c>detail=none</c> 下裸短语会直接报错，而 AND 出来的只是
+    /// **超集**（"abcd" 会命中「含 abc、也含 bcd，但两者不相邻」的文本）。</para>
+    /// <para>② 复核：把候选行读回来算 dp / lp / src 三种文本，用 <c>OrdinalIgnoreCase</c>
+    /// 精确判子串（见 <see cref="MatchesReverifyKeys"/>）。</para>
+    /// <para>③ <c>src</c> 不入索引但不等价性丢失 —— 见
+    /// <see cref="MatchesSourcePathConstant"/>：它的可变内容就是 <c>lp</c> 的前两段。</para>
     /// <para>查询串短于 3 字符时索引里没有任何可用词项，退化为流式全表扫描
-    /// （逐行算显示路径，不物化记录；真实规模实测 1.5–3 s）。</para>
+    /// （逐行算三种文本，不物化记录；真实规模实测 1.5–3 s）。含反斜杠的查询串同理
+    /// —— 那可能只在 <c>src</c> 的分隔符处命中。</para>
     /// </summary>
     public IReadOnlyList<int> SearchRanks(string text, CancellationToken cancellationToken = default)
     {
@@ -516,10 +569,18 @@ public sealed class UnityCacheSqliteIndexStore
         if (needle.Length == 0) return [];
         using var connection = OpenEnsured();
         EnsureDerivedForQuery(connection);
-        var match = needle.Length < TrigramLength ? string.Empty : TrigramAndQuery(needle);
-        if (match.Length == 0)
+        var state = ReadDerivedState(connection);
+        if (MatchesSourcePathConstant(state, needle))
         {
-            Log.Debug("检索退化全表扫描：查询串「{0}」（{1} 字符，trigram 取不到词项）", needle, needle.Length);
+            // 命中「所有行都相同」的那段 —— 旧实现在这里也没有过滤作用，返回全部。
+            Log.Debug("检索「{0}」：命中 SourcePath 的公共前后缀（每行都相同）⇒ 等价于不过滤，返回全部名次", needle);
+            return ReadAllRanks(connection);
+        }
+        var match = needle.Length < TrigramLength ? string.Empty : TrigramAndQuery(needle);
+        if (match.Length == 0 || needle.Contains('\\'))
+        {
+            Log.Debug("检索退化全表扫描：查询串「{0}」（{1} 字符，词项取不到或可能只命中 SourcePath 的分隔符）",
+                needle, needle.Length);
             return ScanDisplayPaths(connection, needle, cancellationToken);
         }
         var candidates = new List<int>();
@@ -538,15 +599,38 @@ public sealed class UnityCacheSqliteIndexStore
             var count = Math.Min(RankChunk, candidates.Count - offset);
             var slice = new int[count];
             for (var i = 0; i < count; i++) slice[i] = candidates[offset + i];
-            foreach (var (rank, containerEntry, typeId, type, pathId) in ReadDisplayKeysByRank(connection, slice))
-            {
-                var path = AssetDisplay.CacheRowDisplayPath(typeId, type, pathId, containerEntry);
-                if (path.Contains(needle, StringComparison.OrdinalIgnoreCase)) verified.Add(rank);
-            }
+            foreach (var row in ReadReverifyKeysByRank(connection, slice))
+                if (MatchesReverifyKeys(row, needle)) verified.Add(row.Rank);
         }
         verified.Sort();
         Log.Debug("检索「{0}」：候选 {1:N0} → 复核 {2:N0}（词项 {3}）", needle, candidates.Count, verified.Count, match);
         return verified;
+    }
+
+    /// <summary>
+    /// <c>SourcePath</c>（= <c>bundles.data_path</c>）的等价性补丁。
+    /// <para>旧实现的匹配面含 SourcePath，而派生层只索引 dp+lp。之所以不为 src 单列索引：
+    /// 实测 <c>data_path = &lt;缓存根&gt;\&lt;outer&gt;\&lt;inner&gt;\__data</c>（1471/1471 条同形），
+    /// **可变内容只有 outer/inner —— 而 lp 已含这两段**，所以任何落在 outer/inner 里的
+    /// 子串都会由 lp 命中。src 里剩下的只有「所有行都相同」的两段常量：公共前缀（缓存根
+    /// 目录）与公共后缀（<c>\__data</c>）。</para>
+    /// <para>于是规则是：<b>needle 含于公共前后缀 ⇒ 它命中了每一行</b>（旧实现在这种情况下
+    /// 同样没有任何过滤作用），直接返回全部名次。跨 outer/inner 或跨进 <c>\__data</c> 的
+    /// needle 含反斜杠，由 <see cref="SearchRanks"/> 退化为全表扫描。其余情形
+    /// FTS(dp∪lp) 已是 src 匹配面的超集。</para>
+    /// </summary>
+    private static bool MatchesSourcePathConstant(DerivedState state, string needle)
+        => (state.SourcePrefix is { Length: > 0 } prefix && prefix.Contains(needle, StringComparison.OrdinalIgnoreCase))
+        || (state.SourceSuffix is { Length: > 0 } suffix && suffix.Contains(needle, StringComparison.OrdinalIgnoreCase));
+
+    private static List<int> ReadAllRanks(SqliteConnection connection)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT r FROM catalog_rank ORDER BY r";
+        using var reader = command.ExecuteReader();
+        var ranks = new List<int>();
+        while (reader.Read()) ranks.Add(reader.GetInt32(0));
+        return ranks;
     }
 
     // ── 派生层内部实现 ──────────────────────────────────────────────────
@@ -556,14 +640,54 @@ public sealed class UnityCacheSqliteIndexStore
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT k, v FROM derived_state";
         string? revision = null;
+        string? prefix = null;
+        string? suffix = null;
         var rows = -1L;
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
-            if (reader.GetString(0) == "revision") revision = reader.GetString(1);
-            else if (reader.GetString(0) == "rows") long.TryParse(reader.GetString(1), out rows);
+            var value = reader.GetString(1);
+            switch (reader.GetString(0))
+            {
+                case "revision": revision = value; break;
+                case "rows": long.TryParse(value, out rows); break;
+                case "src_prefix": prefix = value; break;
+                case "src_suffix": suffix = value; break;
+            }
         }
-        return new(revision, rows);
+        return new(revision, rows, prefix, suffix);
+    }
+
+    /// <summary>所有 <c>data_path</c> 的公共前缀与公共后缀（各读一遍 1471 行，微秒级）。
+    /// 供检索的 SourcePath 常量规则使用。</summary>
+    private static (string Prefix, string Suffix) ReadSourcePathAffixes(SqliteConnection connection)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT data_path FROM bundles";
+        using var reader = command.ExecuteReader();
+        var paths = new List<string>(2048);
+        while (reader.Read()) paths.Add(reader.GetString(0));
+        if (paths.Count == 0) return (string.Empty, string.Empty);
+        var prefix = paths[0];
+        foreach (var path in paths)
+        {
+            var n = Math.Min(prefix.Length, path.Length);
+            var i = 0;
+            while (i < n && prefix[i] == path[i]) i++;
+            prefix = prefix[..i];
+            if (prefix.Length == 0) break;
+        }
+        var reversed = paths.ConvertAll(static p => new string(p.Reverse().ToArray()));
+        var suffix = reversed[0];
+        foreach (var path in reversed)
+        {
+            var n = Math.Min(suffix.Length, path.Length);
+            var i = 0;
+            while (i < n && suffix[i] == path[i]) i++;
+            suffix = suffix[..i];
+            if (suffix.Length == 0) break;
+        }
+        return (prefix, new string(suffix.Reverse().ToArray()));
     }
 
     private static long CountAssets(SqliteConnection connection)
@@ -620,7 +744,7 @@ public sealed class UnityCacheSqliteIndexStore
                 if (tiedKeys.Count == 0 || tiedKeys[^1] != keys[i - 1]) tiedKeys.Add(keys[i - 1]);
                 tiedKeys.Add(keys[i]);
             }
-        var logicalPaths = ReadLogicalPaths(connection, tiedKeys, cancellationToken);
+        var logicalPaths = ReadLogicalPaths(connection, tiedKeys.ToArray(), 0, tiedKeys.Count, cancellationToken);
         var comparer = new LogicalPathComparer(logicalPaths);
         var start = 0;
         while (start < n)
@@ -633,45 +757,48 @@ public sealed class UnityCacheSqliteIndexStore
         return tiedKeys.Count;
     }
 
-    /// <summary>取给定打包键（bundle_id/bundle_index）对应的 LogicalPath。
-    /// 只在打平的行上调用，所以分块 IN 足够。</summary>
-    private static Dictionary<long, string> ReadLogicalPaths(
-        SqliteConnection connection, IReadOnlyList<long> keys, CancellationToken cancellationToken)
+    /// <summary>取给定打包键（<c>bundle_id/bundle_index</c>）对应的 LogicalPath。
+    /// 两个调用点都是「按批 IN」而非全表：打平的行只有几万条，检索索引写入每批一千条。
+    /// <para>拼串走 <see cref="AssetDisplay.CacheRowLogicalPath"/> —— 与检索复核同一个函数，
+    /// 否则「索引里写的 lp」和「复核时算的 lp」可能不是一个串，造成假阴性。</para></summary>
+    private static Dictionary<long, string> ReadLogicalPaths(SqliteConnection connection, long[] keys,
+        int start, int count, CancellationToken cancellationToken, SqliteTransaction? transaction = null)
     {
-        var result = new Dictionary<long, string>(keys.Count);
+        var result = new Dictionary<long, string>(count);
         const int batch = 200;
-        for (var offset = 0; offset < keys.Count; offset += batch)
+        for (var offset = 0; offset < count; offset += batch)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var count = Math.Min(batch, keys.Count - offset);
-            var builder = new System.Text.StringBuilder(count * 12 + 200);
+            var take = Math.Min(batch, count - offset);
+            var builder = new System.Text.StringBuilder(take * 12 + 200);
             builder.Append("""
                 SELECT a.bundle_id, a.bundle_index, b.outer_key, b.inner_key, s.value, a.path_id, a.type_id
                 FROM assets a JOIN bundles b ON b.id = a.bundle_id JOIN strings s ON s.id = a.container_id
                 WHERE (a.bundle_id, a.bundle_index) IN (VALUES 
                 """);
             using var command = connection.CreateCommand();
-            for (var i = 0; i < count; i++)
+            command.Transaction = transaction;
+            for (var i = 0; i < take; i++)
             {
                 if (i > 0) builder.Append(',');
                 builder.Append($"($b{i},$x{i})");
-                command.Parameters.AddWithValue($"$b{i}", BundleIdOf(keys[offset + i]));
-                command.Parameters.AddWithValue($"$x{i}", BundleIndexOf(keys[offset + i]));
+                var key = keys[start + offset + i];
+                command.Parameters.AddWithValue($"$b{i}", BundleIdOf(key));
+                command.Parameters.AddWithValue($"$x{i}", BundleIndexOf(key));
             }
             builder.Append(')');
             command.CommandText = builder.ToString();
             using var reader = command.ExecuteReader();
             while (reader.Read())
-                result[CatalogKey(reader.GetInt64(0), reader.GetInt32(1))] =
-                    $"{reader.GetString(2)}/{reader.GetString(3)}/{reader.GetString(4)}/" +
-                    $"{reader.GetInt64(5).ToString(System.Globalization.CultureInfo.InvariantCulture)}." +
-                    $"{reader.GetInt32(6).ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+                result[CatalogKey(reader.GetInt64(0), reader.GetInt32(1))] = AssetDisplay.CacheRowLogicalPath(
+                    reader.GetString(2), reader.GetString(3), reader.GetString(4),
+                    reader.GetInt64(5), reader.GetInt32(6));
         }
         return result;
     }
 
     private static void WriteDerivedLayer(SqliteConnection connection, SqliteTransaction transaction,
-        string[] displayPaths, long[] keys, CancellationToken cancellationToken)
+        string[] displayPaths, long[] keys, (string Prefix, string Suffix) affixes, CancellationToken cancellationToken)
     {
         using (var clearRank = Command(connection, transaction, "DELETE FROM catalog_rank"))
             clearRank.ExecuteNonQuery();
@@ -683,11 +810,21 @@ public sealed class UnityCacheSqliteIndexStore
             "INSERT INTO asset_fts(asset_fts) VALUES('delete-all')"))
             clearFts.ExecuteNonQuery();
         InsertRankRows(connection, transaction, keys, cancellationToken);
-        InsertSearchRows(connection, transaction, displayPaths, cancellationToken);
-        using var state = Command(connection, transaction,
-            "INSERT INTO derived_state(k,v) VALUES('revision',$rev),('rows',$rows)", "$rev", "$rows");
+        InsertSearchRows(connection, transaction, displayPaths, keys, cancellationToken);
+        // 先清再写。常规路径下 derived_state 已被 PersistAll 清空，所以这一步看着多余 ——
+        // 但**修订号变化**时（如 d1→d2）状态行还在，直接 INSERT 会撞主键
+        // （`UNIQUE constraint failed: derived_state.k`）。修订号不符本来就是重建的合法触发
+        // 条件之一，不能只在「表被整个删掉」的情形下才成立。派生层本就可丢弃，清掉再写最省心。
+        using (var clearState = Command(connection, transaction, "DELETE FROM derived_state"))
+            clearState.ExecuteNonQuery();
+        using var state = Command(connection, transaction, """
+            INSERT INTO derived_state(k,v) VALUES
+                ('revision',$rev),('rows',$rows),('src_prefix',$pre),('src_suffix',$suf)
+            """, "$rev", "$rows", "$pre", "$suf");
         state.Parameters[0].Value = DerivedSchemaRevision;
         state.Parameters[1].Value = displayPaths.LongLength.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        state.Parameters[2].Value = affixes.Prefix;
+        state.Parameters[3].Value = affixes.Suffix;
         state.ExecuteNonQuery();
     }
 
@@ -720,25 +857,31 @@ public sealed class UnityCacheSqliteIndexStore
     }
 
     /// <summary>批量灌检索索引。<c>rowid</c> 直接用名次，所以检索命中的 rowid 就是名次，
-    /// 排序/分页不需要任何转换。</summary>
+    /// 排序/分页不需要任何转换。
+    /// <para><c>lp</c> 按批现取（<see cref="ReadLogicalPaths"/>），**不整表驻留**：
+    /// <c>dp</c> 数组本身已是约 130 MiB 的瞬时分配，再并排留一份 127 万条的 <c>lp</c>
+    /// 就是翻倍，而这层重建是后台可取消任务，没必要为它顶到峰值。
+    /// 批量取 1000 行（×3 个参数，远低于 SQLite 的变量上限），比 200 行少 5 倍往返。</para></summary>
     private static void InsertSearchRows(SqliteConnection connection, SqliteTransaction transaction,
-        string[] displayPaths, CancellationToken cancellationToken)
+        string[] displayPaths, long[] keys, CancellationToken cancellationToken)
     {
-        const int batch = 200;
-        var builder = new System.Text.StringBuilder(batch * 48 + 64);
+        const int batch = 1000;
+        var builder = new System.Text.StringBuilder(batch * 64 + 64);
         for (var start = 0; start < displayPaths.Length; start += batch)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var count = Math.Min(batch, displayPaths.Length - start);
-            builder.Clear().Append("INSERT INTO asset_fts(rowid, dp) VALUES ");
+            var logicalPaths = ReadLogicalPaths(connection, keys, start, count, cancellationToken, transaction);
+            builder.Clear().Append("INSERT INTO asset_fts(rowid, dp, lp) VALUES ");
             using var command = connection.CreateCommand();
             command.Transaction = transaction;
             for (var i = 0; i < count; i++)
             {
                 if (i > 0) builder.Append(',');
-                builder.Append($"($r{i},$d{i})");
+                builder.Append($"($r{i},$d{i},$l{i})");
                 command.Parameters.AddWithValue($"$r{i}", start + i);
                 command.Parameters.AddWithValue($"$d{i}", displayPaths[start + i]);
+                command.Parameters.AddWithValue($"$l{i}", logicalPaths[keys[start + i]]);
             }
             command.CommandText = builder.ToString();
             command.ExecuteNonQuery();
@@ -765,27 +908,23 @@ public sealed class UnityCacheSqliteIndexStore
         return string.Join(" AND ", parts);
     }
 
-    /// <summary>trigram 覆盖不到时的兜底：流式扫全表逐行算显示路径。
+    /// <summary>词项取不到（查询串 &lt; 3 字符）或可能只命中 <c>SourcePath</c> 分隔符时的兜底：
+    /// 流式扫全表逐行算 dp / lp / src 三种文本。判据与 FTS 路径**同一个函数**
+    /// （<see cref="MatchesReverifyKeys"/>），所以两条路径的结果一致。
     /// 仍然不物化 AssetRecord —— 只是慢，不是不可用。</summary>
     private static List<int> ScanDisplayPaths(SqliteConnection connection, string needle,
         CancellationToken cancellationToken)
     {
         var hits = new List<int>();
         using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT k.r, a.container_entry, a.type_id, a.type, a.path_id
-            FROM catalog_rank k JOIN assets a ON a.bundle_id = k.bundle_id AND a.bundle_index = k.bundle_index
-            ORDER BY k.r
-            """;
+        command.CommandText = ReverifyColumns + " ORDER BY k.r";
         using var reader = command.ExecuteReader();
         var seen = 0;
         while (reader.Read())
         {
             if (seen++ % 4096 == 0) cancellationToken.ThrowIfCancellationRequested();
-            var containerEntry = reader.IsDBNull(1) ? null : reader.GetString(1);
-            var path = AssetDisplay.CacheRowDisplayPath(
-                reader.GetInt32(2), (AssetType)reader.GetInt32(3), reader.GetInt64(4), containerEntry);
-            if (path.Contains(needle, StringComparison.OrdinalIgnoreCase)) hits.Add(reader.GetInt32(0));
+            var row = ReadReverifyKeys(reader);
+            if (MatchesReverifyKeys(row, needle)) hits.Add(row.Rank);
         }
         return hits;
     }
@@ -822,16 +961,19 @@ public sealed class UnityCacheSqliteIndexStore
         return rows;
     }
 
-    /// <summary>只取复核显示路径需要的列（比整行轻）。</summary>
-    private static List<(int Rank, string? ContainerEntry, int TypeId, AssetType Type, long PathId)>
-        ReadDisplayKeysByRank(SqliteConnection connection, int[] ranks)
+    /// <summary>复核一行需要的全部文本来源：显示路径（<c>dp</c>）、LogicalPath（<c>lp</c>）、
+    /// 源文件路径（<c>src</c>）。三者齐全，复核才与旧
+    /// <c>AssetSearchService.MatchesText</c> 的匹配面等价。</summary>
+    private readonly record struct ReverifyKeys(
+        int Rank, string? ContainerEntry, int TypeId, AssetType Type, long PathId,
+        string OuterKey, string InnerKey, string Container, string SourcePath);
+
+    /// <summary>复核用的列（比整行轻，但够算出 dp / lp / src 三种文本）。</summary>
+    private static List<ReverifyKeys> ReadReverifyKeysByRank(SqliteConnection connection, int[] ranks)
     {
-        var builder = new System.Text.StringBuilder(160 + ranks.Length * 6);
-        builder.Append("""
-            SELECT k.r, a.container_entry, a.type_id, a.type, a.path_id
-            FROM catalog_rank k JOIN assets a ON a.bundle_id = k.bundle_id AND a.bundle_index = k.bundle_index
-            WHERE k.r IN (
-            """);
+        if (ranks.Length == 0) return [];
+        var builder = new System.Text.StringBuilder(200 + ranks.Length * 6);
+        builder.Append(ReverifyColumns).Append(" WHERE k.r IN (");
         using var command = connection.CreateCommand();
         for (var i = 0; i < ranks.Length; i++)
         {
@@ -842,12 +984,37 @@ public sealed class UnityCacheSqliteIndexStore
         builder.Append(") ORDER BY k.r");
         command.CommandText = builder.ToString();
         using var reader = command.ExecuteReader();
-        var rows = new List<(int, string?, int, AssetType, long)>(ranks.Length);
-        while (reader.Read())
-            rows.Add((reader.GetInt32(0), reader.IsDBNull(1) ? null : reader.GetString(1),
-                reader.GetInt32(2), (AssetType)reader.GetInt32(3), reader.GetInt64(4)));
+        var rows = new List<ReverifyKeys>(ranks.Length);
+        while (reader.Read()) rows.Add(ReadReverifyKeys(reader));
         return rows;
     }
+
+    /// <summary>文本列投影：<c>dp</c> 的来源、<c>lp</c> 的三段、<c>src</c> 本身。</summary>
+    private const string ReverifyColumns = """
+        SELECT k.r, a.container_entry, a.type_id, a.type, a.path_id,
+               b.outer_key, b.inner_key, s.value, b.data_path
+        FROM catalog_rank k
+        JOIN assets a ON a.bundle_id = k.bundle_id AND a.bundle_index = k.bundle_index
+        JOIN bundles b ON b.id = a.bundle_id
+        JOIN strings s ON s.id = a.container_id
+        """;
+
+    private static ReverifyKeys ReadReverifyKeys(SqliteDataReader reader)
+        => new(reader.GetInt32(0), reader.IsDBNull(1) ? null : reader.GetString(1),
+            reader.GetInt32(2), (AssetType)reader.GetInt32(3), reader.GetInt64(4),
+            reader.GetString(5), reader.GetString(6), reader.GetString(7), reader.GetString(8));
+
+    /// <summary>复核判据：与旧 <c>AssetSearchService.MatchesText</c> 同口径 ——
+    /// 显示路径 ∪ LogicalPath ∪ SourcePath，大小写不敏感。
+    /// <para>拼接一律走 <see cref="AssetDisplay"/> 的两个 <c>CacheRow*</c> 函数，
+    /// 与派生层写入检索索引时用的是同一份实现，所以「索引命中」与「复核通过」
+    /// 不可能因为拼接口径不同而打架。</para></summary>
+    private static bool MatchesReverifyKeys(in ReverifyKeys row, string needle)
+        => AssetDisplay.CacheRowDisplayPath(row.TypeId, row.Type, row.PathId, row.ContainerEntry)
+               .Contains(needle, StringComparison.OrdinalIgnoreCase)
+        || AssetDisplay.CacheRowLogicalPath(row.OuterKey, row.InnerKey, row.Container, row.PathId, row.TypeId)
+               .Contains(needle, StringComparison.OrdinalIgnoreCase)
+        || row.SourcePath.Contains(needle, StringComparison.OrdinalIgnoreCase);
 
     private const string PageColumns = """
         SELECT k.r,

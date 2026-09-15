@@ -232,8 +232,9 @@ SELECT ... WHERE r >= k*200 AND r < k*200 + 200 ORDER BY r
 
 ```sql
 CREATE TABLE catalog_rank (r INTEGER PRIMARY KEY, bundle_id, bundle_index) WITHOUT ROWID;
-CREATE VIRTUAL TABLE asset_fts USING fts5(dp, content='', detail=none, columnsize=0, tokenize='trigram');
-CREATE TABLE derived_state (k TEXT PRIMARY KEY, v TEXT NOT NULL);   -- revision='d1' + rows
+CREATE VIRTUAL TABLE asset_fts USING fts5(dp, lp, content='', detail=none, columnsize=0, tokenize='trigram');
+CREATE TABLE derived_state (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+-- revision='d2' + rows + src_prefix + src_suffix
 ```
 
 - **名次不写成 `assets.r` 列**：`UPDATE assets SET r=?` 实测 43–50 µs/行 → 55–65 s（127 万行）；
@@ -242,20 +243,33 @@ CREATE TABLE derived_state (k TEXT PRIMARY KEY, v TEXT NOT NULL);   -- revision=
 - **FTS 的 `rowid` 直接用名次**，所以检索命中的 rowid 就是名次，排序/分页零转换。
   代价是名次属于**整表全序**，任何一行增删都会挪动它后面的名次 ⇒ `catalog_rank` 与 `asset_fts`
   **必须在同一个事务里一起重建**，否则「搜到的行」会指向「另一条资源」。
-- **FTS 只索引 `dp`（显示路径），绝不索引 `lp`**：实测 `lp` 形如
-  `<32位16进制>/<32位16进制>/CAB-<32位16进制>/<pathId>.<typeId>`，除编号外**全是机器哈希**，
-  没有任何用户会手打的文本；可搜内容（`Assets/Animation/SD/10612_Honglu_RCorp/…`）只在
-  `container_entry` → `dp`。实测 `dp+lp` @ `detail=full` 净 **+855.1 MiB / 灌入 161.4 s**；
-  `dp` @ `detail=none` 净 **+39.79 MiB / 灌入 28.7 s**。`src`（SourcePath）同样排除
-  —— 它只比 `lp` 多一层固定前后缀，搜它约等于搜整个库。
+- **FTS 索引 `dp` + `lp` 两列**（`d2` 起）。口径来源是旧 `AssetSearchService.MatchesText` 的匹配面
+  `DisplayPath ∪ LogicalPath ∪ SourcePath`：只索引 `dp` 会让「按 LogicalPath 搜」**从能搜到变成搜不到**
+  —— 这是行为回归，不是优化。代价也实测了（`logs/probe_fts_dp_lp.py`，真实规模副本）：
+
+  | FTS 形态 | 净增 | 灌入 |
+  |---|---|---|
+  | `fts5(dp)` | +49.7 MiB | 10.7 s |
+  | `fts5(dp, lp)` | **+180.8 MiB** | **45.0 s** |
+  | `lp` 的边际 | **+131.1 MiB** | **+34.2 s** |
+
+  `lp` 形如 `<32位16进制>/<32位16进制>/CAB-<32位16进制>/<pathId>.<typeId>`，除编号外全是机器哈希
+  —— 没人会手打，但它与 `src` 的可变部分同源，所以不索引它就等于丢掉两个字段的搜索能力。
+  （早先测的 `dp+lp` @ `detail=full` 是 +855.1 MiB / 161.4 s；`detail=none` 的 `lp` 边际只有它的 1/6.5。）
+- **`src`（SourcePath）不单列索引，但等价性没丢**：实测 `data_path` 全部 1,471 条同形
+  `<缓存根>\<outer>\<inner>\__data`，**可变内容只有 outer/inner —— 而 `lp` 已经含这两段**。
+  剩下只有「每一行都相同」的两段常量：公共前缀（`C:\…\ProjectMoon_LimbusCompany\`）与
+  公共后缀（`\__data`）。于是规则是：needle 含于公共前后缀 ⇒ 命中**全部行**（旧实现在这种情况下
+  同样没有任何过滤作用）；含反斜杠（跨 outer/inner 或跨进 `\__data`）⇒ 退化为全表扫描；其余情形
+  `FTS(dp∪lp)` 已是 `src` 匹配面的超集。两个前后缀在建派生层时算好、存进 `derived_state`。
 - `content=''`（contentless）**采用**，但有三条必须照着写的约束（都是实测踩出来的）：
   ① **清空只能用专用指令**：`DELETE FROM asset_fts`（带不带 `WHERE` 都一样）直接报
   `asset_fts: table does not support scanning`；正确写法是
   `INSERT INTO asset_fts(asset_fts) VALUES('delete-all')`（可重复调用，之后重插与检索都正常，
   `integrity-check` 通过 —— `logs/probe_fts_clear.py`）。
   ② **不能从索引里把文本读回来**（同样是 `table does not support scanning`）。这一条**我们不需要**：
-  复核是拿命中的 `rowid`（= 名次）回到 `catalog_rank`/`assets` 的列上**重新算**显示路径
-  （`ReadDisplayKeysByRank`），从不读 FTS 表的原文 —— 这也是 contentless 能用的前提。
+  复核是拿命中的 `rowid`（= 名次）回到 `catalog_rank`/`assets`/`bundles`/`strings` 的列上**重新算**
+  三种文本（`ReadReverifyKeysByRank`），从不读 FTS 表的原文 —— 这也是 contentless 能用的前提。
   ③ **不能 `rebuild`**（contentless 没有可重建的源）。
   省下来的体积很实在：contentless `dp` 净 **+42.3 MiB / 灌 15.6 s**，vs 存储原文的 `detail=none,columnsize=0`
   **+113.8 MiB / 灌 21.8 s**。代价是「搜到的不等于索引里的原文」这件事完全由复核兜住。
@@ -270,13 +284,19 @@ needle = anim/icon2  →  "ani" AND "nim" AND "im/" AND "m/i" AND "/ic" AND "ico
 ```
 
 这样得到**只是超集**：含全部词项 ≠ 含连续子串（例：`assets/icon/on2/x.png` 同时含
-`ico`/`con`/`on2`，却没有 `icon2`）。所以必须把候选行读回来算显示路径、用 `OrdinalIgnoreCase`
-判子串做**精确复核**。复核与列表显示、派生层回填**共用同一个函数**
-（`AssetDisplay.CacheRowDisplayPath`）—— 这样「搜到的」严格等于「看到的」。
+`ico`/`con`/`on2`，却没有 `icon2`）。所以必须把候选行读回来算文本、用 `OrdinalIgnoreCase`
+判子串做**精确复核**（`ReadReverifyKeysByRank` + `MatchesReverifyKeys`）。
+
+复核的口径 = 旧 `AssetSearchService.MatchesText` 的匹配面，**三个字段**：
+`dp ∪ lp ∪ src`。拼接一律走 `AssetDisplay.CacheRowDisplayPath` / `CacheRowLogicalPath` ——
+与列表显示、派生层回填、兜底全表扫描**是同一份实现**，所以「搜到的」严格等于「看到的」，
+且不会出现「索引按一种拼法命中、复核按另一种拼法否掉」的假阴性。
 
 - 实测 trigram **跨空白建词项**（`"本 #"` 是合法词项），逐窗口加引号是必须的：
   裸写的多词查询会被当成短语，而 `detail=none` 直接报错。
 - 查询串 **短于 3 字符**时索引里取不到任何词项 ⇒ 退化为流式全表扫描（实测 1.5–3 s，不物化记录）。
+  **含反斜杠**的查询串同理：它可能只落在 `src` 的分隔符上（跨 outer/inner 或跨进 `\__data`），
+  而 `src` 不在索引里 —— 也走同一条兜底扫描。两条路径共用同一个复核函数，所以结果一致。
 - 复核用的 `Contains(..., OrdinalIgnoreCase)` 是**字面量**匹配，没有 `LIKE` 的 `_`/`%` 通配语义。
   实测拿 `LIKE` 当判据会**多算**：`'%cg_40%'` 命中 35 条，而真正的子串命中是 33 条
   （SQLite 的 `_` 是单字符通配符）⇒ 复核口径必须用 `Contains`，不能用 `LIKE`。
@@ -287,12 +307,18 @@ needle = anim/icon2  →  "ani" AND "nim" AND "im/" AND "m/i" AND "/ic" AND "ico
 
 | 项 | 值 |
 |---|---|
-| 索引库体积 | 46.5 → **138.7 MiB**（`assets` 55.22 / `catalog_rank` 19.19 / `asset_fts_data` 39.79） |
+| 索引库体积 | 46.5 → **138.7 MiB**（`d1`，`assets` 55.22 / `catalog_rank` 19.19 / `asset_fts_data` 39.79）<br>`d2` 的 FTS 再 +131.1 MiB ⇒ **≈ 270 MiB** |
 | 单页读取 | **1.35 / 1.58 / 1.68 ms**（首页 / 中段 / 末页 —— 与页深无关） |
 | 名次重建 | **5.9 s**（DELETE + 重插） |
-| 检索索引重建 | **27.8 s** |
-| 每次缓存变化合计 | **≈ 34 s**，且只在缓存真的变过之后发生一次 |
+| 检索索引重建 | **27.8 s**（`d1`）→ **≈ 62 s**（`d2`，按 `lp` 边际 +34.2 s 估） |
+| 每次缓存变化合计 | **≈ 34 s**（`d1`）/ **≈ 68 s**（`d2`），且只在缓存真的变过之后发生一次 |
 | 排序打平 | 显示路径并列的行数（靠 `LogicalPath` 才分先后） |
+
+> `d2` 的两项是 `logs/probe_fts_dp_lp.py` 在同一份真实副本上用**生产不用的**
+> `journal_mode=OFF / synchronous=OFF` 量的，所以是**下界**：生产走 WAL + `synchronous=NORMAL`，
+> 真实墙钟要更高。相对代价（`lp` 让检索引擎的灌入时间翻 4 倍以上、体积翻 2.6 倍）是准的。
+> 程序日志里已有 `派生层重建完成：… 用时 X 秒` 一行，以它为准。
+
 
 ### 维护策略
 
@@ -306,8 +332,10 @@ needle = anim/icon2  →  "ani" AND "nim" AND "im/" AND "m/i" AND "/ic" AND "ico
 
 ### 复现
 
-`logs/probe_final_shape.py`（定案尺寸与耗时）、`logs/probe_rank_table.py`（名次表 vs 逐条 UPDATE）、
-`logs/probe_fts_maint.py`（contentless 的删除/重建限制）、`logs/probe_shapes.py`（`lp`/`dp` 实形）、
+`logs/probe_final_shape.py`（定案尺寸与耗时）、`logs/probe_fts_dp_lp.py`（`lp` 的边际体积/时间，
+同一副本两变体 + `page_count/freelist_count` 口径）、`logs/probe_rank_table.py`（名次表 vs 逐条 UPDATE）、
+`logs/probe_fts_maint.py`（contentless 的删除/重建限制）、`logs/probe_fts_clear.py`（`delete-all` 写法）、
+`logs/probe_shapes.py`（`lp`/`dp` 实形）、
 `logs/probe_sql_only7.py`（用 `page_count/freelist_count` 量真实体积）、
 `logs/probe_trigram_space.py`（跨空白词项）、`logs/probe_trigram_sem.py`（`LIKE` 判据不可靠）、
 `logs/probe_bulk.py`（多行 VALUES 对 FTS5 虚表同样可用）。
@@ -316,5 +344,6 @@ needle = anim/icon2  →  "ani" AND "nim" AND "im/" AND "m/i" AND "/ic" AND "ico
 
 UI 仍会把全部引用资产物化为 `AssetRecord`，没有改成数据库分页查询；百万级资产的常驻
 集合、路径和元数据仍占较多内存。**迁移可行的形态与实测代价见上一节**：派生列 + 稠密名次，
-磁盘约 +141 MiB 换掉约 1,250.9 MiB 常驻堆。其他四个工作台/派生缓存没有改表布局。
+磁盘约 +217 MiB（`d2`，含 `lp` 检索）换掉约 1,250.9 MiB 常驻堆。
+其他四个工作台/派生缓存没有改表布局。
 XZ 压缩与 Unity 重打包仍由原库处理；本次不改变加载器格式或扩展未知 Unity 格式的写回支持。

@@ -127,12 +127,26 @@ public sealed class UnityCacheSqliteIndexStoreTests : IDisposable
     // 这一组测试的判据不是「手写期望值」，而是**拿同一个公共口径当场重算一遍**：
     //   · 全序   → AssetDisplay.CompareCatalogOrder（派生层名次的定义）
     //   · 显示路径 → AssetDisplay.CacheRowDisplayPath（列表显示 / 派生层回填 / 复核 三处共用）
-    //   · 检索   → 对显示路径做 OrdinalIgnoreCase 子串暴力扫描
+    //   · 检索   → 对 dp ∪ lp ∪ src 做 OrdinalIgnoreCase 子串暴力扫描
     // 这样一旦派生层与「内存里那条路径」分家（本次重构最大的风险），测试立刻红。
+    //
+    // 检索的匹配面 = 旧 AssetSearchService.MatchesText：
+    //   DisplayPath ∪ LogicalPath ∪ SourcePath
+    // 默认夹具（Bundle(name)）的 data_path 就是 bundle 名，只有 1 个字符，天然覆盖不到
+    // SourcePath；真正测 SourcePath 要用 SourceBundle，它给出接近真实的
+    // `<缓存根>\<名字>\__data`，于是公共前后缀 = `<缓存根>\` 与 `\__data`。
 
     private static UnityCacheIndexRow CatalogRow(int index, string? containerEntry, long pathId,
         int typeId = 49, AssetType type = AssetType.Text)
         => new(index, "共享容器", pathId, typeId, type, 9876543210, null, containerEntry);
+
+    /// <summary>data_path 取接近真实的形态 —— 否则造不出 SourcePath 的公共前后缀，
+    /// 检索的常量规则（命中它 = 所有行）就没法被覆盖。</summary>
+    private static UnityCacheIndexBundle SourceBundle(string name)
+        => new($@"C:\缓存根\{name}\__data", 123, 456, "outer", name, true);
+
+    private static UnityCacheScanEntry SourceEntry(string name)
+        => new("outer", name, $@"C:\缓存根\{name}\__data");
 
     /// <summary>刻意造出三种「SQL 自己排不出来」的形态：
     /// ① 数字段自然序（icon2 在 icon10 前，BINARY 序恰好相反）；
@@ -163,6 +177,29 @@ public sealed class UnityCacheSqliteIndexStoreTests : IDisposable
 
     private static string LogicalPathOf(UnityCacheIndexBundle bundle, UnityCacheIndexRow row)
         => $"{bundle.Outer}/{bundle.Inner}/共享容器/{row.PathId}.{row.TypeId}";
+
+    /// <summary>检索的复核口径（= 旧 <c>AssetSearchService.MatchesText</c>）：
+    /// 显示路径 ∪ LogicalPath ∪ SourcePath，大小写不敏感。
+    /// <para>lp 的拼法**故意手写**，而不是调 <c>AssetDisplay.CacheRowLogicalPath</c> ——
+    /// 这样它同时是对派生层 lp 格式的一层独立校验：派生层若把 lp 拼成别的样子，
+    /// 检索结果立刻与这个暴力扫描对不上。</para></summary>
+    private static bool MatchesAnyText(UnityCacheIndexBundle bundle, UnityCacheIndexRow row, string needle)
+        => DisplayPathOf(bundle, row).Contains(needle, StringComparison.OrdinalIgnoreCase)
+        || LogicalPathOf(bundle, row).Contains(needle, StringComparison.OrdinalIgnoreCase)
+        || bundle.DataPath.Contains(needle, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>三字段子串暴力扫描 → 名次（检索的独立判据，恒升序）。</summary>
+    private static int[] BruteForce(
+        (UnityCacheIndexBundle Bundle, IReadOnlyList<UnityCacheIndexRow> Rows)[] batches, string needle)
+    {
+        var probe = needle.Trim();
+        if (probe.Length == 0) return [];
+        return ExpectedCatalogOrder(batches)
+            .Select((x, rank) => (x, rank))
+            .Where(t => MatchesAnyText(t.x.Bundle, t.x.Row, probe))
+            .Select(t => t.rank)
+            .ToArray();
+    }
 
     private static List<(UnityCacheIndexBundle Bundle, UnityCacheIndexRow Row)> ExpectedCatalogOrder(
         (UnityCacheIndexBundle Bundle, IReadOnlyList<UnityCacheIndexRow> Rows)[] batches)
@@ -246,31 +283,23 @@ public sealed class UnityCacheSqliteIndexStoreTests : IDisposable
     [InlineData("未命名")]        // 中文三字（正好一个 trigram）
     [InlineData("文本 #7")]       // 含空格：trigram 跨空白建词项，见 logs/probe_trigram_space.py
     [InlineData("icon2.png")]    // 含 '.'
+    [InlineData("共享容器")]      // 只出现在 lp 里（容器名）—— d1 只索引 dp 时会漏
     [InlineData("i")]            // < 3 字符：trigram 取不到词项 → 退化全表扫描
     [InlineData("n2")]           // 同上
+    [InlineData("a")]            // < 3 字符且只命中 src（data_path == bundle 名）→ 全表扫描 + 三字段复核
     [InlineData("_")]            // LIKE 的通配符：这里必须是字面量，且谁都不该命中
     [InlineData("")]             // 空串：不该扫全表
     [InlineData("   ")]          // 纯空白：同上
-    public void Search_matches_a_brute_force_substring_scan_of_the_display_paths(string needle)
+    public void Search_matches_a_brute_force_substring_scan_of_dp_lp_and_src(string needle)
     {
         var batches = CatalogBatches();
         var store = new UnityCacheSqliteIndexStore(Database);
         store.PersistAll([Entry("a"), Entry("b")], batches);
         store.EnsureDerived();
 
-        var expected = ExpectedCatalogOrder(batches);
-        // 复核口径必须与 SearchRanks 的契约一致：先 Trim，空/纯空白一律「没有结果」。
+        // 判据先 Trim、空/纯空白一律「没有结果」—— 与 SearchRanks 的契约一致。
         // （不能直接拿原始串做 Contains —— `"".Contains` 恒真，会把每一行都算成命中。）
-        var probe = needle.Trim();
-        var brute = probe.Length == 0
-            ? Array.Empty<int>()
-            : expected
-                .Select((x, rank) => (x, rank))
-                .Where(t => DisplayPathOf(t.x.Bundle, t.x.Row).Contains(probe, StringComparison.OrdinalIgnoreCase))
-                .Select(t => t.rank)
-                .ToArray();
-
-        Assert.Equal(brute, store.SearchRanks(needle).ToArray());
+        Assert.Equal(BruteForce(batches, needle), store.SearchRanks(needle).ToArray());
     }
 
     [Fact]
@@ -287,6 +316,88 @@ public sealed class UnityCacheSqliteIndexStoreTests : IDisposable
         Assert.Equal(4, store.SearchRanks("icon2").Count);     // 但没被算成 'icon2' 的命中
         // 反过来，真正存在的连续子串必须命中 —— 复核不能把对的滤掉。
         Assert.Single(store.SearchRanks("assets/icon"));
+    }
+
+    [Fact]
+    public void Search_covers_logical_path_and_source_path_like_the_old_matcher()
+    {
+        var batches = new (UnityCacheIndexBundle Bundle, IReadOnlyList<UnityCacheIndexRow> Rows)[]
+        {
+            (SourceBundle("a"), new[] { CatalogRow(0, "assets/anim/icon2.png", 700) }),
+            (SourceBundle("b"), new[] { CatalogRow(0, "assets/anim/icon3.png", 800) }),
+        };
+        var store = new UnityCacheSqliteIndexStore(Database);
+        store.PersistAll([SourceEntry("a"), SourceEntry("b")], batches);
+        store.EnsureDerived();
+        var expected = ExpectedCatalogOrder(batches);
+
+        // ① 只有 lp 会命中：容器名是 lp 的一段，任何一个显示路径里都没有它。
+        //    先钉住「dp 确实搜不到」这一点，否则这条测试可能只是碰巧通过。
+        Assert.DoesNotContain(expected, x =>
+            DisplayPathOf(x.Bundle, x.Row).Contains("共享容器", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(2, store.SearchRanks("共享容器").Count);
+        Assert.Equal(BruteForce(batches, "共享容器"), store.SearchRanks("共享容器").ToArray());
+
+        // ② pathId 同样只出现在 lp 里（dp 用的是容器条目名）。
+        Assert.Equal(BruteForce(batches, "800"), store.SearchRanks("800").ToArray());
+        Assert.Single(store.SearchRanks("800"));
+
+        // ③ src 的公共前后缀「每一行都相同」⇒ 命中它就等于没在过滤。
+        //    旧实现在这种情况下同样返回全部（SourcePath 人人含它），所以派生层返回全部名次。
+        Assert.Equal(2, store.SearchRanks("缓存根").Count);
+        Assert.Equal(2, store.SearchRanks("__data").Count);
+        Assert.Equal(BruteForce(batches, "缓存根"), store.SearchRanks("缓存根").ToArray());
+        Assert.Equal(BruteForce(batches, "__data"), store.SearchRanks("__data").ToArray());
+
+        // ④ 含反斜杠 → 可能跨过 outer/inner 的分隔符只在 src 里命中：
+        //    FTS 给不出候选，必须退化全表扫描，而结果仍要与暴力扫描逐条相等。
+        Assert.Equal(BruteForce(batches, @"根\a\"), store.SearchRanks(@"根\a\").ToArray());
+        Assert.Single(store.SearchRanks(@"根\a\"));
+    }
+
+    [Fact]
+    public void An_old_search_index_shape_is_dropped_and_rebuilt_without_touching_assets()
+    {
+        var store = new UnityCacheSqliteIndexStore(Database);
+        store.PersistAll([Entry("a")], [(Bundle("a"), new[] { Row(0) })]);
+        store.EnsureDerived();
+
+        // 把 asset_fts 换回 d1 的形状（只有 dp 一列）、状态标成 d1 —— 模拟升级前用户手上的库。
+        // `CREATE VIRTUAL TABLE IF NOT EXISTS` 对已存在的表什么都不做，所以这必须由
+        // 形状自愈兜住，否则写入端按 (rowid,dp,lp) 插会直接报「no column named lp」。
+        using (var connection = new SqliteConnection($"Data Source={Database}"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                DROP TABLE asset_fts;
+                CREATE VIRTUAL TABLE asset_fts USING fts5(dp, content='', detail=none, columnsize=0, tokenize='trigram');
+                DELETE FROM derived_state;
+                INSERT INTO derived_state(k,v) VALUES('revision','d1'),('rows','1');
+                """;
+            command.ExecuteNonQuery();
+        }
+
+        var upgraded = new UnityCacheSqliteIndexStore(Database);
+        Assert.True(upgraded.NeedsDerived());
+        Assert.True(upgraded.EnsureDerived().Rebuilt);
+
+        // 资产没被重扫：SchemaVersion 仍是 2，assets 原样在位。
+        Assert.Equal(Row(0), Assert.Single(Assert.Single(upgraded.ReadAll()).Rows));
+        Assert.False(upgraded.NeedsDerived());
+
+        // 检索索引确实换成了两列的形状，而且 lp 立刻可搜（d1 会返回空）。
+        using (var connection = new SqliteConnection($"Data Source={Database}"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT name FROM pragma_table_info('asset_fts') ORDER BY cid";
+            var columns = new List<string>();
+            using var reader = command.ExecuteReader();
+            while (reader.Read()) columns.Add(reader.GetString(0));
+            Assert.Equal(new[] { "dp", "lp" }, columns);
+        }
+        Assert.Single(upgraded.SearchRanks("共享容器"));
     }
 
     [Fact]

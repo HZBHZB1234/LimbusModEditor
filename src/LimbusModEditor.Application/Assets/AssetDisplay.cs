@@ -146,6 +146,22 @@ public static class AssetDisplay
         => TreePathOf(true, string.Empty, containerEntry,
             UnityClassId.Map(typeId, storedType), pathId);
 
+    /// <summary>
+    /// **索引行**（缓存引用资产）的 <see cref="AssetRecord.LogicalPath"/> —— 由索引库的
+    /// 列拼出来的唯一出处，口径与 <c>UnityCacheScanService.BuildRecord</c> 一致：
+    /// <c>&lt;outerKey&gt;/&lt;innerKey&gt;/&lt;container&gt;/&lt;pathId&gt;.&lt;typeId&gt;</c>。
+    /// <para>为什么要它：旧 <c>AssetSearchService.MatchesText</c> 的文本匹配面是
+    /// <c>DisplayPath ∪ LogicalPath ∪ SourcePath</c>，所以派生层的检索索引必须能搜
+    /// <c>lp</c>。若「写入索引时拼的 lp」与「复核时拼的 lp」不是同一个串，就会出现
+    /// 「索引说命中、复核说没有」的假阴性 —— 两处都调本函数即可从构造上排除。</para>
+    /// <para>注意 <c>lp</c> 除编号外全是机器哈希（外层/内层哈希、<c>CAB-&lt;哈希&gt;</c>），
+    /// 列表**显示**的是 <see cref="CacheRowDisplayPath"/>，不是它。</para>
+    /// </summary>
+    public static string CacheRowLogicalPath(string outerKey, string innerKey, string container, long pathId, int typeId)
+        => $"{outerKey}/{innerKey}/{container}/" +
+           $"{pathId.ToString(System.Globalization.CultureInfo.InvariantCulture)}." +
+           $"{typeId.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+
     /// <summary>路径的最后一段（不含 '/'）；空串进空串出。</summary>
     private static string LeafOf(string path)
         => path.Length == 0 ? string.Empty

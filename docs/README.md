@@ -17,6 +17,8 @@
 | 关心自审发现、设计变更风险、性能量化 | `REVIEW.md` |
 | 查看资源库 v2、启动分析与导出读取的真实性能对比及复现步骤 | `PERFORMANCE-REFACTOR.md` |
 | 想查「为什么是这个口径 / 为什么不做某件事」 | `ARCHIVE-DESIGN-NOTES.md` |
+| 想评估「用 WebView 重构前端」是否值得（现状实测 / 三方案对比 / 建议路线） | `WEBVIEW-FEASIBILITY.md` |
+| 想知道 Spine 三层链路（路径归类 / 结构预览 / 真渲染播放）在真实库上的命中率与决策清单 | `SPINE-INTEGRATION-ANALYSIS.md` |
 | 想看实现历史与后续方向的长文记录 | `ROADMAP.md` |
 | 项目门面（三步工作流、格式边界、CLI、打包） | `../README.md` |
 

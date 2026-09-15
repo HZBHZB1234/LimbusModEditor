@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Text.Json;
@@ -10,10 +11,14 @@ using System.Windows.Threading;
 using LimbusModEditor.Application.AppConfig;
 using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Application.Assets.Preview;
+using LimbusModEditor.Application.Caching;
+using LimbusModEditor.Application.Catalog;
 using LimbusModEditor.Application.Relations;
+using LimbusModEditor.Application.Scanning;
 using LimbusModEditor.Application.Spine;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Domain.Diagnostics;
+using LimbusModEditor.Domain.Projects;
 using LimbusModEditor.Editing.Images;
 using LimbusModEditor.Formats.Bank;
 using NLog;
@@ -41,7 +46,6 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
     private string? _pendingRevealLogicalPath;
 
     private readonly IWorkbenchHost _host;
-    private readonly AssetSearchService _search = new();
     private readonly AssetEditService _assetEdits = new();
     private readonly ImageAtlasEditService _atlasEdits = new();
     private readonly SpriteMetadataEditService _spriteEdits = new();
@@ -61,14 +65,27 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
     private readonly string _uiStateFile;
     private int _searchGeneration;
     private int _previewGeneration;
+    // ── 资源目录：按页查询（AssetCatalog）+ 页码条状态 ────────────────────
+    // 目录门面按项目缓存：它内部持有「索引库 + 项目态来源」，两者在项目换掉或
+    // 资产条数变化（扫描新增 / 提取音频到项目）时必须重来，见 CatalogFor 的说明。
+    private AssetCatalog? _catalog;
+    private ModProject? _catalogProject;
+    private int _catalogAssetCount = -1;
+    // 当前页（0 基）与页大小。页码条与列表**必须来自同一次查询**，
+    // 所以这两个值只在 RunSearchAsync 里被读取/回写。
+    private long _pageIndex;
+    private int _pageSize = DefaultPageSize;
     // 音频试听：预览管线给出的已解码 WAV + WPF MediaPlayer（切换选中/关窗即停）。
     private System.Windows.Media.MediaPlayer? _previewPlayer;
     private string? _previewAudioFile;
     private AssetPreviewAudio? _currentAudio;
     // 当前选中资源：列表与目录树两个视图共用（右键菜单/双击/按钮都以此为准）。
     private AssetRecord? _selectedAsset;
-    // 最近一次搜索结果快照：目录树视图按它重建根层。
-    private IReadOnlyList<AssetRecord>? _lastResults;
+    // 最近一次搜索结果的**目录树数据源**（列表模式下为 null —— 那时不需要树）。
+    // 它只常驻「命中序列的 8 字节条目」，每展开一层才物化那一层（见 AssetCatalogTree）。
+    private AssetCatalogTree? _tree;
+    // 命中总数：页码条与「共 N 条」用，列表与树共用同一个数。
+    private long _lastTotal;
     // 目录树已展开节点的稳定 key（跨重建累积）：修复「刷新/同步后树突然折叠回初始形态」。
     private readonly HashSet<string> _expandedTreeKeys = new(StringComparer.OrdinalIgnoreCase);
     // 默认以「容器目录树」呈现：用户看到的是类文件夹结构，而不是扁平技术路径。
@@ -87,6 +104,13 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
     private PreviewWindow? _previewWindow;
     // 用户手动定位过预览高度（拖拽/双击）后就别再自动收敛，免得跟用户抢把手。
     private bool _previewHeightUserSet;
+
+    /// <summary>默认页大小。200 是实测的折中：一页 200 条约 0.3 MB 记录、行视图模型
+    /// 200 个（旧实现是一次性 1,275,623 个），滚动一屏也就几十条。</summary>
+    private const int DefaultPageSize = 200;
+
+    /// <summary>每页条数可选项（与 XAML 里 ComboBoxItem 的顺序一一对应）。</summary>
+    private static readonly int[] PageSizes = [100, 200, 500, 1000];
 
     public AssetsWorkbenchPage(IWorkbenchHost host)
     {
@@ -455,10 +479,14 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
         using var scope = Log.Scope("RefreshAssetList");
         if (_host.Project is null)
         {
-            AssetList.ItemsSource = null; _lastResults = null; AssetTree.ItemsSource = null;
+            AssetList.ItemsSource = null; AssetTree.ItemsSource = null;
+            _tree = null; _lastTotal = 0; _pageIndex = 0;
+            UpdatePageBar();
             Log.Debug("刷新资源列表：无项目，已清空列表与目录树");
             return;
         }
+        // 回第 0 页：刷新之后「上次停在第 137 页」没有意义（命中集可能完全不同）。
+        _pageIndex = 0;
         Log.Debug("刷新资源列表：资产总数={0}，筛选已初始化={1}，视图={2}",
             _host.Project.Assets.Count, _filtersInitialized, _treeMode ? "树形" : "列表");
         if (!_filtersInitialized)
@@ -523,87 +551,215 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
         return value is TEnum typed ? typed : null;
     }
 
-    /// <summary>后台线程过滤 + 排序 + 行视图模型构造（快照先在 UI 线程取好，
-    /// 避免与集合修改竞争），带代际守卫：过期结果直接丢弃；选中项按 AssetId
-    /// 跨刷新保留。列表承载 <see cref="AssetRow"/>（显示层），树视图仍按底层
-    /// 记录构建。</summary>
-    private async Task RunSearchAsync()
+    /// <summary>
+    /// 当前项目对应的资源目录门面。**按项目缓存**，但也必须会失效 ——
+    /// 它内部持有索引库与项目态来源（后者把项目的资产集合索引成字典并摘出补充集），
+    /// 项目换掉、或资产条数变过（扫描新增、音频工作台「提取到项目」）之后都必须重来，
+    /// 否则新资源在列表里会看不见。
+    /// <para>条数相同但内容被换掉（删一条又加一条）不在此检测范围内：那种情况下记录对象
+    /// 本身仍是活的（<c>Find</c> 返回同一条对象，编辑状态/元数据实时可见），只有
+    /// 「路径 → 记录」的映射会滞后，属于可接受的极端情形。</para>
+    /// </summary>
+    private AssetCatalog CatalogFor(ModProject project)
+    {
+        if (_catalog is not null && ReferenceEquals(_catalogProject, project)
+            && _catalogAssetCount == project.Assets.Count) return _catalog;
+        // 索引库路径与启动扫描用的是同一个文件（cache/unity-cache-index.db）。
+        // 库不存在时 AssetCatalog 返回空命中集，此时列表里剩下的正是项目态补充集
+        // （导入的旧式模组）—— 与「扫描结果为空」的语义一致，不需要第二条代码路径。
+        var store = new UnityCacheSqliteIndexStore(
+            Path.Combine(_host.Env.CacheDirectory, WorkbenchCachePaths.UnityCacheIndexFileName));
+        _catalog = new AssetCatalog(store, project);
+        _catalogProject = project;
+        _catalogAssetCount = project.Assets.Count;
+        Log.Debug("资源目录门面已重建：项目资产 {0:N0} 条，索引库存在={1}", project.Assets.Count, store.Exists);
+        return _catalog;
+    }
+
+    /// <summary>一次搜索的结果：列表页与目录树只会出现一样（另一个视图本来就没显示）。</summary>
+    private sealed record SearchOutcome(
+        IReadOnlyList<AssetRow>? Rows, long Total, long PageIndex, AssetRecord? Revealed);
+
+    /// <summary>
+    /// 后台线程取数：列表**只物化要显示的那一页**，目录树**只拿命中序列**（8 字节一条）。
+    /// <para>两个视图各取所需、**不同时取**是刻意的：列表要按用户选的排序取一页，目录树要按
+    /// 目录序拿整条序列以便分层展开，同时取会让「取一页」的代价白白翻倍。</para>
+    /// </summary>
+    private SearchOutcome BuildView(AssetCatalog catalog, AssetSearchQuery query, bool treeMode,
+        string? revealPath, long requestedPage, int pageSize)
+    {
+        // 定位目标（深链跳转）先解析成记录：它不在当前页里也要能把右侧预览切过去。
+        var revealed = revealPath is null ? null : catalog.Resolve([revealPath]).FirstOrDefault();
+        if (treeMode)
+        {
+            var tree = new AssetCatalogTree(catalog, query);
+            return new(null, tree.Count, 0, revealed);
+        }
+        // 「跳到某资源」优先于页码：先算出它在命中集里是第几条，再翻到它所在的那一页，
+        // 否则用户跳过来了却停在别的页上（那一行根本不在列表里）。
+        if (revealPath is { } path && catalog.IndexIn(query, path) is { } index)
+            requestedPage = index / pageSize;
+        var page = catalog.Page(query, requestedPage * (long)pageSize, pageSize);
+        // 筛选变化后用户可能停在一个已经不存在的页码上 —— 夹到最后一页，
+        // 否则他看到的是空白页，而「共 N 条」明明不为零。
+        var pageCount = page.PageCount(pageSize);
+        if (requestedPage >= pageCount)
+        {
+            requestedPage = pageCount - 1;
+            page = catalog.Page(query, requestedPage * (long)pageSize, pageSize);
+        }
+        var rows = new List<AssetRow>(page.Items.Count);
+        foreach (var record in page.Items) rows.Add(new AssetRow(record));
+        return new(rows, page.TotalCount, requestedPage, revealed);
+    }
+
+    /// <summary>后台线程查询 + 代际守卫：过期结果直接丢弃；选中项按 LogicalPath 跨刷新保留。
+    /// <paramref name="keepPage"/> = false 时回到第 0 页（筛选变化 / 刷新 / 切页回来都该回第 0 页，
+    /// 只有「翻页」这一个动作保留页码）。</summary>
+    private async Task RunSearchAsync(bool keepPage = false)
     {
         using var scope = Log.Scope("RunSearchAsync");
         var project = _host.Project;
-        if (project is null) { AssetList.ItemsSource = null; _lastResults = null; AssetTree.ItemsSource = null; Log.Debug("搜索跳过：无项目"); return; }
-        var generation = ++_searchGeneration;
-        var query = BuildSearchQuery();
-        var snapshot = project.Assets.ToArray();
-        Log.Debug("搜索开始：代际={0}，快照={1} 条资产，视图={2}", generation, snapshot.Length, _treeMode ? "树形" : "列表");
-        IReadOnlyList<AssetRecord> results;
-        IReadOnlyList<AssetRow> rows;
-        IReadOnlyList<AssetTreeNode>? roots = null;
-        try
+        if (project is null)
         {
-            // 过滤 + 排序 + 百万级 AssetRow 构造全部在后台线程完成，
-            // UI 线程只做最终的 ItemsSource 赋值（ListView 虚拟化按需实例化）。
-            (results, rows, roots) = await Task.Run(() =>
-            {
-                var filtered = _search.Search(snapshot, query);
-                var rowList = filtered.Select(a => new AssetRow(a)).ToList();
-                // 目录树根层构建也是逐条解析显示路径 + 分组（真实规模下约 0.5 s），
-                // 一并放到后台；UI 线程只做 TreeViewItem 映射（根节点数量级很小）。
-                var rootList = _treeMode ? AssetTreeBuilder.BuildRoots(filtered) : null;
-                return (filtered, (IReadOnlyList<AssetRow>)rowList, rootList);
-            });
-        }
-        catch (ArgumentException ex) { Log.Error(ex, "搜索参数被拒绝（语义原样：结果丢弃）：代际={0}，快照={1} 条", generation, snapshot.Length); return; }
-        if (generation != _searchGeneration)
-        {
-            Log.Debug("搜索结果已过期丢弃：本代际={0}，当前代际={1}，命中={2} 条", generation, _searchGeneration, results.Count);
+            AssetList.ItemsSource = null; AssetTree.ItemsSource = null;
+            _tree = null; _lastTotal = 0; _catalog = null; _catalogProject = null; _catalogAssetCount = -1;
+            Log.Debug("搜索跳过：无项目，已清空列表/目录树/目录门面");
             return;
         }
-        _lastResults = results;
-        // 精确跳转优先于「上次选中的资源」：它带的是用户刚点的那条关联，更该被保住。
+        var generation = ++_searchGeneration;
+        var query = BuildSearchQuery();
+        var catalog = CatalogFor(project);
+        var treeMode = _treeMode;
+        var requestedPage = keepPage ? _pageIndex : 0;
+        var pageSize = _pageSize;
+        // 待定位目标只受理一次：本次搜索必须消费掉它，否则之后的每一次筛选都会被它劫持。
         var revealPath = _pendingRevealLogicalPath;
         _pendingRevealLogicalPath = null;
-        var selectedPath = revealPath ?? (AssetList.SelectedItem as AssetRow)?.LogicalPath;
-        AssetList.ItemsSource = rows;
-        if (selectedPath is { } path && AssetList.ItemsSource is IEnumerable<AssetRow> rows2)
+        Log.Debug("搜索开始：代际={0}，视图={1}，请求第 {2} 页（页大小 {3}），待定位={4}",
+            generation, treeMode ? "树形" : "列表", requestedPage + 1, pageSize, revealPath ?? "(无)");
+        var started = Stopwatch.GetTimestamp();
+        SearchOutcome outcome;
+        try
         {
-            var restored = rows2.FirstOrDefault(x => string.Equals(x.LogicalPath, path, StringComparison.OrdinalIgnoreCase));
-            if (restored is not null)
-            {
-                AssetList.SelectedItem = restored;
-                AssetList.ScrollIntoView(restored);
-            }
-            else Log.Warn("搜索后恢复选中失败：LogicalPath={0} 不在本代际 {1} 条结果中", path, results.Count);
+            outcome = await Task.Run(() => BuildView(catalog, query, treeMode, revealPath, requestedPage, pageSize));
         }
-        if (revealPath is { } revealedPath)
+        catch (ArgumentException ex)
         {
-            if (results.FirstOrDefault(x => string.Equals(x.LogicalPath, revealedPath, StringComparison.OrdinalIgnoreCase)) is { } revealed)
+            Log.Error(ex, "搜索参数被拒绝（语义原样：结果丢弃）：代际={0}", generation);
+            return;
+        }
+        if (generation != _searchGeneration)
+        {
+            Log.Debug("搜索结果已过期丢弃：本代际={0}，当前代际={1}，命中={2} 条",
+                generation, _searchGeneration, outcome.Total);
+            return;
+        }
+        _lastTotal = outcome.Total;
+        _pageIndex = outcome.PageIndex;
+        // 列表项源赋值会清掉列表选中（触发一次 SelectionChanged(null)）——先把缓冲的选中记下来，
+        // 供「它不在本页」时恢复右侧预览（否则翻页会把预览清空）。
+        var keepSelection = _selectedAsset;
+        if (outcome.Rows is { } rows) AssetList.ItemsSource = rows;
+        AssetCountText.Text = outcome.Total == project.Assets.Count
+            ? project.Assets.Count.ToString()
+            : $"{outcome.Total} / {project.Assets.Count}";
+        UpdatePageBar();
+        Log.Debug("搜索完成：代际={0}，命中 {1:N0} / 全量 {2:N0} 条，本页 {3} 条，耗时 {4:0.#} ms",
+            generation, outcome.Total, project.Assets.Count, outcome.Rows?.Count ?? 0,
+            Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+        if (treeMode)
+        {
+            RebuildTree();
+            // 树是惰性物化的：根层重建后还得把目标叶子选中（并展开路径），否则「跳过来」看不见东西。
+            // 目标还很深时树里找不到它，此时至少要让右侧预览切过去。
+            if (outcome.Revealed is { } revealed)
             {
-                // 两个视图共用一个选中入口（ApplyAssetSelection）：树模式下即使行没挂上，
-                // 右侧预览也必须切到这条资源，否则「跳过来了但还显示上一个」。
                 ApplyAssetSelection(revealed);
+                RestoreTreeSelection(revealed.LogicalPath);
                 _host.SetStatus($"已定位到资源：{AssetDisplay.DisplayPath(revealed)}");
                 Log.Info("资源页精确跳转命中：{0}", AssetDisplay.DisplayPath(revealed));
             }
-            else
-            {
-                Log.Warn("资源页精确跳转未命中：LogicalPath={0} 不在本代际 {1} 条结果中（可能被筛选条件排除）",
-                    revealedPath, results.Count);
-            }
         }
-        AssetCountText.Text = results.Count == project.Assets.Count
-            ? project.Assets.Count.ToString()
-            : $"{results.Count} / {project.Assets.Count}";
-        Log.Debug("搜索完成：代际={0}，命中 {1} / 全量 {2} 条，行视图模型={3} 个",
-            generation, results.Count, project.Assets.Count, rows.Count);
-        // 目录树视图：按最新搜索结果重建根层（展开仍是惰性的）。
-        // 根层已在后台线程构建好（见上面的 Task.Run），这里只做 UI 映射。
-        if (_treeMode)
+        else if (outcome.Revealed is { } revealedRow)
         {
-            RebuildTree(roots);
-            // 树是惰性物化的：根层重建后还得把目标叶子选中（并展开路径），否则「跳过来」看不见东西。
-            if (revealPath is { } treeRevealPath) RestoreTreeSelection(treeRevealPath);
+            RestoreListSelection(revealedRow);
+            _host.SetStatus($"已定位到资源：{AssetDisplay.DisplayPath(revealedRow)}");
+            Log.Info("资源页精确跳转命中：{0}（第 {1} 页）",
+                AssetDisplay.DisplayPath(revealedRow), _pageIndex + 1);
         }
+        else if (keepSelection is { } keep)
+        {
+            // 翻转页之后原选中项多半不在本页：列表里没有那一行，但右侧预览必须保持住。
+            RestoreListSelection(keep);
+        }
+    }
+
+    // ── 页码条 ───────────────────────────────────────────────────────
+
+    private static long PageCountOf(long total, int pageSize)
+        => pageSize <= 0 ? 1 : Math.Max(1, (total + pageSize - 1) / pageSize);
+
+    /// <summary>按当前命中数与页码重画页码条（不查询、不改变页码来源）。</summary>
+    private void UpdatePageBar()
+    {
+        var pageCount = PageCountOf(_lastTotal, _pageSize);
+        if (_pageIndex >= pageCount) _pageIndex = pageCount - 1;
+        PageNumberBox.Text = (_pageIndex + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        PageCountText.Text = $"/ {pageCount.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+        PageTotalText.Text = $"共 {_lastTotal:N0} 条";
+        PageFirstButton.IsEnabled = PagePrevButton.IsEnabled = _pageIndex > 0;
+        PageNextButton.IsEnabled = PageLastButton.IsEnabled = _pageIndex + 1 < pageCount;
+        // 页码条只服务列表视图：目录树是惰性分层的，没有「第几页」这回事。
+        PageBar.Visibility = _treeMode ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private void GoToPage(long pageIndex)
+    {
+        var pageCount = PageCountOf(_lastTotal, _pageSize);
+        var clamped = Math.Clamp(pageIndex, 0, pageCount - 1);
+        if (clamped == _pageIndex) { UpdatePageBar(); return; }
+        Log.Info("用户翻页：第 {0} 页 → 第 {1} 页（共 {2} 页，命中 {3:N0} 条）",
+            _pageIndex + 1, clamped + 1, pageCount, _lastTotal);
+        _pageIndex = clamped;
+        _ = RunSearchAsync(keepPage: true);
+    }
+
+    private void PageFirst_Click(object sender, RoutedEventArgs e) => GoToPage(0);
+
+    private void PagePrev_Click(object sender, RoutedEventArgs e) => GoToPage(_pageIndex - 1);
+
+    private void PageNext_Click(object sender, RoutedEventArgs e) => GoToPage(_pageIndex + 1);
+
+    private void PageLast_Click(object sender, RoutedEventArgs e)
+        => GoToPage(PageCountOf(_lastTotal, _pageSize) - 1);
+
+    /// <summary>页码框：回车才跳转；输入非法就把显示恢复成当前页（不做任何过滤）。</summary>
+    private void PageNumberBox_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key != System.Windows.Input.Key.Enter) return;
+        var text = PageNumberBox.Text.Trim();
+        if (!long.TryParse(text, System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var number) || number < 1)
+        {
+            Log.Debug("页码框输入非法：「{0}」，恢复为当前页", text);
+            UpdatePageBar();
+            return;
+        }
+        GoToPage(number - 1);
+    }
+
+    private void PageSize_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        // XAML 解析期间也会触发一次（SelectedIndex 写在 XAML 里），那时筛选还没初始化。
+        if (!_filtersInitialized || _host.Project is null) return;
+        var index = PageSizeBox.SelectedIndex;
+        if (index < 0 || index >= PageSizes.Length) return;
+        var size = PageSizes[index];
+        if (size == _pageSize) return;
+        Log.Info("用户切换每页条数：{0} → {1}（回到第 1 页）", _pageSize, size);
+        _pageSize = size;
+        _ = RunSearchAsync();
     }
 
     // ── 选中与预览 ───────────────────────────────────────────────────
@@ -2182,8 +2338,8 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
 
     // ── 列表 / 目录树视图切换 ────────────────────────────────────────────
 
-    /// <summary>列表 / 目录树切换：两个视图共享同一份搜索结果
-    /// （<see cref="_lastResults"/>），树视图按容器路径惰性分层。
+    /// <summary>列表 / 目录树切换。两个视图的数据来源不同（列表按排序取一页、目录树按目录序
+    /// 取整条命中序列），所以切到树视图要重新取一次数 —— 列表模式下根本没取过树的数据源。
     /// 用 Click 而不是 Checked：点击已选中的 ToggleButton 会先取消勾选，
     /// 这里在每次点击后强制两态互斥。</summary>
     private void AssetViewMode_Click(object sender, RoutedEventArgs e)
@@ -2197,19 +2353,24 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
         _treeMode = treeSelected;
         AssetList.Visibility = treeSelected ? Visibility.Collapsed : Visibility.Visible;
         AssetTree.Visibility = treeSelected ? Visibility.Visible : Visibility.Collapsed;
-        if (_treeMode) RebuildTree();
+        if (_tree is not null && treeSelected) RebuildTree();
+        else _ = RunSearchAsync(keepPage: true);
     }
 
-    /// <param name="prebuiltRoots">调用方已在后台线程构建好的根层模型（搜索路径会传，
-    /// 避免在 UI 线程上对百万级结果做路径解析）；为 null 时就地构建（切视图模式等）。</param>
-    private void RebuildTree(IReadOnlyList<AssetTreeNode>? prebuiltRoots = null)
+    /// <summary>
+    /// 按当前命中序列重建目录树根层。展开仍是惰性的 —— 每个节点只记「命中序列里的一个区间」，
+    /// <see cref="MaterializeAssetNode"/> 才把那一层取回来（见 <see cref="AssetCatalogTree"/>）。
+    /// <para>根层构建要逐条算显示路径（真实规模 5 万条约 0.4 s），所以它发生在后台的
+    /// <c>BuildView</c> 里 —— 本方法只做 <c>TreeViewItem</c> 映射（根节点数量级很小）。</para>
+    /// </summary>
+    private void RebuildTree()
     {
         using var scope = Log.Scope("RebuildTree");
-        if (_lastResults is null)
+        if (_tree is null)
         {
             AssetTree.ItemsSource = null;
             _expandedTreeKeys.Clear();
-            Log.Debug("重建目录树：无搜索结果，清空树并清空展开键集合");
+            Log.Debug("重建目录树：没有命中序列（列表模式或未搜索），清空树并清空展开键集合");
             return;
         }
         // 先把「现在哪些节点是展开的」收进累积集合（跨重建保留：否则一次筛选把树清空
@@ -2218,13 +2379,13 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
         var keysBefore = _expandedTreeKeys.Count;
         TreeExpansionState.Capture(AssetTree, AssetTreeKeyOf, _expandedTreeKeys);
         var capturedKeys = _expandedTreeKeys.Count;
-        var selectedLogicalPath = (AssetTree.SelectedItem as TreeViewItem)?.Tag is AssetTreeNode { Asset: { } selected }
+        var selectedLogicalPath = (AssetTree.SelectedItem as TreeViewItem)?.Tag is AssetCatalogTreeNode { Asset: { } selected }
             ? selected.LogicalPath
             : null;
-        var roots = (prebuiltRoots ?? AssetTreeBuilder.BuildRoots(_lastResults)).Select(MakeTreeItem).ToList();
+        var roots = _tree.Roots().Select(MakeTreeItem).ToList();
         AssetTree.ItemsSource = roots;
-        Log.Debug("重建目录树：结果 {0} 条 → 根节点 {1} 个；捕获展开键 {2} → {3}；重建前选中 LogicalPath={4}（④ 若展开键数量骤减即折叠）",
-            _lastResults.Count, roots.Count, keysBefore, capturedKeys, selectedLogicalPath ?? "(无)");
+        Log.Debug("重建目录树：命中 {0:N0} 条 → 根节点 {1} 个；捕获展开键 {2} → {3}；重建前选中 LogicalPath={4}（④ 若展开键数量骤减即折叠）",
+            _tree.Count, roots.Count, keysBefore, capturedKeys, selectedLogicalPath ?? "(无)");
         // 回放展开态（懒加载：按 key 逐层物化 + 展开），并找回树上的选中叶子。
         TreeExpansionState.Restore(AssetTree, AssetTreeKeyOf, _expandedTreeKeys, MaterializeAssetNode);
         Log.Debug("回放展开态完成：应回放 {0} 个键，AssetTree 根层实测 {1} 项",
@@ -2232,21 +2393,17 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
         if (selectedLogicalPath is { } selectedPath) RestoreTreeSelection(selectedPath);
     }
 
-    /// <summary>树节点的稳定 key：从根到自己的显示路径段（兄弟间唯一，见
-    /// <c>AssetTreeNode.DistinguishLeaves</c> 的同名消歧）。</summary>
+    /// <summary>树节点的稳定 key = 节点自己记的**原始**路径段拼接（不含消歧后缀，
+    /// 免得「同级出现重名之后后缀变了」把所有展开态冲掉）。</summary>
     private static string? AssetTreeKeyOf(object? tag)
-    {
-        if (tag is not AssetTreeNode node) return null;
-        var segments = AssetDisplay.SplitTreePath(AssetDisplay.TreePath(node.Assets[0]));
-        var depth = node.Depth + 1;
-        return depth <= 0 || depth > segments.Length ? null : string.Join('/', segments.Take(depth));
-    }
+        => tag is AssetCatalogTreeNode { Path.Length: > 0 } node ? node.Path : null;
 
-    /// <summary>物化一个节点的子层（与 <see cref="AssetTree_Expanded"/> 同一逻辑，供回放复用）。</summary>
+    /// <summary>物化一个节点的子层（与 <see cref="AssetTree_Expanded"/> 同一逻辑，供回放复用）。
+    /// 这一刻才向目录门面要记录 —— 而且要的只是**这一层的那一段区间**。</summary>
     private static void MaterializeAssetNode(TreeViewItem item)
     {
-        if (item.Tag is not AssetTreeNode node || node.IsLeaf) return;
-        if (item.Items.Count == 1 && item.Items[0] is not AssetTreeNode)
+        if (item.Tag is not AssetCatalogTreeNode node || node.IsLeaf) return;
+        if (item.Items.Count == 1 && item.Items[0] is not AssetCatalogTreeNode)
         {
             item.Items.Clear();
             foreach (var child in node.Expand())
@@ -2263,7 +2420,7 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
     {
         var found = FindLeafItem(AssetTree.Items, logicalPath);
         if (found is not null) found.IsSelected = true;
-        else Log.Warn("重建目录树后找不到选中叶子：LogicalPath={0}（④ 树折叠/重建可能已丢掉该节点）", logicalPath);
+        else Log.Debug("重建目录树后没有找到选中叶子：LogicalPath={0}（目标还在未展开的分支里，属正常）", logicalPath);
     }
 
     private static TreeViewItem? FindLeafItem(System.Collections.IEnumerable items, string logicalPath)
@@ -2271,7 +2428,7 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
         foreach (var item in items)
         {
             if (item is not TreeViewItem node) continue;
-            if (node.Tag is AssetTreeNode { IsLeaf: true, Asset: { } asset }
+            if (node.Tag is AssetCatalogTreeNode { IsLeaf: true, Asset: { } asset }
                 && string.Equals(asset.LogicalPath, logicalPath, StringComparison.OrdinalIgnoreCase)) return node;
             var nested = FindLeafItem(node.Items, logicalPath);
             if (nested is not null) return nested;
@@ -2281,7 +2438,7 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
 
     /// <summary>包装一个树节点：目录节点先放一个占位子项，真正展开时才
     /// 生成下一层（40 万级索引也不会在构建树时卡顿）。</summary>
-    private static TreeViewItem MakeTreeItem(AssetTreeNode node)
+    private static TreeViewItem MakeTreeItem(AssetCatalogTreeNode node)
     {
         var item = new TreeViewItem
         {
@@ -2313,7 +2470,7 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
 
     private void AssetTree_SelectedItemChanged(object sender, RoutedPropertyChangedEventArgs<object> e)
     {
-        if (e.NewValue is TreeViewItem { Tag: AssetTreeNode { IsLeaf: true } leaf })
+        if (e.NewValue is TreeViewItem { Tag: AssetCatalogTreeNode { IsLeaf: true } leaf })
         {
             if (Log.IsDebugEnabled) Log.Debug("树选中叶子：{0}", AssetDisplay.DisplayPath(leaf.Asset!));
             ApplyAssetSelection(leaf.Asset);
@@ -2322,7 +2479,7 @@ public partial class AssetsWorkbenchPage : UserControl, ISearchableWorkbench, IR
 
     private void AssetTree_DoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
-        if (AssetTree.SelectedItem is TreeViewItem { Tag: AssetTreeNode { IsLeaf: true, Asset: { } asset } })
+        if (AssetTree.SelectedItem is TreeViewItem { Tag: AssetCatalogTreeNode { IsLeaf: true, Asset: { } asset } })
         {
             Log.Info("用户双击目录树叶子：资源={0}（类型={1}）", AssetDisplay.DisplayPath(asset), asset.Type);
             ActivateDefaultAction(asset);

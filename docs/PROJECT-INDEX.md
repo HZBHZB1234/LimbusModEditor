@@ -280,8 +280,8 @@
 | 文件 | 功能 |
 |---|---|
 | `AssetDisplay.cs` ★ | **显示层口径**：容器条目路径、叶子名消歧、中文类型/状态标签、自然名称比较 |
-| `AssetSearchService.cs` | 合并搜索（文本匹配显示路径/原路径/源文件）+ 类型/状态/大小/容器过滤 + 排序；**静态数据默认隐藏走三道判据**（元数据标记 + bundle 名兜底 + 容器路径前缀） |
-| `AssetTreeBuilder.cs` | 按显示路径逐段**惰性**建树（根层一次构建，展开才分组下一层） |
+| `AssetSearchService.cs` | **判据与排序的唯一出处**（`Matches` / `BuildSortKey` / `CompareSortKeys`）+ 全量搜索（吃 `IEnumerable<AssetRecord>` 的旧路径，导出/构建与测试仍用）。静态数据的可见性不再在这里判（2026-09-15 移除，见 `CODE-STRUCTURE` §7-20） |
+| `AssetTreeBuilder.cs` | 按显示路径逐段**惰性**建树。**已不是资源页的生产路径**（改为 `Catalog/AssetCatalogTree.cs`）；保留作分组语义的参考实现 + `AssetTreeNode.DistinguishLeaves` 供两边共用 |
 | `AssetPropertyService.cs` | 选中资源的属性行（中文标签；单项失败降级，不整体失败） |
 | `AssetEditService.cs` | 替换/批量替换/撤销、暂存到项目 `edits/assets/`、`HasEdits` 口径；`ReadCurrentBytesAsync` **拒绝把 AssetBundle 容器当正文读** |
 | `TextAssetEditService.cs` | 文本资源（TextAsset/.json）编辑，保存注册为普通可逆替换；`CanEditText` 只放行松散文件，二进制/超长正文（>40 万字符）拒绝打开 |
@@ -393,10 +393,12 @@
 - **中间产物复用**：Carra 与 Lunartique 两个槽位共用「改后对象」这一份产物，
   同一目标路径在一次导出内复用（`UnityCacheExportService` 的复用缓存），不要重跑整条流水线。
 
-### §8.10 `Catalog/`（官方 catalog 只读解析）
+### §8.10 `Catalog/`（资源目录查询门面 + 官方 catalog 只读解析）
 
 | 文件 | 功能 |
 |---|---|
+| `AssetCatalog.cs` ★ | **资源目录的按页查询门面**（无 WPF 依赖）：命中集 = 索引下推名次 ∪ 项目态补充集；`Page` / `Count` / `Locate` / `IndexIn` / `Resolve` / `ResolveEntries` / `MatchOrder`；判据与排序都复用 `AssetSearchService` 那一份 |
+| `AssetCatalogTree.cs` ★ | 目录树的**按区间分层**数据源：节点只记命中序列的 `[Start, End)`，展开才物化那一层。显示路径 / 重名消歧与 `AssetTreeBuilder` 共用同一批函数 |
 | `CatalogFileService.cs` | catalog 只读解析：一次线性扫描定位全部 Hash128，复用名称偏移；保留首次命中、双布局 CRC/size 自校准 |
 | `CatalogBaselineService.cs` | vanilla / 修改过 / 不在 catalog / 未知 四态判定（供导入与扫描写基线） |
 
@@ -656,7 +658,9 @@
 |---|---|
 | `AssetDisplay` / 显示口径 | `AssetDisplayTests.cs`、`AssetFilterComboSentinelTests.cs` |
 | `AssetSearchService` | `AssetSearchServiceTests.cs` |
-| `AssetTreeBuilder` | `AssetTreeBuilderTests.cs` |
+| `AssetCatalog`（分页/定位/补充集，**与旧搜索逐行等价**） | `AssetCatalogTests.cs` |
+| `AssetCatalogTree`（**与 `AssetTreeBuilder` 逐节点等价**） | `AssetCatalogTreeTests.cs` |
+| `AssetTreeBuilder`（参考实现，仍由测试驱动） | `AssetTreeBuilderTests.cs` |
 | `AssetPropertyService` | `AssetPropertyServiceTests.cs` |
 | `AssetPreviewRegistry` / providers | `AssetPreviewRegistryTests.cs`（含「大静态表预览必须有界」的真实数据回归） |
 | `AssetEditService` / 批量替换 | `AssetEditServiceTests.cs`、`BatchReplacementTests.cs` |
@@ -767,8 +771,10 @@
 |---|---|---|
 | 资源列表名字/路径/类型标签不对 | `Application/Assets/AssetDisplay.cs` | `Formats.Unity/UnityClassId.cs`、`Domain/Assets/AssetModels.cs` |
 | 资源列表出现大量「未知」类型 | `Formats.Unity/UnityClassId.cs`（映射） | `AssetDisplay.TypeLabel`（中文文案） |
-| 搜索/筛选/排序不对 | `Application/Assets/AssetSearchService.cs` | `AssetsWorkbenchPage` 筛选栏、`AssetSortKind` |
-| 目录树层级/重名/懒展开 | `Application/Assets/AssetTreeBuilder.cs` | `AssetDisplay.TreePath/LeafDisambiguator` |
+| 搜索/筛选/排序不对 | `Application/Assets/AssetSearchService.cs`（`Matches`） | 分页列表走 `Application/Catalog/AssetCatalog.cs`、`AssetsWorkbenchPage` 筛选栏、`AssetSortKind` |
+| 翻页/页码条/「打开某资源没翻到那一页」 | `Application/Catalog/AssetCatalog.cs`（`Page` / `IndexIn`） | `AssetsWorkbenchPage.RunSearchAsync`、`BuildView`、`UpdatePageBar` |
+| 目录树层级/重名/懒展开 | `Application/Catalog/AssetCatalogTree.cs` | `AssetDisplay.TreePath/LeafDisambiguator`、`AssetTreeNode.DistinguishLeaves` |
+| 资源列表里导入的模组 / 提取到项目的音频不见了 | `Application/Catalog/AssetCatalog.cs` 的 `IAssetStateSource.ProjectOnly` | `ProjectAssetStateSource`（判据 = `AssetDisplay.IsCacheReference`）、`CatalogFor` 的失效条件 |
 | 预览空白或形态不对 | `Application/Assets/Preview/AssetPreview.cs` + `AssetPreviewProviders.cs` | `TextPreviewService.cs`、`HexDumpService.cs` |
 | **某种资源预览退化成十六进制转储** | `AssetPreviewProviders.ScriptPreviewProvider.CanPreview`（现覆盖 MonoBehaviour / MonoScript **+ Component / GameObject / ScriptableObject**，字段树标题为「对象字段树」） | 该类型是否还有别的 provider；`AssetPreviewRegistry.CreateDefault` 的注册顺序；真实数据实测 Component（type 14）在缓存里最多 |
 | **图片资源预览不出图（Sprite 类）** | 解码要走 `ReadBundleSpriteComposite`（**Sprite**）而不是 `ReadTexturePng`（只认 Texture2D pathId）；参考 `AssetsWorkbenchPage` / `PresetWorkbenchPage` 的 `TryDecodeImagePng` | `asset.Type == AssetType.Sprite && ContainerPath` 是否存在；`UnityPathId` 是否为空 |

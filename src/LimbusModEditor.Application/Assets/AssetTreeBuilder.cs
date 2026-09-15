@@ -115,6 +115,21 @@ public sealed class AssetTreeNode
     }
 }
 
+/// <summary>
+/// **手里已经有全部记录**时的目录树构建器。
+///
+/// <para><b>它不再是资源页的生产路径</b>（2026-09-15）：资源页改用
+/// <see cref="Catalog.AssetCatalogTree"/> —— 那边只常驻命中序列、按区间分层物化，
+/// 因为列表改成按页查询之后，「为了建树把整份命中集拉进内存」就是最后一个
+/// 把全量资产常驻的地方（命中 5 万条 = 5 万 × 1,028 字节）。</para>
+///
+/// <para><b>但它没有被删，也不能被删</b>，两个理由：
+/// ① 重名叶子的消歧数学（<see cref="AssetTreeNode.DistinguishLeaves"/>）是两者**共用**的
+/// 同一个函数，catalog 树直接调它；
+/// ② 它是分组语义的**参考实现** —— <c>AssetCatalogTreeTests</c> 拿同一份数据当场跑两棵树
+/// 逐节点对账，靠它守住「换了一条取数路径，树还是那棵树」。这与
+/// <c>AssetDisplay.CompareCatalogOrder</c>（目录全序的参考实现）是同一种用法。</para>
+/// </summary>
 public static class AssetTreeBuilder
 {
     /// <summary>构建根层节点：按容器显示路径的第一段分组（游戏内资源根目录）。

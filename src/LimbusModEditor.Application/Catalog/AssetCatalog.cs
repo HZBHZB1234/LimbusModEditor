@@ -27,6 +27,28 @@ public sealed record AssetCatalogPage(IReadOnlyList<AssetRecord> Items, long Tot
 public sealed record AssetCatalogLocation(int Rank, string LogicalPath);
 
 /// <summary>
+/// 命中集里的一条 —— **只记录来源，不持有记录**（这才是分页能省下 1.2 GiB 的原因）。
+/// <list type="bullet">
+/// <item><see cref="Rank"/> ≥ 0：索引行，名次就是它的身份（目录全序里的位置）。</item>
+/// <item><see cref="ExtraIndex"/> ≥ 0：只存在于项目里的资源
+/// （见 <see cref="IAssetStateSource.ProjectOnly"/>），在补充集里的下标就是它的身份。</item>
+/// </list>
+/// <para>两个字段互斥，<see cref="IsIndex"/> 判定。大小只有 8 字节，命中集几万条也只有几百 KB ——
+/// 这是「目录树能在不物化全部记录的前提下分层展开」的前提：树节点存的是区间，
+/// 区间里装的就是这种 8 字节的条目。</para>
+/// </summary>
+public readonly record struct AssetCatalogEntry(int Rank, int ExtraIndex)
+{
+    /// <summary>索引行（名次 ≥ 0，补充集下标 -1）。</summary>
+    public static AssetCatalogEntry FromRank(int rank) => new(rank, -1);
+
+    /// <summary>只在项目里的资源（名次 -1，补充集下标 ≥ 0）。</summary>
+    public static AssetCatalogEntry FromExtra(int index) => new(-1, index);
+
+    public bool IsIndex => Rank >= 0;
+}
+
+/// <summary>
 /// 项目态覆盖的取值来源：按 LogicalPath 给出**项目里已经存在的**那条记录。
 /// <para>为什么需要它：索引库只有扫描时的事实（类型、大小、容器、bundle 归属），
 /// 而资源列表要显示的事实里有一半属于**项目态** —— 编辑状态、已实体化的本地副本路径、
@@ -39,6 +61,20 @@ public interface IAssetStateSource
 {
     /// <summary>取项目态记录；项目里没有这条（纯扫描得到的引用）时返回 null。</summary>
     AssetRecord? Find(string logicalPath);
+
+    /// <summary>
+    /// <b>只存在于项目里</b>的资源 —— 扫描索引库中没有它们，所以命中集必须由项目态自己贡献。
+    ///
+    /// <para>为什么不能省：索引行只覆盖「扫描到的缓存引用」，而项目还能自己长出资源 ——
+    /// 音频工作台「提取样本到项目」（<c>BankWorkbenchPage</c>）、<c>ModImportService</c> 导入的
+    /// 旧式模组（Carra / Lunartique / Rebank）都是往 <see cref="ModProject.Assets"/> 里加一条
+    /// 索引里不存在的记录。<b>列表改走索引之后，这些资源不会因为「索引里没有」就消失</b> ——
+    /// 它们由这里补进来，与索引命中按同一份排序键混排。</para>
+    ///
+    /// <para>实现要保证「取一次就够」：<c>ModProject.Assets</c> 超过百万条时逐次枚举太贵，
+    /// 所以实现可以缓存结果，调用方（<see cref="AssetCatalog"/>）也只在每次查询时取一次引用。</para>
+    /// </summary>
+    IReadOnlyList<AssetRecord> ProjectOnly { get; }
 }
 
 /// <summary>项目态来源 = 一个资产记录集合（当前即 <see cref="ModProject.Assets"/>）。</summary>
@@ -46,6 +82,7 @@ public sealed class ProjectAssetStateSource : IAssetStateSource
 {
     private readonly IReadOnlyCollection<AssetRecord> _records;
     private Dictionary<string, AssetRecord>? _byPath;
+    private IReadOnlyList<AssetRecord>? _projectOnly;
 
     public ProjectAssetStateSource(IEnumerable<AssetRecord> records)
     {
@@ -56,18 +93,36 @@ public sealed class ProjectAssetStateSource : IAssetStateSource
     public AssetRecord? Find(string logicalPath)
         => Index().TryGetValue(logicalPath, out var record) ? record : null;
 
-    /// <summary>按 LogicalPath 建索引。**先出现的优先**（与
-    /// <c>RehydrateFromIndexAsync</c> 的「既有记录优先」同一口径）—— 重复的 LogicalPath
-    /// 只可能来自损坏的项目文件，此时保留先读到的那条比保留后读到的更接近原意。</summary>
+    public IReadOnlyList<AssetRecord> ProjectOnly
+    {
+        get
+        {
+            Index();
+            return _projectOnly!;
+        }
+    }
+
+    /// <summary>按 LogicalPath 建索引，**顺便**把「不是索引引用」的那些摘出来。
+    /// <para>两个结果同一趟算完是刻意的：判断「是不是索引引用」只多一次 Metadata 查找，
+    /// 而这一趟本来就要遍历全部记录（真实项目百万级）。分开算等于把百万级遍历做两遍。</para>
+    /// <para>「先出现的优先」与 <c>RehydrateFromIndexAsync</c> 同一口径 —— 重复的 LogicalPath
+    /// 只可能来自损坏的项目文件，此时保留先读到的那条比保留后读到的更接近原意。</para>
+    /// <para>补充集的判据用 <see cref="AssetDisplay.IsCacheReference"/>（元数据 <c>reference=true</c>
+    /// 或存在 <c>cacheOuter</c>），与「显示路径取容器条目还是取 LogicalPath」是同一个判据 ——
+    /// 两者必须同源，否则会出现「按索引口径算路径、却按项目口径决定要不要补」的错位。</para>
+    /// </summary>
     private Dictionary<string, AssetRecord> Index()
     {
         if (_byPath is not null) return _byPath;
         var map = new Dictionary<string, AssetRecord>(_records.Count, StringComparer.Ordinal);
+        var extras = new List<AssetRecord>();
         foreach (var record in _records)
         {
             if (string.IsNullOrEmpty(record.LogicalPath)) continue;
+            if (!AssetDisplay.IsCacheReference(record)) extras.Add(record);
             map.TryAdd(record.LogicalPath, record);
         }
+        _projectOnly = extras;
         return _byPath = map;
     }
 }
@@ -77,6 +132,7 @@ public sealed class EmptyAssetStateSource : IAssetStateSource
 {
     public static readonly EmptyAssetStateSource Instance = new();
     public AssetRecord? Find(string logicalPath) => null;
+    public IReadOnlyList<AssetRecord> ProjectOnly => [];
 }
 
 /// <summary>
@@ -96,6 +152,9 @@ public sealed class EmptyAssetStateSource : IAssetStateSource
 /// 而且与页深无关。</item>
 /// <item>重建记录只有一份：<see cref="UnityCacheScanService.BuildReferenceRecord"/>，
 /// 与扫描写入项目时是同一个函数。</item>
+/// <item>命中集有两个来源，缺一不可：索引库下推出来的行，以及
+/// <see cref="IAssetStateSource.ProjectOnly"/>（导入的旧式模组、提取到项目的音频 ——
+/// 扫描索引里根本没有它们）。**只查索引会让这些资源从列表里消失**。</item>
 /// </list>
 ///
 /// <para><b>返回的是「视图记录」，不是项目态记录</b>：它们是按索引现算出来的副本。
@@ -103,7 +162,11 @@ public sealed class EmptyAssetStateSource : IAssetStateSource
 /// 直接改这些副本不会有任何效果。唯一被继承过去的身份字段是
 /// <see cref="AssetRecord.AssetId"/>（项目态有记录时取它自己的）—— 因为
 /// <c>EditOperation.AssetId</c> 是持久化在 <c>.lmeproj</c> 里的，不能因为
-/// 「重新查了一次列表」就对不上。</para>
+/// 「重新查了一次列表」就对不上。补充集里的记录是项目态记录**本身**，不是副本。</para>
+///
+/// <para><b>目录树</b>不在这里，在 <see cref="AssetCatalogTree"/>：它复用本类的命中序列
+/// （<see cref="MatchOrder"/>）与取数入口（<see cref="ResolveEntries"/>），
+/// 只是把「一次取几万条记录」换成「按区间分层取」。</para>
 /// </summary>
 public sealed class AssetCatalog
 {
@@ -143,12 +206,32 @@ public sealed class AssetCatalog
         var total = matches.Count;
         if (take == 0 || offset >= total) return new([], total, offset, take);
         var count = (int)Math.Min(take, total - offset);
-        var ranks = new int[count];
-        for (var i = 0; i < count; i++) ranks[i] = matches[(int)offset + i].Rank;
-        var items = ResolveRanks(ranks);
+        var slice = new List<AssetCatalogEntry>(count);
+        for (var i = 0; i < count; i++) slice.Add(matches[(int)offset + i].Entry);
+        var items = ResolveEntries(slice);
         Log.Debug("资源目录分页：命中 {0:N0} 条，返回第 {1} 页（下标 {2}，{3} 条，排序 {4}）",
             total, take <= 0 ? 0 : offset / take, offset, items.Count, query.Sort);
         return new(items, total, offset, take);
+    }
+
+    /// <summary>
+    /// 命中集的**顺序本身**（按查询的排序排好），只返回 8 字节的来源标记。
+    ///
+    /// <para>用途是目录树：它的分层展开要「按目录序连续分组」，而它一秒也不能持有记录
+    /// （命中集几万条 × 1,028 字节 = 几十 MB）。拿到这份序列之后，树的每个节点只需要
+    /// 记一个区间 <c>[start, end)</c>，展开时才按区间分批物化 —— 见
+    /// <see cref="AssetCatalogTree"/>。</para>
+    ///
+    /// <para>与 <see cref="Page"/> 走**同一个** <c>CollectMatches</c>：树的命中集与列表的
+    /// 命中集因此不可能不一致（差别只在取多少个）。</para>
+    /// </summary>
+    public IReadOnlyList<AssetCatalogEntry> MatchOrder(AssetSearchQuery query)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        var matches = CollectMatches(query);
+        var entries = new List<AssetCatalogEntry>(matches.Count);
+        foreach (var match in matches) entries.Add(match.Entry);
+        return entries;
     }
 
     /// <summary>按 LogicalPath 定位（跑不进索引的路径 —— 导入的旧式资源 —— 返回 null）。
@@ -171,11 +254,25 @@ public sealed class AssetCatalog
     {
         ArgumentNullException.ThrowIfNull(query);
         if (string.IsNullOrWhiteSpace(logicalPath)) return null;
+        // 先问索引要名次：命中集里比较两个 int 比比较两条路径便宜得多。
+        // 索引里没有（导入的旧式资源 / 提取到项目的音频）才退化为在补充集里按路径找。
         var rank = _store.FindRank(logicalPath);
-        if (rank < 0) return null;
+        var extras = _state.ProjectOnly;
         var matches = CollectMatches(query);
         for (var i = 0; i < matches.Count; i++)
-            if (matches[i].Rank == rank) return i;
+        {
+            var entry = matches[i].Entry;
+            if (rank >= 0)
+            {
+                if (entry.IsIndex && entry.Rank == rank) return i;
+            }
+            else if (!entry.IsIndex && (uint)entry.ExtraIndex < (uint)extras.Count
+                     && string.Equals(extras[entry.ExtraIndex].LogicalPath, logicalPath,
+                         StringComparison.OrdinalIgnoreCase))
+            {
+                return i;
+            }
+        }
         return null;
     }
 
@@ -187,13 +284,59 @@ public sealed class AssetCatalog
     public IReadOnlyList<AssetRecord> Resolve(IReadOnlyList<string> logicalPaths)
     {
         ArgumentNullException.ThrowIfNull(logicalPaths);
-        var ranks = new List<int>(logicalPaths.Count);
+        var entries = new List<AssetCatalogEntry>(logicalPaths.Count);
+        // 补充集**按需再取**：全部路径都在索引里时（导出/构建的常见情形）这一趟
+        // 完全不必惊动项目态那百万级的一遍遍历。
+        IReadOnlyList<AssetRecord>? extras = null;
         foreach (var path in logicalPaths)
         {
             var rank = _store.FindRank(path);
-            if (rank >= 0) ranks.Add(rank);
+            if (rank >= 0)
+            {
+                entries.Add(AssetCatalogEntry.FromRank(rank));
+                continue;
+            }
+            extras ??= _state.ProjectOnly;
+            for (var i = 0; i < extras.Count; i++)
+            {
+                if (!string.Equals(extras[i].LogicalPath, path, StringComparison.OrdinalIgnoreCase)) continue;
+                entries.Add(AssetCatalogEntry.FromExtra(i));
+                break;
+            }
         }
-        return ResolveRanks(ranks);
+        return ResolveEntries(entries);
+    }
+
+    /// <summary>
+    /// 按**来源标记**批量取记录（保持输入顺序，取不到的跳过；同一来源出现多次时返回同一对象）。
+    /// <para>这是列表取一页、目录树取一层共用的取数入口 —— 两者手里的都只有
+    /// <see cref="AssetCatalogEntry"/>，没有记录。索引行按名次一次性批量读
+    /// （<c>StreamByRanks</c> 分批，压在 SQLite 参数上限之下），项目补充集直接按下标取。</para>
+    /// </summary>
+    public IReadOnlyList<AssetRecord> ResolveEntries(IReadOnlyList<AssetCatalogEntry> entries)
+    {
+        ArgumentNullException.ThrowIfNull(entries);
+        if (entries.Count == 0) return [];
+        var ranks = new List<int>(entries.Count);
+        foreach (var entry in entries)
+            if (entry.IsIndex) ranks.Add(entry.Rank);
+        var byRank = new Dictionary<int, AssetRecord>(ranks.Count);
+        if (ranks.Count > 0)
+            foreach (var row in _store.StreamByRanks(ranks)) byRank[row.Rank] = Materialize(row);
+        var extras = _state.ProjectOnly;
+        var result = new List<AssetRecord>(entries.Count);
+        foreach (var entry in entries)
+        {
+            if (entry.IsIndex)
+            {
+                if (byRank.TryGetValue(entry.Rank, out var record)) result.Add(record);
+            }
+            else if ((uint)entry.ExtraIndex < (uint)extras.Count)
+            {
+                result.Add(extras[entry.ExtraIndex]);
+            }
+        }
+        return result;
     }
 
     /// <summary>按名次取记录（输入顺序保持；同一名次出现多次时返回同一对象）。</summary>
@@ -213,13 +356,17 @@ public sealed class AssetCatalog
         return result;
     }
 
-    /// <summary>命中集（**已按当前排序排好**，只留名次与排序键）。</summary>
-    private readonly record struct CatalogMatch(int Rank, AssetSearchService.AssetSortKey Key);
+    /// <summary>命中集里的一条：来源标记 + 排序键（只在需要排序时才填）。</summary>
+    private readonly record struct CatalogMatch(AssetCatalogEntry Entry, AssetSearchService.AssetSortKey Key);
 
     /// <summary>
-    /// 走一遍「下推候选 → 复核判据 → 排序」，返回排好序的命中名次。
+    /// 走一遍「下推候选 → 复核判据 → 排序」，返回排好序的命中集。
     /// <para>刻意**不留 AssetRecord**：命中集可能上万条而记录是 1,028 字节/条，
     /// 留记录就等于把「全量常驻」原样搬回来。真正要显示的只有最后一页。</para>
+    /// <para>候选集来自两处：索引库下推出来的名次（SQL 判得动的条件全部交给它），
+    /// 以及**只存在于项目里的资源**（<see cref="IAssetStateSource.ProjectOnly"/>）。
+    /// 后者不必也不能下推 —— 它们不在名次表里，只能走同一份判据
+    /// （<see cref="AssetSearchService.Matches"/>）在内存里复核。</para>
     /// </summary>
     private List<CatalogMatch> CollectMatches(AssetSearchQuery query)
     {
@@ -235,17 +382,26 @@ public sealed class AssetCatalog
             Container: query.Container,
             HasContainerEntry: query.HasContainerEntry,
             Text: text));
+        var extras = _state.ProjectOnly;
         // 「按名称」的排序就是目录全序本身（catalog_rank 的 r 就是按它算出来的），
-        // 所以这条路径既不排序、也不算排序键 —— 省掉每条一次的显示路径分配。
-        var byName = query.Sort == AssetSortKind.Name;
-        var matches = new List<CatalogMatch>(Math.Min(ranks.Count, 65536));
+        // 所以没有补充集时这条路径既不排序、也不算排序键 —— 省掉每条一次的显示路径分配。
+        // **有补充集就必须算键**：项目里的资源不在名次表里，只有靠同一份排序键才能与索引行混排。
+        var needKeys = query.Sort != AssetSortKind.Name || extras.Count > 0;
+        var matches = new List<CatalogMatch>(Math.Min(ranks.Count + extras.Count, 65536));
         foreach (var row in _store.StreamByRanks(ranks))
         {
             var record = Materialize(row);
             if (!AssetSearchService.Matches(record, query, text)) continue;
-            matches.Add(new CatalogMatch(row.Rank, byName ? default : AssetSearchService.BuildSortKey(record)));
+            matches.Add(new CatalogMatch(AssetCatalogEntry.FromRank(row.Rank),
+                needKeys ? AssetSearchService.BuildSortKey(record) : default));
         }
-        if (!byName)
+        for (var i = 0; i < extras.Count; i++)
+        {
+            var record = extras[i];
+            if (!AssetSearchService.Matches(record, query, text)) continue;
+            matches.Add(new CatalogMatch(AssetCatalogEntry.FromExtra(i), AssetSearchService.BuildSortKey(record)));
+        }
+        if (needKeys)
         {
             var sort = query.Sort;
             matches.Sort((a, b) => AssetSearchService.CompareSortKeys(a.Key, b.Key, sort));

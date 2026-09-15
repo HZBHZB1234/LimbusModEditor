@@ -74,6 +74,39 @@
                     <ToggleButton x:Name="AssetViewTreeToggle" Style="{StaticResource ViewToggle}" Content="🗂 目录树"
                                   IsChecked="True" Click="AssetViewMode_Click" ToolTip="按游戏容器目录浏览（类文件夹，双击展开）"/>
                 </WrapPanel>
+                <!--
+                    页码条（只服务列表视图：目录树是惰性分层的，没有「第几页」这回事）。
+                    列表改成「按页从索引库取」之后，一页就是列表里真正存在的全部行；
+                    翻页必须显式可见、可控，「末页」也不能靠一直滚到底才到得了。
+                    可见性由 UpdatePageBar() 按视图模式设置（树模式下折叠）。
+                -->
+                <Border x:Name="PageBar" DockPanel.Dock="Bottom" Visibility="Collapsed"
+                        Margin="0,8,0,0" Padding="0,8,0,0"
+                        BorderBrush="{StaticResource WbBorderBrush}" BorderThickness="0,1,0,0">
+                    <WrapPanel>
+                        <Button x:Name="PageFirstButton" Content="⏮ 首页" Click="PageFirst_Click" Padding="8,3" FontSize="11.5"/>
+                        <Button x:Name="PagePrevButton" Content="◀ 上一页" Click="PagePrev_Click" Padding="8,3" FontSize="11.5" Margin="6,0,0,0"/>
+                        <TextBox x:Name="PageNumberBox" Width="56" MinHeight="28" VerticalContentAlignment="Center"
+                                 TextAlignment="Center" Margin="8,0,0,0" KeyDown="PageNumberBox_KeyDown"
+                                 ToolTip="输入页码后回车跳转"/>
+                        <TextBlock x:Name="PageCountText" Text="/ 1" VerticalAlignment="Center" Margin="4,0,0,0"
+                                   Foreground="{StaticResource WbTextMutedBrush}"/>
+                        <Button x:Name="PageNextButton" Content="下一页 ▶" Click="PageNext_Click" Padding="8,3" FontSize="11.5" Margin="8,0,0,0"/>
+                        <Button x:Name="PageLastButton" Content="末页 ⏭" Click="PageLast_Click" Padding="8,3" FontSize="11.5" Margin="6,0,0,0"/>
+                        <TextBlock Text="每页" VerticalAlignment="Center" Margin="16,0,4,0"
+                                   Foreground="{StaticResource WbTextMutedBrush}"/>
+                        <!-- 候选项顺序必须与 AssetsWorkbenchPage.PageSizes 一一对应 -->
+                        <ComboBox x:Name="PageSizeBox" Style="{StaticResource WorkbenchFilterCombo}" Width="104"
+                                  SelectedIndex="1" SelectionChanged="PageSize_Changed" ToolTip="每页显示多少条">
+                            <ComboBoxItem Content="100 条"/>
+                            <ComboBoxItem Content="200 条"/>
+                            <ComboBoxItem Content="500 条"/>
+                            <ComboBoxItem Content="1000 条"/>
+                        </ComboBox>
+                        <TextBlock x:Name="PageTotalText" Text="共 0 条" VerticalAlignment="Center" Margin="16,0,0,0"
+                                   Foreground="{StaticResource WbTextMutedBrush}"/>
+                    </WrapPanel>
+                </Border>
                 <Grid>
                     <!-- AssetList 是全项目此前唯一没显式开虚拟化的列表（AssetTree 反而开了）。
                          百万级结果下不开虚拟化 = 每条命中都实例化一个 ListViewItem，

@@ -211,6 +211,63 @@ public sealed class AssetCatalogTests : IDisposable
         Assert.False(materialized.Metadata.ContainsKey("reference"));
     }
 
+    /// <summary>
+    /// **只存在于项目里的资源**必须与索引命中一起分页、排序、定位。
+    ///
+    /// <para>它们不在名次表里（扫描索引只覆盖缓存引用），而项目会自己长出资源：音频工作台
+    /// 「提取样本到项目」、<c>ModImportService</c> 导入的旧式模组（Carra / Lunartique / Rebank）
+    /// 都是往 <see cref="ModProject.Assets"/> 里加一条索引里没有的记录。列表改走索引之后，
+    /// **这些资源不会因为「索引里没有」就消失** —— 本用例就是钉住这一点的：任何「只查索引」
+    /// 的写法都会让这份逐行等价当场红掉。</para>
+    /// </summary>
+    [Fact]
+    public async Task Project_only_assets_take_part_in_paging_sorting_and_locating()
+    {
+        var harness = await NewHarnessAsync();
+        harness.Project.Assets.Add(new AssetRecord
+        {
+            LogicalPath = "bank/bgm/foo.wav",
+            ContainerPath = "bank/bgm/foo.wav",
+            Type = AssetType.Audio,
+            Size = 1_234,
+            Metadata = { ["bankSource"] = "foo.bank", ["sampleName"] = "foo" },
+        });
+        harness.Project.Assets.Add(new AssetRecord
+        {
+            LogicalPath = "导入的旧式资源/abc.png",
+            Type = AssetType.Texture,
+            Size = 42,
+        });
+        // 目录门面按项目构建（与资源页一样：资产条数变过就重建）。
+        var catalog = new AssetCatalog(harness.Store, harness.Project);
+
+        foreach (var query in AllQueries())
+        {
+            var expected = harness.Search.Search(harness.Project, query);
+            var actual = catalog.Page(query, 0, int.MaxValue);
+            Assert.True((long)expected.Count == actual.TotalCount,
+                $"命中数不一致（含补充集）：{expected.Count} vs {actual.TotalCount}｜{Describe(query)}");
+            AssertSameRows(expected, actual.Items, $"（含项目态补充集）{Describe(query)}");
+        }
+
+        // 补充集同样要能「翻到它所在的那一页并选中」：下标 → 页 → 取回同一条。
+        var unfiltered = new AssetSearchQuery();
+        foreach (var path in new[] { "bank/bgm/foo.wav", "导入的旧式资源/abc.png" })
+        {
+            var index = catalog.IndexIn(unfiltered, path);
+            Assert.True(index is not null, $"补充集里的「{path}」在无筛选视图里应当有下标");
+            Assert.Equal(path, Assert.Single(catalog.Page(unfiltered, index!.Value, 1).Items).LogicalPath);
+            var resolved = Assert.Single(catalog.Resolve([path]));
+            Assert.Equal(path, resolved.LogicalPath);
+        }
+
+        // 上一行与下一行也必须是**混排后**的邻居，而不是「补充集全被甩到末尾」。
+        var ordered = catalog.Page(unfiltered, 0, int.MaxValue).Items;
+        var positions = ordered.Select((x, i) => (x.LogicalPath, i)).ToDictionary(x => x.LogicalPath, x => x.i);
+        Assert.True(positions["bank/bgm/foo.wav"] < ordered.Count - 1,
+            "补充集资源不该总是排在最后一行 —— 那说明它没有参与同一份排序");
+    }
+
     // ── 定位与解析 ──────────────────────────────────────────────────────
 
     [Fact]

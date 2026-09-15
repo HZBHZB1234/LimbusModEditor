@@ -209,11 +209,15 @@ ProjectService.LoadAsync(.lmeproj)     Application/Projects/ProjectService.cs
   ├─ SchemaVersion 校验（>CurrentSchemaVersion 拒绝）
   ├─ SkipReferenceAssetsConverter：纯引用资产不落盘（项目文件从 GB 降到 KB 级）
   └─ RehydrateFromIndexAsync：后台从 unity-cache-index.db 回灌引用资产（不阻塞 UI）
-资源页数据流：
-  ModProject.Assets
-    → AssetSearchService.Search(query)        过滤 + 排序（可后台线程，快照式）
-    → AssetDisplay                           显示路径/名称/中文类型与状态标签（容器视图口径）
-    → AssetTreeBuilder                       按显示路径逐段惰性建树
+资源页数据流（S3b 起列表与目录树走 `AssetCatalog`；只有编辑/导出仍读 ModProject.Assets）：
+  AssetCatalog(UnityCacheSqliteIndexStore, IAssetStateSource)   Application/Catalog/AssetCatalog.cs
+    ├─ 命中集 = 索引下推名次 ∪ IAssetStateSource.ProjectOnly（导入的旧式模组 / 提取到项目的音频）
+    ├─ 判据只有一份：AssetSearchService.Matches（分页列表 / 旧全量搜索 / 导出与构建同结论）
+    ├─ 排序只有一份：AssetSearchService.BuildSortKey / CompareSortKeys
+    │                （「按名称」直接用目录名次，免算排序键；**有补充集时必须算**才能混排）
+    ├─ Page(query, offset, take)             只物化这一页 → 列表 + 页码条
+    └─ AssetCatalogTree(catalog, query)       节点只记命中序列的一个区间，展开才物化那一层 → 目录树
+  AssetDisplay                               显示路径/名称/中文类型与状态标签（容器视图口径）
     → AssetPreviewRegistry → IAssetPreviewProvider  多形态预览（图像/Sprite 合成/音频/文本/JSON行/对象字段树/摘要/材质/着色器/视频/图集/Spine/十六进制）
     → RelationQueryService.DescribeSubjectsForAsset  关联资源板块（反查「这资源属于哪些对象」，6 类别，走 relation-index.db 反向索引）
     → IReferenceRevealable.Reveal(payload)          别的页 / 卡片详情点「打开」时，按精确载荷选中并滚到那一行
@@ -404,8 +408,10 @@ catalog 用固定 16 字节键集合做一次线性扫描；Carra 差异比较�
 | 需求 / 症状 | 首选文件 | 连带检查 |
 |---|---|---|
 | 资源列表显示的名字/路径/类型标签不对 | `Application/Assets/AssetDisplay.cs` | `Formats.Unity/UnityClassId.cs`（class id → `AssetType`）、`Domain/Assets/AssetModels.cs`（枚举） |
-| 搜索/筛选/排序行为 | `Application/Assets/AssetSearchService.cs`（`AssetSearchQuery`） | `AssetsWorkbenchPage` 筛选栏绑定、`AssetSortKind` |
-| 目录树层级/懒展开/重名消歧 | `Application/Assets/AssetTreeBuilder.cs` | `AssetDisplay.TreePath`、`AssetTreeBuilderTests` |
+| 搜索/筛选/排序行为 | `Application/Assets/AssetSearchService.cs`（`AssetSearchQuery` + `Matches`） | 分页列表走 `Application/Catalog/AssetCatalog.cs`、`AssetsWorkbenchPage` 筛选栏绑定、`AssetSortKind` |
+| 分页/页码/「翻到某资源第几页」 | `Application/Catalog/AssetCatalog.cs`（`Page` / `IndexIn` / `MatchOrder` / `ResolveEntries`） | `AssetsWorkbenchPage.RunSearchAsync` + 页码条；`AssetCatalogTests`（与旧搜索逐行等价） |
+| 目录树层级/懒展开/重名消歧 | `Application/Catalog/AssetCatalogTree.cs`（生产路径） | `AssetDisplay.TreePath`、`AssetTreeNode.DistinguishLeaves`（共用）、`AssetCatalogTreeTests`（与 `AssetTreeBuilder` 逐节点等价） |
+| 列表里少了导入的模组 / 提取到项目的音频 | `Application/Catalog/AssetCatalog.cs` 的 `IAssetStateSource.ProjectOnly` | `ProjectAssetStateSource`（判据 = `AssetDisplay.IsCacheReference`） |
 | 预览形态（图像/文本/JSON/音频/十六进制） | `Application/Assets/Preview/AssetPreview.cs`（`AssetPreviewRegistry`）+ `AssetPreviewProviders.cs` | `Assets/TextPreviewService.cs`、`Preview/HexDumpService.cs`、`Assets/AssetPropertyService.cs` |
 | 纹理/Sprite 预览或替换异常 | `Editing/Images/UnityTextureCodec.cs`、`Formats.Unity/AssetsToolsBackend.cs`（resS 读写、`ReadBundleSpriteComposite`） | 行序不变量 §6-1 |
 | Unity 字段树/字段编辑/PPtr 依赖 | `Formats.Unity/UnityAssetService.cs`、`Application/Assets/UnityFieldEditService.cs` | `Domain/Edits/UnityFieldEditModels.cs`、`Build/UnityBundleBuildService.cs` |

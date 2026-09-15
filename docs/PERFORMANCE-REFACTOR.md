@@ -340,10 +340,77 @@ needle = anim/icon2  →  "ani" AND "nim" AND "im/" AND "m/i" AND "/ic" AND "ico
 `logs/probe_trigram_space.py`（跨空白词项）、`logs/probe_trigram_sem.py`（`LIKE` 判据不可靠）、
 `logs/probe_bulk.py`（多行 VALUES 对 FTS5 虚表同样可用）。
 
+## S3a：查询门面 `AssetCatalog`（2026-09-15）
+
+派生层（名次 + 检索）本身不会让界面变快 —— 得有人去用它。`AssetCatalog`
+（`Application/Catalog/AssetCatalog.cs`，**无 WPF 依赖**）就是那个门面：
+`Count` / `Page` / `Locate` / `IndexIn` / `Resolve`。本步**纯新增**，调用点尚未迁移，
+所以先保证「与旧 `AssetSearchService.Search` 逐行等价」，再在 S3b/S3c 换列表与集合。
+
+### 一条页面的产生过程
+
+1. **下推候选**：`UnityCacheSqliteIndexStore.ReadCandidateRanks(UnityCacheIndexFilter)`。
+   能在 SQL 里判的条件全给 SQLite —— 类型、`path_id`、`type_id`、大小区间、容器子串、
+   有没有容器条目，以及**文本**（复用派生层的 `asset_fts`，写成
+   `k.r IN (SELECT rowid FROM asset_fts WHERE asset_fts MATCH $q)`，不需要把名次列表塞进 IN）。
+2. **复核判据**：逐候选构造记录，走**唯一那份**判据 `AssetSearchService.Matches`。
+   库里没有的事实只有三类 —— 编辑状态、替换文件是否存在、静态判定 —— 它们只在这里生效。
+3. **只留名次**：命中集里**不保留 `AssetRecord`**，只留名次（+ 非按名称排序时的排序键）。
+   留记录就等于把「1,028 字节/条的全量常驻」原样搬回来。
+4. **物化一页**：只有最终那一页的 `take` 条才真正构造成 `AssetRecord`。
+
+### 三个「唯一出处」（这是本门面存在的全部意义）
+
+| 口径 | 唯一出处 | 说明 |
+| --- | --- | --- |
+| 判据 | `AssetSearchService.Matches` | 分页列表、旧全量搜索、导出/构建必须同结论 |
+| 排序 | `AssetSearchService.BuildSortKey` / `CompareSortKeys` | `SortByKeys` 也改成走它，不再各写一份 `OrderBy` 链 |
+| 重建记录 | `UnityCacheScanService.BuildReferenceRecord` | 与扫描写入项目时**同一个函数**（`BuildRecord`） |
+
+### 「按名称」不需要排序
+
+`catalog_rank.r` 本身就是目录全序（`ComparePaths` 再 `LogicalPath` 兜底），而 `LogicalPath`
+全库唯一 ⇒ 这是**严格全序、没有并列**。所以按名称这条路径直接按名次升序取候选，
+既不排序、也不算排序键（省掉每条一次的显示路径分配）。另外四种排序仍要排，
+但只对**下推后的候选集**排（默认视图 5.1 万行），不是全表。
+
+### 两个必须记住的定位口径
+
+- `Locate(logicalPath)` 给的是**全局名次**。只有「无任何筛选」的视图里它才等于页下标 ——
+  默认视图隐藏静态数据表（`ContainerOnlyFilter` 为勾选 + `ShowStaticTables=false`），
+  两个数就不是一个。
+- 要「翻到某一页并选中」用 `IndexIn(query, logicalPath)`，它给的是**命中集内的下标**。
+
+### 正确性证据
+
+`tests/LimbusModEditor.Domain.Tests/AssetCatalogTests.cs`：数据集 4 bundle × 6 行，维度刻意铺满
+（两种静态判据各占一个 bundle、一行落在 static-data 路径前缀、类型覆盖 class-id 映射 /
+ref-type 伪 id / 映射不到保留类型树结论、**不同 bundle 显示路径故意重名**以压住打平兜底），
+然后 34 种筛选 × 5 种排序 = 170 条查询，逐条断言
+
+- `Page(query, 0, ∞)` 与 `AssetSearchService.Search(project, query)` **逐行逐字段**相等
+  （含 `AssetId`）；以及
+- 页大小取 1 / 5 / 7 / 23 / 24 / 25 时分页拼接等于整份结果。
+
+另有两组：项目态参与（编辑状态、`replacementPath`、已实体化摘 `reference`）与逐行等价同样成立；
+以及「项目态来源为空时除 `AssetId` 外逐字段与回灌记录一致」——用来锁住
+`BuildReferenceRecord` ≡ `RebuildRecords`。
+
+### 下推的类型判据为什么是完整的（不是近似）
+
+一行索引的目录类型是 `Map(type_id, 索引里的 type)`。它等于目标类型当且仅当二者之一成立：
+① `Map(type_id)` 就是目标 ⇒ `type_id ∈ ClassIdsOf(目标)`；② `Map(type_id) == Unknown`
+且索引里的 `type` 就是目标。所以 SQL 的 `assets.type = $t OR assets.type_id IN (…)`
+是**完整覆盖**。`UnityClassId.ClassIdsOf` 的反向表由正向表生成，并由测试双向对账
+（正→反、反→正）。少数类型（`Json`、`ScriptableObject`）没有对应 class id，反向表为空是
+**正确**的 —— SQL 退化成 `assets.type = $t`，而那一列正是它们唯一的出处。
+
 ## 仍存在的开销
 
 UI 仍会把全部引用资产物化为 `AssetRecord`，没有改成数据库分页查询；百万级资产的常驻
 集合、路径和元数据仍占较多内存。**迁移可行的形态与实测代价见上一节**：派生列 + 稠密名次，
 磁盘约 +217 MiB（`d2`，含 `lp` 检索）换掉约 1,250.9 MiB 常驻堆。
+**S3a 已经把查询门面做出来并证明与旧搜索逐行等价**，剩下的工作是让列表/树改走它
+（S3b）、再把 `ModProject.Assets` 收窄成「项目态记录」并迁移其余用法（S3c）。
 其他四个工作台/派生缓存没有改表布局。
 XZ 压缩与 Unity 重打包仍由原库处理；本次不改变加载器格式或扩展未知 Unity 格式的写回支持。

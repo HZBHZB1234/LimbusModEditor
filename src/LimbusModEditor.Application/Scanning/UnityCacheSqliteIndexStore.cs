@@ -2,6 +2,7 @@ using System.Diagnostics;
 using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Domain.Diagnostics;
+using LimbusModEditor.Formats.Unity;
 using Microsoft.Data.Sqlite;
 using NLog;
 
@@ -13,6 +14,31 @@ public sealed record UnityCacheIndexRow(
 
 public sealed record UnityCacheIndexBundle(
     string DataPath, long Size, long MTimeUtcTicks, string Outer, string Inner, bool StaticBundle = false);
+
+/// <summary>
+/// 可以交给 SQLite 判的索引列条件（资源列表筛选下推的入参）。
+///
+/// <para><b>除 <see cref="Type"/> 外，这里的每一条都只是「不漏行」的保证</b>：SQL 侧筛出来的
+/// 是超集，调用方必须再走一遍完整判据。理由是索引列只记录扫描时的事实 ——
+/// 编辑状态、替换文件是否存在、静态判定（含 catalog 缺席时的 bundle 名兜底）都不在库里。</para>
+///
+/// <para><see cref="Type"/> 是例外：它的 SQL 形态与目录类型**完整等价**，因为一行索引的
+/// 目录类型只由 <c>type_id</c>（认得的 class id）与 <c>type</c>（类型树兜底）两个列决定，
+/// 二者合起来正好覆盖（见 <see cref="UnityClassId.ClassIdsOf"/>）。</para>
+///
+/// <para><see cref="Text"/> 走派生层检索索引：<c>FTS(dp∪lp)</c> 是旧
+/// <c>AssetSearchService.MatchesText</c>（dp ∪ lp ∪ src）的超集，所以不会漏行；退化的
+/// 三种情形（&lt; 3 字符、含反斜杠、命中 src 的公共前后缀）直接不加这条条件。</para>
+/// </summary>
+public sealed record UnityCacheIndexFilter(
+    AssetType? Type = null,
+    long? PathId = null,
+    int? TypeId = null,
+    long? MinSize = null,
+    long? MaxSize = null,
+    string? Container = null,
+    bool? HasContainerEntry = null,
+    string? Text = null);
 
 /// <summary>
 /// v2 可重建索引：路径和共享字符串只存一次，对象表按整数 bundle/index 聚簇。
@@ -533,18 +559,33 @@ public sealed class UnityCacheSqliteIndexStore
     /// <summary>按给定名次取行（返回顺序 = 名次升序）。检索结果复核与「定位到某一页」用。</summary>
     public IReadOnlyList<UnityCachePageRow> ReadByRanks(IReadOnlyList<int> ranks)
     {
+        var rows = StreamByRanks(ranks).ToList();
+        rows.Sort(static (a, b) => a.Rank.CompareTo(b.Rank));
+        return rows;
+    }
+
+    /// <summary>
+    /// 按名次**流式**读行：一个连接内分批（<see cref="RankChunk"/>，压在 SQLite 参数上限之下）。
+    /// <para>为什么要流式：资源列表按页查询时候选集可能有几十万条，一次性返回既费内存，
+    /// 又会让每批都重开一次连接（WAL 下每次 open 都要读 schema）。调用方在这条流上
+    /// 边读边判、只留名次即可。</para>
+    /// <para>输入名次升序时输出也升序（批内 <c>ORDER BY k.r</c>、批间按输入顺序推进）。
+    /// 输入不保证升序时请用 <see cref="ReadByRanks"/>。</para>
+    /// </summary>
+    public IEnumerable<UnityCachePageRow> StreamByRanks(
+        IReadOnlyList<int> ranks, CancellationToken cancellationToken = default)
+    {
+        if (ranks.Count == 0) yield break;
         using var connection = OpenEnsured();
         EnsureDerivedForQuery(connection);
-        var rows = new List<UnityCachePageRow>(ranks.Count);
         for (var offset = 0; offset < ranks.Count; offset += RankChunk)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var count = Math.Min(RankChunk, ranks.Count - offset);
             var slice = new int[count];
             for (var i = 0; i < count; i++) slice[i] = ranks[offset + i];
-            foreach (var row in ReadPageRowsByRank(connection, slice)) rows.Add(row);
+            foreach (var row in ReadPageRowsByRank(connection, slice)) yield return row;
         }
-        rows.Sort(static (a, b) => a.Rank.CompareTo(b.Rank));
-        return rows;
     }
 
     /// <summary>
@@ -605,6 +646,177 @@ public sealed class UnityCacheSqliteIndexStore
         verified.Sort();
         Log.Debug("检索「{0}」：候选 {1:N0} → 复核 {2:N0}（词项 {3}）", needle, candidates.Count, verified.Count, match);
         return verified;
+    }
+
+    /// <summary>
+    /// 按 <b>索引列</b>筛出候选名次（升序）。资源列表「筛选下推」的入口：能在 SQL 里判的
+    /// 条件全部交给 SQLite（普通条件走聚簇主键扫、文本条件走 FTS 倒排），只把库里根本没有的
+    /// 事实（编辑状态、替换文件是否存在、静态判定）留给调用方在内存里复核。
+    ///
+    /// <para>与 <see cref="SearchRanks"/> 的分工：后者是「只按文本搜、并当场复核文本」的完整
+    /// 答案；本方法是「多条件筛选的候选集」，文本那一部分复用同一张检索索引，但**不在这里
+    /// 复核** —— 复核由调用方连其它条件一起做，免得同一行被拆成两处判定。</para>
+    ///
+    /// <para>约束：索引行都是扫描产生的缓存引用（<c>reference=true</c>），所以
+    /// <see cref="UnityCacheIndexFilter.HasContainerEntry"/> 可以直接落成
+    /// <c>container_entry</c> 的空/非空 —— 与 <c>AssetSearchService</c> 对这类记录的判定同口径。
+    /// 导入的旧式资源不在索引里，永远由项目态提供。</para>
+    /// </summary>
+    public IReadOnlyList<int> ReadCandidateRanks(
+        UnityCacheIndexFilter filter, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(filter);
+        using var connection = OpenEnsured();
+        EnsureDerivedForQuery(connection);
+        using var command = connection.CreateCommand();
+        var conditions = new List<string>(8);
+        if (filter.Type is { } type)
+        {
+            // 目录类型 = Map(type_id, 索引里的 type)，所以「type 列等于目标」与
+            // 「type_id 属于映射到目标的那些 class id」并起来是完整覆盖（不是近似）。
+            var classIds = UnityClassId.ClassIdsOf(type);
+            if (classIds.Count == 0)
+            {
+                conditions.Add("a.type = $type");
+            }
+            else
+            {
+                var placeholders = new System.Text.StringBuilder(classIds.Count * 9);
+                for (var i = 0; i < classIds.Count; i++)
+                {
+                    if (i > 0) placeholders.Append(',');
+                    placeholders.Append("$t").Append(i);
+                    command.Parameters.AddWithValue($"$t{i}", classIds[i]);
+                }
+                conditions.Add($"(a.type = $type OR a.type_id IN ({placeholders}))");
+            }
+            command.Parameters.AddWithValue("$type", (int)type);
+        }
+        if (filter.PathId is { } pathId)
+        {
+            conditions.Add("a.path_id = $pathId");
+            command.Parameters.AddWithValue("$pathId", pathId);
+        }
+        if (filter.TypeId is { } typeId)
+        {
+            conditions.Add("a.type_id = $typeId");
+            command.Parameters.AddWithValue("$typeId", typeId);
+        }
+        if (filter.MinSize is { } minSize)
+        {
+            conditions.Add("a.size >= $minSize");
+            command.Parameters.AddWithValue("$minSize", minSize);
+        }
+        if (filter.MaxSize is { } maxSize)
+        {
+            conditions.Add("a.size <= $maxSize");
+            command.Parameters.AddWithValue("$maxSize", maxSize);
+        }
+        if (!string.IsNullOrEmpty(filter.Container))
+        {
+            // instr+lower 而不是 LIKE：容器段是 CAB-<32hex> 这类机器串，没有通配符语义，
+            // 而 LIKE 会把 _ / % 当元字符（`CAB-_` 之类的查询串会变成模糊匹配）。
+            conditions.Add("instr(lower(s.value), lower($container)) > 0");
+            command.Parameters.AddWithValue("$container", filter.Container);
+        }
+        if (filter.HasContainerEntry is { } hasContainerEntry)
+        {
+            // trim：元数据侧写的是「非空才写 containerEntry」，空白串在记录上等于没有条目，
+            // 所以两侧都按 trim 后是否为空判，避免「SQL 说有条目、内存说没有」。
+            conditions.Add(hasContainerEntry
+                ? "trim(coalesce(a.container_entry,'')) <> ''"
+                : "trim(coalesce(a.container_entry,'')) = ''");
+        }
+        if (!string.IsNullOrEmpty(filter.Text))
+        {
+            var needle = filter.Text.Trim();
+            var state = ReadDerivedState(connection);
+            // 三种情形不加条件（退回调用方复核，结果不变、只是慢）：命中 src 的公共前后缀
+            // （= 每一行都命中）、含反斜杠（可能只命中 src 的分隔符）、词项取不到（< 3 字符）。
+            if (needle.Length > 0 && !needle.Contains('\\') && !MatchesSourcePathConstant(state, needle))
+            {
+                var match = needle.Length < TrigramLength ? string.Empty : TrigramAndQuery(needle);
+                if (match.Length > 0)
+                {
+                    conditions.Add("k.r IN (SELECT rowid FROM asset_fts WHERE asset_fts MATCH $fts)");
+                    command.Parameters.AddWithValue("$fts", match);
+                }
+            }
+        }
+        var sql = new System.Text.StringBuilder(360)
+            .Append("SELECT k.r FROM catalog_rank k")
+            .Append(" JOIN assets a ON a.bundle_id = k.bundle_id AND a.bundle_index = k.bundle_index")
+            .Append(" JOIN bundles b ON b.id = a.bundle_id")
+            .Append(" JOIN strings s ON s.id = a.container_id");
+        for (var i = 0; i < conditions.Count; i++) sql.Append(i == 0 ? " WHERE " : " AND ").Append(conditions[i]);
+        sql.Append(" ORDER BY k.r");
+        command.CommandText = sql.ToString();
+        var ranks = new List<int>();
+        using var reader = command.ExecuteReader();
+        var seen = 0;
+        while (reader.Read())
+        {
+            if (seen++ % 4096 == 0) cancellationToken.ThrowIfCancellationRequested();
+            ranks.Add(reader.GetInt32(0));
+        }
+        Log.Debug("候选名次：{0:N0} 条（条件 {1} 个，文本「{2}」）", ranks.Count, conditions.Count, filter.Text ?? "-");
+        return ranks;
+    }
+
+    /// <summary>
+    /// 按 <see cref="AssetRecord.LogicalPath"/> 定位目录名次（找不到返回 -1）。
+    /// <para>名字的分段就是索引列本身：<c>&lt;outerKey&gt;/&lt;innerKey&gt;/&lt;container&gt;/&lt;pathId&gt;.&lt;typeId&gt;</c>
+    /// （见 <see cref="AssetDisplay.CacheRowLogicalPath"/>）。列表/树改成按页查询之后，
+    /// 这是**唯一稳定的定位手段** —— <c>AssetRecord.AssetId</c> 每次回灌都会变
+    /// （<c>Guid.NewGuid()</c>），拿它定位会在「重新物化」后失效。</para>
+    /// <para>导入的旧式资源不在索引里（它的 LogicalPath 是项目记录自己的名字），返回 -1。</para>
+    /// </summary>
+    public int FindRank(string logicalPath)
+    {
+        if (!TryParseLogicalPath(logicalPath, out var outer, out var inner, out var container,
+                out var pathId, out var typeId))
+            return -1;
+        using var connection = OpenEnsured();
+        EnsureDerivedForQuery(connection);
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT k.r FROM catalog_rank k
+            JOIN assets a ON a.bundle_id = k.bundle_id AND a.bundle_index = k.bundle_index
+            JOIN bundles b ON b.id = a.bundle_id
+            JOIN strings s ON s.id = a.container_id
+            WHERE b.outer_key = $outer AND b.inner_key = $inner AND s.value = $container
+              AND a.path_id = $pathId AND a.type_id = $typeId
+            """;
+        command.Parameters.AddWithValue("$outer", outer);
+        command.Parameters.AddWithValue("$inner", inner);
+        command.Parameters.AddWithValue("$container", container);
+        command.Parameters.AddWithValue("$pathId", pathId);
+        command.Parameters.AddWithValue("$typeId", typeId);
+        var value = command.ExecuteScalar();
+        return value is null or DBNull ? -1 : Convert.ToInt32(value);
+    }
+
+    /// <summary>拆 <c>&lt;outerKey&gt;/&lt;innerKey&gt;/&lt;container&gt;/&lt;pathId&gt;.&lt;typeId&gt;</c>。
+    /// 段数不对 / 编号不是十进制整数就当它不是索引里的路径（不猜、不模糊匹配）。</summary>
+    private static bool TryParseLogicalPath(string? logicalPath, out string outer, out string inner,
+        out string container, out long pathId, out int typeId)
+    {
+        outer = inner = container = string.Empty;
+        pathId = 0;
+        typeId = 0;
+        if (string.IsNullOrWhiteSpace(logicalPath)) return false;
+        var segments = logicalPath.Split('/');
+        if (segments.Length != 4) return false;
+        var tail = segments[3].Split('.');
+        if (tail.Length != 2) return false;
+        if (!long.TryParse(tail[0], System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out pathId)) return false;
+        if (!int.TryParse(tail[1], System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out typeId)) return false;
+        outer = segments[0];
+        inner = segments[1];
+        container = segments[2];
+        return true;
     }
 
     /// <summary>

@@ -68,8 +68,13 @@ public sealed class AssetSearchService
         return ordered;
     }
 
-    /// <summary>逐条判据（顺序与原 LINQ 谓词链一致：廉价判据在前、IO 判据在后）。</summary>
-    private static bool Matches(AssetRecord asset, AssetSearchQuery query, string? text, StaticVerdictCache? staticVerdicts)
+    /// <summary>逐条判据（顺序与原 LINQ 谓词链一致：廉价判据在前、IO 判据在后）。
+    /// <para><b>公开是刻意的</b>：资源列表改成「按页从索引查询」之后，页里的记录由
+    /// <c>AssetCatalog</c> 构造，但判据**必须还是这一份** —— 复制一份就等于
+    /// 「分页列表」与「导出/构建/旧搜索」对同一条资源给出不同结论，而这种漂移
+    /// 只会在用户那里以「少了一条/多了一条」的形式出现。<paramref name="text"/> 由调用方
+    /// 预先 Trim（<see cref="Search(IEnumerable{AssetRecord}, AssetSearchQuery)"/> 就是这么做的）。</para></summary>
+    public static bool Matches(AssetRecord asset, AssetSearchQuery query, string? text, StaticVerdictCache? staticVerdicts)
     {
         if (!string.IsNullOrEmpty(text) && !MatchesText(asset, text)) return false;
         if (query.Type is { } type && asset.Type != type) return false;
@@ -89,71 +94,96 @@ public sealed class AssetSearchService
     }
 
     /// <summary>
+    /// 列表排序的**预计算键**：排序只需要这几个字段，而 <see cref="AssetRecord"/>
+    /// 每条 1,028 字节（127 万条就是 1.2 GiB）。按页查询要在「不物化整条记录」的前提下
+    /// 用同一份排序语义排候选集，所以排序依据必须能从记录上摘下来。
+    /// </summary>
+    public readonly record struct AssetSortKey(
+        long Size, string TypeLabel, bool Modified, string DisplayPath, string LogicalPath);
+
+    /// <summary>摘排序键。显示路径只算一次（Schwartzian 变换的显式形态）。</summary>
+    public static AssetSortKey BuildSortKey(AssetRecord asset)
+    {
+        ArgumentNullException.ThrowIfNull(asset);
+        return new(asset.Size, AssetDisplay.TypeLabel(asset.Type),
+            asset.EditState is not AssetEditState.Unchanged,
+            AssetDisplay.DisplayPath(asset), asset.LogicalPath);
+    }
+
+    /// <summary>
+    /// 与旧 <c>OrderBy(...).ThenBy(...)</c> 链**逐项同序**的比较。
+    /// <para>尾键 <c>LogicalPath</c> 是全库唯一的（1,275,623 行 = 1,275,623 个 DISTINCT），
+    /// 所以这是一个**严格全序、没有并列** —— 因此「按需排序」与 LINQ 稳定排序的结果一致，
+    /// 可以放心用不稳定排序（<c>Array.Sort</c> / <c>List.Sort</c>）。</para>
+    /// <para>类型的二级比较刻意用 <see cref="StringComparison.CurrentCulture"/>：类型标签是
+    /// 中文，旧实现的 <c>OrderBy(x =&gt; x.Label, StringComparer.CurrentCulture)</c> 就是它。</para>
+    /// </summary>
+    public static int CompareSortKeys(in AssetSortKey a, in AssetSortKey b, AssetSortKind sort)
+    {
+        switch (sort)
+        {
+            case AssetSortKind.SizeDescending:
+            {
+                var bySize = b.Size.CompareTo(a.Size);
+                if (bySize != 0) return bySize;
+                break;
+            }
+            case AssetSortKind.SizeAscending:
+            {
+                var bySize = a.Size.CompareTo(b.Size);
+                if (bySize != 0) return bySize;
+                break;
+            }
+            case AssetSortKind.Type:
+            {
+                var byLabel = string.Compare(a.TypeLabel, b.TypeLabel, StringComparison.CurrentCulture);
+                if (byLabel != 0) return byLabel;
+                break;
+            }
+            case AssetSortKind.ModifiedFirst:
+            {
+                // 「已修改在前」= 旧实现的 OrderBy(EditState == Unchanged ? 1 : 0)。
+                var byModified = (a.Modified ? 0 : 1).CompareTo(b.Modified ? 0 : 1);
+                if (byModified != 0) return byModified;
+                break;
+            }
+        }
+        var byPath = AssetDisplay.ComparePaths(a.DisplayPath, b.DisplayPath);
+        return byPath != 0
+            ? byPath
+            : string.Compare(a.LogicalPath, b.LogicalPath, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
     /// 排序键的**预计算**（Schwartzian 变换）：显示路径解析（
     /// <see cref="AssetDisplay.DisplayPath"/> → <see cref="AssetDisplay.TreePath"/>
     /// 的字典查找 + 裁剪 + 拼接 + 分段）原先发生在比较器内部，每次比较都要
     /// 重算两侧 —— 40 万条资产约 2×10⁷ 次比较，单次搜索上亿次分配。
-    /// 现在每条只算一次，之后比较器只走 <see cref="AssetDisplay.ComparePaths"/>
-    /// （零分配）。语义与原「先比主键、再比显示路径、再比 LogicalPath」完全一致。
+    /// 现在每条只算一次，之后比较器只走 <see cref="CompareSortKeys"/>
+    /// （零分配）。语义与原「先比主键、再比显示路径、再比 LogicalPath」完全一致 ——
+    /// 排序键与比较器都是 <see cref="BuildSortKey"/> / <see cref="CompareSortKeys"/>
+    /// 这一份实现，按页查询用的是同一份。
     /// </summary>
     private static AssetRecord[] SortByKeys(List<AssetRecord> matched, AssetSortKind sort)
     {
         if (matched.Count == 0) return [];
-        switch (sort)
-        {
-            case AssetSortKind.SizeDescending:
-                return matched
-                    .Select(asset => (Asset: asset, Key: AssetDisplay.DisplayPath(asset)))
-                    .OrderByDescending(x => x.Asset.Size)
-                    .ThenBy(x => x.Key, PathComparer.Instance)
-                    .ThenBy(x => x.Asset.LogicalPath, StringComparer.OrdinalIgnoreCase)
-                    .Select(x => x.Asset)
-                    .ToArray();
-            case AssetSortKind.SizeAscending:
-                return matched
-                    .Select(asset => (Asset: asset, Key: AssetDisplay.DisplayPath(asset)))
-                    .OrderBy(x => x.Asset.Size)
-                    .ThenBy(x => x.Key, PathComparer.Instance)
-                    .ThenBy(x => x.Asset.LogicalPath, StringComparer.OrdinalIgnoreCase)
-                    .Select(x => x.Asset)
-                    .ToArray();
-            case AssetSortKind.Type:
-                return matched
-                    .Select(asset => (Asset: asset, Label: AssetDisplay.TypeLabel(asset.Type), Key: AssetDisplay.DisplayPath(asset)))
-                    .OrderBy(x => x.Label, StringComparer.CurrentCulture)
-                    .ThenBy(x => x.Key, PathComparer.Instance)
-                    .ThenBy(x => x.Asset.LogicalPath, StringComparer.OrdinalIgnoreCase)
-                    .Select(x => x.Asset)
-                    .ToArray();
-            case AssetSortKind.ModifiedFirst:
-                return matched
-                    .Select(asset => (Asset: asset, Modified: asset.EditState is not AssetEditState.Unchanged ? 0 : 1, Key: AssetDisplay.DisplayPath(asset)))
-                    .OrderBy(x => x.Modified)
-                    .ThenBy(x => x.Key, PathComparer.Instance)
-                    .ThenBy(x => x.Asset.LogicalPath, StringComparer.OrdinalIgnoreCase)
-                    .Select(x => x.Asset)
-                    .ToArray();
-            default:
-                return matched
-                    .Select(asset => (Asset: asset, Key: AssetDisplay.DisplayPath(asset)))
-                    .OrderBy(x => x.Key, PathComparer.Instance)
-                    .ThenBy(x => x.Asset.LogicalPath, StringComparer.OrdinalIgnoreCase)
-                    .Select(x => x.Asset)
-                    .ToArray();
-        }
-    }
-
-    /// <summary>显示路径比较器（委托 <see cref="AssetDisplay.ComparePaths"/>，零分配）。</summary>
-    private sealed class PathComparer : IComparer<string>
-    {
-        public static readonly PathComparer Instance = new();
-        public int Compare(string? x, string? y) => AssetDisplay.ComparePaths(x, y);
+        var keys = new AssetSortKey[matched.Count];
+        for (var i = 0; i < keys.Length; i++) keys[i] = BuildSortKey(matched[i]);
+        var order = new int[matched.Count];
+        for (var i = 0; i < order.Length; i++) order[i] = i;
+        Array.Sort(order, (x, y) => CompareSortKeys(keys[x], keys[y], sort));
+        var sorted = new AssetRecord[matched.Count];
+        for (var i = 0; i < sorted.Length; i++) sorted[i] = matched[order[i]];
+        return sorted;
     }
 
     /// <summary>静态判定的记忆化容器：静态性主要是 **bundle 级**事实
     /// （元数据标记 / bundle 名 / 内层键），只有第三道判据与资源自身相关。
-    /// 40 万条资产只对应上千个 bundle，逐条重算等于白烧。</summary>
-    private sealed class StaticVerdictCache
+    /// 40 万条资产只对应上千个 bundle，逐条重算等于白烧。
+    /// <para>按页查询（<c>AssetCatalog</c>）与全量搜索共用同一个缓存实例类型，
+    /// 但**各自持有一个实例**：两者跑在不同的时间点，共享反而会把「上一批候选」
+    /// 的判断带进这一批。</para></summary>
+    public sealed class StaticVerdictCache
     {
         internal Dictionary<(string Bundle, string InnerKey), bool> BundleLevel { get; } = new();
         internal Dictionary<string, bool> ContainerLevel { get; } = new(StringComparer.OrdinalIgnoreCase);

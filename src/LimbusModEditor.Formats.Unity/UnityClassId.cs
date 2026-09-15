@@ -77,6 +77,47 @@ public static class UnityClassId
     /// <summary>Unity 2022+ ref-type 伪 class id：LookAtConstraint（类型表类名 LookAtConstraint）。</summary>
     public const int LookAtConstraintRefType = 1183024399;
 
+    /// <summary>真实缓存出现过的全部 class id（<see cref="Map(int)"/> 覆盖的那些）。
+    /// 也是 <see cref="ClassIdsOf"/> 的定义域。</summary>
+    public static IReadOnlyList<int> KnownTypeIds => KnownIds;
+
+    private static readonly int[] KnownIds =
+    [
+        GameObject, Transform, Camera, Material, MeshRenderer, Texture2D, MeshFilter, Mesh, Shader,
+        TextAsset, Rigidbody2D, Rigidbody, MeshCollider, BoxCollider, AnimationClip, AudioListener,
+        AudioClip, RenderTexture, CustomRenderTexture, Cubemap, AnimatorController, Animator,
+        TrailRenderer, Light, Animation, MonoBehaviour, MonoScript, LineRenderer, Font, SphereCollider,
+        SkinnedMeshRenderer, AssetBundle, ParticleSystem, ParticleSystemRenderer, SortingGroup,
+        SpriteRenderer, Sprite, ReflectionProbe, AnimatorOverrideController, CanvasRenderer, Canvas,
+        RectTransform, CanvasGroup, HingeJoint2D, PlayableDirector, VideoPlayer, VideoClip, SpriteMask,
+        SpriteAtlasRefType, LightingSettingsRefType, LookAtConstraintRefType,
+    ];
+
+    /// <summary>反向映射：某个 <see cref="AssetType"/> 可能由哪些 class id 映射而来。
+    /// <para><b>用途</b>：把「按类型筛选」下推到索引库的 SQL。一行索引的目录类型是
+    /// <c>Map(type_id, 索引里的 type)</c>（<see cref="Map(int, AssetType)"/>），它等于
+    /// <paramref name="type"/> <b>当且仅当</b>二者之一成立：① <c>Map(type_id) == type</c>
+    /// （则 <c>type_id ∈ ClassIdsOf(type)</c>）；② <c>Map(type_id) == Unknown</c> 且索引里存的
+    /// <c>type</c> 就是它。所以 SQL 判据 <c>assets.type = $t OR assets.type_id IN (ClassIdsOf)</c>
+    /// 是**完整覆盖**，不是超集近似。</para>
+    /// <para>未覆盖的类型（如 <see cref="AssetType.Unknown"/>）返回空列表。</para></summary>
+    public static IReadOnlyList<int> ClassIdsOf(AssetType type)
+        => Reverse.TryGetValue(type, out var ids) ? ids : [];
+
+    private static readonly Dictionary<AssetType, int[]> Reverse = BuildReverse();
+
+    private static Dictionary<AssetType, int[]> BuildReverse()
+    {
+        var grouped = new Dictionary<AssetType, List<int>>();
+        foreach (var id in KnownIds)
+        {
+            var type = Map(id);
+            if (!grouped.TryGetValue(type, out var list)) grouped[type] = list = [];
+            list.Add(id);
+        }
+        return grouped.ToDictionary(x => x.Key, x => x.Value.ToArray());
+    }
+
     public static bool TryMap(int typeId, out AssetType type)
     {
         type = Map(typeId);

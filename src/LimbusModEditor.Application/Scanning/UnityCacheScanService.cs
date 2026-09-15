@@ -591,10 +591,11 @@ public sealed class UnityCacheScanService
 
     private static AssetRecord BuildRecord(
         string dataPath, string outerKey, string innerKey, UnityCacheIndexRow item, bool staticBundle,
-        string sourcePackagePath, string? logicalPath = null)
+        string sourcePackagePath, string? logicalPath = null, Guid? assetId = null)
     {
         var record = new AssetRecord
         {
+            AssetId = assetId ?? Guid.NewGuid(),
             LogicalPath = logicalPath ?? $"{outerKey}/{innerKey}/{item.Container}/{item.PathId}.{item.TypeId}",
             SourcePath = dataPath,
             ContainerPath = item.Container,
@@ -631,6 +632,23 @@ public sealed class UnityCacheScanService
         var sourcePackagePath = Path.GetDirectoryName(dataPath) ?? dataPath;
         foreach (var item in rows) yield return BuildRecord(dataPath, outerKey, innerKey, item, staticBundle, sourcePackagePath);
     }
+
+    /// <summary>
+    /// 由**索引库读回的一行**重建 <see cref="AssetRecord"/> —— 与扫描时写进项目的记录
+    /// **逐字段同口径**（同一个 <see cref="BuildRecord"/>）。
+    /// <para>存在的理由：资源列表改为「按页从索引查询」之后，页里的记录不能再依赖
+    /// 「项目里常驻着 127 万条」这个前提；而只要字段口径漂了，就会出现「列表看到的」
+    /// 与「扫描得到的」不是同一条资源（类型、显示名、bundle 归属都可能对不上）。
+    /// 因此只有这一条构造路径。</para>
+    /// <para><paramref name="logicalPath"/> 与 <paramref name="assetId"/> 可选：前者由
+    /// <see cref="AssetDisplay.CacheRowLogicalPath"/> 拼出（省一次转换），后者用于
+    /// 与项目态记录保持同一身份（<c>EditOperation.AssetId</c> 持久化在
+    /// <c>.lmeproj</c> 里，不能因为「重新查了一次列表」就对不上）。</para>
+    /// </summary>
+    public static AssetRecord BuildReferenceRecord(
+        UnityCacheIndexBundle bundle, UnityCacheIndexRow row, string? logicalPath = null, Guid? assetId = null)
+        => BuildRecord(bundle.DataPath, bundle.Outer, bundle.Inner, row, bundle.StaticBundle,
+            Path.GetDirectoryName(bundle.DataPath) ?? bundle.DataPath, logicalPath, assetId);
 
     // ── 索引持久化（SQLite；单事务批量写，不再整文件/逐 bundle 重写）──
 

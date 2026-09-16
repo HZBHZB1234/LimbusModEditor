@@ -1,4 +1,4 @@
-﻿using LimbusModEditor.Application.Relations;
+using LimbusModEditor.Application.Relations;
 using LimbusModEditor.Application.Relations.Authority;
 using LimbusModEditor.Domain.Assets;
 
@@ -179,5 +179,51 @@ public sealed class WikiAuthorityEngineTests : IDisposable
         var authoritative = facts.AuthoritativeOnly;
         Assert.NotEmpty(authoritative);
         Assert.All(authoritative, f => Assert.Equal(ConfidenceLevel.Authoritative, f.Confidence));
+    }
+
+    [Fact]
+    public void WritableSource_null_means_unknown()
+    {
+        // null = 未知/尚未分析出出处（待办）
+        var fact = new AuthorityFact("persona:10201", "text", "some/ref",
+            AuthoritySource.LangFileName, ConfidenceLevel.Authoritative, null);
+
+        Assert.Null(fact.WritableSource);
+    }
+
+    [Fact]
+    public void WritableSource_empty_means_readable_but_not_writable()
+    {
+        // 空串 = 可读但不可写（已确认无可写出处）
+        var fact = new AuthorityFact("persona:10201", "spine", "some/prefab",
+            AuthoritySource.PrefabReferenceChain, ConfidenceLevel.Authoritative, string.Empty);
+
+        Assert.NotNull(fact.WritableSource);
+        Assert.Empty(fact.WritableSource);
+    }
+
+    [Fact]
+    public void WritableSource_path_means_writable()
+    {
+        // 非空路径 = 有可写出处
+        var fact = new AuthorityFact("persona:10201", "text", "some/ref",
+            AuthoritySource.LangFileName, ConfidenceLevel.Authoritative, "PersonalityVoiceDlg/10201.json");
+
+        Assert.NotNull(fact.WritableSource);
+        Assert.Equal("PersonalityVoiceDlg/10201.json", fact.WritableSource);
+    }
+
+    [Fact]
+    public void WritableSource_distinguishes_unknown_from_no_source()
+    {
+        // 验证 null（未知）与空串（不可写）是可区分的
+        var unknown = new AuthorityFact("persona:10201", "text", "ref1",
+            AuthoritySource.LangFileName, ConfidenceLevel.Authoritative, null);
+        var noSource = new AuthorityFact("persona:10201", "spine", "ref2",
+            AuthoritySource.PrefabReferenceChain, ConfidenceLevel.Authoritative, string.Empty);
+
+        Assert.Null(unknown.WritableSource);
+        Assert.NotNull(noSource.WritableSource);
+        Assert.Empty(noSource.WritableSource);
     }
 }

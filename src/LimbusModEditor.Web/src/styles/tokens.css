@@ -1,0 +1,139 @@
+/* 设计色唯一允许出处（对应铁律 §3-9 的 Web 约束） */
+/* views/ 与 components/ 下禁止硬编码色值，一律引用此文件 */
+
+:root {
+  /* ── 背景层级 ── */
+  --lme-bg-base: #1e1e2e;
+  --lme-bg-panel: #252536;
+  --lme-bg-elevated: #2a2a3c;
+  --lme-bg-input: #1a1a28;
+  --lme-bg-hover: #33334a;
+  --lme-bg-selected: #3d3d5c;
+
+  /* ── 文字 ── */
+  --lme-text-primary: #e4e4ef;
+  --lme-text-secondary: #b0b0c0;
+  --lme-text-muted: #8888a0;
+  --lme-text-disabled: #5a5a70;
+
+  /* ── 边框 ── */
+  --lme-border: #3a3a50;
+  --lme-border-strong: #4a4a65;
+
+  /* ── 主题色 ── */
+  --lme-accent: #7c6ff7;
+  --lme-accent-hover: #9185ff;
+  --lme-accent-muted: #5a4fd0;
+
+  /* ── 状态色 ── */
+  --lme-success: #4caf7a;
+  --lme-warning: #e0a83a;
+  --lme-error: #d9534f;
+  --lme-info: #5b9bd5;
+
+  /* ── 资产类型色 ── */
+  --lme-type-texture: #7c6ff7;
+  --lme-type-sprite: #a78bfa;
+  --lme-type-audio: #4caf7a;
+  --lme-text-text: #e0a83a;
+  --lme-type-json: #5b9bd5;
+  --lme-type-mono: #d9534f;
+  --lme-type-binary: #8888a0;
+  --lme-type-mesh: #e07a3a;
+  --lme-type-animation: #d55bb0;
+  --lme-type-font: #3ab5e0;
+  --lme-type-video: #b55bd5;
+  --lme-type-material: #5bd5b5;
+  --lme-type-shader: #d5a85b;
+  --lme-type-component: #8a8aa0;
+  --lme-type-unknown: #6a6a80;
+
+  /* ── 状态标签色 ── */
+  --lme-state-modified: #e0a83a;
+  --lme-state-added: #4caf7a;
+  --lme-state-deleted: #d9534f;
+  --lme-state-conflict: #ff6b6b;
+  --lme-state-unchanged: #8888a0;
+
+  /* ── 间距 ── */
+  --lme-gap-xs: 4px;
+  --lme-gap-sm: 8px;
+  --lme-gap-md: 12px;
+  --lme-gap-lg: 16px;
+  --lme-gap-xl: 24px;
+
+  /* ── 圆角 ── */
+  --lme-radius-sm: 4px;
+  --lme-radius-md: 6px;
+  --lme-radius-lg: 8px;
+
+  /* ── 字体 ── */
+  --lme-font-family: 'Microsoft YaHei', 'PingFang SC', 'Segoe UI', system-ui, sans-serif;
+  --lme-font-mono: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
+  --lme-font-size-xs: 11px;
+  --lme-font-size-sm: 12px;
+  --lme-font-size-md: 13px;
+  --lme-font-size-lg: 15px;
+  --lme-font-size-xl: 18px;
+
+  /* ── 阴影 ── */
+  --lme-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --lme-shadow-md: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --lme-shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.5);
+
+  /* ── 半透明背景（状态标签） ── */
+  --lme-state-modified-bg: rgba(224, 168, 58, 0.1);
+  --lme-state-added-bg: rgba(76, 175, 122, 0.1);
+  --lme-state-deleted-bg: rgba(217, 83, 79, 0.1);
+  --lme-overlay-bg: rgba(30, 30, 46, 0.7);
+  --lme-error-banner-bg: rgba(217, 83, 79, 0.15);
+}
+
+/* ── 全局基础 ── */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--lme-bg-base);
+  color: var(--lme-text-primary);
+  font-family: var(--lme-font-family);
+  font-size: var(--lme-font-size-md);
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  height: 100%;
+}
+
+/* ── 滚动条 ── */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--lme-bg-base);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--lme-border);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--lme-border-strong);
+}
+
+/* ── 通用工具类 ── */
+.lme-mono {
+  font-family: var(--lme-font-mono);
+  font-size: var(--lme-font-size-sm);
+}
+
+.lme-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

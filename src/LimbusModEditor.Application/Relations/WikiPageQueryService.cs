@@ -91,7 +91,7 @@ public sealed class WikiPageQueryService
     public int CountByCategory(string category)
         => _store.CountByCategory(category);
 
-    /// <summary>来源统计：人工编纂数 / 候选导入数。</summary>
-    public (int HumanEdited, int Candidate) SourceStatistics()
+    /// <summary>来源统计：自动生成数 / 用户修订数。</summary>
+    public (int Auto, int Revised) SourceStatistics()
         => _store.SourceStatistics();
 }

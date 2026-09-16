@@ -15,13 +15,16 @@ public sealed class WikiPageAuthorityEngine
 
     public WikiPageAuthorityEngine()
     {
-        // 注册全部 6 类别提供者
+        // 注册全部 6 实体类别提供者
         Register(new PersonaAuthorityProvider());
         Register(new EnemyAuthorityProvider());
         Register(new AnnouncerAuthorityProvider());
         Register(new EgoAuthorityProvider());
         Register(new EgoGiftAuthorityProvider());
         Register(new AbnormalityAuthorityProvider());
+
+        // 注册剧情页提供者
+        Register(new StoryDataAuthorityProvider());
     }
 
     /// <summary>注册一个来源提供者。</summary>

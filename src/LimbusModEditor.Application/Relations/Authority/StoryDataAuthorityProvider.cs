@@ -26,6 +26,9 @@ public sealed class StoryDataAuthorityProvider : IAuthorityProvider
         // ② AbDlg_<角色>.json —— 角色级剧情
         ExtractFromAbDlg(subjectId, context, facts);
 
+        // ③ 静态表 cutscene / storytheater-personality —— 过场 / 登场角色
+        ExtractFromStaticTables(subjectId, context, facts);
+
         if (!facts.Any())
             unavailable.Add(new UnavailableType("text", "本地数据无来源：无匹配的 StoryData 或 AbDlg 文件"));
 
@@ -53,15 +56,15 @@ public sealed class StoryDataAuthorityProvider : IAuthorityProvider
             if (!int.TryParse(fileName[1..], out _))
                 continue;
 
-            facts.Add(new AuthorityFact(subjectId, "story_chapter", path,
+            facts.Add(new AuthorityFact(subjectId, "story_content", path,
                 AuthoritySource.LangFileName, ConfidenceLevel.Authoritative, WritableSourceKind.Path)
             {
                 WritableSourcePath = path,
                 Display = fileName,
-                Detail = $"{lang.KeyCount} 个键",
+                Detail = $"{lang.KeyCount} 个键（含 dialog 台词正文）",
                 MediaKind = "text",
                 DeepLink = RelationDeepLink.ForText(path, null),
-                SourceDetail = $"Lang 文件名约定 StoryData/{fileName}.json（章节级）",
+                SourceDetail = $"Lang 文件名约定 StoryData/{fileName}.json（章节级，含对话正文）",
             });
         }
     }
@@ -87,6 +90,56 @@ public sealed class StoryDataAuthorityProvider : IAuthorityProvider
                 DeepLink = RelationDeepLink.ForText(path, null),
                 SourceDetail = $"Lang 文件名约定 {fileName}（角色级）",
             });
+        }
+    }
+
+    /// <summary>
+    /// 从静态表提取 cutscene 数据（cutscene-* 类别，过场 ID 外键）。
+    /// <para>粒度：过场级。若 cutscene 数据里没有逐句说话者标注，按"过场 → 段落"呈现。</para>
+    /// </summary>
+    private static void ExtractFromStaticTables(string subjectId, AuthorityExtractionContext context, List<AuthorityFact> facts)
+    {
+        foreach (var table in context.StaticTables)
+        {
+            if (string.IsNullOrEmpty(table.ContainerEntry)) continue;
+
+            // 匹配 cutscene 类别：Assets/Resources_moved/StaticData/static-data/cutscene/cutscene-*.json
+            if (!table.ContainerEntry.Contains("/static-data/cutscene/", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            facts.Add(new AuthorityFact(subjectId, "cutscene", table.ContainerEntry,
+                AuthoritySource.StaticTableForeignKey, ConfidenceLevel.Authoritative, WritableSourceKind.Path)
+            {
+                WritableSourcePath = table.ContainerEntry,
+                Display = table.Name,
+                Detail = $"{table.DataClass} · {table.SizeBytes} B",
+                MediaKind = "video",
+                DeepLink = RelationDeepLink.ForStatic(table.ContainerEntry, null),
+                SourceDetail = $"静态表外键 cutscene（过场级）",
+            });
+        }
+
+        // 匹配 storytheater-* 类别（登场角色）
+        foreach (var table in context.StaticTables)
+        {
+            if (string.IsNullOrEmpty(table.ContainerEntry)) continue;
+            if (!table.ContainerEntry.Contains("/static-data/storytheater-", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            // storytheater-personality 进角色节
+            if (table.DataClass.Contains("personality", StringComparison.OrdinalIgnoreCase))
+            {
+                facts.Add(new AuthorityFact(subjectId, "story_character", table.ContainerEntry,
+                    AuthoritySource.StaticTableForeignKey, ConfidenceLevel.Authoritative, WritableSourceKind.Path)
+                {
+                    WritableSourcePath = table.ContainerEntry,
+                    Display = table.Name,
+                    Detail = $"{table.DataClass} · {table.SizeBytes} B",
+                    MediaKind = "text",
+                    DeepLink = RelationDeepLink.ForStatic(table.ContainerEntry, null),
+                    SourceDetail = $"静态表外键 storytheater-personality（角色级）",
+                });
+            }
         }
     }
 }

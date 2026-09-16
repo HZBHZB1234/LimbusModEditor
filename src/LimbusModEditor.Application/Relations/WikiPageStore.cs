@@ -157,7 +157,7 @@ public sealed class WikiPageStore
                     reader.GetString(2),
                     reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
                     reader.GetInt32(4))
-                { Source = reader.IsDBNull(5) ? WikiEntrySources.HumanEdited : reader.GetString(5), CandidateId = reader.IsDBNull(6) ? null : reader.GetString(6) });
+                { Source = reader.IsDBNull(5) ? WikiEntrySources.Auto : reader.GetString(5) });
             }
             return (IReadOnlyList<WikiEntry>)rows;
         });
@@ -214,7 +214,7 @@ public sealed class WikiPageStore
                     reader.GetString(2),
                     reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
                     reader.GetInt32(4))
-                { Source = reader.IsDBNull(5) ? WikiEntrySources.HumanEdited : reader.GetString(5), CandidateId = reader.IsDBNull(6) ? null : reader.GetString(6) });
+                { Source = reader.IsDBNull(5) ? WikiEntrySources.Auto : reader.GetString(5) });
             }
             return (IReadOnlyList<WikiEntry>)rows;
         });
@@ -235,13 +235,13 @@ public sealed class WikiPageStore
         return CountTable(PagesTable, "WHERE category = $cat", ("$cat", category));
     }
 
-    public (int HumanEdited, int Candidate) SourceStatistics()
+    public (int Auto, int Revised) SourceStatistics()
     {
         if (!_cache.Exists) return (0, 0);
         return _cache.Read(connection =>
         {
             using var command = connection.CreateCommand();
-            command.CommandText = $"SELECT SUM(CASE WHEN source = 'human' THEN 1 ELSE 0 END) as human_count, SUM(CASE WHEN source = 'candidate' THEN 1 ELSE 0 END) as candidate_count FROM {EntriesTable}";
+            command.CommandText = $"SELECT SUM(CASE WHEN source = 'auto' THEN 1 ELSE 0 END) as auto_count, SUM(CASE WHEN source = 'revised' THEN 1 ELSE 0 END) as revised_count FROM {EntriesTable}";
             using var reader = command.ExecuteReader();
             if (!reader.Read()) return (0, 0);
             return (reader.IsDBNull(0) ? 0 : reader.GetInt32(0), reader.IsDBNull(1) ? 0 : reader.GetInt32(1));
@@ -281,14 +281,13 @@ public sealed class WikiPageStore
         }
         using var cmd = connection.CreateCommand();
         cmd.Transaction = transaction;
-        cmd.CommandText = $"INSERT INTO {EntriesTable} (entry_id, sub_page_id, title, body, sort_order, source, candidate_id) VALUES ($eid, $sid, $title, $body, $sort, $source, $cid) ON CONFLICT(entry_id) DO UPDATE SET title = $title, body = $body, sort_order = $sort, source = $source, candidate_id = $cid";
+        cmd.CommandText = $"INSERT INTO {EntriesTable} (entry_id, sub_page_id, title, body, sort_order, source) VALUES ($eid, $sid, $title, $body, $sort, $source) ON CONFLICT(entry_id) DO UPDATE SET title = $title, body = $body, sort_order = $sort, source = $source";
         cmd.Parameters.AddWithValue("$eid", entry.EntryId);
         cmd.Parameters.AddWithValue("$sid", entry.SubPageId);
         cmd.Parameters.AddWithValue("$title", entry.Title);
         cmd.Parameters.AddWithValue("$body", entry.Body ?? string.Empty);
         cmd.Parameters.AddWithValue("$sort", entry.SortOrder);
         cmd.Parameters.AddWithValue("$source", entry.Source);
-        cmd.Parameters.AddWithValue("$cid", (object?)entry.CandidateId ?? DBNull.Value);
         cmd.ExecuteNonQuery();
         // Re-enable FK constraints
         using (var pragma = connection.CreateCommand())

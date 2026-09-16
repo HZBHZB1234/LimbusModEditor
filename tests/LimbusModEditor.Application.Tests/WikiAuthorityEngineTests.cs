@@ -258,4 +258,72 @@ public sealed class WikiAuthorityEngineTests : IDisposable
         Assert.Contains(facts.Unavailable, u => u.ContentType == "text");
         Assert.Contains(facts.Unavailable, u => u.ContentType == "audio");
     }
+
+    [Fact]
+    public void Story_provider_extracts_chapter_content()
+    {
+        // F-01 验证：剧情页不再空 —— StoryData/S<n>.json 被正确提取
+        var context = CreateContext(langFiles: new[]
+        {
+            LangFile("StoryData/S1.json", 10),
+            LangFile("StoryData/S2.json", 15),
+        });
+
+        var engine = new WikiPageAuthorityEngine();
+        var facts = engine.Extract("story:main", context);
+
+        // 应该产出章节正文事实
+        Assert.NotEmpty(facts.Facts);
+        Assert.Contains(facts.Facts, f =>
+            f.ContentType == "story_content" &&
+            f.Source == AuthoritySource.LangFileName &&
+            f.WritableSource == WritableSourceKind.Path);
+    }
+
+    [Fact]
+    public void Story_provider_extracts_cutscene_from_static_tables()
+    {
+        // F-01 验证：cutscene 数据从静态表提取
+        var context = CreateContext(staticTables: new[]
+        {
+            new RelationStaticFact("Assets/Resources_moved/StaticData/static-data/cutscene/cutscene-a1c5p1.json", "cutscene-a1c5p1", "cutscene", null, 100),
+        });
+
+        var engine = new WikiPageAuthorityEngine();
+        var facts = engine.Extract("story:main", context);
+
+        Assert.Contains(facts.Facts, f =>
+            f.ContentType == "cutscene" &&
+            f.Source == AuthoritySource.StaticTableForeignKey);
+    }
+
+    [Fact]
+    public void Story_section_table_has_all_required_sections()
+    {
+        // F-01 验证：剧情页分节表包含所有必需分节
+        var sections = WikiSectionTables.Story;
+        var sectionIds = sections.Select(s => s.SectionId).ToList();
+
+        Assert.Contains(WikiSectionTables.StoryChapters, sectionIds);
+        Assert.Contains(WikiSectionTables.StoryContent, sectionIds);
+        Assert.Contains(WikiSectionTables.StoryCharacters, sectionIds);
+        Assert.Contains(WikiSectionTables.StoryEvents, sectionIds);
+        Assert.Contains(WikiSectionTables.StoryCutscenes, sectionIds);
+    }
+
+    [Fact]
+    public void Negative_story_provider_does_not_guess_ids_from_filenames()
+    {
+        // 负例：含 5 位数字的文件名不得当 id
+        var context = CreateContext(langFiles: new[]
+        {
+            LangFile("SomeRandomFile_10201.json", 5),  // 含 5 位数字但不是剧情文件
+        });
+
+        var engine = new WikiPageAuthorityEngine();
+        var facts = engine.Extract("story:main", context);
+
+        // 不应该产出任何事实（文件名不符合剧情命名约定）
+        Assert.Empty(facts.Facts);
+    }
 }

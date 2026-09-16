@@ -80,7 +80,7 @@ public sealed class WikiPageArranger
             var entries = sectionFacts.Select((f, i) => new WikiEntryDetail(
                 new WikiEntry(Guid.NewGuid().ToString("N"), $"temp-{i}", f.Display ?? f.RefKey, string.Empty, i)
                 {
-                    Source = WikiEntrySources.Candidate,
+                    Source = WikiEntrySources.Auto,
                 },
                 new[]
                 {

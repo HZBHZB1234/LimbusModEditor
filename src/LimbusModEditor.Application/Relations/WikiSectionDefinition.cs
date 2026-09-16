@@ -58,6 +58,23 @@ public static class WikiSectionTables
     /// <summary>通用分节：考据。包含跨资源引用（xref）。</summary>
     public const string Trivia = "trivia";
 
+    // ── 剧情页分节 ─────────────────────────────────────────────────
+
+    /// <summary>剧情分节：章节导航（subchapter-detail / storytheater-main）。</summary>
+    public const string StoryChapters = "story_chapters";
+
+    /// <summary>剧情分节：章节正文（StoryData/S&lt;n&gt;.json 的 dialog）。</summary>
+    public const string StoryContent = "story_content";
+
+    /// <summary>剧情分节：登场角色（storytheater-personality）。</summary>
+    public const string StoryCharacters = "story_characters";
+
+    /// <summary>剧情分节：事件与选择（story-dungeon-* / abnormality-event）。</summary>
+    public const string StoryEvents = "story_events";
+
+    /// <summary>剧情分节：过场（cutscene-*）。</summary>
+    public const string StoryCutscenes = "story_cutscenes";
+
     /// <summary>人格专属：人格剧情。</summary>
     public const string PersonalityStory = "personality_story";
 
@@ -169,6 +186,26 @@ public static class WikiSectionTables
         new(Trivia, "考据", 7, []),
     ];
 
+    // ── 剧情页分节表 ───────────────────────────────────────────────
+
+    /// <summary>剧情页分节表。
+    /// <para>章节导航（subchapter-detail / storytheater-main，章节 ID 外键）→
+    /// 章节正文（StoryData/S&lt;n&gt;.json 的 dialog，章节级）→
+    /// 登场角色（storytheater-personality，角色 token）→
+    /// 事件与选择（story-dungeon-* / abnormality-event，事件 ID）→
+    /// 过场（cutscene-*，过场 ID）。</para>
+    /// </summary>
+    public static readonly IReadOnlyList<WikiSectionDefinition> Story =
+    [
+        new(Overview, "概览", 0, []),
+        new(StoryChapters, "章节导航", 1, ["story_chapter"]),
+        new(StoryContent, "章节正文", 2, ["story_content"]),
+        new(StoryCharacters, "登场角色", 3, ["story_character"]),
+        new(StoryEvents, "事件与选择", 4, ["story_event"]),
+        new(StoryCutscenes, "过场", 5, ["cutscene"]),
+        new(Trivia, "考据", 6, []),
+    ];
+
     /// <summary>获取指定类别的分节表。未知类别返回通用分节表（概览 + 数据 + 文本 + 语音 + 立绘 + 其它 + 考据）。</summary>
     public static IReadOnlyList<WikiSectionDefinition> ForCategory(string category) => category switch
     {
@@ -178,6 +215,7 @@ public static class WikiSectionTables
         RelationCategories.Announcer => Announcer,
         RelationCategories.Ego => Ego,
         RelationCategories.EgoGift => EgoGift,
+        "story" => Story,
         _ => Generic,
     };
 

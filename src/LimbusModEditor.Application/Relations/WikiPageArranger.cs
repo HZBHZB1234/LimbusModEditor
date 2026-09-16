@@ -263,7 +263,7 @@ public sealed class WikiPageArranger
         var entryId = Guid.NewGuid().ToString("N");
         var entry = new WikiEntry(entryId, subPageId, link.Display, string.Empty, 0)
         {
-            Source = WikiEntrySources.Candidate,
+            Source = WikiEntrySources.Auto,
         };
         var binding = new WikiResourceBinding(
             Guid.NewGuid().ToString("N"),

@@ -5,6 +5,12 @@
 > 验证结果和限制见 [性能重构报告](PERFORMANCE-REFACTOR.md)。下文旧性能数字保留为历史记录。
 > 本轮 solution 回归为 **746 项全通过（Domain 672 + Format 74）**，并显式完成真实全量扫描与六步骤启动验证。
 
+> **2026-09-17（WebView2 重构交付轮）**：界面已全量重构为 **WebView2 薄宿主 + Vue3/TS 前端**，
+> Spine 渲染全量前移到前端（native Spine 工程已删除），并新增**维基化关联页**。
+> 当前验证基线 = **864 项全绿（Domain 94 + Format 74 + Application 696）**，
+> 逐条命令与原始输出见 [`docs/FINAL-DELIVERY.md`](FINAL-DELIVERY.md)；
+> 三项委托的完成度、已知缺口与人工冒烟清单也在该文档。
+
 > 接手入口文档：先读本文，再读 `docs/CODE-STRUCTURE.md`（结构与不变量）与
 > `docs/PROJECT-INDEX.md`（逐文件功能索引），最后按需查 `docs/USAGE.md`（用户手册）、
 > `docs/REALDATA-VERIFY.md`（真实数据验证证据）、`docs/REVIEW.md`（自审与风险）、
@@ -17,12 +23,19 @@
 
 ## 1. 一句话现状
 
-Windows-only 的 C#/.NET 8 + WPF 模组创作工作台，已能跑通
+Windows-only 的 **WebView2 薄宿主（C#/.NET 8，8 个源文件）+ Vue3/TS 前端**模组创作工作台，已能跑通
 **真实游戏数据读取（1459 个缓存 bundle / 1531 个 bank / 真实 lang 目录 / catalog 基线）
-→ 四个工作台编辑（资源 / 音频 / 文本 / 静态）
+→ 四工作台编辑（资源 / 音频 / 文本 / 静态）+ 维基化关联页查看
 → 一键导出加载器可消费的包（carra / bank / rebank / staticmod / lang bus·patch·pathset）
 → 调试铺盘（逐文件备份 + 关闭逐字节还原）**
 的完整闭环；写回链路已在真实纹理上端到端验证（`docs/REALDATA-VERIFY.md`）。
+**Spine 渲染（解析 / 静态预览 / 骨骼动画播放）全在前端**（spine-webgl@4.0.26），
+native Spine 工程与 `Application/Spine/` 的解析层已删除（全仓 0 命中）。
+
+> ⚠️ **维基页的现状口径（务必按此理解，勿过度声明）**：页面库 / 查询 / 内容编辑 / IPC / 前端 4 视图
+> 是实的且有测试；但「**自动分析 → 生成页面 → 落 `wiki-pages.db`**」这条链路**尚未接通**
+> （权威引擎与编排器无生产调用点，且交付环境无 `wiki-pages.db`），因此**本机启动后 14 类页面均为空**。
+> 见 `docs/FINAL-DELIVERY.md` 已知缺口 G-01/G-02。
 
 ---
 
@@ -32,11 +45,18 @@ Windows-only 的 C#/.NET 8 + WPF 模组创作工作台，已能跑通
 dotnet build LimbusModEditor.slnx --no-restore --nologo
 dotnet test  LimbusModEditor.slnx --no-build --nologo
 dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r win-x64 --self-contained false -o artifacts/publish-win-x64 --no-restore
+npm --prefix src/LimbusModEditor.Web run build      # 前端（必须在 publish 之前；缺失时 PublishFrontend Target 直接报错）
 ```
+
+**2026-09-17（重构交付轮）实测：864 项全绿 = Domain 94 + Format 74 + Application 696；四条命令（build / test / npm build / publish）退出码均为 0。**
+命令与逐项输出见 [`docs/FINAL-DELIVERY.md`](FINAL-DELIVERY.md) §2。
 
 **2026-09-13 实测：642 个测试全绿（74 Format + 568 Domain），本机真实数据门控测试全部真跑。**
 
-测试基线的历史轨迹（参考）：168 → 205 → 218 → 223 → 228 → 231 → 256 → 274 → 334 → 476 → 528 → 549 → 562 → 573 → 610 → 611 → 625 → 634 → **642**。
+测试基线的历史轨迹（参考）：168 → 205 → 218 → 223 → 228 → 231 → 256 → 274 → 334 → 476 → 528 → 549 → 562 → 573 → 610 → 611 → 625 → 634 → 642 → 746（WPF 时代口径）→ 733 → **864**。
+
+> 口径提醒：**869 / Application 701** 是 `docs/AUDIT-2026-R2.md` 审查当时的记录值，
+> 交付轮复测为 **864 / 696**（差 5 例），该文 §8 已加勘误。**以本节实测为准。**
 
 注意（见 `docs/PROJECT-INDEX.md` §11）：
 
@@ -62,8 +82,11 @@ dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r 
 7. **UI 文案用中文**；提交信息用中文；每个里程碑独立提交；提交前 build + test 必须全绿。
 8. **格式边界**：Unity 走 AssetsTools.NET 适配层、图像走 ImageSharp、XZ 走 Joveler（解码用 SharpCompress）、
    FMOD 只绑公开 C ABI。
-9. **设计色只允许出现在** `App/Themes/Theme.xaml` 与 `App/Themes/WorkbenchStyles.xaml`；
-   `WorkbenchPages/` 下硬编码色值必须为 0（既有验收门）。
+9. **设计色只允许出现在** 前端 `src/LimbusModEditor.Web/src/styles/tokens.css`（收口验收门，见
+   `docs/CODE-STRUCTURE.md` §6-34）；`src/views/`、`src/components/` 下硬编码色值必须为 0。
+   历史条目（`App/Themes/Theme.xaml` + `App/Themes/WorkbenchStyles.xaml`）**仅对宿主外壳残留有效**：
+   两个文件 2026-09-17 实测**仍在且已无消费点**，`WebView2MainWindow.xaml` 另有 6 处内联色值——
+   属未修残留，见 `docs/FINAL-DELIVERY.md` G-08（旧 WPF 页面层的 `WorkbenchPages/` 硬编码色值门已随目录删除失效）。
 10. **新增逻辑要可测**：`App` 项目没有测试工程，值得测的逻辑必须下沉到 `Application`。
 11. **文档索引与代码同步**：新增/删除源文件、改变职责边界或口径时，同步更新
     `docs/PROJECT-INDEX.md`（逐文件索引）与 `docs/CODE-STRUCTURE.md`（不变量表/流程）；
@@ -159,6 +182,34 @@ dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r 
   无 catalog 时不清标记）、`AssetPreviewRegistryTests`（真实静态表预览必须有界）、
   `ModPackExportTests`（进度节流）。
 
+### T-J（WebView2 重构交付轮遗留，2026-09-17 登记；按价值排序）
+- **T-J1（最高）维基页面自动生成链路**：权威引擎（`Relations/Authority/`）与两个
+  `WikiPageArranger` 目前**没有生产调用点**，也**没有**「分析 → 生成页面 → 落 `wiki-pages.db`」的服务
+  （注释引用的 `WikiAutoGenerationService` 不存在）。后果：14 类页面在本机全为空。
+  验收：一条命令/一次启动能把 `relation-index.db` + lang/static 事实按 `docs/WIKI-PARITY-SPEC.md`
+  生成页面并入 `wiki-pages.db`，且 `WritableSourceKind != Path` 的字段**留空不编造**。
+  证据与影响见 `docs/FINAL-DELIVERY.md` G-01。
+- **T-J2 `wiki.getEditPlan` / `wiki.applyEdit` 是原样回执**：`applyEdit` 不落库即返回 `ok=true`，
+  `getEditPlan` 对所有编辑都回填常量方法名 `"wiki.saveContent"`。见 FINAL-DELIVERY G-02。
+- **T-J3 `bank.preview`（音频试听）未端到端可用**：只做到「验证 Bank+FMOD 可用 + 标注需宿主原生播放」。
+  见 FINAL-DELIVERY G-03 与 §5 R-06。
+- **T-J4 前端无单测工程**：`package.json` 无 `test` 脚本（`npm run test` 会失败），
+  现有只有 `type-check`；R2 新债 N-02 仍未关闭。
+- **T-J5 WPF 时代文档章节重写**：`docs/CODE-STRUCTURE.md` §4/§5/§7/§8/§9 与
+  `docs/PROJECT-INDEX.md` §5.2/§9/§11.6 仍是 WPF 时代原文（指向已删除文件）。
+  两文顶部均已加「章节新鲜度声明」，逐段重写未做。见 FINAL-DELIVERY G-07。
+- **T-J6 发布目录残留旧前端产物**：`PublishFrontend` 增量复制不清目录。**2026-09-17 交付轮精确口径**：
+  当两次前端构建的**哈希文件名不同**（内容变了）时，旧 `assets/*` 会残留在 `wwwroot/`（此前观察到 17 个孤儿即属该情形）；
+  本轮 `npm run build` → `dotnet publish` 连续两次实测 `wwwroot/` 与 `dist/` **52 = 52、逐文件 SHA256 一致、`diff -rq` 无输出**，
+  故本次未复现。风险仍在（升级/改前端后重新发布到旧目录即可能出现）。见 FINAL-DELIVERY G-05。
+- **T-J7 宿主外壳残留（委托2 发现，未修）**：`App/Themes/Theme.xaml`(76 行) + `App/Themes/WorkbenchStyles.xaml`(443 行)
+  仍被 `App.xaml` 并入 `Application.Resources` 但**无任何消费点**（死资源）；`WPF-UI 4.3.0` 仍为
+  `PackageReference`（宿主外壳 `ui:FluentWindow`/`ui:TitleBar` 在用）；`WebView2MainWindow.xaml` 含 6 处内联色值。
+  见 FINAL-DELIVERY G-08。**交付轮硬约束「不改 `src/`」，故只登记不修。**
+- **T-J8 sync-over-async 余量**：R2 新债 N-03 所述 `IpcGateway.cs` 8 处已由 t60 清零（实测 0 命中），
+  但 Application 内**仍有 3 处**：`Assets/Preview/AssetPreviewProviders.cs:297`、`:354`、`Build/UnityCacheExportService.cs:206`。
+  见 FINAL-DELIVERY G-09。
+
 ---
 
 ## 6. 已知边界与已知问题（不要顺手改）
@@ -183,6 +234,9 @@ dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r 
 | `tests/LimbusModEditor.Domain.Tests/UnitTest1.cs` 是空测试 | 无覆盖价值 | 保留（删除无收益，见 `docs/PROJECT-INDEX.md` §11.6） |
 | 游戏更新后缓存外层键变化 | Carra2 导出会与缓存不对齐 | 由导出诊断暴露（**不自动修复**） |
 | 旧导出通道与新导出并列 | 概念重叠 | 见 T-D 决策点 |
+| 宿主的 WPF 残留（死主题资源 + WPF-UI 依赖 + 内联色值 6 处） | 启动期多解析 519 行资源、依赖多一个包；不影响功能 | 未修（交付轮不改 `src/`）→ T-J7 / FINAL-DELIVERY G-08 |
+| Application 内 3 处 sync-over-async | 预览/导出路径有死锁与线程阻塞的理论风险（本机未复现） | 未修 → T-J8 / FINAL-DELIVERY G-09 |
+| 维基 14 类页面在本机为空 | 无法在界面上查看/编辑任何维基内容 | 生成链路未接通 → T-J1 / FINAL-DELIVERY G-01 |
 
 **2026-09-12 用户报障四条已修（回归测试已入库，别再退回旧写法）**：
 
@@ -239,7 +293,13 @@ dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r 
 | `docs/REALDATA-VERIFY.md` | 写回链路真实数据验证报告（含严重缺陷的根因与修复） |
 | `docs/REVIEW.md` | 自审报告：审查发现、设计变更风险、性能量化基线 |
 | `docs/ARCHIVE-DESIGN-NOTES.md` | 历史计划中被删文件里**仍然有约束力**的设计决策（其余历史见 git log） |
-| `docs/ROADMAP.md` | 实现历史与后续方向（长文；P0–P4 的原始表述） |
+| `docs/ROADMAP.md` | 实现历史与后续方向（长文；P0–P4 的原始表述 + 2026-09-17 新增的 W 波次状态） |
+| `docs/ARCH-WEBVIEW2-VUE.md` ★ | **架构决策记录（ADR）**：显式取代 `docs/WEBVIEW-FEASIBILITY.md` §5/§6；WebView2 宿主 + Vue3/TS 前端的波次（W0–W4）、不利项回应、迁移分类表、Spine 前移清单、内存/体积目标 |
+| `docs/WEB-IPC-CONTRACT.md` ★ | 最小 IPC 契约：三向信封、统一分页、错误码与取消、二进制通道（禁 base64）、对话框/剪贴板/`Process.Start` 回调 |
+| `docs/WIKI-PARITY-SPEC.md` ★ | 维基对等规格：14 类页面站点地图 + 结构 Schema + 仿制清单（照搬/适配/放弃）+ 逐栏数据映射 |
+| `docs/RELATIONS-AUTHORITY-MATRIX.md` ★ | 权威来源矩阵：16 种权威来源、三档置信度、可写性判定；**禁止 id 数字窗口猜测** |
+| `docs/AUDIT-2026-R1.md` / `docs/AUDIT-2026-R2.md` | 委托2 两轮审查（重构前 / 重构后）；R2 含 R1 逐条复核、并发事故复核、新债与残余风险、§8 勘误 |
+| `docs/FINAL-DELIVERY.md` ★ | **三项委托的最终交付报告**：完成度与验收证据、与用户原话逐条对照、已知缺口与残余风险、过程风险与应对规则、**交付前人工冒烟清单** |
 
 **已删除/归档的历史文件**（2026-09-12）：
 

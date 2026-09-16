@@ -1,5 +1,13 @@
 # WebView 重构前端 · 可行性分析
 
+> 🚫 **结论已被取代（横幅，2026-09-17 交付轮复核）**：本文档 §5/§6 的
+> 「不建议现在做 A（全量 WebView 重写）」**结论作废**，一律以
+> [`docs/ARCH-WEBVIEW2-VUE.md`](ARCH-WEBVIEW2-VUE.md)（ADR）为准。
+> 重构**已执行并交付**：WebView2 薄宿主（`src/LimbusModEditor.App/`，8 个源文件）+
+> Vue3/TS 前端（`src/LimbusModEditor.Web/`，9 工作台视图 + 维基视图，
+> Spine 渲染全在前端 / native Spine 工程已删除）；交付证据、已知缺口与人工冒烟清单见
+> [`docs/FINAL-DELIVERY.md`](FINAL-DELIVERY.md)。
+>
 > ⚠️ **2026-09-15 状态更新**：本文档 §5/§6 的「不建议现在做 A（全量 WebView 重写）」结论
 > **已被 `docs/ARCH-WEBVIEW2-VUE.md`（ADR）显式取代**——用户已定案全量重构为 WebView2 宿主 + Vue3/TS 前端，
 > 波次 W0→W4 与 IPC 契约见 ADR 与 `docs/WEB-IPC-CONTRACT.md`。

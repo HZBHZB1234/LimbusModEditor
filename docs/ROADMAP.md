@@ -46,7 +46,30 @@
 dotnet build LimbusModEditor.slnx --no-restore
 dotnet test LimbusModEditor.slnx --no-restore
 dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r win-x64 --self-contained false -o artifacts/publish-win-x64 --no-restore
+npm --prefix src/LimbusModEditor.Web run build          # 前端（publish 之前必须先构建）
 ```
+
+---
+
+## W 波次（WebView2 + Vue3/TS 全量重构，2026-09-15 起）
+
+> 本节按 `docs/ARCH-WEBVIEW2-VUE.md` §4 的波次口径登记状态；**验收证据一律给命令/文件路径**，
+> 完整交付报告见 `docs/FINAL-DELIVERY.md`。
+
+| 波次 | 目标 | 状态 | 验收证据 |
+|---|---|---|---|
+| **W0** 冻结 / spike | ADR + IPC 契约冻结；前端工程根骨架；宿主壳 spike；五个未知量（运行时检测/IME/DPI/对话框回调/二进制通道） | ✅ 完成 | `docs/ARCH-WEBVIEW2-VUE.md`、`docs/WEB-IPC-CONTRACT.md`、`docs/SPIKE-WEBVIEW2.md`；`src/LimbusModEditor.Web/` 骨架 |
+| **W1** 网关 + 竖切片 | IPC 网关（信封/分页/错误码/取消/二进制通道/对话框回调）+ 资源工作台竖切片 + 路由与 Pinia | ✅ 完成 | `src/LimbusModEditor.Application/Ipc/`（**49 个派发方法名 / 47 个独立处理器**，2026-09-17 交付轮实测；此前「50 个派发入口」为旧口径，见 `docs/AUDIT-2026-R2.md` §8 勘误）、`src/LimbusModEditor.Web/src/ipc/client.ts`、9 工作台视图 |
+| **W2** 全量迁移 | 22 个 UI 单元按分类表迁移；四工作台保真；**Spine 全量前端化 + native 移除**；App 收窄为薄宿主 | ✅ 完成 | `src/LimbusModEditor.App/` 8 个 `.cs` 源文件（另有 `App.xaml` / `WebView2MainWindow.xaml` / `app.manifest`，以及**未删除但已无消费点**的 `Themes/*.xaml`，见 FINAL-DELIVERY G-08）；`SpineRuntime`/`SpineAnimationPreviewWindow`/`Application/Spine` 解析层删除后 grep **0 命中**（2026-09-17 交付轮复测 `grep -rniE "SpineRuntime\|SpineFrameRenderer\|SpineAnimationPreviewWindow" src/` = 0 行）。⚠️ 交付轮复核 `cg_40` 渲染证据：截图实际路径为 `C:\Users\tester\temp\t40-test\screenshot_cg40_final.png`（文件**存在**，前序报告写的 `temp\40-test\` 是笔误），但该截图 canvas 区域仅 3 种颜色（纯背景）→ **不能证明渲染成功**，故「真实骨架渲染成功」在交付轮**未复核通过**，只作为前序结论引用（详见 FINAL-DELIVERY G-06） |
+| **W3** 关联维基化 | 维基化彻底重构、**一一对等 14 类页面**、多级二级页面、**不依赖 id 规则推断**、内存与速度 | ✅ **完成（结构面）** ⚠️ **生成链路未接通** | 规格 `docs/WIKI-PARITY-SPEC.md`（14 类 + 结构 Schema + 仿制清单 照搬17/适配8/放弃11）、`docs/RELATIONS-AUTHORITY-MATRIX.md`（16 权威来源 + 三档置信度）、`Application/Relations/Authority/`（引擎 + 7 provider）、`Relations/WikiPageStore|QueryService|EditService`（4 层树 + CASCADE）、`WikiSecondaryPageRules`（多二级页）、前端 4 视图 + `wiki.*` **10 个** IPC 处理器。**未接通**：引擎/编排器无生产调用点、交付环境无 `wiki-pages.db`（页面为空的直接原因）→ 见 `docs/FINAL-DELIVERY.md` G-01 |
+| **W4** 终审 + 集成 | 重构后审查；发布集成（web 产物进 `wwwroot/`）；文档同步收尾 | ✅ 完成（含 1 项遗留） | `docs/AUDIT-2026-R2.md`（R1 逐条复核 8/3/1 + 并发事故复核 + 新债 + 残余风险 + 勘误）、`docs/FINAL-DELIVERY.md`；发布一致性实测（2026-09-17 交付轮）：`npm run build` → `dotnet publish` 后 `wwwroot/` 与 `dist/` **52 文件逐文件 SHA256 一致**（`diff -rq` 无输出），`wwwroot/licenses/` 两份 LICENSE 在。**残留孤儿问题的口径**：`PublishFrontend` 是 `SkipUnchangedFiles=true` 的增量复制且不清理目标目录，**当两次构建的前端哈希文件名不同**时旧 `assets/*` 会残留（此前观察到 17 个孤儿即属该情形）；本轮两次构建产物一致，故未复现 → 见 FINAL-DELIVERY G-05 |
+
+**W3 的口径澄清（重要，勿过度声明）**：用户对维基的最终口径是
+「一一对等 14 类页面 / 只显示本地可推导的数据（推不出来不显示、不编造）/ 页面只是方便查看与编辑的界面
+/ 无自由正文撰写 / 编辑只改内容不改结构 / 只导出模组」。本轮落地的是**结构、契约与查询/编辑面**；
+**「自动分析 → 生成页面」这一步尚未接线**，故运行期页面为空。该项已登记为最高优先待办（`docs/STATUS.md` T-J1）。
+
+---
 
 ## P0：真实样本和稳定性（优先级最高）
 

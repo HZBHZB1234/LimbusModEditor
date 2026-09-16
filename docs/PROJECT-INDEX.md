@@ -33,6 +33,8 @@
 | §12 | `artifacts/` 与 `third_party/` |
 | §13 | 元数据（`AssetRecord.Metadata`）键字典 |
 | §14 | 按「症状」定位文件的速查表 |
+| §15 | 文档登记 |
+| §16 | Wiki（维基化关联页）：前端视图/组件 + 服务层 + IPC 处理器 |
 
 ---
 
@@ -522,7 +524,32 @@
 
 ---
 
+### §8.17 `Ipc/`（宿主 ↔ 前端契约网关，W1 新增）
+
+> 一句话：**契约 DTO 与派发逻辑都在 `Application`（无 WPF 依赖，铁律 §3-10），可被单测覆盖**；
+> 宿主侧只留 `CoreWebView2.PostWebMessageAsJson` 传输层。契约文本见 `docs/WEB-IPC-CONTRACT.md`。
+
+| 文件 | 功能 |
+|---|---|
+| `IpcGateway.cs` | 单一 dispatch 入口：**49 个派发方法名 / 47 个独立处理器**（2026-09-17 实测；`catalog.*` `asset.*` `spine.*` `relation.*` `project.*` `export.*` `config.*` `uiState.*` `bank.*` `lang.*` `static.*` `wiki.*` 十二组），async 贯通 + 协作式取消；`wiki.*` 十个方法名见 §16.3 |
+| `IpcDtos.cs` | 请求/响应 DTO（含 pagination、`AssetCatalogPage`、wiki 段） |
+| `IpcEnvelope.cs` | 三向信封（request / response / event）与统一错误码 |
+| `ProjectState.cs` | 组合根：服务装配与生命周期（前端不持有服务实例） |
+
+---
+
 ## §9 `src/LimbusModEditor.App`（WPF 界面层）
+
+> ⚠️ **章节新鲜度声明（2026-09-17 交付轮加注）**：§9.1–§9.4 为 **WPF 时代原文**，
+> 其中列出的 `MainWindow.xaml(.cs)`、`WorkbenchPages/*`（五个工作台页与共享骨架）、
+> `SpineAnimationPreviewWindow`、`ExportProgressWindow`、`AppTheme.cs`、`HumanSizeConverter.cs`、
+> `AssetRow.cs`（以 `App/` 下**实际不存在的文件**为准）**均已删除**（22 个 UI 单元，见 `docs/ARCH-WEBVIEW2-VUE.md` §7）。
+> 现状：`src/LimbusModEditor.App/` = 8 个 `.cs`（`WebView2MainWindow` / `NativeBridgeService` /
+> `TextService` / `LogHost` / `UiHeartbeat` / `StartupTrace` / `App.xaml.cs` / `AssemblyInfo.cs`）
+> + `App.xaml` + `WebView2MainWindow.xaml` + `app.manifest`，以及**仍存在但无消费点**的
+> `Themes/Theme.xaml` + `Themes/WorkbenchStyles.xaml`（见 FINAL-DELIVERY G-08）。
+> **界面与页面现在全部在前端工程**：见 §16（Wiki）与 `src/LimbusModEditor.Web/src/`；
+> 逐段重写尚未完成，登记在 `docs/FINAL-DELIVERY.md` G-07。
 
 > 本层**没有测试工程**：任何值得测的逻辑都要下沉到 `Application`。
 
@@ -866,7 +893,12 @@
 | `docs/WEB-IPC-CONTRACT.md` ★ | **最小 IPC 契约**：请求/响应/事件三类消息帧；统一分页契约（`AssetCatalogPage`，禁止全量）；错误码与取消语义；二进制通道（`lme.app`/`lme.data` 本地虚拟主机，禁止 base64）；对话框/剪贴板/`Process.Start` 回调；`RelationDeepLink` 的 `'\0'` 分段载荷原样透传与 Reveal 布尔语义；契约 DTO 归属 `Application/Ipc`（无 WPF，铁律 §3-10） |
 | `docs/SPIKE-WEBVIEW2.md` ★ | **W0 WebView2 宿主 spike 实测结论**：五个未知量（运行时检测/IME/DPI/对话框回调/二进制通道）逐项实测；Evergreen 运行时探测（本机 153.0.4234.32）；虚拟主机映射（`lme.app`/`lme.data`）加载静态页成功；PerMonitorV2 DPI 清单；中文 IME/文件对话框/剪贴板/`Process.Start` 回调通道代码落地；二进制通道 Virtual Host vs Base64 对比结论；Fixed Version 分发开关预留与体积代价；契约需修正点 |
 | `docs/AUDIT-2026-R1.md` ★ | **【委托2·首轮】架构级反模式审查与仓库卫生审计**（t1，2026-09-15）：12 项架构审计发现（F-01~F-12，含 4 HIGH / 5 MEDIUM / 2 LOW），逐条给编号/严重度/证据/根因/建议/重构交互标注；首轮 14 项独立复审已收录于 docs/REVIEW.md §2.3 |
-| `docs/AUDIT-2026-R2.md` ★ | **【委托2·第二轮】重构后最终状态全面审查**（t20，2026-09-17）：R1 发现逐条复核（7 已修/不复现、4 仍存在有意决策、1 不修）；并发改动事故专项复核（FormatVersion v4 一致性、无重复逻辑、测试与实现一致）；新债清单（5 项）；残余风险清单（6 项）；文档同步核对清单（8 文档） |
+| `docs/AUDIT-2026-R2.md` ★ | **【委托2·第二轮】重构后最终状态全面审查**（t20，2026-09-17）：R1 发现逐条复核（**8 已修/不复现、3 仍存在有意决策、1 不修**，合计 12 项）；并发改动事故专项复核（FormatVersion v4 一致性、无重复逻辑、测试与实现一致）；新债清单（5 项）；残余风险清单（6 项）；文档同步核对清单（8 文档）。**§0/§2.4 的「869 / Application 701」为审查时旧数，交付轮实测为 864 / 696，见该文 §8 勘误** |
+| `docs/WIKI-PARITY-SPEC.md` ★ | **【委托3】维基对等规格**：以 `limbuscompany.huijiwiki.com` 为目标，**14 类页面**站点地图（一一对等）+ 每类页面的结构 Schema（信息框字段 / 分节 / 列表列）+ 仿制清单（照搬 17 / 适配 8 / 放弃 11）+ 数据映射列（每一栏标注本地数据来源与可推导性） |
+| `docs/RELATIONS-AUTHORITY-MATRIX.md` ★ | **【委托3】权威来源矩阵**：16 种权威来源逐条列出（源文件/表/字段 → 可推出的事实 → 置信度），三档置信度口径（Authoritative / Derived / Ambiguous）与「`WritableSourceKind` = Unknown/None/Path」的可写性判定，明确**禁止用 id 数字窗口猜测类别** |
+| `docs/t50-api-signature-table.md` | **【委托1】spine-webgl@4.0.26 前端渲染 API 对照表**（t50）：官方 API 签名 / 参数语义 / 与 t40 旧假设的差异点 / 修正结论；是前端 `SpineRenderer.vue` + `spine-runtime.ts` 的依据 |
+| `docs/t43-step2-analysis.md` | **【委托3】权威推断第二步分析**（t43）：页面编排的数据依赖分解、哪些字段可推导 / 哪些必须留空（不编造）、二级页面拆分判据 |
+| `docs/FINAL-DELIVERY.md` ★ | **【交付】三项委托的最终交付报告**：逐项完成度与验收证据（命令 + 文件路径）、与用户原话逐条对照、已知缺口与残余风险、过程风险与应对规则、**交付前人工冒烟清单**（含「未自动验证」标注） |
 
 ### 同步标记汇总（2026-09-15）
 
@@ -874,3 +906,99 @@
 - `docs/CODE-STRUCTURE.md`：§2/§3/§6/§10 与本文档联动更新（见该文件对应小节）。
 - `docs/STATUS.md`：测试基线 746 → **733**（W2 删除 SpineRuntime.Tests 7 例 + SpineTests 13 例时生效）。
 - `THIRD-PARTY-NOTICES.md`：§1 spine-csharp / §2 SkiaSharp 条目 W2 移除，新增 spine-ts（前端运行时）条目。
+
+### 同步标记汇总（2026-09-17，交付轮）
+
+- `docs/STATUS.md`：测试基线 → **864**（Domain 94 + Format 74 + **Application 696**，实测命令见该文 §2）。
+- `docs/CODE-STRUCTURE.md`：§2 依赖表（新服务 + spine-webgl@4.0.26）、§6 不变量（`FormatVersion = v4`、
+  权威来源优先）、§10 常用命令（前端构建 + 一键发布）已同步。
+- `docs/ROADMAP.md`：新增「W 波次（WebView2 重构）」小节，W3 关联维基化标记完成。
+- `docs/USAGE.md`：新增 §10「Wiki 工作台（维基化关联页）」。
+- `docs/AUDIT-2026-R2.md`：新增 §8 勘误（测试数 869→864 / Application 701→696；IPC 派发 33→**49 个方法名 / 47 个处理器**）。
+- `README.md`：构建步骤补前端 `npm` 构建与 publish 集成。
+
+### 同步标记汇总（2026-09-17 交付轮实测复校）
+
+> 上面两段是**编写时的声明**；以下是交付轮**逐条实测**后的落地状态与更正（依据见 `docs/FINAL-DELIVERY.md` §3/§4）。
+
+| 项 | 实测状态 |
+|---|---|
+| 本文 §16（Wiki 前端/服务层/IPC 处理器） | ✅ 已登记；IPC 处理器表与 `IpcGateway.cs` 实测一致（`wiki.*` 10 个方法名） |
+| 本文 §8.17（`Ipc/` 网关四个文件） | ✅ 交付轮补登（原文缺该小节） |
+| 本文 §9/§9.1–§9.4 新鲜度 | ⚠️ 交付轮加「WPF 时代原文」横幅；逐段重写未做（G-07） |
+| `docs/STATUS.md` 基线 | ✅ 864 为交付轮实测（build/test/npm/publish 四条命令 exit 0） |
+| `docs/ROADMAP.md` W 波次 | ✅ W3 标记完成（结构面）；W1 派发入口数更正为 **49/47**；W2 的 cg_40 截图证据复核结论已更正（G-06） |
+| `docs/USAGE.md` §10 | ✅ 交付轮新增「Wiki 工作台」 |
+| `docs/CODE-STRUCTURE.md` §2 App 行 / §6-13 | ⚠️ 交付轮**更正两处不实表述**：WPF-UI 未移除、`App/Themes/*.xaml` 未删除（G-08） |
+| `docs/AUDIT-2026-R2.md` §8 | ✅ 交付轮新增勘误表（E-01~E-09） |
+| `README.md` | ✅ 交付轮补「Building from source」（npm → build/test → publish 顺序与 `wwwroot/` 一致性期望） |
+
+---
+
+## §16 Wiki（维基化关联页）：前端视图/组件 + 服务层 + IPC 处理器
+
+> **口径（委托3 最终口径，2026-09-17）**：与 `limbuscompany.huijiwiki.com` **一一对等（14 类页面）**；
+> **只显示本地可推导的数据**（推不出来的不显示、**不编造**）；页面只是「方便查看与编辑」的界面，
+> **无自由正文撰写**；**编辑只改内容、不改结构**；**只导出模组**。
+> 规格与逐栏数据映射见 `docs/WIKI-PARITY-SPEC.md`；权威来源与置信度见 `docs/RELATIONS-AUTHORITY-MATRIX.md`。
+
+### §16.1 前端（`src/LimbusModEditor.Web/src/`，Node 工程，不进 `.slnx`）
+
+| 位置 | 文件 | 功能 |
+|---|---|---|
+| `views/` | `WikiHomeView.vue` | 维基首页：14 类目卡片 + 最近页 + 统计（`wiki.home`） |
+| `views/` | `WikiCategoryView.vue` | 类目索引页（分页 + 虚拟滚动，`wiki.categoryIndex` / `wiki.category.load`） |
+| `views/` | `WikiEntityPage.vue` | 实体页：信息框 + 分节 + TOC + 关联列表（`wiki.page.load` / `wiki.getPage`） |
+| `views/` | `WikiSearchView.vue` | 维基内搜索（`wiki.search`） |
+| `components/` | `WikiShell.vue` | 维基外壳：类目导航 + 面包屑 + 页宿主（`/wiki/*` 路由共用） |
+| `components/` | `WikiEditor.vue` | **内容编辑器**：只改字段内容、不改页面结构（`wiki.getEditPlan` → `wiki.applyEdit` / `wiki.saveContent`） |
+| `router/` | `index.ts` | 维基路由：`/wiki`（home）、`/wiki/category/:category`、`/wiki/page/:id`、`/wiki/search` |
+| `stores/` | `wiki.ts` | Pinia：当前页/类目/搜索结果/编辑态（**只存页级数据，不缓存全量**） |
+| `ipc/` | `client.ts` | IPC 客户端（三向信封；`wiki.*` 方法名与网关 dispatch 表一致） |
+| `ipc/` | `types.ts` | 契约 DTO 的 TS 镜像（对应 `Application/Ipc/IpcDtos.cs` 的 wiki 段） |
+| `ipc/` | `harness.ts` / `stubBridge.ts` | **验证专用接缝**（仅 `?harness=1` 生效；桩桥 + 夹具，生产路径不受影响，见 `src/LimbusModEditor.Web/HARNESS.md`） |
+| `public/fixtures/` | 13 个 `wiki-*.json` | 夹具（覆盖 6 类别：persona / enemy / ego / ego-gift / abnormality / announcer）——**验证用，不是运行时数据** |
+| `components/` | `SpineRenderer.vue` + `spine-runtime.ts` | 前端 Spine 渲染（spine-webgl@4.0.26；JSON 主路径 + 二进制兜底 + `pma:true` 预乘 alpha） |
+
+### §16.2 服务层（`src/LimbusModEditor.Application/Relations/`）
+
+| 命名空间 | 文件 | 功能 |
+|---|---|---|
+| `…Application.Relations` | `WikiPageModels.cs` | 维基页面数据模型：`WikiPage` / `WikiEntry` / 分节 / 信息框字段 / 二级页引用 |
+| `…Application.Relations` | `WikiPageStore.cs` | 页面库（SQLite `cache/wiki-pages.db`）：**4 层页面树**（类目 → 页面 → 分节 → 条目）+ 显式 **CASCADE DELETE**（删父不留孤儿）+ `Source` 语义 `auto`/`revised` |
+| `…Application.Relations` | `WikiPageQueryService.cs` | 查询门面：页树、类目索引、条目搜索（**分页**，前端不取全量） |
+| `…Application.Relations` | `WikiEditService.cs` | 内容编辑：字段级写入 + 修订标记（**只改内容，不改结构**） |
+| `…Application.Relations` | `WikiPageArranger.cs`（t12 版，基于 `RelationQueryService`） | 页面编排：把 `relation-index.db` 的 subjects/links/xrefs 按分节表组织成页面结构 |
+| `…Application.Relations` | `WikiSectionDefinition.cs` / `WikiSecondaryPageRules.cs` | 分节表与**二级页拆分判据**（允许同一对象拆多个二级页面） |
+| `…Application.Relations.Authority` | `AuthoritySource.cs` / `ConfidenceLevel.cs` / `AuthorityFact.cs` / `IAuthorityProvider.cs` | 权威推断引擎契约：**16 种权威来源** → 事实；三档置信度 `Authoritative` / `Derived` / `Ambiguous`；`WritableSourceKind` = `Unknown` / `None` / `Path` |
+| `…Application.Relations.Authority` | `PersonaAuthorityProvider.cs` / `EnemyAuthorityProvider.cs` / `EgoAuthorityProvider.cs` / `EgoGiftAuthorityProvider.cs` / `AbnormalityAuthorityProvider.cs` / `AnnouncerAuthorityProvider.cs` / `StoryDataAuthorityProvider.cs` | 逐类权威来源实现（资源目录前缀判类、lang 的 `Egos.json` 权威判 E.G.O、`id % 10000` 归一化饰品等；**禁止 id 数字窗口猜测**） |
+| `…Application.Relations.Authority` | `WikiPageAuthorityEngine.cs` | 权威引擎：按对象汇总事实 + 判可写性（`WritableSourceKind`） |
+| `…Application.Relations.Authority` | `WikiPageArranger.cs`（t43 版，基于权威引擎） | 编排器：**只产出 `WritableSourceKind.Path` 的事实**，`None`/`Unknown` 不进页面结构 |
+
+> ⚠️ **接线现状（2026-09-17 实测，勿误读）**：UI/IPC 路径 = `IpcGateway` → `WikiPageStore` / `WikiPageQueryService`（真实可用，有测试）；
+> 而 **权威引擎与两个 `WikiPageArranger` 目前没有生产调用点**（仅被 `WikiAuthorityEngineTests` 覆盖），
+> 也**没有**「分析 → 生成页面 → 落 `wiki-pages.db`」的服务（`WikiPageArranger` 注释里引用的 `WikiAutoGenerationService` **在本仓库中不存在**）。
+> 即：页面结构/查询/编辑/IPC 链路是实的，**自动生成链路缺失**。详见 `docs/FINAL-DELIVERY.md` 已知缺口 G-01。
+
+### §16.3 IPC 处理器（`src/LimbusModEditor.Application/Ipc/IpcGateway.cs`）
+
+| 方法名 | 处理器 | 说明 |
+|---|---|---|
+| `wiki.home` | `HandleWikiHome` | 首页卡片/最近页/统计（库不存在时返回空集，不报错） |
+| `wiki.categoryIndex` / `wiki.category.load` | `HandleWikiCategoryIndex` | 类目索引（**同一处理器的两个别名**，兼容前后端命名） |
+| `wiki.page.load` / `wiki.getPage` | `HandleWikiPageLoad` | 单页加载（**别名对**）；库不存在返回 `not-found` 中文错误 |
+| `wiki.search` | `HandleWikiSearch` | 条目搜索（分页） |
+| `wiki.page.save` | `HandleWikiPageSave` | 页面 upsert（`InsertPageIfNotExists`） |
+| `wiki.saveContent` | `HandleWikiSaveContent` | 内容写入（`Source = "Revised"`） |
+| `wiki.getEditPlan` | `HandleWikiGetEditPlan` | 生成可编辑清单（供 `WikiEditor.vue`） |
+| `wiki.applyEdit` | `HandleWikiApplyEdit` | 应用编辑计划（**当前实现为原样回执，未落库**，见 FINAL-DELIVERY G-02） |
+
+### §16.4 数据落盘
+
+| 位置 | 内容 | 谁写 |
+|---|---|---|
+| `<程序目录>/cache/wiki-pages.db` | 维基页面树（类目/页面/分节/条目，CASCADE 删父） | `Application/Relations/WikiPageStore.cs`（写入入口：`IpcGateway` 的 `wiki.page.save` / `wiki.saveContent`） |
+
+> **交付环境实测（2026-09-17）**：`wiki-pages.db` 在仓库与 `artifacts/publish-win-x64/cache/` 下**均不存在**
+> （`Get-ChildItem -Recurse -Filter wiki-pages.db` 无输出），因此本机启动后 14 类页面均为空——
+> 这是 §16.2 接线缺口 G-01 的直接后果，不是渲染 bug。

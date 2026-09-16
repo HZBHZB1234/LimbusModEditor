@@ -1,8 +1,16 @@
 # Limbus Mod Editor
 
-Windows-only C#/.NET 8 WPF authoring workbench for Limbus Company mods. The
+Windows-only C#/.NET 8 authoring workbench for Limbus Company mods. The
 project is structured as a creator tool (Assets Studio + FMOD Studio workflow),
 not as a launcher replacement.
+
+Since the 2026-09-15 refactor the UI is a **WebView2 thin host (C#, 8 source
+files) + Vue 3 / TypeScript frontend** (`src/LimbusModEditor.Web/`, Vite +
+vue-router + Pinia); Spine rendering (parsing, static preview, animation
+playback) lives entirely in the frontend. The WPF page layer and the native
+Spine runtime were deleted. See
+[`docs/ARCH-WEBVIEW2-VUE.md`](docs/ARCH-WEBVIEW2-VUE.md) and
+[`docs/WEB-IPC-CONTRACT.md`](docs/WEB-IPC-CONTRACT.md).
 
 ## Current workflow (three steps, zero configuration)
 
@@ -105,6 +113,37 @@ LimbusModEditor.Cli.exe import <project.lmeproj> <file-or-directory>
 LimbusModEditor.Cli.exe export <project.lmeproj> <output> [source]
 ```
 
+## Building from source
+
+```text
+# 0. prerequisites: .NET 8 SDK (global.json pins the SDK), Node 18+ / npm
+# 1. backend
+dotnet build LimbusModEditor.slnx --no-restore --nologo      # 0 warnings / 0 errors (warnings are errors)
+dotnet test  LimbusModEditor.slnx --no-build  --nologo       # baseline: 864 green (94 domain + 74 format + 696 application)
+
+# 2. frontend (Node project — deliberately NOT in LimbusModEditor.slnx)
+npm --prefix src/LimbusModEditor.Web install                 # first time only
+npm --prefix src/LimbusModEditor.Web run build               # vite build -> src/LimbusModEditor.Web/dist/ (+ licenses copied to dist/licenses/)
+
+# 3. publish (the frontend must be built first — see below)
+dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r win-x64 --self-contained false -o artifacts/publish-win-x64 --no-restore
+```
+
+The App project's `PublishFrontend` MSBuild target copies
+`src/LimbusModEditor.Web/dist/**` (including `dist/licenses/`) into the
+published `wwwroot/`, so step 2 **must** run before step 3 — a missing `dist/`
+fails the publish with a Chinese error instead of silently producing a package
+without a UI. Expected result: `wwwroot/` is byte-identical to `dist/`
+(52 files on 2026-09-17) and `wwwroot/licenses/` holds `spine-core-LICENSE` and
+`spine-webgl-LICENSE`.
+
+`logs/lme.py` (`build` / `test` / `publish`) wraps the dotnet commands only — it
+does **not** run npm. For a one-shot "frontend + backend" release either run the
+three blocks above, or use
+`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/publish.ps1`, which
+additionally copies the FMOD DLLs from `third_party/fmod/` into the output
+`fmod/` folder.
+
 ## Packaging
 
 ```text
@@ -136,8 +175,9 @@ running probes or taking screenshots. The per-round execution plans (`docs/plans
 ## Verification
 
 ```text
-dotnet build LimbusModEditor.slnx --no-restore
-dotnet test LimbusModEditor.slnx --no-restore
+dotnet build LimbusModEditor.slnx --no-restore --nologo
+dotnet test  LimbusModEditor.slnx --no-build  --nologo
+npm --prefix src/LimbusModEditor.Web run build          # frontend (must precede publish)
 ```
 
 The tests cover shared-config persistence/migration, FMOD discovery, cache
@@ -148,9 +188,13 @@ display/tree/sort/filter behavior, export-outlet advising, text preview
 one-click Carra2 export round-trips (real-sample gated), project persistence,
 source materialization, directory and package import, Carra/Lunartique/Rebank
 round trips, XZ compression round trips, bank probing, image/atlas operations,
-overlay backup/restore, and game launch path validation.
+overlay backup/restore, and game launch path validation — plus, since the
+refactor, the IPC gateway/envelope/paging/cancel contract, the wiki page store
+and query service, and the relation authority engine.
 
-Current baseline: **611 tests green** (74 format + 537 domain; real-data gated
-tests run for real on a machine with the game installed). Per-file test
-coverage, real-data gating variables and known flakes are documented in
-[`docs/PROJECT-INDEX.md`](docs/PROJECT-INDEX.md) §11.
+Current baseline (2026-09-17, measured): **864 tests green** (94 domain +
+74 format + 696 application) with `dotnet build` at 0 warnings / 0 errors.
+Per-file test coverage, real-data gating variables and known flakes are
+documented in [`docs/PROJECT-INDEX.md`](docs/PROJECT-INDEX.md) §11; the full
+delivery report (evidence, known gaps, manual smoke checklist) is
+[`docs/FINAL-DELIVERY.md`](docs/FINAL-DELIVERY.md).

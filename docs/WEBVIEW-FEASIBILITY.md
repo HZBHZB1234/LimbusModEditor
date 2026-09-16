@@ -1,5 +1,10 @@
 # WebView 重构前端 · 可行性分析
 
+> ⚠️ **2026-09-15 状态更新**：本文档 §5/§6 的「不建议现在做 A（全量 WebView 重写）」结论
+> **已被 `docs/ARCH-WEBVIEW2-VUE.md`（ADR）显式取代**——用户已定案全量重构为 WebView2 宿主 + Vue3/TS 前端，
+> 波次 W0→W4 与 IPC 契约见 ADR 与 `docs/WEB-IPC-CONTRACT.md`。
+> 本文档 §1–§4 的技术账（现状实测、纯数据家底、代价分布、WebView2 技术账）**仍然有效**，继续作为事实基础引用。
+
 - 分析方式：**只读**（不改源码 / 不跑 build / 不跑 test；索引库一律 `mode=ro`）
 - 日期：2026-09-15
 - 数据源：工作区源码实测（`src/**` 行数与控件统计）、`artifacts/publish-win-x64`、`docs/*`

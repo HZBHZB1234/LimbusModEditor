@@ -40,13 +40,14 @@
 
 | 命名空间 | 文件 | 功能 |
 |---|---|---|
-| — | `LimbusModEditor.slnx` | 解决方案清单（13 个 src 项目 + 2 个测试项目）；**新项目必须在此登记**，否则本地构建都不编译。**唯一例外**：`tests/LimbusModEditor.SpineRuntime.Tests` 刻意独立（理由见其 csproj 注释），验收时单独 `dotnet test tests/LimbusModEditor.SpineRuntime.Tests` 驱动 |
+| — | `LimbusModEditor.slnx` | 解决方案清单（13 个 src 项目 + 2 个测试项目）；**新项目必须在此登记**，否则本地构建都不编译。**刻意独立的例外**：`tests/LimbusModEditor.SpineRuntime.Tests`（W2 随工程删除）与 `src/LimbusModEditor.Web/`（Node 工程，见 §1），登记在各自小节 |
 | — | `Directory.Build.props` | 全局编译约定：`net8.0`、`Nullable=enable`、`TreatWarningsAsErrors=true`（**警告即失败**）、`RuntimeIdentifier=win-x64` |
 | — | `nlog.config` ★ | **日志配置的唯一来源**（NLog 6.2）：`current.log` 全量 + `errors.log` 只收 Error/Fatal（跨会话追加）、按大小轮转归档、AsyncWrapper 丢弃式背压（**绝不阻塞 UI 线程**）、`memory` 环形缓冲（UI/崩溃快照）、`autoReload="true"` 运行中改级别即生效；同时内嵌进 `Application` 以便被删时自动还原。埋点约定见 `docs/LOGGING.md` |
 | — | `global.json` | 固定构建 SDK 版本（`rollForward: latestPatch`） |
 | — | `README.md` | 项目门面：三步工作流、格式边界、CLI、打包、文档导航与验证命令 |
 | — | `scripts/publish.ps1` | Release win-x64 发布，并把 `third_party/fmod/*.dll` 复制进输出 `fmod/`（纯 ASCII，兼容 PS 5.1） |
 | — | `.gitignore` | 仓库卫生（忽略 `bin/obj/artifacts/third_party/fmod` 等） |
+| — | `src/LimbusModEditor.Web/` ★ | **前端工程根（固定，2026-09-15 起）**：Vite + Vue3 + TS + vue-router + Pinia；**刻意不进 `.slnx`**（Node 工程与 dotnet 构建隔离，与 `SpineRuntime.Tests` 同理）；设计色只允许出现在 `src/styles/tokens.css`；构建产物 `dist/` 发布时复制进 `artifacts/publish-win-x64/wwwroot/`。架构与 IPC 契约见 `docs/ARCH-WEBVIEW2-VUE.md` / `docs/WEB-IPC-CONTRACT.md` |
 
 ---
 
@@ -129,24 +130,26 @@
   `Rg16` 是「两个 8 位通道」。
 - **已知边界**：`ToImage`/`FromPng` 只处理 level 0（mipmap 只支持布局计算与切片）。
 
-### §5.2 `src/LimbusModEditor.SpineRuntime`（Spine 4.0 骨骼动画离线渲染）
+### §5.2 `src/LimbusModEditor.SpineRuntime`（Spine 4.0 骨骼动画离线渲染）— **2026-09-15 起计划删除（W2）**
 
 命名空间：`LimbusModEditor.SpineRuntime`
 
-> 用途：把 vendored 的官方 `spine-csharp` 4.0 核心源码（`third_party/spine-csharp/src/`）
-> 收编成一个 **net8.0、无 WPF 依赖**的类库，配 `SkiaSharp` 离屏绘制，给 App 提供
-> 「骨架 + 图集 + 页贴图 → 某一时刻的位图」的**真渲染**能力（此前只有文本解析预览，
-> 见 §8.15）。第三方许可与上游警告清单见 `docs/THIRD-PARTY-NOTICES.md`。
+> **⚠️ 已定案删除**（`docs/ARCH-WEBVIEW2-VUE.md` §7）：Spine 渲染全量前移前端（官方 spine-ts 运行时），
+> 本工程与 `third_party/spine-csharp/`、`tests/LimbusModEditor.SpineRuntime.Tests/` 一并移除。
+> 保留能力仅「定位并流式喂原始字节」（留在 `Application/Spine/SpineAnimationSourceService.cs`）
+> 与纯定位逻辑（`SpineSiblingIndex` 迁为独立文件）。删除/保留逐文件清单见 ADR §7；
+> 测试基线 746 → **733**（Domain 672→659）。下方为**删除前**的现状记录。
 
-| 文件 | 功能 |
-|---|---|
-| `SpineDocument.cs` ★ | 加载入口：`TryCreate(骨架 JSON, 图集文本, `ISpineTextureSource`)` → 可查询/可渲染的文档（动画清单、时长）。失败给中文原因，不抛 |
-| `SpineFrameRenderer.cs` ★ | 渲染入口：`RenderFrame(time, 宽, 高)` → PNG 字节；立绘等比缩进画布 |
-| `ISpineTextureSource.cs` | 「图集页名 → PNG 字节」的解耦接口（App 侧由 `SpineAnimationSource.PageBytes` 适配） |
-| `SkiaTextureLoader.cs` | 用 SkiaSharp 把 PNG 字节解码成 Spine 运行时需要的纹理 |
-| `SpineResults.cs` | 失败结果模型（中文原因） |
+| 文件 | 功能 | 处置（W2） |
+|---|---|---|
+| `SpineDocument.cs` ★ | 加载入口：`TryCreate(骨架 JSON, 图集文本, `ISpineTextureSource`)` → 可查询/可渲染的文档（动画清单、时长）。失败给中文原因，不抛 | **删除**（渲染前移前端） |
+| `SpineFrameRenderer.cs` ★ | 渲染入口：`RenderFrame(time, 宽, 高)` → PNG 字节；立绘等比缩进画布 | **删除** |
+| `ISpineTextureSource.cs` | 「图集页名 → PNG 字节」的解耦接口（App 侧由 `SpineAnimationSource.PageBytes` 适配） | **删除** |
+| `SkiaTextureLoader.cs` | 用 SkiaSharp 把 PNG 字节解码成 Spine 运行时需要的纹理 | **删除** |
+| `SpineResults.cs` | 失败结果模型（中文原因） | **删除** |
+| `LimbusModEditor.SpineRuntime.csproj` | 工程文件；刻意覆盖根 `Directory.Build.props`（`Nullable=disable` + `TreatWarningsAsErrors=false`，vendored 源码非 nullable 标注） | **删除** |
 
-### ★ 要点（`SpineRuntime`）
+### ★ 要点（`SpineRuntime`，删除前现状）
 
 - **本工程刻意覆盖根 `Directory.Build.props`**：`Nullable=disable` + `TreatWarningsAsErrors=false`
   （vendored 官方源码不是 nullable 标注的；不为消警告大改官方源码）。`NoWarn=CS8632` 只抑制
@@ -463,11 +466,20 @@
   类别 id 归一化 / 新增列并填充 / 跨链关系名改名」。否则旧派生库会被当成新鲜的。
   仅改 UI 侧**如何使用**现有列、或 SQLite 加列本身（`WorkbenchCacheSchema` 轻量迁移）**不**需要 +1 —— 两者是两件事。
 
-### §8.15 `Spine/`（Spine 文本解析 / 静态预览 / 导出 / 找动画素材）
+### §8.15 `Spine/`（Spine 文本解析 / 静态预览 / 导出 / 找动画素材）— **2026-09-15 起瘦身（W2）**
 
 > 一句话：**解析与渲染分离**。游戏里的 Spine 数据就是可读文本
 > （骨架 `<name>.json`、图集 `<name>.atlas.txt`、页贴图 `.png`），本目录自己解析这三样，
 > 给出「结构 + 图集布局」预览，并把三件套**导出**给外部 Spine 工具查看。
+>
+> **⚠️ 已定案瘦身**（`docs/ARCH-WEBVIEW2-VUE.md` §7）：解析（`SpineModels.cs`）与「结构 + 图集布局」
+> 预览（`SpinePreviewService.cs` 的 `Build`/`DrawRegionBoxes`）**前移前端**（官方 spine-ts 运行时），
+> native 预览 provider（`SpinePreviewProvider.cs`）退役；**保留**：
+> ① `SpineAnimationSourceService.cs`——「定位并流式喂原始字节」（骨架 JSON + atlas 文本 + 页名→PNG 字节）；
+> ② `SpineExportService.cs`——三件套写盘（**导出目标清单由前端决定、写盘由 C# 执行**）；
+> ③ `SpineSiblingIndex.cs`（新文件，从 `SpinePreviewService.cs` 迁出的纯定位逻辑）。
+> 路径判据 `RelationDisplayRules.IsSpinePath` 不动（前端经 IPC 使用，不复制）。
+> 下方为**瘦身前**的现状记录。
 >
 > **骨骼动画真播放另有一环**：渲染由独立叶子项目 `LimbusModEditor.SpineRuntime`
 > （vendored spine-csharp 4.0 + SkiaSharp，见 §5.2）承担，本目录的 `SpineAnimationSourceService`
@@ -475,19 +487,21 @@
 
 | 文件 | 功能 |
 |---|---|
-| `SpineModels.cs` ★ | 数据模型 + `SpineTextParser`（**纯函数、无 IO**）：`SpineBone`/`SpineSlot`/`SpineRegionAttachment`/`SpineKey`/`SpineAnimation`/`SpineSkeleton`/`SpineAtlas(Page/Region)`/`SpineParseResult`。骨架按 **Spine 4.0 口径**解析：`skins` 是数组（3.8 是对象，两种都认）、动画按 `bones`/`slots` 分组、**第一条关键帧没有 `time` 即 0**。关键帧是「按目标类型取用字段」的联合记录：骨骼时间线用 `rotate`/`translate`/`scale` 按时间合并（旋转/缩放落在单值位），槽位时间线用 `attachment`（换装 / 显隐）+ `rgba`（只取 alpha，淡入淡出）。**只收 `region` 附件**，网格 / 包围盒 / 路径 / 裁剪 / 点附件计入 `UnsupportedAttachmentCount` 并跳过。图集支持多页 + `scale:` / `filter:` / `pma:` / `repeat:` 头 + `bounds`/`xy`/`orig`/`offsets`/`rotate:90`。结构不符返回 `SpineParseResult.None`（**不猜格式**，交回普通文本预览）；容忍 BOM；有病态文件闸门（动画数 / 单时间线键数 / 附件数） |
-| `SpinePreviewService.cs` ★ | 预览构建 + `SpineSiblingIndex`：**Spine 三件套靠「容器路径的目录」定位**（真实数据 `Assets/Resources_moved/Story/CG/Ep9_3/StorySpine_Sinclair/` 下的 `cg_40.json` / `cg_40.atlas.txt` / `cg_40.png`），因此只索引**带容器路径**的资源（127 万行里约 5.1 万行），按目录一次建表 O(1) 取。索引缓存三道失效条件（引用相等 + 数量变化 + 15 s 超时，因为资源集合会被就地增删）。`Build`：骨架资源找同目录 `.atlas.txt` 与页贴图 → 结构行 + 布局叠加图；`DrawRegionBoxes`（ImageSharp：**长边超 `MaxLayoutDimension=1024` 等比缩小**，区域内半透明蓝填充 + 红框，区域外一个像素都不动）。`LooksLikeSpineText` 只按路径 / 类型粗筛（不读盘） |
-| `SpinePreviewProvider.cs` | `IAssetPreviewProvider`（`Name = "Spine 预览"`）：`CanPreview` = 路径粗筛；`PreviewAsync` 交给 `SpinePreviewService.Build`，**不像 Spine 就返回 null**，交回后面的文本预览 provider |
-| `SpineExportService.cs` | 把三件套导出到 `<目标>/<目录名>/`（目录名取容器路径的末级目录，取不到用 `spine`）；**复用 `SpinePreviewService` 的同目录索引**，不重复扫。**刻意不是 `ExportSlot`**：模组导出只装「被修改过的资源」，把「给外部工具查看」混进去会破坏这个语义，因此做成独立动作。绝不抛异常 |
-| `SpineAnimationSourceService.cs` ★ | **动画预览的素材解析**：从项目资源里按**容器目录**找齐「骨架 JSON（排除 `*.atlas.json`）+ `.atlas.txt` + 同名页贴图 PNG」，产出 `SpineAnimationSource`（骨架/图集文本 + `PageBytes(页名)` 回调 + 可用页清单）。用户从骨架/图集/贴图任一个点进来结果都一致（一律以所在目录为范围）。**失败返回中文原因，绝不抛**（Spine 是旁路预览，缺件只是「这次看不了」）；页贴图解码按 Sprite/Texture 分别走 `ReadBundleSpriteComposite` / `ReadTexturePng` |
+| `SpineModels.cs` ★ | 数据模型 + `SpineTextParser`（**纯函数、无 IO**）：`SpineBone`/`SpineSlot`/`SpineRegionAttachment`/`SpineKey`/`SpineAnimation`/`SpineSkeleton`/`SpineAtlas(Page/Region)`/`SpineParseResult`。骨架按 **Spine 4.0 口径**解析：`skins` 是数组（3.8 是对象，两种都认）、动画按 `bones`/`slots` 分组、**第一条关键帧没有 `time` 即 0**。关键帧是「按目标类型取用字段」的联合记录：骨骼时间线用 `rotate`/`translate`/`scale` 按时间合并（旋转/缩放落在单值位），槽位时间线用 `attachment`（换装 / 显隐）+ `rgba`（只取 alpha，淡入淡出）。**只收 `region` 附件**，网格 / 包围盒 / 路径 / 裁剪 / 点附件计入 `UnsupportedAttachmentCount` 并跳过。图集支持多页 + `scale:` / `filter:` / `pma:` / `repeat:` 头 + `bounds`/`xy`/`orig`/`offsets`/`rotate:90`。结构不符返回 `SpineParseResult.None`（**不猜格式**，交回普通文本预览）；容忍 BOM；有病态文件闸门（动画数 / 单时间线键数 / 附件数） | **W2 删除**（解析前移前端 spine-ts） |
+| `SpinePreviewService.cs` ★ | 预览构建 + `SpineSiblingIndex`：**Spine 三件套靠「容器路径的目录」定位**（真实数据 `Assets/Resources_moved/Story/CG/Ep9_3/StorySpine_Sinclair/` 下的 `cg_40.json` / `cg_40.atlas.txt` / `cg_40.png`），因此只索引**带容器路径**的资源（127 万行里约 5.1 万行），按目录一次建表 O(1) 取。索引缓存三道失效条件（引用相等 + 数量变化 + 15 s 超时，因为资源集合会被就地增删）。`Build`：骨架资源找同目录 `.atlas.txt` 与页贴图 → 结构行 + 布局叠加图；`DrawRegionBoxes`（ImageSharp：**长边超 `MaxLayoutDimension=1024` 等比缩小**，区域内半透明蓝填充 + 红框，区域外一个像素都不动）。`LooksLikeSpineText` 只按路径 / 类型粗筛（不读盘） | **W2 删除**（布局/渲染前移前端）；**其中 `SpineSiblingIndex` 保留并迁为独立文件 `SpineSiblingIndex.cs`** |
+| `SpinePreviewProvider.cs` | `IAssetPreviewProvider`（`Name = "Spine 预览"`）：`CanPreview` = 路径粗筛；`PreviewAsync` 交给 `SpinePreviewService.Build`，**不像 Spine 就返回 null**，交回后面的文本预览 provider | **W2 删除**（前端 spine-ts 直接渲染，不再需要后端出图）；`AssetPreview.CreateDefault` 的注册同步移除 |
+| `SpineExportService.cs` | 把三件套导出到 `<目标>/<目录名>/`（目录名取容器路径的末级目录，取不到用 `spine`）；**复用 `SpinePreviewService` 的同目录索引**，不重复扫。**刻意不是 `ExportSlot`**：模组导出只装「被修改过的资源」，把「给外部工具查看」混进去会破坏这个语义，因此做成独立动作。绝不抛异常 | **保留**（写盘由 C# 执行）；构造函数改依赖 `SpineSiblingIndex`；导出目标清单由前端决定（ADR §7） |
+| `SpineAnimationSourceService.cs` ★ | **动画预览的素材解析**：从项目资源里按**容器目录**找齐「骨架 JSON（排除 `*.atlas.json`）+ `.atlas.txt` + 同名页贴图 PNG」，产出 `SpineAnimationSource`（骨架/图集文本 + `PageBytes(页名)` 回调 + 可用页清单）。用户从骨架/图集/贴图任一个点进来结果都一致（一律以所在目录为范围）。**失败返回中文原因，绝不抛**（Spine 是旁路预览，缺件只是「这次看不了」）；页贴图解码按 Sprite/Texture 分别走 `ReadBundleSpriteComposite` / `ReadTexturePng` | **保留**（「定位并流式喂原始字节」能力）；构造函数改依赖 `SpineSiblingIndex` |
+| `SpineSiblingIndex.cs`（**W2 新增**） | 纯定位：从 `SpinePreviewService.cs` 迁出的 `FolderOf`/`FileNameOf`/`Siblings`（按容器目录建表 O(1) 取；无解析、无渲染；保留原索引缓存语义：引用相等 + 数量变化 + 15 s 超时） | **W2 新增**（承接保留能力） |
 
 - **真实数据口径（2026-09-12 实测）**：骨架 `spine: 4.0.64`；图集页头 `scale:0.333`；
   关系图里 Spine 类 122 条、动画类 25 条。
 - **新增判定规则不要只改 `LooksLikeSpineText`**：真正的「是不是 Spine」由 `SpineTextParser` 按内容判定，
-  路径粗筛只是省一次读盘的门。
-- **动画播放链路（2026-09-13 接入）**：`SpineAnimationSourceService.Resolve` 找素材 →
+  路径粗筛只是省一次读盘的门。（W2 后：内容判定在前端 spine-ts；路径判据 `RelationDisplayRules.IsSpinePath` 保留在 C#。）
+- **动画播放链路（2026-09-13 接入，W2 起改为前端播放）**：`SpineAnimationSourceService.Resolve` 找素材 →
   `SpineDocument.TryCreate` 建文档（含动画清单/时长）→ `SpineFrameRenderer.RenderFrame(time, 440, 600)`
   出 PNG → App 贴到 `Image`。任一环失败都由该环给出中文原因，**不出现白图**。
+  （W2 后：前端 spine-ts 加载 `spine.locate` 返回的字节 URL 就地播放；C# 侧不再出帧。）
 
 ---
 
@@ -576,7 +590,7 @@
 | `ExportReportWindow.cs` | 旧导出报告（旧导出通道） |
 | `ExportProgressWindow.cs` ★ | 导出/调试的阶段进度窗口：**取消令牌** + 取消按钮 + 关窗即取消 + 「是否被用户中途关闭」标记 |
 | `ModExportReportWindow.cs` | **新导出报告**（槽位结果、空槽位说明） |
-| `SpineAnimationPreviewWindow.cs` ★ | **Spine 骨骼动画播放窗**（非模态 `ShowFor`）：用 `SpineDocument.TryCreate` + `SpineFrameRenderer.RenderFrame(time, 440, 600)` 真渲染（~30 fps `DispatcherTimer`），含播放/暂停、时间轴 `Slider`、动画 `ComboBox`。素材由 `SpineAnimationSourceService.Resolve` 提供（`PageBytes` 适配成 `ISpineTextureSource`）。任一件缺失/解析失败都在信息行给**中文原因**，绝不白图崩溃 |
+| `SpineAnimationPreviewWindow.cs` ★ | **Spine 骨骼动画播放窗**（非模态 `ShowFor`）：用 `SpineDocument.TryCreate` + `SpineFrameRenderer.RenderFrame(time, 440, 600)` 真渲染（~30 fps `DispatcherTimer`），含播放/暂停、时间轴 `Slider`、动画 `ComboBox`。素材由 `SpineAnimationSourceService.Resolve` 提供（`PageBytes` 适配成 `ISpineTextureSource`）。任一件缺失/解析失败都在信息行给**中文原因**，绝不白图崩溃 | **W2 删除**（native 播放窗退役，动画改前端 spine-ts 就地播放；调用点 `AssetsWorkbenchPage`/`PresetWorkbenchPage` 的「▶ 动画预览…」按钮同步改） |
 
 ---
 
@@ -682,7 +696,7 @@
 | 扫描与索引 | `StartupScanServiceTests.cs`、`UnityCacheScanServiceTests.cs`、`UnityCacheSqliteIndexStoreTests.cs`（规范化往返、快照、取消/异常回滚、旧版/缺表重建）、`CacheSignatureTests.cs`、`SqliteTableCacheTests.cs`、`RealFullScanSmokeTests.cs`、`RealStartupScanSmokeTests.cs`、`PerformanceBaselineTests.cs`、`DatabasePerformanceTests.cs`（真实库逐行等价、耗时/分配、导出读取会话、全量冷/热扫描） |
 | 关联图（派生，6 类别） | `SubjectRelationAnalyzerTests.cs`（含「游戏侧角色名拼写错误合并为一组」、6 类别判定、跨资源 `xref` 边、E.G.O 饰品 id 归一化）、`RelationStoreTests.cs`（持久化 + 反向索引 + `xref` 多对多 + `LinksOf`）、`RealRelationIndexSmokeTests.cs`（真实数据门控 `LME_RELATION_SMOKE=1`） |
 | 预设卡片流（展示层） | `PresetWorkbenchServiceTests.cs`（**类别切换器计数**、封面挑立绘优先级 + **能渲染的胜过不能渲染的**、定位键→`AssetRecord` 还原、详情分组用户视角顺序、每行 `TargetFor` 跳哪页 / 用什么载荷） |
-| Spine 解析 / 预览 / 导出 / 素材解析 | `SpineTests.cs`（骨架 4.0 口径：`skins` 数组、动画分组、**首帧无 `time` = 0**、`rotate`/`translate`/`scale` 合帧、槽位 `attachment`+`rgba` 淡入淡出、只收 region 附件且 mesh 计入不支持；图集多页 + `scale`/`orig`/`offsets`/`rotate`；BOM 容忍；同目录索引；布局叠加图**区域外像素不动** + 超长边等比缩小；导出目录名取容器目录末级）、`SpineAnimationSourceServiceTests.cs`（同目录找齐骨架/图集/页贴图、从图集进入结果一致、缺骨架/缺图集给中文错、不跨目录串、未知页返回空字节） |
+| Spine 解析 / 预览 / 导出 / 素材解析 | `SpineTests.cs`（骨架 4.0 口径：`skins` 数组、动画分组、**首帧无 `time` = 0**、`rotate`/`translate`/`scale` 合帧、槽位 `attachment`+`rgba` 淡入淡出、只收 region 附件且 mesh 计入不支持；图集多页 + `scale`/`orig`/`offsets`/`rotate`；BOM 容忍；同目录索引；布局叠加图**区域外像素不动** + 超长边等比缩小；导出目录名取容器目录末级）——**W2 删除**（13 例，随解析/布局逻辑）；`SpineAnimationSourceServiceTests.cs`（同目录找齐骨架/图集/页贴图、从图集进入结果一致、缺骨架/缺图集给中文错、不跨目录串、未知页返回空字节）——**保留**（6 例，ctor 适配） |
 | 目录定位与配置 | `GameDirectoryLocatorTests.cs`、`UnityCacheLocatorTests.cs`、`RealLocatorTests.cs`、`SharedConfigTests.cs`、`UiStateServiceTests.cs` |
 | 调试与启动 | `ModApplyServiceTests.cs`、`DebugApplyTests.cs`、`ModInstallServiceTests.cs`、`GameLaunchServiceTests.cs` |
 | catalog | `CatalogBaselineTests.cs` |
@@ -707,15 +721,16 @@
 | `CarraDiffTests.cs` / `XzCodecTests.cs` | Carra 差分与 XZ 编解码 |
 | `UnitTest1.cs` | 类名 `FormatTests`：Carra 探测/导入导出往返、Lunartique 探测与往返（4 例，非空占位） |
 
-### §11.6 `LimbusModEditor.SpineRuntime.Tests/`（7 例，刻意独立）
+### §11.6 `LimbusModEditor.SpineRuntime.Tests/`（7 例，刻意独立）— **2026-09-15 起计划删除（W2）**
 
 | 测试文件 | 覆盖 |
 |---|---|
-| `SpineDocumentTests.cs` / `SpineFrameRendererTests.cs` 等 | 用**合成**的最小 Spine 4.0 数据（骨架 JSON + 图集 + 由 SkiaSharp 现画的 PNG），覆盖：解析、元信息（动画清单/时长）、region/mesh 渲染非空、不同时间像素不同、缺页/解析失败给出**中文失败结果**、PMA 与 `rotate:90` 不越界 |
+| `SpineRuntimeTests.cs` / `SyntheticData.cs` / `TestTextureSource.cs` | 用**合成**的最小 Spine 4.0 数据（骨架 JSON + 图集 + 由 SkiaSharp 现画的 PNG），覆盖：解析、元信息（动画清单/时长）、region/mesh 渲染非空、不同时间像素不同、缺页/解析失败给出**中文失败结果**、PMA 与 `rotate:90` 不越界 |
 
-- **为什么不并入 `.slnx`**：本工程刻意 `TreatWarningsAsErrors=false` 且 `Nullable=disable`（与
+- **⚠️ 已定案删除**（`docs/ARCH-WEBVIEW2-VUE.md` §7）：随 `LimbusModEditor.SpineRuntime` 工程一并移除（7 例；
+  其中渲染类覆盖由前端 spine-ts 测试 + Playwright 端到端替代）。**测试基线 746 → 733**。
+- **为什么不并入 `.slnx`**（删除前现状）：本工程刻意 `TreatWarningsAsErrors=false` 且 `Nullable=disable`（与
   `SpineRuntime` 类库对齐），并入主清单会让「跑整个 solution 测试」把 vendored 源码的历史警告卷进来。
-  验收时单独跑：`dotnet test tests/LimbusModEditor.SpineRuntime.Tests -c Debug --no-build`。
 
 ### §11.7 测试维护注意事项
 
@@ -789,9 +804,9 @@
 | **卡片有标题但没有立绘封面** | `PresetWorkbenchService.BuildCards`（封面要「能定位到资源」且资源可渲染：源文件存在 + `UnityPathId`） | 该对象的 image 链接是否命中 `containerEntry`；目标类型是否 Sprite/Texture/SpriteAtlas |
 | **卡片流想加新类别（EGO 之外）** | `Relations/RelationCategories.cs`（`All` + `Label`）+ `SubjectRelationAnalyzer`（该类别怎么抽事实、id 怎么归一化） | 改完把 `RelationIndexSource.FormatVersion` +1；`WorkbenchCacheSchema` 是否要加列；`PresetWorkbenchServiceTests` 补类别用例 |
 | **卡片详情点「打开」跳过去还要自己翻一遍** | `Relations/RelationDeepLink.cs`（载荷口径）+ 目标页的 `IReferenceRevealable.Reveal`（真要选中那一行） | `MainWindow.RevealReference`（定位失败会退化为关键词）；四页是否都实现了 `IReferenceRevealable` |
-| **Spine 资源不显示 Spine 预览、退回普通文本** | `Relations/RelationDisplayRules.IsSpinePath`（路径粗筛，真实口径 `Prefab/SpineIllustPrefab/`、`.psb`、`SkeletonData`、`/Story/Spine/`） | 内容判定的真正入口是 `Spine/SpineTextParser`（**不像骨架/图集就返回 `None`**，属预期）；`AssetPreviewRegistry.CreateDefault` 是否传了 `SpinePreviewService` |
-| **Spine 只能看结构、想放动画** | `Application/Spine/SpineAnimationSourceService.cs`（找齐素材）→ `LimbusModEditor.SpineRuntime`（渲染）→ `App/SpineAnimationPreviewWindow.cs`（播帧） | 素材是否同目录齐三件套、`PageBytes` 是否能解出页贴图（Sprite 走 `ReadBundleSpriteComposite`）、`SpineDocument.TryCreate` 的中文错误 |
-| **Spine 预览有结构但看不到图集布局图** | `Spine/SpinePreviewService.TryBuildLayoutImage`（按图集页名在同目录找同名贴图） | 页贴图是否与 `.atlas.txt` **同一目录**且文件名与页名一致、是否有 `UnityPathId` |
+| **Spine 资源不显示 Spine 预览、退回普通文本** | `Relations/RelationDisplayRules.IsSpinePath`（路径粗筛，真实口径 `Prefab/SpineIllustPrefab/`、`.psb`、`SkeletonData`、`/Story/Spine/`） | 内容判定的真正入口是 `Spine/SpineTextParser`（**不像骨架/图集就返回 `None`**，属预期）；`AssetPreviewRegistry.CreateDefault` 是否传了 `SpinePreviewService` | **W2 后**：内容判定在前端 spine-ts；路径判据保留 C#（前端经 IPC 使用）；`SpinePreviewProvider` 注册移除 |
+| **Spine 只能看结构、想放动画** | `Application/Spine/SpineAnimationSourceService.cs`（找齐素材）→ `LimbusModEditor.SpineRuntime`（渲染）→ `App/SpineAnimationPreviewWindow.cs`（播帧） | 素材是否同目录齐三件套、`PageBytes` 是否能解出页贴图（Sprite 走 `ReadBundleSpriteComposite`）、`SpineDocument.TryCreate` 的中文错误 | **W2 起改为**：`SpineAnimationSourceService`（定位+流式喂字节）→ 前端 spine-ts 就地播放（`spine.locate` IPC，ADR §7） |
+| **Spine 预览有结构但看不到图集布局图** | `Spine/SpinePreviewService.TryBuildLayoutImage`（按图集页名在同目录找同名贴图） | 页贴图是否与 `.atlas.txt` **同一目录**且文件名与页名一致、是否有 `UnityPathId` | **W2 后**：布局图由前端 spine-ts 渲染替代；此症状转为前端渲染问题（按 spine-ts 加载失败原因排查） |
 | **Spine「导出…」写不出文件** | `Spine/SpineExportService.ExportAsync`（写 `<目标>/<目录名>/`，只写骨架/图集文本 + PNG 页贴图） | 目标目录是否可选；该资源是否有容器路径（取不到末级目录时落到 `spine/`） |
 | **导出几分钟不出产物** | `Build/UnityCacheExportService.IsEditedCacheAsset` 与 `Build/UnityBundleBuildService.Build` 的候选谓词（`File.Exists` 是否前置、惰性链是否物化） | `ModExportPlanService.Plan`、`Application/Scanning/UnityCacheScanService.RehydrateFromIndexAsync`（项目为何有 127 万条资产） |
 | **树形视图突然折叠回初始形态** | `App/WorkbenchPages/TreeExpansionState.cs`（key 回放） | 各页 `RebuildTree` + `_expandedTreeKeys`；`Loaded` 是否有 `_loaded` 守卫（Static/Bank 早先没有） |
@@ -823,3 +838,20 @@
 | 目录定位到错误位置 | `Debugging/*Locator.cs` | `AppConfig/AppEnvironment.cs`（优先级与迁移） |
 | CLI 行为 | `Cli/Program.cs` | `Build/ModExportService.cs`、`Assets/ModImportService.cs` |
 | 界面颜色/样式不一致 | `App/Themes/Theme.xaml`、`WorkbenchStyles.xaml` | 页面内是否有硬编码色值（应清零） |
+
+---
+
+## §15 文档登记（2026-09-15 新增，铁律 §3-11）
+
+| 文档 | 内容 |
+|---|---|
+| `docs/ARCH-WEBVIEW2-VUE.md` ★ | **架构决策记录（ADR）**：显式取代 `docs/WEBVIEW-FEASIBILITY.md` §5/§6 的「不做全量重写」结论；为何现在做 A；§4.2 不利项逐条回应（运行时依赖/内存/IPC/中文 IME/对话框/DPI）；W0→W4 波次与验收口径；22 个 UI 单元迁移分类表（保真 13 / 重设计 5 / 砍掉 4）；前端工程根 `src/LimbusModEditor.Web/` 与构建集成；Spine 全量前端化移除/保留清单（逐工程逐文件）；内存与速度目标口径（基线 1,275,623 条资源 / 1,459 bundle / 发布 519MB） |
+| `docs/WEB-IPC-CONTRACT.md` ★ | **最小 IPC 契约**：请求/响应/事件三类消息帧；统一分页契约（`AssetCatalogPage`，禁止全量）；错误码与取消语义；二进制通道（`lme.app`/`lme.data` 本地虚拟主机，禁止 base64）；对话框/剪贴板/`Process.Start` 回调；`RelationDeepLink` 的 `'\0'` 分段载荷原样透传与 Reveal 布尔语义；契约 DTO 归属 `Application/Ipc`（无 WPF，铁律 §3-10） |
+| `docs/SPIKE-WEBVIEW2.md` ★ | **W0 WebView2 宿主 spike 实测结论**：五个未知量（运行时检测/IME/DPI/对话框回调/二进制通道）逐项实测；Evergreen 运行时探测（本机 153.0.4234.32）；虚拟主机映射（`lme.app`/`lme.data`）加载静态页成功；PerMonitorV2 DPI 清单；中文 IME/文件对话框/剪贴板/`Process.Start` 回调通道代码落地；二进制通道 Virtual Host vs Base64 对比结论；Fixed Version 分发开关预留与体积代价；契约需修正点 |
+
+### 同步标记汇总（2026-09-15）
+
+- `docs/WEBVIEW-FEASIBILITY.md`：§5/§6 结论**被 ADR 取代**（顶部有横幅）；§1–§4 技术账继续有效。
+- `docs/CODE-STRUCTURE.md`：§2/§3/§6/§10 与本文档联动更新（见该文件对应小节）。
+- `docs/STATUS.md`：测试基线 746 → **733**（W2 删除 SpineRuntime.Tests 7 例 + SpineTests 13 例时生效）。
+- `THIRD-PARTY-NOTICES.md`：§1 spine-csharp / §2 SkiaSharp 条目 W2 移除，新增 spine-ts（前端运行时）条目。

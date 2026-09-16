@@ -9,6 +9,10 @@
 > - 用户可见行为与界面：`docs/USAGE.md`
 > - 写回链路真实验证证据：`docs/REALDATA-VERIFY.md`
 > - 自审与风险记录：`docs/REVIEW.md`
+> - **WebView2+Vue 全量重构 ADR（取代 WEBVIEW-FEASIBILITY §5/§6）**：`docs/ARCH-WEBVIEW2-VUE.md`
+> - **最小 IPC 契约（请求/响应/事件、分页、二进制通道、对话框回调）**：`docs/WEB-IPC-CONTRACT.md`
+> - **W0 spike 实测结论（五个未知量、运行时/二进制通道证据）**：`docs/SPIKE-WEBVIEW2.md`
+> - 架构反模式与仓库卫生审计（R1）：`docs/AUDIT-2026-R1.md`
 >
 > 本文所有结论来自源码阅读（read/grep），不依赖运行程序、探针或截图。
 > 文中行号为撰写时的真实行号，改代码后请以符号名检索为准。
@@ -61,7 +65,7 @@ lang 文本 / 静态数据表）→ 在五个工作台里浏览与编辑（资�
 | `LimbusModEditor.Formats.Abstractions` | net8.0 | 无 | 格式插件唯一接口契约 `IModFormatHandler` |
 | `LimbusModEditor.Infrastructure` | net8.0 | 无 | 基础实现（当前只有 `SafePathService`，且**未被调用**，见 §9） |
 | `LimbusModEditor.Editing` | net8.0 | ImageSharp 3.1.11 + NLog | Unity 纹理 ↔ PNG 编解码、图集切分/回填、缩略图 |
-| `LimbusModEditor.SpineRuntime` | net8.0 | SkiaSharp 3.119.0（+ vendored spine-csharp 4.0 源码） | Spine 4.0 骨骼动画**离线渲染**（叶子项目，只被 App 引用）。**刻意覆盖 `Nullable=disable` + `TreatWarningsAsErrors=false`**（vendored 官方源码非 nullable 标注；逐文件说明见 `docs/PROJECT-INDEX.md` §5.2） |
+| `LimbusModEditor.SpineRuntime` | net8.0 | SkiaSharp 3.119.0（+ vendored spine-csharp 4.0 源码） | Spine 4.0 骨骼动画**离线渲染**（叶子项目，只被 App 引用）。**刻意覆盖 `Nullable=disable` + `TreatWarningsAsErrors=false`**（vendored 官方源码非 nullable 标注；逐文件说明见 `docs/PROJECT-INDEX.md` §5.2）。**2026-09-15 起计划删除（W2）**：渲染全量前移前端 spine-ts，工程与 `third_party/spine-csharp/`、`tests/LimbusModEditor.SpineRuntime.Tests/` 一并移除（逐文件清单见 `docs/ARCH-WEBVIEW2-VUE.md` §7） |
 | `LimbusModEditor.Formats.Unity` | net8.0 | AssetsTools.NET 3.0.5 + NLog | Unity bundle/SerializedFile 唯一后端（不手写解析器） |
 | `LimbusModEditor.Formats.Carra` | net8.0 | Joveler.Compression.XZ 5.0.2 + SharpCompress 0.38.0 + NLog | Carra/Carra2 容器 |
 | `LimbusModEditor.Formats.Bank` | net8.0 | NLog（P/Invoke 运行时绑 FMOD C ABI） | FMOD bank/FSB5 索引层 + 音频编解码抽象 |
@@ -70,9 +74,10 @@ lang 文本 / 静态数据表）→ 在五个工作台里浏览与编辑（资�
 | `LimbusModEditor.Application` | net8.0 | Microsoft.Data.Sqlite 8.0.11 + System.IO.Hashing 8.0.0 + ImageSharp + NLog | WPF 无关的服务编排层；Hashing 用于 IEEE CRC32 流式校验（**能被直接单测**） |
 | `LimbusModEditor.App` | net8.0-windows | WPF-UI 4.3.0 + NLog | 界面（**没有测试工程**，逻辑要下沉到 Application 才能测） |
 | `LimbusModEditor.Cli` | net8.0 | NLog | 三个子命令的命令行入口 |
+| `src/LimbusModEditor.Web/`（**2026-09-15 起，刻意不进 `.slnx`**） | Node（npm） | Vite + Vue3 + TS + vue-router + Pinia + `@esotericsoftware/spine-webgl@4.0.26`（Spine Runtimes License，权威文本见官网 https://esotericsoftware.com/spine-runtimes-license） | **前端工程根（固定）**：WebView2 承载的全部前端；设计色只允许出现在 `src/styles/tokens.css`；契约见 `docs/WEB-IPC-CONTRACT.md`，架构见 `docs/ARCH-WEBVIEW2-VUE.md` |
 | `tests/LimbusModEditor.Domain.Tests` | net8.0 | xunit 2.9.3 | 行为测试主战场（引用 Domain/Editing/Application/Formats.Unity） |
 | `tests/LimbusModEditor.Format.Tests` | net8.0 | xunit 2.9.3 + AssetsTools.NET | 格式层与真实样本测试 |
-| `tests/LimbusModEditor.SpineRuntime.Tests` | net8.0 | xunit 2.9.2 + SkiaSharp | Spine 渲染类库的合成数据测试（7 例）。**刻意不进 `.slnx`**（`Nullable=disable` + 不警告即失败，避免把 vendored 源码历史警告卷进 solution 测试） |
+| `tests/LimbusModEditor.SpineRuntime.Tests` | net8.0 | xunit 2.9.2 + SkiaSharp | Spine 渲染类库的合成数据测试（7 例）。**刻意不进 `.slnx`**（`Nullable=disable` + 不警告即失败，避免把 vendored 源码历史警告卷进 solution 测试）。**2026-09-15 起计划删除（W2）**：随 `SpineRuntime` 工程一并移除 |
 
 **依赖原则：优先用成熟第三方库，分层不构成拒绝引库的理由**（铁律 §3-12）。通用能力
 （日志、压缩、图像、Unity 解析、SQLite）一律用库；自研只留「本工具特有编排」。
@@ -97,8 +102,8 @@ Windows 下默认 `RuntimeIdentifier=win-x64`、`CopyLocalLockFileAssemblies=tru
 | 格式包（Carra/Bank/Rebank/Lunartique） | `src/LimbusModEditor.Formats.*/` |
 | 缓存库（五个 SQLite：四源 + 一派生） | `src/LimbusModEditor.Application/Caching/` + `Scanning/` + `Texts/` + `StaticMods/` + `Assets/BankIndex*` + `Relations/` |
 | 跨资源关联（6 类别对象 ↔ 资源） | `src/LimbusModEditor.Application/Relations/`（`RelationCategories` 六类别 / `SubjectRelationAnalyzer` / 派生缓存 `RelationStore` / 查询门面 / 卡片流展示层 `PresetWorkbenchService` / 精确跳转载荷 `RelationDeepLink`） |
-| Spine：解析 / 静态预览 / 导出 / 找素材 | `src/LimbusModEditor.Application/Spine/`（`SpineModels.cs` 纯解析 → `SpinePreviewService` 结构 + 布局叠加图 → `SpineExportService` 导出三件套 → `SpineAnimationSourceService` 找齐动画素材） |
-| Spine：骨骼动画**真播放** | `src/LimbusModEditor.SpineRuntime/`（vendored spine-csharp 4.0 + SkiaSharp：`SpineDocument.TryCreate` / `SpineFrameRenderer.RenderFrame`）→ `App/SpineAnimationPreviewWindow.cs` |
+| Spine：解析 / 静态预览 / 导出 / 找素材 | `src/LimbusModEditor.Application/Spine/`（`SpineModels.cs` 纯解析 → `SpinePreviewService` 结构 + 布局叠加图 → `SpineExportService` 导出三件套 → `SpineAnimationSourceService` 找齐动画素材）。**2026-09-15 起瘦身（W2）**：解析/布局前移前端，保留 `SpineAnimationSourceService`（定位+流式喂字节）+ `SpineExportService`（写盘）+ `SpineSiblingIndex.cs`（新文件，纯定位），见 `docs/ARCH-WEBVIEW2-VUE.md` §7 |
+| Spine：骨骼动画**真播放** | `src/LimbusModEditor.SpineRuntime/`（vendored spine-csharp 4.0 + SkiaSharp：`SpineDocument.TryCreate` / `SpineFrameRenderer.RenderFrame`）→ `App/SpineAnimationPreviewWindow.cs`。**2026-09-15 起计划删除（W2）**：渲染全量前移前端 spine-ts，native 播放窗退役，动画改前端就地播放 |
 | 导出流水线 | `Domain/Formats/ExportLayout.cs` + `Application/Build/ModExportPlanService.cs` + `ModPackExportService.cs` |
 | 调试应用（写游戏目录） | `Application/Debugging/ModApplyService.cs` + `StaticModApplyService.cs` + `DebugApplyService.cs` |
 
@@ -321,13 +326,17 @@ catalog 用固定 16 字节键集合做一次线性扫描；Carra 差异比较�
 | 24 | 编辑集自身的 `Changed` 已驱动刷新，调用方**不得再手动刷新一次** | 四个页面 + `LangEditSession`/`StaticEditSession` | 同一次保存重建两遍树（历史缺陷） |
 | 25 | **全表谓词里不许把 `File.Exists` 排在廉价判据之前**，且惰性 `GroupBy` 链**必须先物化再计数** | `Application/Build/UnityCacheExportService.IsEditedCacheAsset`、`UnityBundleBuildService.Build`、`UnitySerializedFileBuildService.BuildAsync` | 回灌后项目有 127 万条资产：一次全表 `File.Exists` ≈ 44 s，同一条谓词被跑 4 遍 → 导出 7 分钟（实测，见 `STATUS.md` §6.2.1） |
 | 26 | **内置编辑器只吃松散文件**：bundle 内对象的 `SourcePath` 是整个 AssetBundle 容器，不能当正文读 | `Application/Assets/AssetEditService.ReadCurrentBytesAsync`、`TextAssetEditService.CanEditText`（App 侧按钮置灰 + 中文说明） | 双击 bundle 内 TextAsset → 2.26 MB 二进制进 `TextBox`，排版 26.5 秒 → 界面「未响应」被强杀（历史报障，且**没有** crash 日志） |
-| 27 | **Spine 的「解析/静态预览」与「动画播放」是两条链**：文本解析 + 结构/布局叠加图在 `Application/Spine/`（不依赖运行时）；动画**真播放**必须走 `LimbusModEditor.SpineRuntime`（vendored spine-csharp 4.0 + SkiaSharp），App 只负责把渲染出的帧贴到界面 | `Application/Spine/SpineModels.cs` / `SpinePreviewService.cs` / `SpineAnimationSourceService.cs`；`LimbusModEditor.SpineRuntime`（`SpineDocument.TryCreate` / `SpineFrameRenderer.RenderFrame`） | 以为「加个预览 provider 就能播动画」；或把渲染细节漏进 App、在 Application 里直接引 spine-csharp 类型（破坏分层） |
+| 27 | **Spine 的「解析/静态预览」与「动画播放」是两条链**：文本解析 + 结构/布局叠加图在 `Application/Spine/`（不依赖运行时）；动画**真播放**必须走 `LimbusModEditor.SpineRuntime`（vendored spine-csharp 4.0 + SkiaSharp），App 只负责把渲染出的帧贴到界面。**2026-09-15 起改为**：解析/布局/播放全量前移前端 spine-ts；C# 侧只保留「定位并流式喂原始字节」（`SpineAnimationSourceService`）+ 纯定位（`SpineSiblingIndex`）+ 导出写盘（`SpineExportService`），逐文件清单见 `docs/ARCH-WEBVIEW2-VUE.md` §7 | `Application/Spine/SpineModels.cs` / `SpinePreviewService.cs` / `SpineAnimationSourceService.cs`；`LimbusModEditor.SpineRuntime`（`SpineDocument.TryCreate` / `SpineFrameRenderer.RenderFrame`） | 以为「加个预览 provider 就能播动画」；或把渲染细节漏进 App、在 Application 里直接引 spine-csharp 类型（破坏分层） |
 | 28 | **Spine 三件套靠「容器路径的目录」定位**（骨架 + `.atlas.txt` + 页贴图同目录）；索引只收**带容器路径**的资源 | `Application/Spine/SpinePreviewService.cs`（`SpineSiblingIndex`） | 拼不出同目录就既看不到图集布局图、也导出不齐三件套 |
 | 29 | **Spine 导出不是 `ExportSlot`**：模组导出只装「被修改过的资源」，给外部工具查看属独立动作 | `Application/Spine/SpineExportService.cs`、`Build/ModExportPlanService.cs`（槽位定义） | 把「导出查看」混进模组产物，破坏「只装改动」的语义 |
 | 30 | **关联对象 id 必须带类别前缀** `<category>:<key>`（走 `SubjectIds.Make/CategoryOf/KeyOf`），且**类别一律由资源目录前缀判定**，绝不「扫 5 位数字窗口」 | `Application/Relations/RelationCategories.cs`、`SubjectRelationAnalyzer.cs` | 敌人 4 位段与异常/事件 id 真的撞车（实测含 `90005`）；E.G.O 资源侧 20xxx 数字会造「幽灵 EGO」（只认 lang `Egos.json`）；E.G.O 饰品要 `id % 10000` 归一化 |
 | 31 | **`IReferenceRevealable.Reveal` 允许失败（返回 false），但不得抛异常**；宿主必须退化为关键词过滤 | `App/WorkbenchPages/IReferenceRevealable.cs` + `MainWindow.RevealReference` | 关联图是旁路：定位不到就崩页面、或静默什么都不做（用户以为按钮坏了） |
 | 32 | **精确跳转载荷（`RelationDeepLink`）是纯数据**：不参与判重、不影响关联图正确性 → 改它**不需要** `FormatVersion` +1 | `Application/Relations/RelationDeepLink.cs` | 误以为必须动派生库版本；或把载荷塞进判重键导致同一关联重复/丢失 |
 | 33 | **改「抽哪些事实 / 怎么算关联 / 类别 id 归一化 / 新增并填充列 / 跨链关系名」必须把 `RelationIndexSource.FormatVersion` +1**；仅改 UI 怎么用现有列、或 SQLite 加列本身（轻量迁移）**不**需要 | `Application/Relations/RelationModels.cs`（`FormatVersion`）、`Caching/WorkbenchCacheSchema.cs` | 旧派生库被当成新鲜的，卡片流 / 关联资源显示旧数据且不重建 |
+| 34 | **（2026-09-15 新增）设计色只允许出现在 `src/LimbusModEditor.Web/src/styles/tokens.css`**；`src/views/` 与 `src/components/` 下硬编码色值必须为 0（铁律 §9 的 Web 对应物，取代原 `WorkbenchPages/` 收口验收门） | 前端工程 + 收口验收门 | 界面颜色/样式不一致 |
+| 35 | **（2026-09-15 新增）所有列表一律「查询 → 一页」**：IPC 契约为 `AssetCatalogPage(Items,TotalCount,Offset,Take)` 形状；**禁止取全量再前端筛**（=WPF 时代 S1–S4 性能成果）；禁止 base64 二进制过 IPC，一律走 `lme.app`/`lme.data` 本地虚拟主机 | `docs/WEB-IPC-CONTRACT.md` §2/§5 | 列表卡死、大纹理传输成为新瓶颈 |
+| 36 | **（2026-09-15 新增）IPC 契约 DTO 与宿主网关逻辑必须定义在 `Application` 层（无 WPF 依赖）**；`CoreWebView2.PostWebMessageAsJson` 传输层是唯一的 WPF 依赖点；契约逻辑必须可被 `Domain.Tests` 覆盖（铁律 §3-10 不被桥接绕过） | `src/LimbusModEditor.Application/Ipc/`（W1 起）、宿主 App | 换壳要重写两遍；契约无测试 |
+| 37 | **（2026-09-15 新增）`relation.reveal` 的 `'\0'` 分段载荷（`RelationDeepLink`）原样透传、前端不解析**；响应 `located:false` 时前端退化为关键词过滤（与 `IReferenceRevealable` 布尔语义一致）；改载荷**不需要** `FormatVersion` +1 | `Application/Relations/RelationDeepLink.cs` + IPC 契约 §2.4/§3 | 误升派生库版本；或载荷被前端解析后语义漂移 |
 
 ---
 
@@ -474,7 +483,19 @@ dotnet test  LimbusModEditor.slnx --no-build --nologo      # 只跑 slnx 内的�
 # 建议按工程分开跑（并行时互相抢磁盘，墙钟断言最先受影响）
 dotnet test tests/LimbusModEditor.Domain.Tests       -c Debug --no-build --nologo   # 661 例
 dotnet test tests/LimbusModEditor.Format.Tests       -c Debug --no-build --nologo   # 74 例
-dotnet test tests/LimbusModEditor.SpineRuntime.Tests -c Debug --no-build --nologo   # 7 例（刻意不在 slnx 内）
+dotnet test tests/LimbusModEditor.SpineRuntime.Tests -c Debug --no-build --nologo   # 7 例（刻意不在 slnx 内；**W2 起随工程删除**）
 dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r win-x64 --self-contained false -o artifacts/publish-win-x64 --no-restore
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/publish.ps1
 ```
+
+**一键构建/发布（2026-09-15 起，Web 工程接入后）**：
+
+```text
+python logs/lme.py build     # npm run build（Web）→ dotnet build LimbusModEditor.slnx
+python logs/lme.py publish   # npm run build → dotnet publish → 复制 dist/ → artifacts/publish-win-x64/wwwroot/ → 复制 fmod/
+npm --prefix src/LimbusModEditor.Web test        # 前端单测（Vitest）+ Playwright 端到端
+```
+
+- Web 工程（`src/LimbusModEditor.Web/`）**刻意不进 `.slnx`**：Node 工程与 dotnet 构建隔离（与 `SpineRuntime.Tests` 同理）；`logs/lme.py build` 在 dotnet 之前先跑 `npm run build`，失败即中止（不静默跳过）。
+- 发布体积基线：`artifacts/publish-win-x64` = **519MB**（含 5 个 SQLite 索引库）；Fixed Version WebView2 运行时约 +180MB，目标上限 ≈ 700MB（见 `docs/ARCH-WEBVIEW2-VUE.md` §6.3）。
+- 测试基线：**746**（Domain 672 + Format 74）→ W2 删除 SpineRuntime 后 **733**（Domain 659 + Format 74），见 `docs/ARCH-WEBVIEW2-VUE.md` §7.3。

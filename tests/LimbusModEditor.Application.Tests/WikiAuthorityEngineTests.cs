@@ -6,8 +6,7 @@ namespace LimbusModEditor.Application.Tests;
 
 /// <summary>
 /// 维基权威引擎（<see cref="WikiPageAuthorityEngine"/>）语义测试。
-///
-/// <para>覆盖：分节顺序、归类规则、深链载荷往返、负例（不得 id 猜测）、损坏/缺失数据的降级。</para>
+/// 覆盖：分节顺序、归类规则、深链载荷往返、负例（不得 id 猜测）、损坏/缺失数据的降级。
 /// </summary>
 public sealed class WikiAuthorityEngineTests : IDisposable
 {
@@ -52,12 +51,15 @@ public sealed class WikiAuthorityEngineTests : IDisposable
     private static RelationLangFact LangFile(string path, int keyCount = 10)
         => new(path, keyCount);
 
+    private static RelationTextAnchor Anchor(string anchor, string table, string? name = null, string? desc = null, string? body = null, string? path = null)
+        => new(anchor, path ?? $"PersonalityVoiceDlg/{anchor}.json", name, desc, body, table);
+
     [Fact]
     public void Persona_provider_extracts_facts_from_container_path()
     {
         var context = CreateContext(assets: new[]
         {
-            Asset("/Prefab/SD/Personality/10201_yisang_LCBAppearance.prefab", AssetType.GameObject),
+            Asset("/Prefab/SD/Personality/10201_yisang_LCBAppearance.prefab"),
             Asset("/Prefab/SD/Personality/10202_faust_LCBAppearance.prefab"),
         });
 
@@ -69,7 +71,9 @@ public sealed class WikiAuthorityEngineTests : IDisposable
         {
             Assert.Equal(ConfidenceLevel.Authoritative, f.Confidence);
             Assert.Equal(AuthoritySource.ContainerPathPrefix, f.Source);
-            Assert.NotNull(f.WritableSource);
+            Assert.Equal(WritableSourceKind.Path, f.WritableSource);
+            Assert.NotNull(f.WritableSourcePath);
+            Assert.NotEmpty(f.WritableSourcePath);
         });
     }
 
@@ -87,7 +91,8 @@ public sealed class WikiAuthorityEngineTests : IDisposable
 
         Assert.Contains(facts.Facts, f =>
             f.Source == AuthoritySource.LangFileName &&
-            f.WritableSource == "PersonalityVoiceDlg/Voice_First_10201.json");
+            f.WritableSource == WritableSourceKind.Path &&
+            f.WritableSourcePath == "PersonalityVoiceDlg/Voice_First_10201.json");
     }
 
     [Fact]
@@ -95,7 +100,7 @@ public sealed class WikiAuthorityEngineTests : IDisposable
     {
         var context = CreateContext(assets: new[]
         {
-            Asset("/Prefab/SD/Personality/10201_yisang_LCBAppearance.prefab", AssetType.GameObject),
+            Asset("/Prefab/SD/Personality/10201_yisang_LCBAppearance.prefab"),
         });
 
         var engine = new WikiPageAuthorityEngine();
@@ -103,8 +108,9 @@ public sealed class WikiAuthorityEngineTests : IDisposable
 
         Assert.All(facts.Facts, f =>
         {
-            Assert.NotNull(f.WritableSource);
-            Assert.NotEmpty(f.WritableSource);
+            Assert.Equal(WritableSourceKind.Path, f.WritableSource);
+            Assert.NotNull(f.WritableSourcePath);
+            Assert.NotEmpty(f.WritableSourcePath);
         });
     }
 
@@ -182,48 +188,74 @@ public sealed class WikiAuthorityEngineTests : IDisposable
     }
 
     [Fact]
-    public void WritableSource_null_means_unknown()
+    public void WritableSource_Unknown_means_not_yet_analyzed()
     {
-        // null = 未知/尚未分析出出处（待办）
+        // WritableSourceKind.Unknown = 未知/尚未分析出出处（待办）
         var fact = new AuthorityFact("persona:10201", "text", "some/ref",
-            AuthoritySource.LangFileName, ConfidenceLevel.Authoritative, null);
+            AuthoritySource.LangFileName, ConfidenceLevel.Authoritative, WritableSourceKind.Unknown);
 
-        Assert.Null(fact.WritableSource);
+        Assert.Equal(WritableSourceKind.Unknown, fact.WritableSource);
     }
 
     [Fact]
-    public void WritableSource_empty_means_readable_but_not_writable()
+    public void WritableSource_None_means_readable_but_not_writable()
     {
-        // 空串 = 可读但不可写（已确认无可写出处）
+        // WritableSourceKind.None = 可读但不可写（已确认无可写出处）
         var fact = new AuthorityFact("persona:10201", "spine", "some/prefab",
-            AuthoritySource.PrefabReferenceChain, ConfidenceLevel.Authoritative, string.Empty);
+            AuthoritySource.PrefabReferenceChain, ConfidenceLevel.Authoritative, WritableSourceKind.None);
 
-        Assert.NotNull(fact.WritableSource);
-        Assert.Empty(fact.WritableSource);
+        Assert.Equal(WritableSourceKind.None, fact.WritableSource);
     }
 
     [Fact]
-    public void WritableSource_path_means_writable()
+    public void WritableSource_Path_means_writable()
     {
-        // 非空路径 = 有可写出处
+        // WritableSourceKind.Path = 有可写出处
         var fact = new AuthorityFact("persona:10201", "text", "some/ref",
-            AuthoritySource.LangFileName, ConfidenceLevel.Authoritative, "PersonalityVoiceDlg/10201.json");
+            AuthoritySource.LangFileName, ConfidenceLevel.Authoritative, WritableSourceKind.Path)
+        {
+            WritableSourcePath = "PersonalityVoiceDlg/10201.json",
+        };
 
-        Assert.NotNull(fact.WritableSource);
-        Assert.Equal("PersonalityVoiceDlg/10201.json", fact.WritableSource);
+        Assert.Equal(WritableSourceKind.Path, fact.WritableSource);
+        Assert.Equal("PersonalityVoiceDlg/10201.json", fact.WritableSourcePath);
     }
 
     [Fact]
-    public void WritableSource_distinguishes_unknown_from_no_source()
+    public void WritableSource_three_states_are_distinguishable()
     {
-        // 验证 null（未知）与空串（不可写）是可区分的
+        // 验证三种状态是可区分的
         var unknown = new AuthorityFact("persona:10201", "text", "ref1",
-            AuthoritySource.LangFileName, ConfidenceLevel.Authoritative, null);
-        var noSource = new AuthorityFact("persona:10201", "spine", "ref2",
-            AuthoritySource.PrefabReferenceChain, ConfidenceLevel.Authoritative, string.Empty);
+            AuthoritySource.LangFileName, ConfidenceLevel.Authoritative, WritableSourceKind.Unknown);
+        var none = new AuthorityFact("persona:10201", "spine", "ref2",
+            AuthoritySource.PrefabReferenceChain, ConfidenceLevel.Authoritative, WritableSourceKind.None);
+        var path = new AuthorityFact("persona:10201", "audio", "ref3",
+            AuthoritySource.BankSampleExactMatch, ConfidenceLevel.Authoritative, WritableSourceKind.Path)
+        {
+            WritableSourcePath = "some/path",
+        };
 
-        Assert.Null(unknown.WritableSource);
-        Assert.NotNull(noSource.WritableSource);
-        Assert.Empty(noSource.WritableSource);
+        Assert.Equal(WritableSourceKind.Unknown, unknown.WritableSource);
+        Assert.Equal(WritableSourceKind.None, none.WritableSource);
+        Assert.Equal(WritableSourceKind.Path, path.WritableSource);
+
+        // 验证它们互不相等
+        Assert.NotEqual(unknown.WritableSource, none.WritableSource);
+        Assert.NotEqual(none.WritableSource, path.WritableSource);
+        Assert.NotEqual(unknown.WritableSource, path.WritableSource);
+    }
+
+    [Fact]
+    public void Unavailable_types_tracked_separately()
+    {
+        var context = CreateContext();
+        var engine = new WikiPageAuthorityEngine();
+
+        var facts = engine.Extract("persona:10201", context);
+
+        // 空上下文应该产出不可用类型
+        Assert.True(facts.UnavailableCount > 0);
+        Assert.Contains(facts.Unavailable, u => u.ContentType == "text");
+        Assert.Contains(facts.Unavailable, u => u.ContentType == "audio");
     }
 }

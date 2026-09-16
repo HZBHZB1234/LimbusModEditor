@@ -13,7 +13,6 @@ import {
   AnimationState,
   AnimationStateData,
   GLTexture,
-  Physics,
 } from '@esotericsoftware/spine-webgl'
 
 export const spine = {
@@ -27,6 +26,5 @@ export const spine = {
   AnimationState,
   AnimationStateData,
   GLTexture,
-  Physics,
 }
 

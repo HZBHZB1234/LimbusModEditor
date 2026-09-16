@@ -865,6 +865,8 @@
 | `docs/ARCH-WEBVIEW2-VUE.md` ★ | **架构决策记录（ADR）**：显式取代 `docs/WEBVIEW-FEASIBILITY.md` §5/§6 的「不做全量重写」结论；为何现在做 A；§4.2 不利项逐条回应（运行时依赖/内存/IPC/中文 IME/对话框/DPI）；W0→W4 波次与验收口径；22 个 UI 单元迁移分类表（保真 13 / 重设计 5 / 砍掉 4）；前端工程根 `src/LimbusModEditor.Web/` 与构建集成；Spine 全量前端化移除/保留清单（逐工程逐文件）；内存与速度目标口径（基线 1,275,623 条资源 / 1,459 bundle / 发布 519MB） |
 | `docs/WEB-IPC-CONTRACT.md` ★ | **最小 IPC 契约**：请求/响应/事件三类消息帧；统一分页契约（`AssetCatalogPage`，禁止全量）；错误码与取消语义；二进制通道（`lme.app`/`lme.data` 本地虚拟主机，禁止 base64）；对话框/剪贴板/`Process.Start` 回调；`RelationDeepLink` 的 `'\0'` 分段载荷原样透传与 Reveal 布尔语义；契约 DTO 归属 `Application/Ipc`（无 WPF，铁律 §3-10） |
 | `docs/SPIKE-WEBVIEW2.md` ★ | **W0 WebView2 宿主 spike 实测结论**：五个未知量（运行时检测/IME/DPI/对话框回调/二进制通道）逐项实测；Evergreen 运行时探测（本机 153.0.4234.32）；虚拟主机映射（`lme.app`/`lme.data`）加载静态页成功；PerMonitorV2 DPI 清单；中文 IME/文件对话框/剪贴板/`Process.Start` 回调通道代码落地；二进制通道 Virtual Host vs Base64 对比结论；Fixed Version 分发开关预留与体积代价；契约需修正点 |
+| `docs/AUDIT-2026-R1.md` ★ | **【委托2·首轮】架构级反模式审查与仓库卫生审计**（t1，2026-09-15）：12 项架构审计发现（F-01~F-12，含 4 HIGH / 5 MEDIUM / 2 LOW），逐条给编号/严重度/证据/根因/建议/重构交互标注；首轮 14 项独立复审已收录于 docs/REVIEW.md §2.3 |
+| `docs/AUDIT-2026-R2.md` ★ | **【委托2·第二轮】重构后最终状态全面审查**（t20，2026-09-17）：R1 发现逐条复核（7 已修/不复现、4 仍存在有意决策、1 不修）；并发改动事故专项复核（FormatVersion v4 一致性、无重复逻辑、测试与实现一致）；新债清单（5 项）；残余风险清单（6 项）；文档同步核对清单（8 文档） |
 
 ### 同步标记汇总（2026-09-15）
 

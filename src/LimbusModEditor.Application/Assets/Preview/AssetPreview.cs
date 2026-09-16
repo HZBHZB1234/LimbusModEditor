@@ -96,14 +96,13 @@ public sealed class AssetPreviewRegistry
     public AssetPreviewRegistry(IEnumerable<IAssetPreviewProvider> providers)
         => _providers = providers?.ToArray() ?? throw new ArgumentNullException(nameof(providers));
 
-    /// <summary>默认注册顺序：图像 → Sprite → 音频 → Spine → 文本/JSON → 脚本字段 → 摘要 →
+    /// <summary>默认注册顺序：图像 → Sprite → 音频 → 文本/JSON → 脚本字段 → 摘要 →
     /// 材质/着色器/视频/图集（只读字段树）→ 十六进制兜底。
+    /// Spine 预览已前移前端（spine-webgl），WPF 侧不再注册 Spine 预览服务。
     /// <paramref name="fmodDirectoryProvider"/> 提供当前 FMOD DLL 目录（设置可随时改，
-    /// 因此每次预览都现取；为 null 表示没有可用 DLL）。
-    /// <paramref name="spinePreviewService"/> 提供 Spine 同目录索引（为 null 时不启用 Spine 预览）。</summary>
+    /// 因此每次预览都现取；为 null 表示没有可用 DLL）。</summary>
     public static AssetPreviewRegistry CreateDefault(
-        Func<string?>? fmodDirectoryProvider = null,
-        Spine.SpinePreviewService? spinePreviewService = null)
+        Func<string?>? fmodDirectoryProvider = null)
     {
         var providers = new List<IAssetPreviewProvider>
         {
@@ -111,9 +110,6 @@ public sealed class AssetPreviewRegistry
             new SpritePreviewProvider(),
             new AudioPreviewProvider(fmodDirectoryProvider),
         };
-        // Spine 放在文本预览之前：命中路径时先按 Spine 结构解析，解析不出会返回 null，
-        // 于是「Story/Spine 目录下的普通 JSON」自然回落到文本预览，不会丢内容。
-        if (spinePreviewService is not null) providers.Add(new Spine.SpinePreviewProvider(spinePreviewService));
         providers.AddRange(
         [
             new TextPreviewProvider(),

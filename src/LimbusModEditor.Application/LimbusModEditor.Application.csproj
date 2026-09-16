@@ -7,6 +7,12 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- 允许 Domain.Tests 和 App 访问 internal 类型（IpcJson 等） -->
+    <InternalsVisibleTo Include="LimbusModEditor.Domain.Tests" />
+    <InternalsVisibleTo Include="LimbusModEditor.App" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.11" />
     <PackageReference Include="System.IO.Hashing" Version="8.0.0" />
     <PackageReference Include="NLog" Version="6.2.0" />

@@ -4,6 +4,9 @@
 > 审查范围：重构后全仓（WebView2 宿主 + Vue3/TS 前端 + 维基化关联页）
 > 对照：docs/AUDIT-2026-R1.md（首轮 14 项独立复审 + 12 项架构审计）
 > 口径：核心闭环优先（编辑/导出/预览/写回保真，浏览类界面允许重设计）
+> ⚠️ **勘误（2026-09-17 交付轮）**：本文 §0/§2.1/§2.2/§2.3/§2.4/§4/§5/§7 的数字有三处已被交付轮实测更正
+> （测试 869→**864**、IPC「33 方法」→**49 派发名/47 处理器**、App「8 源文件」的完整文件清单、
+> 「0 any」→8 处、「WPF-UI 已移除」不实），**一律以 §8 勘误表为准**。
 
 ---
 
@@ -183,3 +186,26 @@ spine-engineer 在 t24 完成后越界修改了 6 个文件（RelationDisplayRul
 > **审查方法教训**：审计结论须以**审查者亲自执行的命令/grep 输出**为准，不得引用其它任务的决策或记忆。本轮 F-02 的错误即源于「引用 t22 决策」而未实测当前文件；所有数字结论均应给命令与原始输出。
 
 > **组织经验**：并发成员越界修改是本轮最大风险源。建议 W4 引入文件级归属（CODEOWNERS 式）机制，防止多成员同时修改重叠文件。
+
+---
+
+## 8. 勘误（2026-09-17 交付轮复测，以本节为准）
+
+本节由交付轮（收尾工程师）**亲自执行命令**复核得到，用于更正本文档正文中与当前仓库不符的数字与结论。
+方法口径沿用 §0 的教训：**只信本次实测输出**，不引用其它任务的决策或记忆。
+
+| # | 本文档原文位置 | 原值 | 交付轮实测值 | 复现命令 / 证据 |
+|---|----------------|------|--------------|------------------|
+| E-01 | §0.1、§2.4、§7 | 测试 **869**（Domain 94 + Format 74 + **Application 701**） | **864**（Domain 94 + Format 74 + **Application 696**，差 5 例） | `dotnet build LimbusModEditor.slnx --no-restore --nologo` → 0 警告 0 错误，exit 0；`dotnet test LimbusModEditor.slnx --no-build --nologo` → 输出「失败: 0，通过: 94 / 74 / 696」，exit 0 |
+| E-02 | §2.2、§7 | IPC「**33 方法**全部真实实现」 | **49 个派发方法名 / 47 个独立处理器**（`wiki.categoryIndex`≡`wiki.category.load`、`wiki.page.load`≡`wiki.getPage` 两组别名） | `grep -oE '"[a-zA-Z]+\.[a-zA-Z.]+" =>' src/LimbusModEditor.Application/Ipc/IpcGateway.cs \| sort -u \| wc -l` → 49；`… \| grep -oE 'Handle[A-Za-z]+' \| sort -u \| wc -l` → 47 |
+| E-03 | §2.1 | 「薄宿主：仅 8 个源文件」（易读成「只剩 8 个文件 / WPF 痕迹已清零」） | 8 个 **`.cs`** 成立；但 App 目录另有 `App.xaml`、`WebView2MainWindow.xaml`、`app.manifest`，以及**并未删除**的 `Themes/Theme.xaml` + `Themes/WorkbenchStyles.xaml`（合计 519 行，**已无消费点**） | `find src/LimbusModEditor.App -type f \( -name "*.cs" -o -name "*.xaml" \) -not -path "*/obj/*"`；`App.xaml` 仍 `MergedDictionaries` 引入两个 Themes 字典 |
+| E-04 | §2.1 表「WebView2 集成」+ 下游 `CODE-STRUCTURE.md` §2「WPF-UI 随 WPF 页面层一并移除」 | WPF-UI 已移除 | **不实**：`WPF-UI 4.3.0` 仍是 `PackageReference`，且宿主外壳**在用**（`App.xaml` 的 `ui:ThemesDictionary`/`ui:ControlsDictionary`，`WebView2MainWindow.xaml` 的 `ui:FluentWindow`/`ui:TitleBar`） | `grep -n "WPF-UI" src/LimbusModEditor.App/LimbusModEditor.App.csproj` → `Version="4.3.0"` |
+| E-05 | §2.3 表「类型安全」 | 「**0 any**（除 3 处 WebView2 桥接）」 | 实测 **8 处** `any`：`components/spine-runtime.ts` 2、`components/SpineRenderer.vue` 5、`views/StaticView.vue` 1（集中在 spine-webgl 缺类型处） | `grep -rn ": any\|as any\|<any>" src/LimbusModEditor.Web/src/ \| wc -l` → 8 |
+| E-06 | §4 N-03 | 「8 处 sync-over-async（`IpcGateway.cs`）」 | `IpcGateway.cs` **已清零**（t60 改成 async 管道）；但 Application 内**仍余 3 处**：`Assets/Preview/AssetPreviewProviders.cs:297`、`:354`、`Build/UnityCacheExportService.cs:206` 的 `.Result` | `grep -rn "GetAwaiter().GetResult()\|\.Result;" src/LimbusModEditor.Application/ --include=*.cs` → 3 行 |
+| E-07 | §5 R-03 | 「实测 JS 堆 ~2.3 MiB」 | **未复核**（交付轮未重测堆快照）；委托口径为 **2.13–2.16 MiB**。两者差异未查清，**以需方口径为准** | 无本轮证据 |
+| E-08 | §2.5「npm build：98 modules」 | 98 modules | **未复核**（本轮 `npm run build` 输出为 vite 产物表 + `copy-licenses` 日志，未打印 module 计数）；可确认的是 **exit 0、`✓ built in 2.08s`、两份 LICENSE 已复制** | `npm --prefix src/LimbusModEditor.Web run build` → exit 0 |
+| E-09 | §2.3「性能反模式」/ §6「npm build ✅」等其余 ✅ 项 | — | 本次未逐条重跑，**保持原结论但不视为交付轮证据**；需要时必须重跑对应命令 | — |
+
+**结论**：E-01/E-02/E-03/E-04/E-05/E-06 属**文档与仓库不符**（已同步修正 `docs/CODE-STRUCTURE.md`、`docs/PROJECT-INDEX.md`、`docs/ROADMAP.md`、`docs/STATUS.md`）；
+E-07/E-08 属**未复核**，已在 `docs/FINAL-DELIVERY.md` 标注为「未验证」，不得当作已验收事实引用。
+**其中 E-03/E-04 同时是「委托2：残留不妥设计」的实质发现**（死资源 + 未清理的 WPF 依赖），因交付轮硬约束「不改 `src/`」而只登记不修，见 FINAL-DELIVERY G-08。

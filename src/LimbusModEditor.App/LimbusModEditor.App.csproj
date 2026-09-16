@@ -14,15 +14,10 @@
     <ProjectReference Include="..\LimbusModEditor.Domain\LimbusModEditor.Domain.csproj" />
     <ProjectReference Include="..\LimbusModEditor.Editing\LimbusModEditor.Editing.csproj" />
     <ProjectReference Include="..\LimbusModEditor.Formats.Unity\LimbusModEditor.Formats.Unity.csproj" />
-    <!--
-      Spine 4.0 骨骼动画离线渲染（vendored spine-csharp + SkiaSharp）。
-      应用层只负责「找到骨架/图集/贴图素材 + 把渲染出的帧贴到界面」，
-      真正的解析与绘制都在这个类库里（net8.0，无 WPF 依赖）。
-    -->
-    <ProjectReference Include="..\LimbusModEditor.SpineRuntime\LimbusModEditor.SpineRuntime.csproj" />
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4191.47" />
     <PackageReference Include="NLog" Version="6.2.0" />
     <PackageReference Include="WPF-UI" Version="4.3.0" />
   </ItemGroup>
@@ -30,6 +25,25 @@
   <ItemGroup>
     <!-- 日志配置随程序发布：autoReload 生效时可在运行中直接改级别（见 docs/LOGGING.md）。 -->
     <None Include="..\..\nlog.config" Link="nlog.config" CopyToOutputDirectory="PreserveNewest" />
+    <!-- PerMonitorV2 DPI 感知 + 长路径支持（WebView2 跟随宿主 DPI，Chromium 自行处理 per-monitor） -->
+    <ApplicationManifest Include="app.manifest" />
   </ItemGroup>
+
+  <!-- 发布集成：将前端产物 dist/ 复制到输出 wwwroot/ -->
+  <PropertyGroup>
+    <FrontendDistDir>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\LimbusModEditor.Web\dist'))</FrontendDistDir>
+  </PropertyGroup>
+
+  <Target Name="PublishFrontend" BeforeTargets="ComputeFilesToPublish">
+    <ItemGroup>
+      <FrontendFiles Include="$(FrontendDistDir)\**\*" Condition="Exists('$(FrontendDistDir)')" />
+    </ItemGroup>
+    <Error Condition="!Exists('$(FrontendDistDir)') OR '@(FrontendFiles)' == ''"
+           Text="前端产物不存在：$(FrontendDistDir)。请先构建前端：npm --prefix src/LimbusModEditor.Web run build" />
+    <Message Importance="high" Text="发布前端产物：@(FrontendFiles->Count()) 个文件从 $(FrontendDistDir) → wwwroot/" />
+    <Copy SourceFiles="@(FrontendFiles)"
+          DestinationFiles="@(FrontendFiles->'$(PublishDir)wwwroot\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
 
 </Project>

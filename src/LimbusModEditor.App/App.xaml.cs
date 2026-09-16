@@ -25,7 +25,8 @@ public partial class App : WpfApplication
         LogHost.Initialize(this);
     }
 
-    protected override void OnStartup(StartupEventArgs e)
+    /// <summary>启动入口（已取代 StartupUri，以便 --spike-webview2 走独立窗口）。</summary>
+    private void App_OnStartup(object sender, StartupEventArgs e)
     {
         Log.Info("App.OnStartup（参数 {0} 个）", e.Args.Length);
         if (!OperatingSystem.IsWindows())
@@ -35,8 +36,11 @@ public partial class App : WpfApplication
             Shutdown(1);
             return;
         }
-        base.OnStartup(e);
-        Log.Info("App.OnStartup 完成（即将创建主窗口）");
+
+        // 正常启动：创建 WebView2 主窗口（W1 正式宿主壳）
+        Log.Info("App.OnStartup: 正常启动，创建 WebView2MainWindow");
+        var mainWindow = new WebView2MainWindow();
+        mainWindow.Show();
     }
 
     protected override void OnExit(ExitEventArgs e)

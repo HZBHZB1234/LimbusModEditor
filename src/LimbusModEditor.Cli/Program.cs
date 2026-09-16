@@ -20,6 +20,10 @@ if (args.Length == 0 || args[0] is "help" or "--help" or "-h")
     Console.WriteLine("  import <project.lmeproj> <file-or-dir>    Import package, bundle or directory");
     Console.WriteLine("  export <project.lmeproj> <output> [src]   Export project edits");
     Console.WriteLine("  export-mod <project.lmeproj> <targetDir>  Headless 导出模组（与 GUI 同链路；用于真实数据性能/取消排查）");
+    Console.WriteLine("  wiki-generate <project.lmeproj> [pageId] [out.json]");
+    Console.WriteLine("                                           Headless 生成维基页面（与 Wiki 首页按钮同链路）；");
+    Console.WriteLine("                                           给 pageId（可逗号分隔多个）时把该页完整内容（含权威标注）导出到 out.json");
+    Console.WriteLine("                                           环境变量 LME_BASE=<程序目录> 指定共享配置/缓存目录");
     Console.WriteLine("  logs                                      Print the log directory");
     NLogBootstrap.Shutdown();
     return;
@@ -46,6 +50,13 @@ try
                 int.TryParse(Environment.GetEnvironmentVariable("LME_EXPORT_TIMEOUT_S"), out var timeoutSeconds)
                     ? Math.Max(0, timeoutSeconds)
                     : 0);
+            break;
+        case "wiki-generate" when args.Length >= 2:
+            Environment.ExitCode = await WikiGenerateCommand.RunAsync(
+                args[1],
+                Environment.GetEnvironmentVariable("LME_BASE"),
+                args.Length >= 3 ? args[2] : null,
+                args.Length >= 4 ? args[3] : null);
             break;
         case "logs":
             Console.WriteLine(logging.CurrentFile ?? logging.Describe());

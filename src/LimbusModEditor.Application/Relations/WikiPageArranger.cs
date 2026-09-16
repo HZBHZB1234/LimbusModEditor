@@ -32,9 +32,17 @@ public sealed class WikiPageArranger
     /// 为指定对象生成维基式页面结构。
     /// <param name="subjectId">对象 id（格式 <c>&lt;category&gt;:&lt;key&gt;</c>）。</param>
     /// <param name="assets">项目资源索引（用于封面挑选与资源定位）。</param>
+    /// <param name="assetIndex">
+    /// 预先建好的「容器路径 → 资源」索引；<b>批量生成时必须传</b>——不传就按
+    /// <paramref name="assets"/> 重建一次，在真实规模（127 万条资源行）下
+    /// 每个对象重建一遍是不可接受的。单个对象按需生成时可以不传。
+    /// </param>
     /// <returns>生成的页面结构。如果对象不存在或关联图为空，返回 null。</returns>
     /// </summary>
-    public WikiPageDetail? Arrange(string subjectId, IReadOnlyList<Domain.Assets.AssetRecord> assets)
+    public WikiPageDetail? Arrange(
+        string subjectId,
+        IReadOnlyList<Domain.Assets.AssetRecord> assets,
+        IReadOnlyDictionary<string, Domain.Assets.AssetRecord>? assetIndex = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(subjectId);
         if (!_relations.IsReady) return null;
@@ -47,7 +55,7 @@ public sealed class WikiPageArranger
 
         var category = SubjectIds.CategoryOf(subjectId);
         var sections = WikiSectionTables.ForCategory(category);
-        var assetIndex = PresetWorkbenchService.IndexByContainerEntry(assets);
+        assetIndex ??= PresetWorkbenchService.IndexByContainerEntry(assets);
 
         // 按分节归类资源
         var sectionGroups = new Dictionary<string, List<RelationLink>>();

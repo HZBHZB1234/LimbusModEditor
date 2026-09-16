@@ -471,6 +471,31 @@ public sealed class UnityCacheSqliteIndexStore
 
     public sealed record UnityCacheContainerRow(string ContainerEntry, AssetType Type, long Size);
 
+    /// <summary>
+    /// 读出<b>非静态数据表</b>的容器行：与 <see cref="ReadContainerRows"/> 同一口径，
+    /// 再用 <c>bundles.static_bundle</c> 与 <c>assets.static_kind</c> 两列把静态数据排除掉。
+    ///
+    /// <para><b>为什么生成维基页时要排除</b>：静态表另有一路事实源
+    /// （<c>StaticBundleLocator</c> 读出的 <c>RelationStaticFact</c>），
+    /// 把同一批 <c>static-data/*.json</c> 既当「资源」又当「静态表」会在页面里出现两次、
+    /// 且资源侧的 type 是 TextAsset、没有容器路径语义（<c>AssetStaticClassifier</c> 的判据）。</para>
+    /// </summary>
+    public IReadOnlyList<UnityCacheContainerRow> ReadNonStaticContainerRows()
+    {
+        using var connection = OpenEnsured();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT a.container_entry, a.type, a.size
+            FROM assets a JOIN bundles b ON b.id = a.bundle_id
+            WHERE a.container_entry IS NOT NULL AND a.container_entry <> ''
+              AND b.static_bundle = 0 AND a.static_kind = 0
+            """;
+        using var reader = command.ExecuteReader();
+        var rows = new List<UnityCacheContainerRow>();
+        while (reader.Read()) rows.Add(new(reader.GetString(0), (AssetType)reader.GetInt32(1), reader.GetInt64(2)));
+        return rows;
+    }
+
     public IReadOnlyList<UnityCacheContainerRow> ReadContainerRows()
     {
         using var connection = OpenEnsured();

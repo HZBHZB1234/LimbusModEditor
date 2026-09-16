@@ -29,6 +29,12 @@ public sealed class StoryDataAuthorityProvider : IAuthorityProvider
         // ③ 静态表 cutscene / storytheater-personality —— 过场 / 登场角色
         ExtractFromStaticTables(subjectId, context, facts);
 
+        // ④ 静态表 subchapter-detail / storytheater-main —— 章节导航
+        ExtractChapterNavigation(subjectId, context, facts);
+
+        // ⑤ 静态表 story-dungeon-* / abnormality-event —— 事件与选择
+        ExtractStoryEvents(subjectId, context, facts);
+
         if (!facts.Any())
             unavailable.Add(new UnavailableType("text", "本地数据无来源：无匹配的 StoryData 或 AbDlg 文件"));
 
@@ -50,18 +56,19 @@ public sealed class StoryDataAuthorityProvider : IAuthorityProvider
             if (string.IsNullOrEmpty(dirName) || !dirName.EndsWith("StoryData", StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            // 文件名必须是 S<数字>.json 格式（章节级）
-            if (!fileName.StartsWith("S", StringComparison.OrdinalIgnoreCase) || fileName.Length < 2)
-                continue;
-            if (!int.TryParse(fileName[1..], out _))
-                continue;
+            // 文件名必须带数字段（章节级）。
+            // 真实命名是 S001A / 1D101B / ES001B / P01011 等（实测 920 个文件）——
+            // 早期那句 int.TryParse(fileName[1..]) 只对 "S1" 成立，对 "S001A" 恒为 false，
+            // 等于把全部真实剧情文件都过滤掉了。这里改成「含数字段」判定，
+            // 章节键另由 StoryDataReader.ChapterKeyOf 按同一约定推出。
+            if (fileName.Length < 2 || !fileName.Any(char.IsAsciiDigit)) continue;
 
             facts.Add(new AuthorityFact(subjectId, "story_content", path,
                 AuthoritySource.LangFileName, ConfidenceLevel.Authoritative, WritableSourceKind.Path)
             {
                 WritableSourcePath = path,
                 Display = fileName,
-                Detail = $"{lang.KeyCount} 个键（含 dialog 台词正文）",
+                Detail = $"{lang.KeyCount} 个键（dataList[].content 为台词正文）",
                 MediaKind = "text",
                 DeepLink = RelationDeepLink.ForText(path, null),
                 SourceDetail = $"Lang 文件名约定 StoryData/{fileName}.json（章节级，含对话正文）",
@@ -140,6 +147,58 @@ public sealed class StoryDataAuthorityProvider : IAuthorityProvider
                     SourceDetail = $"静态表外键 storytheater-personality（角色级）",
                 });
             }
+        }
+    }
+
+    /// <summary>
+    /// 章节导航（subchapter-detail / storytheater-main）：静态表里的章节定义，
+    /// 来源是容器路径 + <c>data_class</c>（<see cref="AuthoritySource.StaticTableForeignKey"/>）。
+    /// </summary>
+    private static void ExtractChapterNavigation(string subjectId, AuthorityExtractionContext context, List<AuthorityFact> facts)
+    {
+        foreach (var table in context.StaticTables)
+        {
+            if (string.IsNullOrEmpty(table.ContainerEntry)) continue;
+            if (!table.ContainerEntry.Contains("/static-data/subchapter-detail/", StringComparison.OrdinalIgnoreCase) &&
+                !table.ContainerEntry.Contains("/static-data/storytheater-main/", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            facts.Add(new AuthorityFact(subjectId, "story_chapter", table.ContainerEntry,
+                AuthoritySource.StaticTableForeignKey, ConfidenceLevel.Authoritative, WritableSourceKind.Path)
+            {
+                WritableSourcePath = table.ContainerEntry,
+                Display = table.Name,
+                Detail = $"{table.DataClass} · {table.SizeBytes} B",
+                MediaKind = "static",
+                DeepLink = RelationDeepLink.ForStatic(table.ContainerEntry, null),
+                SourceDetail = $"静态表 subchapter-detail / storytheater-main（章节导航）",
+            });
+        }
+    }
+
+    /// <summary>
+    /// 事件与选择（story-dungeon-* / abnormality-event）：静态表里的事件定义，
+    /// 来源同样是容器路径 + <c>data_class</c>。
+    /// </summary>
+    private static void ExtractStoryEvents(string subjectId, AuthorityExtractionContext context, List<AuthorityFact> facts)
+    {
+        foreach (var table in context.StaticTables)
+        {
+            if (string.IsNullOrEmpty(table.ContainerEntry)) continue;
+            if (!table.ContainerEntry.Contains("/static-data/story-dungeon-", StringComparison.OrdinalIgnoreCase) &&
+                !table.ContainerEntry.Contains("/static-data/abnormality-event/", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            facts.Add(new AuthorityFact(subjectId, "story_event", table.ContainerEntry,
+                AuthoritySource.StaticTableForeignKey, ConfidenceLevel.Authoritative, WritableSourceKind.Path)
+            {
+                WritableSourcePath = table.ContainerEntry,
+                Display = table.Name,
+                Detail = $"{table.DataClass} · {table.SizeBytes} B",
+                MediaKind = "static",
+                DeepLink = RelationDeepLink.ForStatic(table.ContainerEntry, null),
+                SourceDetail = $"静态表 story-dungeon-* / abnormality-event（事件与选择）",
+            });
         }
     }
 }

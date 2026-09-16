@@ -176,3 +176,202 @@ export interface ProgressPayload {
   total: number
   message: string
 }
+
+// ── 维基页面类型 ──────────────────────────────────────────
+export type WikiPageCategory =
+  | 'persona'
+  | 'enemy'
+  | 'abnormality'
+  | 'ego'
+  | 'ego_gift'
+  | 'announcer'
+  | 'story'
+  | 'stage'
+  | 'item'
+  | 'mechanism'
+  | 'keyword'
+
+export const WikiPageCategoryLabels: Record<WikiPageCategory, string> = {
+  persona: '人格',
+  enemy: '敌方单位',
+  abnormality: '异想体',
+  ego: 'E.G.O 装备',
+  ego_gift: 'E.G.O 饰品',
+  announcer: '播报员',
+  story: '剧情',
+  stage: '关卡',
+  item: '物品',
+  mechanism: '机制',
+  keyword: '关键词',
+}
+
+// ── 信息框字段 ──────────────────────────────────────────────
+export interface InfoboxField {
+  label: string
+  value: string
+  type: 'text' | 'image' | 'number' | 'boolean' | 'link' | 'tags'
+  editable: boolean
+  source?: string // WritableSource 出处
+}
+
+// ── 信息框 ──────────────────────────────────────────────────
+export interface Infobox {
+  title: string
+  imageUrl?: string
+  fields: InfoboxField[]
+}
+
+// ── 分节 ────────────────────────────────────────────────────
+export interface WikiSection {
+  id: string
+  title: string
+  content: string // Markdown or HTML
+  collapsible: boolean
+  editable: boolean
+  bindings?: ResourceBinding[]
+}
+
+// ── 目录项 ──────────────────────────────────────────────────
+export interface TocItem {
+  id: string
+  title: string
+  level: number
+  children?: TocItem[]
+}
+
+// ── 维基页面 ────────────────────────────────────────────────
+export interface WikiPage {
+  id: string
+  title: string
+  category: WikiPageCategory
+  subtitle?: string
+  infobox?: Infobox
+  sections: WikiSection[]
+  toc: TocItem[]
+  gallery?: GalleryImage[]
+  relatedPages?: WikiRelatedPage[]
+  tags?: string[]
+  lastModified?: string
+}
+
+export interface GalleryImage {
+  url: string
+  caption?: string
+  credit?: string
+}
+
+export interface WikiRelatedPage {
+  id: string
+  title: string
+  category: WikiPageCategory
+  url: string
+}
+
+// ── 二级页面树 ──────────────────────────────────────────────
+export interface WikiSubPage {
+  id: string
+  title: string
+  sortOrder: number
+  entries: WikiEntry[]
+}
+
+export interface WikiEntry {
+  id: string
+  title: string
+  body: string
+  bindings: ResourceBinding[]
+  source: 'user' | 'auto' | 'candidate'
+  lastModified?: string
+}
+
+export interface ResourceBinding {
+  refKey: string
+  kind: string
+  display: string
+  deepLink: string
+  previewText?: string
+  mediaKind?: string
+  durationSec?: number
+}
+
+// ── 内容编辑 ────────────────────────────────────────────────
+export interface ContentEdit {
+  pageId: string
+  sectionId?: string
+  entryId?: string
+  field: string
+  oldValue: string
+  newValue: string
+  source: 'user' | 'auto' | 'candidate'
+  timestamp: number
+}
+
+// ── 搜索 ────────────────────────────────────────────────────
+export interface WikiSearchQuery {
+  keyword: string
+  category?: WikiPageCategory
+  offset: number
+  limit: number
+}
+
+export interface WikiSearchResult {
+  pageId: string
+  title: string
+  category: WikiPageCategory
+  snippet: string
+  url: string
+}
+
+export interface WikiSearchResponse {
+  total: number
+  results: WikiSearchResult[]
+}
+
+// ── 分类索引 ────────────────────────────────────────────────
+export interface CategoryIndex {
+  category: WikiPageCategory
+  label: string
+  pages: CategoryPageRef[]
+}
+
+export interface CategoryPageRef {
+  id: string
+  title: string
+  subtitle?: string
+  thumbnailUrl?: string
+}
+
+// ── 首页数据 ────────────────────────────────────────────────
+export interface HomeData {
+  categories: HomeCategoryCard[]
+  recentPages: HomeRecentPage[]
+  stats: WikiStats
+}
+
+export interface HomeCategoryCard {
+  category: WikiPageCategory
+  label: string
+  icon: string
+  pageCount: number
+  featuredPages: CategoryPageRef[]
+}
+
+export interface HomeRecentPage {
+  id: string
+  title: string
+  category: WikiPageCategory
+  lastModified: string
+}
+
+export interface WikiStats {
+  totalPages: number
+  totalEntries: number
+  totalBindings: number
+  userEdits: number
+}
+
+// ── 面包屑 ──────────────────────────────────────────────────
+export interface BreadcrumbItem {
+  label: string
+  route: string
+}

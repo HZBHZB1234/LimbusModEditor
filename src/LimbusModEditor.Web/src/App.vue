@@ -16,6 +16,7 @@ const navItems = [
   { key: 'project', label: '项目', icon: '📁', route: '/project' },
   { key: 'settings', label: '设置', icon: '⚙️', route: '/settings' },
   { key: 'help', label: '帮助', icon: '❓', route: '/help' },
+  { key: 'wiki', label: '维基', icon: '📖', route: '/wiki' },
 ]
 
 function navigate(routePath: string) {

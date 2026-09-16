@@ -50,6 +50,29 @@ const router = createRouter({
       name: 'project',
       component: () => import('@/views/ProjectView.vue'),
     },
+    // ── 维基页面 ──
+    {
+      path: '/wiki',
+      name: 'wiki-home',
+      component: () => import('@/views/WikiHomeView.vue'),
+    },
+    {
+      path: '/wiki/category/:category',
+      name: 'wiki-category',
+      component: () => import('@/views/WikiCategoryView.vue'),
+      props: true,
+    },
+    {
+      path: '/wiki/page/:id',
+      name: 'wiki-page',
+      component: () => import('@/views/WikiEntityPage.vue'),
+      props: true,
+    },
+    {
+      path: '/wiki/search',
+      name: 'wiki-search',
+      component: () => import('@/views/WikiSearchView.vue'),
+    },
   ],
 })
 

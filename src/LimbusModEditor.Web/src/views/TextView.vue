@@ -299,13 +299,6 @@ function restoreEntry(entry: KeyValueEntry) {
   }
 }
 
-// ── 新增条目 ──────────────────────────────────────────────
-
-function addEntry() {
-  // 新增方法暂未实现，弹出提示
-  alert('暂未实现')
-}
-
 // ── 保存补丁 ─────────────────────────────────────────────
 
 async function saveAsPatch() {
@@ -516,7 +509,6 @@ onUnmounted(() => {
           <input type="checkbox" v-model="showDiffView" />
           差异视图
         </label>
-        <button class="tool-btn" @click="addEntry">+ 新增条目</button>
         <button
           class="tool-btn save-btn"
           :disabled="saving || changedEntries.length === 0"
@@ -1289,5 +1281,4 @@ onUnmounted(() => {
 
   未实现降级：
   - IPC 方法不可用时显示「暂未实现」提示（alert）
-  - 新增条目尚未实现，操作按钮触发相同提示
 -->

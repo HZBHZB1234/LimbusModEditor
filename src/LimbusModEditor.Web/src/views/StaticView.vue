@@ -3,7 +3,7 @@
 // 对应 WPF 旧界面 StaticWorkbenchPage
 // 三栏布局：浏览 | 分隔条 | 编辑
 
-import { ref, computed, onMounted, defineComponent, h } from 'vue'
+import { ref, computed, onMounted, defineComponent, h, type DefineComponent } from 'vue'
 import { ipc } from '@/ipc'
 import VirtualList from '@/components/VirtualList.vue'
 import PageBar from '@/components/PageBar.vue'
@@ -125,7 +125,7 @@ const JsonTreeNode = defineComponent({
     depth: { type: Number, default: 0 },
   },
   setup(props) {
-    return () => {
+    return (): any => {
       const { node, depth } = props
       const indent = depth * 18 + 8
 

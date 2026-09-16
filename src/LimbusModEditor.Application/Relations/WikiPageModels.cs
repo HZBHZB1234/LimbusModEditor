@@ -1,4 +1,5 @@
 using System.Globalization;
+using LimbusModEditor.Application.Relations.Authority;
 
 namespace LimbusModEditor.Application.Relations;
 
@@ -67,6 +68,30 @@ public sealed record WikiEntry(
 {
     /// <summary>来源：<c>Auto</c> = 程序自动生成；<c>Revised</c> = 用户修订。</summary>
     public string Source { get; init; } = WikiEntrySources.Auto;
+
+    /// <summary>
+    /// 权威来源（<see cref="AuthoritySource"/> 的枚举名）。
+    /// <c>Unknown</c> = 本地数据里没有为这条内容找到权威来源（只登记归属、不宣称出处）。
+    /// </summary>
+    public string Authority { get; init; } = nameof(AuthoritySource.Unknown);
+
+    /// <summary>置信度（<see cref="ConfidenceLevel"/> 的枚举名）。</summary>
+    public string Confidence { get; init; } = nameof(ConfidenceLevel.None);
+
+    /// <summary>可写出处类型（<see cref="WritableSourceKind"/> 的枚举名）。</summary>
+    public string WritableSource { get; init; } = nameof(WritableSourceKind.Unknown);
+
+    /// <summary>可写出处路径（<see cref="WritableSource"/> 为 <c>Path</c> 时有效）。</summary>
+    public string? WritableSourcePath { get; init; }
+
+    /// <summary>来源详情（追溯到具体规则：路径前缀名 / 外键字段名 / 匹配的 lang 文件）。</summary>
+    public string? SourceDetail { get; init; }
+
+    /// <summary>
+    /// 可编辑性判据：<b>只有 <c>WritableSourceKind.Path</c> 的条目可写</b>，其余一律只读。
+    /// （<see cref="WikiAutoGenerationService"/> 生成时按同一判据标注，编辑端不得另立标准。）
+    /// </summary>
+    public bool Editable => string.Equals(WritableSource, nameof(WritableSourceKind.Path), StringComparison.Ordinal);
 }
 
 /// <summary>
@@ -138,11 +163,14 @@ public sealed record WikiEntryDetail(
 /// <summary>
 /// 维基页库的格式版本号。
 ///
-/// <para>当前 <c>v1</c>：初始版本（pages / sub_pages / entries / resource_bindings 四张表）。</para>
-/// <para>改表结构 / 改序列化口径时 +1，旧库整库重建。</para>
+/// <para><c>v1</c>：初始版本（pages / sub_pages / entries / resource_bindings 四张表）。</para>
+/// <para><c>v2</c>：给 <c>entries</c> 加权威标注五列（<c>authority</c> / <c>confidence</c> /
+/// <c>writable_source</c> / <c>writable_source_path</c> / <c>source_detail</c>），
+/// 由 <see cref="WikiAutoGenerationService"/> 落盘、供「只有 Path 可写」的编辑性判据使用。</para>
+/// <para>改表结构 / 改序列化口径时 +1，旧库整库重建（<c>SqliteTableCache.HealSchemaDrift</c> 会丢表重建）。</para>
 /// </summary>
 public static class WikiPageStoreFormat
 {
     /// <summary>当前格式版本号。</summary>
-    public const string Version = "v1";
+    public const string Version = "v2";
 }

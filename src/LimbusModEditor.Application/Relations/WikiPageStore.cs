@@ -36,6 +36,11 @@ public sealed class WikiPageStore
             sort_order   INTEGER NOT NULL,
             source       TEXT NOT NULL DEFAULT 'human',
             candidate_id TEXT,
+            authority    TEXT NOT NULL DEFAULT 'Unknown',
+            confidence   TEXT NOT NULL DEFAULT 'None',
+            writable_source TEXT NOT NULL DEFAULT 'Unknown',
+            writable_source_path TEXT,
+            source_detail TEXT,
             FOREIGN KEY (sub_page_id) REFERENCES sub_pages(sub_page_id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS ix_entries_sub_page ON entries(sub_page_id, sort_order);
@@ -138,6 +143,21 @@ public sealed class WikiPageStore
         });
     }
 
+    /// <summary>按 id 读单个条目；不存在返回 null（编辑前要拿到它真实的 sub_page_id 与正文）。</summary>
+    public WikiEntry? ReadEntry(string entryId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(entryId);
+        if (!_cache.Exists) return null;
+        return _cache.Read(connection =>
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = $"SELECT {EntryColumns} FROM {EntriesTable} WHERE entry_id = $id";
+            command.Parameters.AddWithValue("$id", entryId);
+            using var reader = command.ExecuteReader();
+            return reader.Read() ? ReadEntry(reader) : null;
+        });
+    }
+
     public IReadOnlyList<WikiEntry> ReadEntries(string subPageId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(subPageId);
@@ -145,22 +165,37 @@ public sealed class WikiPageStore
         return _cache.Read(connection =>
         {
             using var command = connection.CreateCommand();
-            command.CommandText = $"SELECT entry_id, sub_page_id, title, body, sort_order, source, candidate_id FROM {EntriesTable} WHERE sub_page_id = $id ORDER BY sort_order";
+            command.CommandText = $"SELECT {EntryColumns} FROM {EntriesTable} WHERE sub_page_id = $id ORDER BY sort_order";
             command.Parameters.AddWithValue("$id", subPageId);
             var rows = new List<WikiEntry>();
             using var reader = command.ExecuteReader();
             while (reader.Read())
-            {
-                rows.Add(new WikiEntry(
-                    reader.GetString(0),
-                    reader.GetString(1),
-                    reader.GetString(2),
-                    reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
-                    reader.GetInt32(4))
-                { Source = reader.IsDBNull(5) ? WikiEntrySources.Auto : reader.GetString(5) });
-            }
+                rows.Add(ReadEntry(reader));
             return (IReadOnlyList<WikiEntry>)rows;
         });
+    }
+
+    /// <summary><c>entries</c> 表的查询列清单（权威标注五列随 v2 一起加，读侧统一走这里）。</summary>
+    private const string EntryColumns =
+        "entry_id, sub_page_id, title, body, sort_order, source, candidate_id, " +
+        "authority, confidence, writable_source, writable_source_path, source_detail";
+
+    private static WikiEntry ReadEntry(Microsoft.Data.Sqlite.SqliteDataReader reader)
+    {
+        return new WikiEntry(
+            reader.GetString(0),
+            reader.GetString(1),
+            reader.GetString(2),
+            reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
+            reader.GetInt32(4))
+        {
+            Source = reader.IsDBNull(5) ? WikiEntrySources.Auto : reader.GetString(5),
+            Authority = reader.IsDBNull(7) ? nameof(Authority.AuthoritySource.Unknown) : reader.GetString(7),
+            Confidence = reader.IsDBNull(8) ? nameof(Authority.ConfidenceLevel.None) : reader.GetString(8),
+            WritableSource = reader.IsDBNull(9) ? nameof(Authority.WritableSourceKind.Unknown) : reader.GetString(9),
+            WritableSourcePath = reader.IsDBNull(10) ? null : reader.GetString(10),
+            SourceDetail = reader.IsDBNull(11) ? null : reader.GetString(11),
+        };
     }
 
     public IReadOnlyList<WikiResourceBinding> ReadBindings(string entryId)
@@ -201,21 +236,13 @@ public sealed class WikiPageStore
         {
             var rows = new List<WikiEntry>();
             using var command = connection.CreateCommand();
-            command.CommandText = $"SELECT entry_id, sub_page_id, title, body, sort_order, source, candidate_id FROM {EntriesTable} WHERE title LIKE $kw OR body LIKE $kw ORDER BY sort_order LIMIT $limit OFFSET $offset";
+            command.CommandText = $"SELECT {EntryColumns} FROM {EntriesTable} WHERE title LIKE $kw OR body LIKE $kw ORDER BY sort_order LIMIT $limit OFFSET $offset";
             command.Parameters.AddWithValue("$kw", $"%{keyword}%");
             command.Parameters.AddWithValue("$limit", limit);
             command.Parameters.AddWithValue("$offset", offset);
             using var reader = command.ExecuteReader();
             while (reader.Read())
-            {
-                rows.Add(new WikiEntry(
-                    reader.GetString(0),
-                    reader.GetString(1),
-                    reader.GetString(2),
-                    reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
-                    reader.GetInt32(4))
-                { Source = reader.IsDBNull(5) ? WikiEntrySources.Auto : reader.GetString(5) });
-            }
+                rows.Add(ReadEntry(reader));
             return (IReadOnlyList<WikiEntry>)rows;
         });
         return (total, entries);
@@ -281,13 +308,26 @@ public sealed class WikiPageStore
         }
         using var cmd = connection.CreateCommand();
         cmd.Transaction = transaction;
-        cmd.CommandText = $"INSERT INTO {EntriesTable} (entry_id, sub_page_id, title, body, sort_order, source) VALUES ($eid, $sid, $title, $body, $sort, $source) ON CONFLICT(entry_id) DO UPDATE SET title = $title, body = $body, sort_order = $sort, source = $source";
+        cmd.CommandText = $"""
+            INSERT INTO {EntriesTable} (entry_id, sub_page_id, title, body, sort_order, source,
+                                        authority, confidence, writable_source, writable_source_path, source_detail)
+            VALUES ($eid, $sid, $title, $body, $sort, $source, $auth, $conf, $ws, $wsp, $sd)
+            ON CONFLICT(entry_id) DO UPDATE SET
+                title = $title, body = $body, sort_order = $sort, source = $source,
+                authority = $auth, confidence = $conf, writable_source = $ws,
+                writable_source_path = $wsp, source_detail = $sd
+            """;
         cmd.Parameters.AddWithValue("$eid", entry.EntryId);
         cmd.Parameters.AddWithValue("$sid", entry.SubPageId);
         cmd.Parameters.AddWithValue("$title", entry.Title);
         cmd.Parameters.AddWithValue("$body", entry.Body ?? string.Empty);
         cmd.Parameters.AddWithValue("$sort", entry.SortOrder);
         cmd.Parameters.AddWithValue("$source", entry.Source);
+        cmd.Parameters.AddWithValue("$auth", entry.Authority);
+        cmd.Parameters.AddWithValue("$conf", entry.Confidence);
+        cmd.Parameters.AddWithValue("$ws", entry.WritableSource);
+        cmd.Parameters.AddWithValue("$wsp", (object?)entry.WritableSourcePath ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$sd", (object?)entry.SourceDetail ?? DBNull.Value);
         cmd.ExecuteNonQuery();
         // Re-enable FK constraints
         using (var pragma = connection.CreateCommand())
@@ -413,6 +453,245 @@ public sealed class WikiPageStore
                 }
             }
         });
+    }
+
+    /// <summary>一次「生成落库」的结果计数（<see cref="SaveGeneratedPage"/> 返回）。</summary>
+    /// <param name="SubPages">写入的二级页面数。</param>
+    /// <param name="Entries">写入的条目数。</param>
+    /// <param name="Bindings">写入的资源绑定数。</param>
+    /// <param name="RevisedPreserved">因 <c>source = revised</c> 而<b>跳过未覆盖</b>的条目数。</param>
+    /// <param name="StaleSubPagesRemoved">本轮不再生成、且不含修订条目而删掉的二级页面数。</param>
+    public sealed record WikiGeneratedPageSave(
+        int SubPages, int Entries, int Bindings, int RevisedPreserved, int StaleSubPagesRemoved);
+
+    /// <summary>
+    /// 生成专用落库：写入一整棵页面子树（主页面 → 二级页面 → 条目 → 资源绑定）。
+    ///
+    /// <para><b>幂等</b>：条目/绑定 id 由调用方按内容算成<b>稳定 id</b>（<see cref="WikiStableIds"/>），
+    /// 重复生成同一内容命中同一行 → UPSERT，不产生重复。</para>
+    ///
+    /// <para><b>绝不覆盖用户修订</b>：已存在且 <c>source = 'revised'</c> 的条目整条跳过
+    /// （连同它的资源绑定），只保留 <c>auto</c> 行可被重写。含修订条目的二级页面即使
+    /// 本轮不再生成也<b>不删</b>。</para>
+    ///
+    /// <para>与 <see cref="SavePage"/> 的区别：后者是「整棵丢掉重建」（会吃掉用户修订），
+    /// 本方法只做增量合并。</para>
+    /// </summary>
+    public WikiGeneratedPageSave SaveGeneratedPage(WikiPageDetail detail)
+    {
+        ArgumentNullException.ThrowIfNull(detail);
+        var pageId = detail.Page.PageId;
+        WikiGeneratedPageSave result = new(0, 0, 0, 0, 0);
+        _cache.Write((connection, transaction) =>
+        {
+            UpsertPageCore(connection, transaction, detail.Page);
+
+            // ① 该页已有的条目来源（用于「修订优先」判定）
+            var existingSources = ReadEntrySourcesCore(connection, transaction, pageId);
+
+            // ② 逐二级页面 / 条目 / 绑定 合并写入
+            var subPageCount = 0;
+            var entryCount = 0;
+            var bindingCount = 0;
+            var revisedPreserved = 0;
+            var keepSubPages = new List<string>(detail.SubPages.Count);
+
+            foreach (var sub in detail.SubPages)
+            {
+                SaveSubPageInternal(connection, transaction, sub.SubPage);
+                keepSubPages.Add(sub.SubPage.SubPageId);
+                subPageCount++;
+
+                foreach (var entryDetail in sub.Entries)
+                {
+                    // 用户修订过的条目：整条跳过（内容、排序、绑定一律不动）
+                    if (existingSources.TryGetValue(entryDetail.Entry.EntryId, out var existing) &&
+                        string.Equals(existing, WikiEntrySources.Revised, StringComparison.Ordinal))
+                    {
+                        revisedPreserved++;
+                        continue;
+                    }
+
+                    SaveEntryInternal(connection, transaction, entryDetail.Entry);
+                    entryCount++;
+
+                    var keepBindings = new List<string>(entryDetail.Bindings.Count);
+                    foreach (var binding in entryDetail.Bindings)
+                    {
+                        SaveBindingInternal(connection, transaction, binding);
+                        keepBindings.Add(binding.BindingId);
+                        bindingCount++;
+                    }
+                    DeleteBindingsExcept(connection, transaction, entryDetail.Entry.EntryId, keepBindings);
+                }
+
+                var keepEntries = sub.Entries.Select(x => x.Entry.EntryId).ToList();
+                DeleteEntriesExcept(connection, transaction, sub.SubPage.SubPageId, keepEntries, existingSources);
+            }
+
+            // ③ 本轮不再生成的二级页面：含修订条目的保留，其余连同条目/绑定一起删
+            var removed = DeleteStaleSubPages(connection, transaction, pageId, keepSubPages, existingSources);
+            result = new WikiGeneratedPageSave(subPageCount, entryCount, bindingCount, revisedPreserved, removed);
+        });
+        return result;
+    }
+
+    private static void UpsertPageCore(SqliteConnection connection, SqliteTransaction transaction, WikiPage page)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.Transaction = transaction;
+        cmd.CommandText = $"INSERT INTO {PagesTable} (page_id, category, title, subtitle, sort_key, cover_ref) VALUES ($pid, $cat, $title, $sub, $sort, $cover) ON CONFLICT(page_id) DO UPDATE SET category = $cat, title = $title, subtitle = $sub, sort_key = $sort, cover_ref = $cover";
+        cmd.Parameters.AddWithValue("$pid", page.PageId);
+        cmd.Parameters.AddWithValue("$cat", page.Category);
+        cmd.Parameters.AddWithValue("$title", page.Title);
+        cmd.Parameters.AddWithValue("$sub", page.Subtitle ?? string.Empty);
+        cmd.Parameters.AddWithValue("$sort", page.SortKey);
+        cmd.Parameters.AddWithValue("$cover", (object?)page.CoverRef ?? DBNull.Value);
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>某主页面下「条目 id → source」，用于修订优先判定。</summary>
+    private static Dictionary<string, string> ReadEntrySourcesCore(
+        SqliteConnection connection, SqliteTransaction transaction, string pageId)
+    {
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        using var cmd = connection.CreateCommand();
+        cmd.Transaction = transaction;
+        cmd.CommandText = $"""
+            SELECT e.entry_id, e.source FROM {EntriesTable} e
+            JOIN {SubPagesTable} s ON s.sub_page_id = e.sub_page_id
+            WHERE s.page_id = $pid
+            """;
+        cmd.Parameters.AddWithValue("$pid", pageId);
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+            map[reader.GetString(0)] = reader.IsDBNull(1) ? WikiEntrySources.Auto : reader.GetString(1);
+        return map;
+    }
+
+    private static void DeleteBindingsExcept(
+        SqliteConnection connection, SqliteTransaction transaction, string entryId, IReadOnlyList<string> keep)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.Transaction = transaction;
+        cmd.CommandText = $"DELETE FROM {ResourceBindingsTable} WHERE entry_id = $eid" +
+                          InClause(keep, cmd, "binding_id", "b");
+        cmd.Parameters.AddWithValue("$eid", entryId);
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>删掉某二级页面下「本轮不再生成」的条目（修订条目一律保留）。</summary>
+    private static void DeleteEntriesExcept(
+        SqliteConnection connection, SqliteTransaction transaction, string subPageId,
+        IReadOnlyList<string> keep, IReadOnlyDictionary<string, string> existingSources)
+    {
+        var doomed = new List<string>();
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.Transaction = transaction;
+            cmd.CommandText = $"SELECT entry_id FROM {EntriesTable} WHERE sub_page_id = $sid" +
+                              InClause(keep, cmd, "entry_id", "e");
+            cmd.Parameters.AddWithValue("$sid", subPageId);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read()) doomed.Add(reader.GetString(0));
+        }
+        foreach (var entryId in doomed)
+        {
+            if (existingSources.TryGetValue(entryId, out var source) &&
+                string.Equals(source, WikiEntrySources.Revised, StringComparison.Ordinal))
+                continue;
+            using var del = connection.CreateCommand();
+            del.Transaction = transaction;
+            del.CommandText = $"DELETE FROM {ResourceBindingsTable} WHERE entry_id = $eid";
+            del.Parameters.AddWithValue("$eid", entryId);
+            del.ExecuteNonQuery();
+            using var del2 = connection.CreateCommand();
+            del2.Transaction = transaction;
+            del2.CommandText = $"DELETE FROM {EntriesTable} WHERE entry_id = $eid";
+            del2.Parameters.AddWithValue("$eid", entryId);
+            del2.ExecuteNonQuery();
+        }
+    }
+
+    private static int DeleteStaleSubPages(
+        SqliteConnection connection, SqliteTransaction transaction, string pageId,
+        IReadOnlyList<string> keep, IReadOnlyDictionary<string, string> existingSources)
+    {
+        var stale = new List<string>();
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.Transaction = transaction;
+            cmd.CommandText = $"SELECT sub_page_id FROM {SubPagesTable} WHERE page_id = $pid" +
+                              InClause(keep, cmd, "sub_page_id", "s");
+            cmd.Parameters.AddWithValue("$pid", pageId);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read()) stale.Add(reader.GetString(0));
+        }
+
+        var removed = 0;
+        foreach (var subPageId in stale)
+        {
+            var hasRevised = false;
+            var entryIds = new List<string>();
+            using (var cmd = connection.CreateCommand())
+            {
+                cmd.Transaction = transaction;
+                cmd.CommandText = $"SELECT entry_id FROM {EntriesTable} WHERE sub_page_id = $sid";
+                cmd.Parameters.AddWithValue("$sid", subPageId);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    var entryId = reader.GetString(0);
+                    entryIds.Add(entryId);
+                    if (existingSources.TryGetValue(entryId, out var source) &&
+                        string.Equals(source, WikiEntrySources.Revised, StringComparison.Ordinal))
+                        hasRevised = true;
+                }
+            }
+            if (hasRevised) continue;   // 用户在这页改过东西：留着
+
+            foreach (var entryId in entryIds)
+            {
+                using var delB = connection.CreateCommand();
+                delB.Transaction = transaction;
+                delB.CommandText = $"DELETE FROM {ResourceBindingsTable} WHERE entry_id = $eid";
+                delB.Parameters.AddWithValue("$eid", entryId);
+                delB.ExecuteNonQuery();
+            }
+            using (var delE = connection.CreateCommand())
+            {
+                delE.Transaction = transaction;
+                delE.CommandText = $"DELETE FROM {EntriesTable} WHERE sub_page_id = $sid";
+                delE.Parameters.AddWithValue("$sid", subPageId);
+                delE.ExecuteNonQuery();
+            }
+            using (var delS = connection.CreateCommand())
+            {
+                delS.Transaction = transaction;
+                delS.CommandText = $"DELETE FROM {SubPagesTable} WHERE sub_page_id = $sid";
+                delS.Parameters.AddWithValue("$sid", subPageId);
+                delS.ExecuteNonQuery();
+            }
+            removed++;
+        }
+        return removed;
+    }
+
+    /// <summary>
+    /// 拼 <c>AND &lt;列&gt; NOT IN (…)</c>。集合为空时<b>不拼条件</b>（= 全不匹配保留集 = 全部命中删除集），
+    /// 因为「本轮什么都没生成」就该把旧行全清掉。参数一律走绑定，值不进 SQL 文本。
+    /// </summary>
+    private static string InClause(IReadOnlyList<string> values, SqliteCommand command, string column, string prefix)
+    {
+        if (values.Count == 0) return string.Empty;
+        var names = new string[values.Count];
+        for (var i = 0; i < values.Count; i++)
+        {
+            var name = $"${prefix}{i}";
+            names[i] = name;
+            command.Parameters.AddWithValue(name, values[i]);
+        }
+        return $" AND {column} NOT IN ({string.Join(",", names)})";
     }
 
     private static void SaveSubPageInternal(SqliteConnection connection, SqliteTransaction transaction, WikiSubPage subPage)

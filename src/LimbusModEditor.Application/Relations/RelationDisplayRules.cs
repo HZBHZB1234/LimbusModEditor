@@ -5,19 +5,22 @@ namespace LimbusModEditor.Application.Relations;
 /// <summary>关联分析里与「游戏内路径命名约定」相关的纯规则（无 IO，可直接单测）。</summary>
 public static class RelationDisplayRules
 {
-    /// <summary>Spine 骨骼资源的路径判据（真实数据里 Spine 资源分散在四处）：
+    /// <summary>Spine 骨骼资源的路径判据（真实数据里 Spine 资源分散在五处）：
     /// ① <c>Prefab/SpineIllustPrefab/&lt;id&gt;_gacksung.prefab</c>（人格立绘立牌）；
     /// ② <c>Story/StandingModel/*.psb</c>（立绘 PSB，内含 Skeleton 与图集切片）；
     /// ③ <c>Story/CG/.../*_SkeletonData.asset</c>（Spine SkeletonDataAsset）；
-    /// ④ <c>Story/Spine/**</c>（剧情 Spine 专用目录）。
-    /// <b>不猜格式</b>：这里只做路径归类，能否解析由真身管线按真实文件判定。</summary>
+    /// ④ <c>Story/Spine/**</c>（剧情 Spine 专用目录）；
+    /// ⑤ <c>Story/CG/.../StorySpine_*</c>（CG Spine 目录，如 StorySpine_Sinclair）。
+    /// <b>不猜格式</b>：这里只做路径归类，能否解析由真身管线按真实文件判定。
+    /// 单一判据来源：SpineData 网关与关联图分类均委托此方法，不另立实现。</summary>
     public static bool IsSpinePath(string? containerEntry)
     {
         if (string.IsNullOrEmpty(containerEntry)) return false;
         return containerEntry.Contains("/SpineIllustPrefab/", StringComparison.OrdinalIgnoreCase)
             || containerEntry.EndsWith(".psb", StringComparison.OrdinalIgnoreCase)
             || containerEntry.Contains("SkeletonData", StringComparison.OrdinalIgnoreCase)
-            || containerEntry.Contains("/Story/Spine/", StringComparison.OrdinalIgnoreCase);
+            || containerEntry.Contains("/Story/Spine/", StringComparison.OrdinalIgnoreCase)
+            || containerEntry.Contains("StorySpine", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>把一条资源归到关联类别。</summary>

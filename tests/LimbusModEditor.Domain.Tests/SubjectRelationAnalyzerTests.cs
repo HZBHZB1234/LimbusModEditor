@@ -556,8 +556,8 @@ public sealed class SubjectRelationAnalyzerTests
     }
 
     [Fact]
-    public void Relation_format_version_is_v3()
-        => Assert.Equal("v3", RelationIndexSource.FormatVersion);
+    public void Relation_format_version_is_v4()
+        => Assert.Equal("v4", RelationIndexSource.FormatVersion);
 
     // ── 纯规则 ───────────────────────────────────────────────────────
 

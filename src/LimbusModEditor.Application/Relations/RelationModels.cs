@@ -318,8 +318,11 @@ public sealed record RelationIndexSource(string SourceKey, string Signature)
     /// <c>links</c> 的 7 个新列全被写成 NULL（建表有列、写入语句忘了带上，不报错）。
     /// 盘上已有的 v2 签名对应的是<b>残缺图</b>，所以必须换口径号强制重建一次；
     /// 不换的话旧库会被判定「源未变」直接复用，缺口永远补不上。</para>
+    /// <para><b>v3 → v4</b>：扩展 <c>RelationDisplayRules.IsSpinePath</c> 覆盖 <c>StorySpine_*</c> 目录
+    /// （如 <c>StorySpine_Sinclair</c>），修正既有 4 条判据的盲区；关联图分类更准，
+    /// SpineData 网关与关联图共用同一判据来源（不再另立实现）。</para>
     /// </summary>
-    public const string FormatVersion = "v3";
+    public const string FormatVersion = "v4";
 
     /// <summary>由四个上游源的签名构造。</summary>
     /// <param name="unitySignature">资源索引（Unity 缓存 bundle 集合）的签名。</param>

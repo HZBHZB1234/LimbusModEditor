@@ -12,13 +12,9 @@
     <Project Path="src/LimbusModEditor.Formats.Rebank/LimbusModEditor.Formats.Rebank.csproj" />
     <Project Path="src/LimbusModEditor.Formats.Unity/LimbusModEditor.Formats.Unity.csproj" />
     <Project Path="src/LimbusModEditor.Infrastructure/LimbusModEditor.Infrastructure.csproj" />
-    <!-- Spine 4.0 骨骼动画离线渲染类库（vendored spine-csharp + SkiaSharp）。
-         App 通过项目引用依赖它；登记在此使解决方案图完整。
-         注意：tests/LimbusModEditor.SpineRuntime.Tests 刻意不并入本清单（见其 csproj 注释），
-         验收时单独 `dotnet test tests/LimbusModEditor.SpineRuntime.Tests` 驱动。 -->
-    <Project Path="src/LimbusModEditor.SpineRuntime/LimbusModEditor.SpineRuntime.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/LimbusModEditor.Application.Tests/LimbusModEditor.Application.Tests.csproj" />
     <Project Path="tests/LimbusModEditor.Domain.Tests/LimbusModEditor.Domain.Tests.csproj" />
     <Project Path="tests/LimbusModEditor.Format.Tests/LimbusModEditor.Format.Tests.csproj" />
   </Folder>

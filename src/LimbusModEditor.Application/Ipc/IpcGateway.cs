@@ -679,7 +679,49 @@ public sealed partial class IpcGateway
 
     private IpcResponse HandleStaticLocate(IpcRequest request)
     {
-        return IpcResponse.Success(request.Id, new { offset = 0, page = 0 });
+        var req = DeserializePayload<StaticLocateRequest>(request);
+        var project = _projectState.Project;
+        if (project is null)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "请先打开项目");
+
+        // 使用既有 StaticBundleLocator 定位静态数据 bundle（运行时 catalog → 安装目录 catalog）
+        var gameDir = project.GameDirectory;
+        var cacheRoots = new[] { project.UnityCacheDirectory }.Where(s => !string.IsNullOrWhiteSpace(s));
+        var location = StaticBundleLocator.Locate(gameDir, cacheRoots);
+
+        if (location is null)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound,
+                $"无法定位静态数据 bundle（运行时 catalog 与安装目录 catalog 均未命中）。请确认游戏目录与 Unity 缓存目录已配置。");
+
+        // 在静态表索引中查找目标表的偏移
+        var entries = _staticIndex.Store.ReadEntries();
+        var index = -1;
+        for (var i = 0; i < entries.Count; i++)
+        {
+            if (entries[i].ContainerEntry == req.TableId || entries[i].Name == req.TableId)
+            {
+                index = i;
+                break;
+            }
+        }
+
+        if (index < 0)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound,
+                $"在静态表索引中未找到表：{req.TableId}。共 {entries.Count} 张表。");
+
+        // 计算页偏移（每页 200 条）
+        var offset = index / IpcGatewayConstants.DefaultPageSize * IpcGatewayConstants.DefaultPageSize;
+        var tableEntry = entries[index];
+
+        return IpcResponse.Success(request.Id, new
+        {
+            offset,
+            page = offset / IpcGatewayConstants.DefaultPageSize,
+            tableName = tableEntry.Name,
+            tableIndex = index,
+            bundleFound = location.IsCached,
+            bundleName = location.BundleName
+        });
     }
 
     private IpcResponse HandleStaticReadRecord(IpcRequest request)

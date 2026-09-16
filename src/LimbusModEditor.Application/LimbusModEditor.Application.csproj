@@ -7,8 +7,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- 允许 Domain.Tests 和 App 访问 internal 类型（IpcJson 等） -->
+    <!-- 允许 Domain.Tests、Application.Tests 和 App 访问 internal 类型（IpcJson 等） -->
     <InternalsVisibleTo Include="LimbusModEditor.Domain.Tests" />
+    <InternalsVisibleTo Include="LimbusModEditor.Application.Tests" />
     <InternalsVisibleTo Include="LimbusModEditor.App" />
   </ItemGroup>
 

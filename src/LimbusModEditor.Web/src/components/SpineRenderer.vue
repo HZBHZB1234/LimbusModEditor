@@ -122,12 +122,11 @@ async function loadSpine() {
 
     // Create skeleton
     const skeleton = new spine.Skeleton(skeletonData)
-    skeleton.setToSetupPose()
+    spine.skeletonSetToSetupPose(skeleton)
     if (skeletonData.defaultSkin) {
       skeleton.setSkin(skeletonData.defaultSkin)
     } else if (skeletonData.skins.length > 0) {
       skeleton.setSkin(skeletonData.skins[0])
-    }
     }
 
     // Create animation state
@@ -156,7 +155,7 @@ async function loadSpine() {
         animState.update(delta)
         animState.apply(skeleton)
       }
-      skeleton.updateWorldTransform()
+      spine.skeletonUpdateWorldTransform(skeleton)
 
       sceneRenderer.camera.position.set(canvas.width / 2, canvas.height / 2, 0)
       sceneRenderer.camera.viewportWidth = canvas.width

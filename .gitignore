@@ -8,6 +8,10 @@ x86/
 [Ll]og/
 [Ll]ogs/
 
+# Node / Web build artifacts
+node_modules/
+dist/
+
 # Publish artifacts
 artifacts/
 

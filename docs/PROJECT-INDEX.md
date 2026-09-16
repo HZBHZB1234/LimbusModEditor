@@ -449,7 +449,7 @@
 | 文件 | 功能 |
 |---|---|
 | `RelationCategories.cs` ★ | 6 个类别的常量、中文标签（`Label`）、`SubjectIds` 编解码。**类别一律由资源目录前缀判定**，**绝不复用「扫 5 位数字窗口」的通用匹配**（人格固定 5 位，但敌人变长 4–5 位，4 位值会与事件/异常 id 撞） |
-| `RelationModels.cs` ★ | 关联图模型：`RelationKind`（文本/静态数据/音频/图像/视频/Spine/动画/Prefab/网格/其它）、`RelationSubject`（预设对象，带「能预览、能跳转」的载荷列 `preview_text`/`link_count`）、`RelationLink`（对象→资源，带 `preview_text`/`preview_kind`/`media_kind`/`duration_sec`/`ref_path`/`deep_link`/`target_subject_id`）、`RelationXref`（**显式跨资源边，多对多**）、`RelationInputs`（四份事实输入）、`RelationGraph`（含 `LinksOf`）、`RelationIndexSource`（**派生源签名 = `FormatVersion` + 四个上游源签名拼接**，当前 `FormatVersion = "v3"`）。另含 `RelationXrefKinds`（跨链关系名，落库 → 改名要 +1）、`RelationAnchorTables`（来源表锚点）、`RelationEntityKeys`（id 归一化，E.G.O 饰品 `id % 10000`） |
+| `RelationModels.cs` ★ | 关联图模型：`RelationKind`（文本/静态数据/音频/图像/视频/Spine/动画/Prefab/网格/其它）、`RelationSubject`（预设对象，带「能预览、能跳转」的载荷列 `preview_text`/`link_count`）、`RelationLink`（对象→资源，带 `preview_text`/`preview_kind`/`media_kind`/`duration_sec`/`ref_path`/`deep_link`/`target_subject_id`）、`RelationXref`（**显式跨资源边，多对多**）、`RelationInputs`（四份事实输入）、`RelationGraph`（含 `LinksOf`）、`RelationIndexSource`（**派生源签名 = `FormatVersion` + 四个上游源签名拼接**，当前 `FormatVersion = "v4"`，v3→v4 扩展 `IsSpinePath` 覆盖 `StorySpine_*`）。另含 `RelationXrefKinds`（跨链关系名，落库 → 改名要 +1）、`RelationAnchorTables`（来源表锚点）、`RelationEntityKeys`（id 归一化，E.G.O 饰品 `id % 10000`） |
 | `SubjectRelationAnalyzer.cs` ★ | 纯函数分析器：四份事实 → 关联图（6 类别 + 跨资源 `xref` 边）。**角色名拼写归一**（游戏文件名里的 `Heathclif`/`Meursalut`/`Ishmeal` 合并到规范拼写，否则同角色被拆成多组）；lang 无 5 位 id 命中时回落到 `AbDlg_<角色>.json` 的**角色归属**规则；**E.G.O 只认 lang 的 `Egos.json`**（资源侧 20xxx 数字会造「幽灵 EGO」）；E.G.O 饰品 id 归一化到 4 位基准 |
 | `RelationDisplayRules.cs` | 展示层纯规则：`KindLabel`（关联类别中文名）、`PortraitRank`（立绘排序）、`IsSpinePath`（Spine 路径粗筛） |
 | `LangAnchorReader.cs` | 读 lang 文件、抽「键 → 文本」锚点（不依赖 Unity 读取管线） |
@@ -502,6 +502,23 @@
   `SpineDocument.TryCreate` 建文档（含动画清单/时长）→ `SpineFrameRenderer.RenderFrame(time, 440, 600)`
   出 PNG → App 贴到 `Image`。任一环失败都由该环给出中文原因，**不出现白图**。
   （W2 后：前端 spine-ts 加载 `spine.locate` 返回的字节 URL 就地播放；C# 侧不再出帧。）
+
+### §8.16 `SpineData/`（Spine 原始字节提取网关，W2 新增）
+
+> 一句话：**C# 侧只负责定位、读取与纹理预解码，前端负责解析与 WebGL 渲染**。
+> 替换 `SpineAnimationSourceService` 的解析职责（解析前移前端 spine-ts），
+> 保留 ADR §7 的「定位并流式喂原始字节」能力。无 WPF 引用（铁律 §3-10），可单测。
+
+| 文件 | 功能 |
+|---|---|
+| `SpineRawData.cs` | 载荷模型：`SkeletonBytes`（UTF-8 JSON 或二进制）+ `SkeletonFormat`（`json`/`binary`）+ `AtlasText` + `PageBytes`（页名→PNG 字节）+ `AvailablePages` + `Label` |
+| `ISpineDataGateway.cs` | 网关接口：`GetSpineDataAsync`（按资产 ID）/ `GetSpineDataByPathAsync`（按容器路径）/ `GetSpineDataBatchAsync`（批量预取）；**绝不抛异常，失败返回中文原因** |
+| `SpineDataGateway.cs` | 网关实现：从 `unity-cache-index.db` 定位同目录资源 → 读骨架/图集字节 → 纹理预解码为 PNG（DXT 解码 / 直通格式透传）；含 `SpineDataGatewayFactory` 静态工厂（默认索引库路径） |
+| `SpinePathRules.cs` | 路径判据纯函数：`IsSpinePath` / `IsSkeletonJsonFileName` / `IsAtlasFileName` / `FolderOf` / `FileNameOf`；`TextureFormatRules`（DXT/直通格式判定 + 中文格式名） |
+| `SpineAssetLocator.cs` | 索引定位：`FindSiblings(containerEntry)` 从 `unity-cache-index.db` 按目录查同目录资源（`container_entry LIKE` + 内存过滤同目录） |
+
+- **✅ 已修正（2026-09-16，spine-engineer t24）**：`SpinePathRules.IsSpinePath` 删除全子串匹配，改为**委托 `RelationDisplayRules.IsSpinePath`（单一判据来源）**；`RelationDisplayRules.IsSpinePath` 扩展显式目录模式 `Contains("StorySpine")` 覆盖 `StorySpine_*`（如 `StorySpine_Sinclair`，修正既有 4 条判据盲区）；按不变量 §6-33 `RelationIndexSource.FormatVersion` v3 → **v4**（测试 `Relation_format_version_is_v4` 已更新）。
+- **真实数据验证（spine-engineer t24）**：cg_40 完整三件套读取成功——骨架 202,276 bytes（`spine:4.0.64`）、图集 2,057 chars（含 `pma:true`）、纹理 5 页（1 RGBA32 + 4 DXT5）全部解码为有效 PNG。
 
 ---
 

@@ -104,6 +104,7 @@ Windows 下默认 `RuntimeIdentifier=win-x64`、`CopyLocalLockFileAssemblies=tru
 | 跨资源关联（6 类别对象 ↔ 资源） | `src/LimbusModEditor.Application/Relations/`（`RelationCategories` 六类别 / `SubjectRelationAnalyzer` / 派生缓存 `RelationStore` / 查询门面 / 卡片流展示层 `PresetWorkbenchService` / 精确跳转载荷 `RelationDeepLink`） |
 | Spine：解析 / 静态预览 / 导出 / 找素材 | `src/LimbusModEditor.Application/Spine/`（`SpineModels.cs` 纯解析 → `SpinePreviewService` 结构 + 布局叠加图 → `SpineExportService` 导出三件套 → `SpineAnimationSourceService` 找齐动画素材）。**2026-09-15 起瘦身（W2）**：解析/布局前移前端，保留 `SpineAnimationSourceService`（定位+流式喂字节）+ `SpineExportService`（写盘）+ `SpineSiblingIndex.cs`（新文件，纯定位），见 `docs/ARCH-WEBVIEW2-VUE.md` §7 |
 | Spine：骨骼动画**真播放** | `src/LimbusModEditor.SpineRuntime/`（vendored spine-csharp 4.0 + SkiaSharp：`SpineDocument.TryCreate` / `SpineFrameRenderer.RenderFrame`）→ `App/SpineAnimationPreviewWindow.cs`。**2026-09-15 起计划删除（W2）**：渲染全量前移前端 spine-ts，native 播放窗退役，动画改前端就地播放 |
+| Spine：原始字节提取网关（W2 新增） | `src/LimbusModEditor.Application/SpineData/`（`SpineRawData.cs` 载荷 + `ISpineDataGateway.cs`/`SpineDataGateway.cs` 网关（无 WPF）+ `SpinePathRules.cs` 路径判据 + `SpineAssetLocator.cs` 索引定位 + 网关工厂）→ 替换 `SpineAnimationSourceService` 的解析职责，前端 spine-ts 直接消费字节 |
 | 导出流水线 | `Domain/Formats/ExportLayout.cs` + `Application/Build/ModExportPlanService.cs` + `ModPackExportService.cs` |
 | 调试应用（写游戏目录） | `Application/Debugging/ModApplyService.cs` + `StaticModApplyService.cs` + `DebugApplyService.cs` |
 
@@ -367,7 +368,7 @@ catalog 用固定 16 字节键集合做一次线性扫描；Carra 差异比较�
 | `bank-index.db` | 目录签名 `0:mtimeTicks`（源键 = 目录全路径小写） | 逐 bank 文件 `(size_bytes, mtime_ticks)`，只删该 bank 的 `samples` 行；行集对账删已消失文件 | `WorkbenchCacheSchema` 建表脚本 |
 | `static-tables.db` | **内层内容哈希**（小写） | 源变即整库重建；正文缓存 LRU 淘汰（上限 64MB，淘汰到 80%） | 同上 |
 | `text-index.db` | 内容口径版本 + 活动语言目录签名 + **`config.json` 内容哈希**（切语言必须用内容哈希，size/mtime 不可靠） | 整库 / 单文件 `(size,mtime_ticks)` / 行集不一致整表重建 | `TextIndexStore.IndexFormatVersion = "v4"`（v1 首版 → v2 不收录根级 `config.json` → v3 口径去根文件夹 → v4 并入活动语言目录名 + `language_prefix`） |
-| `relation-index.db`（**派生**） | 上面**四个库的语义签名拼接**（`RelationIndexSource.From`）：unity=bundles 计数+最大 mtime+总字节；bank=目录签名；static=内层内容哈希；text=内容口径版本+目录签名+config 哈希+语言目录 | 任一上游签名变 → **整库重建**（关联图整体由四库决定） | `RelationIndexSource.FormatVersion = "v3"`（**改「抽哪些事实 / 怎么算关联 / 键口径 / 新增并填充列 / 跨链关系名」时必须 +1**，否则旧派生库会被当成新鲜的）。业务表：`subjects` / `links` / `subjects_by_ref` / `xref` |
+| `relation-index.db`（**派生**） | 上面**四个库的语义签名拼接**（`RelationIndexSource.From`）：unity=bundles 计数+最大 mtime+总字节；bank=目录签名；static=内层内容哈希；text=内容口径版本+目录签名+config 哈希+语言目录 | 任一上游签名变 → **整库重建**（关联图整体由四库决定） | `RelationIndexSource.FormatVersion = "v4"`（v3 → v4：扩展 `RelationDisplayRules.IsSpinePath` 覆盖 `StorySpine_*` 目录，修正既有判据盲区；**改「抽哪些事实 / 怎么算关联 / 键口径 / 新增并填充列 / 跨链关系名」时必须 +1**，否则旧派生库会被当成新鲜的）。业务表：`subjects` / `links` / `subjects_by_ref` / `xref` |
 
 > **派生库的源签名不用库文件 mtime**：WAL 下写事务未必改主库 mtime（只写 `-wal`），拿它判「源变没变」会漏判；
 > 四个上游的语义签名才是各自服务真实使用的判据。

@@ -14,11 +14,13 @@ internal sealed class SpineDataGateway : ISpineDataGateway, IDisposable
 {
     private static readonly Logger Log = LogManager.GetCurrentClassLogger();
     private readonly SpineAssetLocator _locator;
+    private readonly SpineAssetEnumerator _enumerator;
     private readonly AssetsToolsBackend _backend = new();
 
     public SpineDataGateway(string dbPath)
     {
         _locator = new SpineAssetLocator(dbPath);
+        _enumerator = new SpineAssetEnumerator(dbPath);
     }
 
     public async Task<(SpineRawData? Data, string? Error)> GetSpineDataAsync(
@@ -225,6 +227,20 @@ internal sealed class SpineDataGateway : ISpineDataGateway, IDisposable
     public void Dispose()
     {
         _backend.Dispose();
+    }
+
+    public Task<IReadOnlyList<SpineSetInfo>> EnumerateCompleteSetsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        return Task.Run(() => _enumerator.EnumerateCompleteSets(cancellationToken), cancellationToken);
+    }
+
+    public Task<IReadOnlyList<SpineSetInfo>> FindByFolderPrefixAsync(
+        string folderPrefix, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(folderPrefix))
+            return Task.FromResult<IReadOnlyList<SpineSetInfo>>([]);
+        return Task.Run(() => _enumerator.FindByFolderPrefix(folderPrefix, cancellationToken), cancellationToken);
     }
 }
 

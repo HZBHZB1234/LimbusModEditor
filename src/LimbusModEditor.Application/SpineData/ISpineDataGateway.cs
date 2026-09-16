@@ -18,4 +18,12 @@ public interface ISpineDataGateway
     /// <summary>批量获取（供前端预取窗口）。</summary>
     Task<IReadOnlyList<SpineRawData>> GetSpineDataBatchAsync(
         IReadOnlyList<string> assetIds, CancellationToken cancellationToken = default);
+
+    /// <summary>枚举所有完整的 Spine 三件套集合（骨架 + atlas + 纹理）。</summary>
+    Task<IReadOnlyList<SpineSetInfo>> EnumerateCompleteSetsAsync(
+        CancellationToken cancellationToken = default);
+
+    /// <summary>按目录前缀查找 Spine 集合（不限完整三件套）。</summary>
+    Task<IReadOnlyList<SpineSetInfo>> FindByFolderPrefixAsync(
+        string folderPrefix, CancellationToken cancellationToken = default);
 }

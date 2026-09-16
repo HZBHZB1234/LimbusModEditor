@@ -68,7 +68,7 @@ internal sealed class SpineAssetLocator
 }
 
 /// <summary>Spine 资源的定位信息（从索引库查出）。</summary>
-internal sealed record SpineAssetInfo(
+public sealed record SpineAssetInfo(
     long PathId,
     int TypeId,
     int Size,

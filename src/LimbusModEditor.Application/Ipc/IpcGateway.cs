@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Linq;
 using System.Text.Json;
 using LimbusModEditor.Application.AppConfig;
@@ -255,6 +256,8 @@ public sealed partial class IpcGateway
             "wiki.saveContent" => HandleWikiSaveContent(request),
             "wiki.getEditPlan" => HandleWikiGetEditPlan(request),
             "wiki.applyEdit" => HandleWikiApplyEdit(request),
+            "wiki.generate" => await HandleWikiGenerateAsync(request),
+            "wiki.generateStatus" => HandleWikiGenerateStatus(request),
 
             // ── 取消 ──────────────────────────────────────────────────────
             "cancel" => HandleCancel(request),
@@ -867,14 +870,116 @@ public sealed partial class IpcGateway
     private IpcResponse HandleWikiSaveContent(IpcRequest request)
     {
         var req = DeserializePayload<WikiSaveContentRequest>(request);
+
+        // 前端发的是 {pageId, sectionId, content}，sectionId 里装的其实是条目 id
+        // （wiki.page.load 的 WikiSectionDto.Id 就是 entry_id）。两个口径都收，不再造孤儿行。
+        var entryId = FirstNonEmpty(req.EntryId, req.SectionId);
+        if (string.IsNullOrWhiteSpace(entryId))
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "缺少条目 id：无法定位要保存的内容项。");
+
+        var value = req.NewValue ?? req.Content;
+        if (value is null)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "缺少要保存的内容（newValue / content 都为空）。");
+
         var store = new WikiPageStore(AppEnvironment.Current.CacheDirectory);
-        var entry = new WikiEntry(req.EntryId ?? Guid.NewGuid().ToString(), req.SectionId ?? "", req.Field, req.NewValue, 0)
-        {
-            Source = "Revised"
-        };
-        store.SaveEntry(entry);
+        var existing = store.ReadEntry(entryId!);
+        if (existing is null)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound, $"页面库里没有这个条目：{entryId}");
+
+        // 保持条目挂在原分节下，只改正文 + 打上 revised（生成时据此跳过、不覆盖）
+        store.SaveEntry(existing with { Body = value, Source = WikiEntrySources.Revised });
         return IpcResponse.Success(request.Id, new WikiSaveResponse(true, null));
     }
+
+    private static string? FirstNonEmpty(params string?[] values)
+    {
+        foreach (var value in values)
+            if (!string.IsNullOrWhiteSpace(value)) return value;
+        return null;
+    }
+
+    /// <summary>
+    /// 生成维基页面（G-01 的生产链路入口）。
+    /// 走 <see cref="WikiAutoGenerationService"/>：读本地事实源 → 权威引擎 → 编排 → 落
+    /// <c>cache/wiki-pages.db</c>。进度按契约 §4 推 <c>progress</c> 事件。
+    /// </summary>
+    private async Task<IpcResponse> HandleWikiGenerateAsync(IpcRequest request)
+    {
+        var req = DeserializePayload<WikiGenerateRequest>(request);
+        var operationId = string.IsNullOrWhiteSpace(req.OperationId) ? "wiki-generate" : req.OperationId!;
+        var cancellationToken = CancellationTokenStore.Register(operationId);
+        try
+        {
+            var service = new WikiAutoGenerationService(AppEnvironment.Current);
+            var result = await service.GenerateAsync(
+                _projectState.Project, CreateProgressSink(operationId), cancellationToken);
+
+            if (!result.Ok)
+                return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, result.Message);
+
+            return IpcResponse.Success(request.Id, new WikiGenerateResponse(
+                true,
+                result.Message,
+                result.PageCount,
+                result.SubPageCount,
+                result.EntryCount,
+                result.BindingCount,
+                result.WrittenEntries,
+                result.RevisedPreserved,
+                result.UnknownSourceEntries,
+                (long)result.Elapsed.TotalMilliseconds,
+                service.CreateStore().DatabasePath,
+                result.Categories.Select(c => new WikiCategoryCountDto(c.Category, c.Label, c.PageCount)).ToList()));
+        }
+        finally
+        {
+            CancellationTokenStore.Complete(operationId);
+        }
+    }
+
+    /// <summary>维基页库的当前状态（前端据此决定要不要提示「生成页面」）。</summary>
+    private IpcResponse HandleWikiGenerateStatus(IpcRequest request)
+    {
+        var store = new WikiPageStore(AppEnvironment.Current.CacheDirectory);
+        var exists = store.Exists;
+        var query = new WikiPageQueryService(store);
+        var (_, revised) = store.SourceStatistics();
+        var categories = new List<WikiCategoryCountDto>();
+        foreach (var (category, label) in WikiCategoryLabels)
+        {
+            var count = store.CountByCategory(category);
+            if (count > 0) categories.Add(new WikiCategoryCountDto(category, label, count));
+        }
+        return IpcResponse.Success(request.Id, new WikiGenerateStatusResponse(
+            query.IsReady, exists, store.DatabasePath,
+            store.ReadPageCount(), store.ReadSubPageCount(), store.ReadEntryCount(),
+            store.ReadBindingCount(), revised, categories));
+    }
+
+    /// <summary>
+    /// 把生成进度转成一个节流的 <see cref="IProgress{T}"/>：首条与末条必达，中间 200 ms 节流
+    /// （契约 §4：避免淹掉 WebView2 消息队列）。
+    /// </summary>
+    private IProgress<WikiGenerationProgress> CreateProgressSink(string operationId)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        long lastSent = -1;
+        return new Progress<WikiGenerationProgress>(step =>
+        {
+            var isEdge = step.Current == 0 || step.Current >= step.Total;
+            var elapsed = stopwatch.ElapsedMilliseconds;
+            if (!isEdge && lastSent >= 0 && elapsed - lastSent < 200) return;
+            lastSent = elapsed;
+            EventSink?.Invoke(IpcEvent.Create("progress", IpcJson.SerializePayload(
+                new ProgressPayload(operationId, step.Phase, step.Current, step.Total, step.Message))));
+        });
+    }
+
+    /// <summary>
+    /// 宿主推送事件的出口（WEB-IPC-CONTRACT §1/§4 的 <c>{kind:"event"}</c> 消息）。
+    /// 由 App 宿主用 <c>PostWebMessageAsString</c> 接上；未接时事件静默丢弃（不影响请求链路）。
+    /// </summary>
+    public Action<IpcEvent>? EventSink { get; set; }
 
     private IpcResponse HandleWikiGetEditPlan(IpcRequest request)
     {
@@ -887,9 +992,40 @@ public sealed partial class IpcGateway
         return IpcResponse.Success(request.Id, new WikiGetEditPlanResponse(exportable, Array.Empty<WikiNonExportableEdit>()));
     }
 
+    /// <summary>
+    /// 应用一条维基编辑（G-02：此前原样回执、什么也没做，用户看到「保存成功」但数据没变）。
+    ///
+    /// <para>现在走既有 <see cref="WikiEditService"/> 真正登记进项目编辑集
+    /// （lang → <c>LangEditSession</c>、静态 → <c>StaticEditSession</c>、资源 → 资源编辑集），
+    /// 之后 <c>export.plan</c> / <c>export.run</c> 才能带上它。</para>
+    ///
+    /// <para><b>失败一律如实回</b>：没有可写出处、lang 文件找不到、JSON 格式错、
+    /// 没打开项目 —— 各自返回中文原因，<b>不再回「成功」</b>。</para>
+    /// </summary>
     private IpcResponse HandleWikiApplyEdit(IpcRequest request)
     {
         var req = DeserializePayload<WikiApplyEditRequest>(request);
-        return IpcResponse.Success(request.Id, new WikiApplyEditResponse(true, req.Id, "wiki.saveContent", null));
+
+        var project = _projectState.Project;
+        if (project is null)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery,
+                "请先打开项目：维基编辑要登记进项目编辑集才能导出为模组。");
+
+        var service = new WikiEditService(
+            project,
+            _projectState.LangEdits ?? new LangEditSession(),
+            _projectState.StaticEdits ?? new StaticEditSession(),
+            _staticIndex.Store);
+
+        var mapped = service.TryMapToWritableSource(new WikiEditItem(
+            req.Id, req.Title, req.Content, req.WritableSource, req.ReplacementPath, req.NewValue));
+
+        if (!mapped.CanExport)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.Unsupported,
+                mapped.Reason ?? "该编辑没有可写出处，无法登记为模组改动。");
+
+        Log.Info("维基编辑已登记：id={0} · 目标={1} · 方式={2}", req.Id, mapped.AssetId, mapped.Method);
+        return IpcResponse.Success(request.Id,
+            new WikiApplyEditResponse(true, mapped.AssetId, mapped.Method, null));
     }
 }

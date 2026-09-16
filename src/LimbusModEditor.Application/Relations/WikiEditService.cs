@@ -1,3 +1,4 @@
+using LimbusModEditor.Application.StaticMods;
 using LimbusModEditor.Application.Texts;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Domain.Projects;
@@ -13,12 +14,22 @@ public sealed class WikiEditService
     private readonly ModProject _project;
     private readonly LangEditSession _langEdits;
     private readonly StaticEditSession _staticEdits;
+    private readonly StaticTableIndexStore? _staticIndex;
 
-    public WikiEditService(ModProject project, LangEditSession langEdits, StaticEditSession staticEdits)
+    /// <param name="project">当前项目（提供游戏目录与资源集）。</param>
+    /// <param name="langEdits">项目语言编辑集（lang 编辑真正落在这里）。</param>
+    /// <param name="staticEdits">项目静态数据编辑集（静态编辑真正落在这里）。</param>
+    /// <param name="staticIndex">静态表索引（静态编辑要查到表条目才登记得进去）。</param>
+    public WikiEditService(
+        ModProject project,
+        LangEditSession langEdits,
+        StaticEditSession staticEdits,
+        StaticTableIndexStore? staticIndex = null)
     {
         _project = project;
         _langEdits = langEdits;
         _staticEdits = staticEdits;
+        _staticIndex = staticIndex;
     }
 
     /// <summary>尝试将一条维基编辑映射到可写出处。返回是否可导出。</summary>
@@ -66,37 +77,42 @@ public sealed class WikiEditService
         return WikiEditResult.NotExportable("无可识别的编辑操作");
     }
 
+    /// <summary>
+    /// lang 编辑：登记进项目的 <see cref="LangEditSession"/>（<b>真正落库</b>，导出时才带得出去）。
+    ///
+    /// <para><b>为什么 <c>NewValue</c> 必须是整份文件的 JSON</b>：
+    /// <c>LangEditSession.SetModified</c> 的口径是「替换整个 lang 文件的文本」，
+    /// 拿单个字段值写进去会把文件改成一行文本。所以这里先校验它是合法 JSON，
+    /// 不合法就如实回「失败」，绝不存半个文件进去。</para>
+    /// </summary>
     private WikiEditResult MapLangEdit(Ipc.WikiEditItem edit)
     {
         var keyPath = edit.WritableSource!.Value;
 
-        // 创建 LangTextWorkbenchService 实例
         var langText = new LangTextWorkbenchService();
-
-        // 验证 lang 文件存在
         var langRoot = langText.ResolveLangRoot(_project.GameDirectory);
         if (langRoot is null)
-        {
             return WikiEditResult.NotFound("未配置游戏目录，无法定位 lang 文件");
-        }
 
         try
         {
             langText.AttachLangRoot(langRoot);
-            var files = langText.EnumerateFiles(langRoot);
+            IReadOnlyList<LangTextFileInfo> files = langText.EnumerateFiles(langRoot);
             var file = files.FirstOrDefault(f =>
                 Path.GetRelativePath(langRoot, f.FullPath).Replace('\\', '/') == keyPath ||
                 f.FullPath == keyPath);
             if (file is null)
-            {
                 return WikiEditResult.NotFound($"未找到 lang 文件：{keyPath}（共 {files.Count} 个文件）");
-            }
 
-            // 登记编辑到 LangEditSession
-            langText.BeginEdit(keyPath);
             if (edit.NewValue is { } newValue)
             {
-                langText.SetModified(keyPath, newValue);
+                if (!IsValidJson(newValue))
+                    return WikiEditResult.Failed($"lang 编辑的 newValue 必须是整份文件的 JSON：{keyPath}");
+
+                // 用项目编辑集登记（此前这里 new 了一个临时服务实例，改完就丢 = 假成功）
+                _langEdits.AttachLangRoot(langRoot);
+                _langEdits.BeginEdit(keyPath);
+                _langEdits.SetModified(keyPath, newValue);
             }
 
             return WikiEditResult.Ok(keyPath, "lang.editEntry");
@@ -111,25 +127,49 @@ public sealed class WikiEditService
     {
         var recordKey = edit.WritableSource!.Value;
 
-        if (edit.NewValue is { } newValue)
-        {
-            try
-            {
-                // 解析 JSON 验证格式
-                using var doc = System.Text.Json.JsonDocument.Parse(newValue);
-            }
-            catch (System.Text.Json.JsonException ex)
-            {
-                return WikiEditResult.Failed($"JSON 格式错误：{ex.Message}");
-            }
+        if (edit.NewValue is not { } newValue)
+            return WikiEditResult.NotExportable("无可识别的编辑操作（静态表编辑需要 newValue）");
 
-            // 查找表条目
-            var tableId = recordKey.Split('/')[0];
-            // 使用 StaticEditSession 登记编辑
-            return WikiEditResult.Ok(recordKey, "static.editRecord");
+        if (!IsValidJson(newValue))
+            return WikiEditResult.Failed($"JSON 格式错误：{recordKey}");
+
+        if (_staticIndex is null)
+            return WikiEditResult.NotFound("没有静态表索引，无法定位表条目（请先完成启动扫描）");
+
+        IReadOnlyList<StaticTableEntry> entries;
+        try
+        {
+            entries = _staticIndex.ReadEntries();
+        }
+        catch (Exception ex)
+        {
+            return WikiEditResult.Failed($"读静态表索引失败：{ex.Message}");
         }
 
-        return WikiEditResult.NotExportable("无可识别的编辑操作");
+        var entry = entries.FirstOrDefault(e =>
+            string.Equals(e.ContainerEntry, recordKey, StringComparison.Ordinal) ||
+            string.Equals(e.Name, recordKey, StringComparison.Ordinal));
+        if (entry is null)
+            return WikiEditResult.NotFound($"静态表索引里没有这条记录：{recordKey}（共 {entries.Count} 张表）");
+
+        // 真正登记进项目静态编辑集（此前只做了 JSON 校验就回 Ok = 假成功）
+        var official = _staticEdits.TryGetOfficialText(entry.Key) ?? string.Empty;
+        _staticEdits.Set(entry.Key, entry, official, newValue);
+        return WikiEditResult.Ok(entry.Key, "static.editRecord");
+    }
+
+    private static bool IsValidJson(string text)
+    {
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(text);
+            return document.RootElement.ValueKind is System.Text.Json.JsonValueKind.Object
+                or System.Text.Json.JsonValueKind.Array;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return false;
+        }
     }
 }
 

@@ -345,14 +345,59 @@ public sealed record WikiSearchRequest(
 /// <summary>保存页面请求。</summary>
 public sealed record WikiPageSaveRequest(WikiPageDto Page);
 
-/// <summary>保存内容编辑请求。</summary>
+/// <summary>
+/// 保存内容编辑请求。
+///
+/// <para><c>Content</c> 是后加的可选字段：维基页前端（WikiEntityPage）发的是
+/// <c>{pageId, sectionId, content}</c>，契约「只加不删」，所以新增同义字段而不是改
+/// <c>NewValue</c> 的语义。服务端按 <c>NewValue ?? Content</c> 取值。</para>
+/// </summary>
 public sealed record WikiSaveContentRequest(
     string PageId,
     string? SectionId,
     string? EntryId,
-    string Field,
-    string OldValue,
-    string NewValue);
+    string? Field,
+    string? OldValue,
+    string? NewValue,
+    string? Content = null);
+
+// ── 维基页面生成（G-01 缺失的生产链路）────────────────────────────
+
+/// <summary>
+/// 生成维基页面请求。<paramref name="OperationId"/> 用于 <c>cancel</c>（契约 §3.2），
+/// 也是 <c>progress</c> 事件里的 <c>operationId</c>。
+/// </summary>
+public sealed record WikiGenerateRequest(string? OperationId = null);
+
+/// <summary>一个类别的生成结果（页面数）。</summary>
+public sealed record WikiCategoryCountDto(string Category, string Label, int PageCount);
+
+/// <summary>生成响应：真实计数 + 库路径（都来自 <c>cache/wiki-pages.db</c>）。</summary>
+public sealed record WikiGenerateResponse(
+    bool Ok,
+    string Message,
+    int Pages,
+    int SubPages,
+    int Entries,
+    int Bindings,
+    int WrittenEntries,
+    int RevisedPreserved,
+    int UnknownSourceEntries,
+    long ElapsedMs,
+    string DatabasePath,
+    IReadOnlyList<WikiCategoryCountDto> Categories);
+
+/// <summary>生成状态响应：库在不在、有多少内容（前端据此决定要不要提示「生成页面」）。</summary>
+public sealed record WikiGenerateStatusResponse(
+    bool Ready,
+    bool DatabaseExists,
+    string DatabasePath,
+    int Pages,
+    int SubPages,
+    int Entries,
+    int Bindings,
+    int RevisedEntries,
+    IReadOnlyList<WikiCategoryCountDto> Categories);
 
 /// <summary>维基页面 DTO（与前端 WikiPage 对应）。</summary>
 public sealed record WikiPageDto(

@@ -20,8 +20,14 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\LimbusModEditor.Application\LimbusModEditor.Application.csproj" />
     <ProjectReference Include="..\..\src\LimbusModEditor.Domain\LimbusModEditor.Domain.csproj" />
     <ProjectReference Include="..\..\src\LimbusModEditor.Editing\LimbusModEditor.Editing.csproj" />
+    <ProjectReference Include="..\..\src\LimbusModEditor.Formats.Abstractions\LimbusModEditor.Formats.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\LimbusModEditor.Formats.Bank\LimbusModEditor.Formats.Bank.csproj" />
+    <ProjectReference Include="..\..\src\LimbusModEditor.Formats.Carra\LimbusModEditor.Formats.Carra.csproj" />
+    <ProjectReference Include="..\..\src\LimbusModEditor.Formats.Lunartique\LimbusModEditor.Formats.Lunartique.csproj" />
+    <ProjectReference Include="..\..\src\LimbusModEditor.Formats.Rebank\LimbusModEditor.Formats.Rebank.csproj" />
     <ProjectReference Include="..\..\src\LimbusModEditor.Formats.Unity\LimbusModEditor.Formats.Unity.csproj" />
     <PackageReference Include="SixLabors.ImageSharp" Version="3.1.11" />
   </ItemGroup>

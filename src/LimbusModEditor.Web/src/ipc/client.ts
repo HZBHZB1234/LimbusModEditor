@@ -32,6 +32,7 @@ export class IpcClient {
   private pending = new Map<string, PendingReq>()
   private listeners = new Map<string, Set<(payload: unknown) => void>>()
   private connected = false
+  private messageHandler: ((event: { data: string }) => void) | null = null
 
   constructor() {
     this.attachHost()
@@ -39,7 +40,12 @@ export class IpcClient {
 
   private attachHost(): void {
     const w = window as unknown as {
-      chrome?: { webview?: { addEventListener?: (t: string, l: (e: { data: string }) => void) => void } }
+      chrome?: {
+        webview?: {
+          addEventListener?: (t: string, l: (e: { data: string }) => void) => void
+          removeEventListener?: (t: string, l: (e: { data: string }) => void) => void
+        }
+      }
     }
     const webview = w.chrome?.webview
     if (!webview?.addEventListener) {
@@ -47,15 +53,31 @@ export class IpcClient {
       console.warn('[IPC] WebView2 桥接不可用，进入离线降级模式')
       return
     }
-    webview.addEventListener('message', (event: { data: string }) => {
+    // 保存引用以便 destroy 时退订（F-04 fix: 防止监听泄漏）
+    this.messageHandler = (event: { data: string }) => {
       try {
         const msg = JSON.parse(event.data) as IpcMessage
         this.dispatch(msg)
       } catch (e) {
         console.error('[IPC] 消息解析失败', e)
       }
-    })
+    }
+    webview.addEventListener('message', this.messageHandler)
     this.connected = true
+  }
+
+  /** 销毁客户端，退订所有事件监听（F-04 fix） */
+  destroy(): void {
+    if (this.messageHandler) {
+      const w = window as unknown as {
+        chrome?: { webview?: { removeEventListener?: (t: string, l: (e: { data: string }) => void) => void } }
+      }
+      w.chrome?.webview?.removeEventListener?.('message', this.messageHandler)
+      this.messageHandler = null
+    }
+    this.listeners.clear()
+    this.pending.clear()
+    this.connected = false
   }
 
   private dispatch(msg: IpcMessage): void {

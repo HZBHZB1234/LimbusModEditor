@@ -28,6 +28,8 @@ export const usePreviewStore = defineStore('preview', () => {
 
   // 并发闸门：同时最多 N 个大图解码
   const MAX_CONCURRENT_DECODE = 4
+  // 有界队列：等待队列最长 N，超出时丢弃队尾（最新）—— 优先保证当前页响应
+  const MAX_QUEUE_LENGTH = 4
   let activeDecodes = 0
   const decodeQueue: Array<() => void> = []
 
@@ -37,6 +39,10 @@ export const usePreviewStore = defineStore('preview', () => {
         activeDecodes++
         resolve()
       } else {
+        // 背压：队列满时丢弃队尾（最新入队者优先），避免快速切换时积压
+        if (decodeQueue.length >= MAX_QUEUE_LENGTH) {
+          decodeQueue.pop() // 丢弃最新等待者
+        }
         decodeQueue.push(() => {
           activeDecodes++
           resolve()
@@ -76,6 +82,11 @@ export const usePreviewStore = defineStore('preview', () => {
   }
 
   function clearPreview() {
+    // F-06 fix: 释放旧图片 URL，避免浏览器继续持有已解码图片
+    const oldUrl = state.value.result?.binaryUrl
+    if (oldUrl && oldUrl.startsWith('blob:')) {
+      URL.revokeObjectURL(oldUrl)
+    }
     state.value.result = null
     state.value.error = null
     state.value.loading = false

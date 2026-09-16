@@ -5,11 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && npm run copy-licenses",
+    "copy-licenses": "node copy-licenses.mjs",
     "type-check": "vue-tsc --noEmit",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@esotericsoftware/spine-webgl": "^4.0.26",
     "pinia": "^2.2.0",
     "vue": "^3.5.0",
     "vue-router": "^4.4.0"

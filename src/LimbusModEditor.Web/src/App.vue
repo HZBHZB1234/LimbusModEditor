@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 
 const router = useRouter()
+const route = useRoute()
 const sidebarCollapsed = ref(false)
 
 const navItems = [
@@ -11,11 +12,21 @@ const navItems = [
   { key: 'text', label: '文本', icon: '📝', route: '/text' },
   { key: 'static', label: '静态数据', icon: '📊', route: '/static' },
   { key: 'presets', label: '预设卡片', icon: '🃏', route: '/presets' },
+  { key: 'export', label: '导出', icon: '📤', route: '/export' },
+  { key: 'project', label: '项目', icon: '📁', route: '/project' },
   { key: 'settings', label: '设置', icon: '⚙️', route: '/settings' },
+  { key: 'help', label: '帮助', icon: '❓', route: '/help' },
 ]
 
-function navigate(route: string) {
-  router.push(route)
+function navigate(routePath: string) {
+  router.push(routePath)
+}
+
+function isActive(routePath: string): boolean {
+  if (routePath === '/assets') {
+    return route.path.startsWith('/assets')
+  }
+  return route.path === routePath || route.path.startsWith(routePath + '/')
 }
 </script>
 
@@ -31,6 +42,7 @@ function navigate(route: string) {
           v-for="item in navItems"
           :key="item.key"
           class="activity-bar-item"
+          :class="{ active: isActive(item.route) }"
           :title="item.label"
           @click="navigate(item.route)"
         >
@@ -87,6 +99,7 @@ function navigate(route: string) {
 }
 
 .activity-bar-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--lme-gap-sm);
@@ -100,6 +113,24 @@ function navigate(route: string) {
 .activity-bar-item:hover {
   background: var(--lme-bg-hover);
   color: var(--lme-text-primary);
+}
+
+.activity-bar-item.active {
+  background: var(--lme-bg-active, var(--lme-bg-hover));
+  color: var(--lme-text-primary);
+  font-weight: 600;
+}
+
+.activity-bar-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 60%;
+  background: var(--lme-accent, #4a9eff);
+  border-radius: 0 2px 2px 0;
 }
 
 .activity-bar-icon {

@@ -37,4 +37,7 @@ export type {
   HomeRecentPage,
   WikiStats,
   BreadcrumbItem,
+  WikiCategoryCount,
+  WikiGenerateResponse,
+  WikiGenerateStatusResponse,
 } from './types'

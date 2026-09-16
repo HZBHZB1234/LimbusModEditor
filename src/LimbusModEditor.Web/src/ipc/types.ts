@@ -370,6 +370,40 @@ export interface WikiStats {
   userEdits: number
 }
 
+// ── 维基页面生成（wiki.generate / wiki.generateStatus）──────
+export interface WikiCategoryCount {
+  category: string
+  label: string
+  pageCount: number
+}
+
+export interface WikiGenerateResponse {
+  ok: boolean
+  message: string
+  pages: number
+  subPages: number
+  entries: number
+  bindings: number
+  writtenEntries: number
+  revisedPreserved: number
+  unknownSourceEntries: number
+  elapsedMs: number
+  databasePath: string
+  categories: WikiCategoryCount[]
+}
+
+export interface WikiGenerateStatusResponse {
+  ready: boolean
+  databaseExists: boolean
+  databasePath: string
+  pages: number
+  subPages: number
+  entries: number
+  bindings: number
+  revisedEntries: number
+  categories: WikiCategoryCount[]
+}
+
 // ── 面包屑 ──────────────────────────────────────────────────
 export interface BreadcrumbItem {
   label: string

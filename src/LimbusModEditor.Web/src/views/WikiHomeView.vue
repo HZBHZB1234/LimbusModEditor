@@ -4,7 +4,7 @@
 // 数据来源：ipc.request('wiki.home', {})
 // 布局：WikiShell 包裹
 
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ipc } from '@/ipc'
 import WikiShell from '@/components/WikiShell.vue'
@@ -13,6 +13,9 @@ import type {
   HomeCategoryCard,
   HomeRecentPage,
   WikiStats,
+  ProgressPayload,
+  WikiGenerateResponse,
+  WikiGenerateStatusResponse,
 } from '@/ipc'
 
 const router = useRouter()
@@ -24,6 +27,18 @@ const errorMessage = ref('')
 
 // 搜索
 const searchKeyword = ref('')
+
+// ── 页面生成（wiki.generate）──
+// 触发点选「Wiki 首页显式按钮」而不是「打开项目后自动跑」：
+// 真实数据下生成要读 127 万条资源行，耗时以分钟计，放在启动路径上会拖慢打开项目；
+// 而维基页是派生内容，用户点一下再生成既可控又可看进度。首次进入页面时若库里还没有
+// 内容（generateStatus.ready = false），就用横幅提示，而不是偷偷后台跑。
+const isGenerating = ref(false)
+const generateMessage = ref('')
+const generateError = ref('')
+const generateProgress = ref<ProgressPayload | null>(null)
+const generateStatus = ref<WikiGenerateStatusResponse | null>(null)
+const generateOperationId = 'wiki-generate'
 
 // ── 方法 ──
 
@@ -69,6 +84,40 @@ function formatTime(timestamp: string): string {
   }
 }
 
+async function loadGenerateStatus() {
+  try {
+    generateStatus.value = await ipc.request<WikiGenerateStatusResponse>('wiki.generateStatus', {})
+  } catch {
+    // 状态只是提示，拿不到就不提示（不扰民）
+    generateStatus.value = null
+  }
+}
+
+async function generatePages() {
+  if (isGenerating.value) return
+  isGenerating.value = true
+  generateError.value = ''
+  generateMessage.value = ''
+  generateProgress.value = null
+  try {
+    const result = await ipc.request<WikiGenerateResponse>(
+      'wiki.generate',
+      { operationId: generateOperationId },
+      // 真实数据下生成要扫 127 万条资源行（实测约 70 秒），默认 30 秒超时不够；
+      // 期间进度由 progress 事件回传，所以给一个宽松上限即可。
+      900000,
+    )
+    generateMessage.value = result.message
+    await loadHomeData()
+    await loadGenerateStatus()
+  } catch (e: unknown) {
+    generateError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    isGenerating.value = false
+    generateProgress.value = null
+  }
+}
+
 function categoryLabel(category: string): string {
   const map: Record<string, string> = {
     persona: '人格',
@@ -103,9 +152,22 @@ function categoryIcon(category: string): string {
   return map[category] ?? '📄'
 }
 
+// ── 进度事件订阅（只认自己那次生成）──
+let unsubscribeProgress: (() => void) | null = null
+
 // ── 初始化 ──
 onMounted(() => {
+  unsubscribeProgress = ipc.on('progress', (payload) => {
+    const progress = payload as ProgressPayload
+    if (progress.operationId !== generateOperationId) return
+    generateProgress.value = progress
+  })
   loadHomeData()
+  loadGenerateStatus()
+})
+
+onUnmounted(() => {
+  unsubscribeProgress?.()
 })
 </script>
 
@@ -131,7 +193,44 @@ onMounted(() => {
               搜索
             </button>
           </div>
+          <!-- 生成入口：维基页是派生内容，按需生成（说明见脚本区注释） -->
+          <div class="hero-generate">
+            <button class="generate-btn" :disabled="isGenerating" @click="generatePages">
+              {{ isGenerating ? '正在生成…' : '生成页面' }}
+            </button>
+            <span v-if="generateStatus" class="generate-hint">
+              {{
+                generateStatus.ready
+                  ? `已生成 ${generateStatus.pages} 个页面（${generateStatus.entries} 条）`
+                  : '还没有生成过页面'
+              }}
+            </span>
+          </div>
         </section>
+
+        <!-- ── 生成进度 ── -->
+        <div v-if="isGenerating" class="generate-progress">
+          <div class="progress-text">
+            {{ generateProgress?.message ?? '正在准备…' }}
+            <span v-if="generateProgress?.total" class="progress-count">
+              {{ generateProgress.current }}/{{ generateProgress.total }}
+            </span>
+          </div>
+          <div class="progress-track">
+            <div
+              class="progress-bar"
+              :style="{
+                width: generateProgress?.total
+                  ? `${Math.round((generateProgress.current / generateProgress.total) * 100)}%`
+                  : '0%',
+              }"
+            />
+          </div>
+        </div>
+
+        <!-- ── 生成结果 / 失败 ── -->
+        <div v-if="generateMessage" class="generate-result">✅ {{ generateMessage }}</div>
+        <div v-if="generateError" class="error-banner">⚠️ {{ generateError }}</div>
 
         <!-- ── 错误提示 ── -->
         <div v-if="errorMessage" class="error-banner">
@@ -329,6 +428,86 @@ onMounted(() => {
 .search-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* ── 生成入口 ── */
+.hero-generate {
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-sm);
+  margin-top: var(--lme-gap-sm);
+}
+
+.generate-btn {
+  padding: var(--lme-gap-sm) var(--lme-gap-lg);
+  background: transparent;
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-sm);
+  color: var(--lme-text-secondary);
+  font-size: var(--lme-font-size-sm);
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    color 0.15s;
+  white-space: nowrap;
+}
+
+.generate-btn:hover:not(:disabled) {
+  border-color: var(--lme-accent);
+  color: var(--lme-text-primary);
+}
+
+.generate-btn:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+.generate-hint {
+  color: var(--lme-text-muted);
+  font-size: var(--lme-font-size-xs);
+}
+
+.generate-progress {
+  padding: var(--lme-gap-md);
+  background: var(--lme-bg-elevated);
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-md);
+}
+
+.progress-text {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--lme-gap-md);
+  margin-bottom: var(--lme-gap-sm);
+  color: var(--lme-text-secondary);
+  font-size: var(--lme-font-size-sm);
+}
+
+.progress-count {
+  color: var(--lme-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.progress-track {
+  height: 4px;
+  background: var(--lme-bg-input);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.progress-bar {
+  height: 100%;
+  background: var(--lme-accent);
+  transition: width 0.2s;
+}
+
+.generate-result {
+  padding: var(--lme-gap-md);
+  background: var(--lme-bg-elevated);
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-md);
+  color: var(--lme-text-secondary);
+  font-size: var(--lme-font-size-sm);
 }
 
 /* ── 错误提示 ── */

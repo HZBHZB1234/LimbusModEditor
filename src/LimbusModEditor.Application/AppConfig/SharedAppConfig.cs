@@ -79,3 +79,38 @@ public static class SharedConfigService
         finally { if (File.Exists(temp)) File.Delete(temp); }
     }
 }
+
+/// <summary>键值读写（供 IPC config.read/write 使用）。</summary>
+public static class SharedConfigKeyValue
+{
+    private static string ConfigFile => Path.Combine(
+        AppEnvironment.Current.ConfigDirectory, "shared-config.json");
+
+    public static string? Read(string key)
+    {
+        var config = SharedConfigService.Load(ConfigFile);
+        return key switch
+        {
+            "gameDirectory" => config.GameDirectory,
+            "unityCacheDirectory" => config.UnityCacheDirectory,
+            "modDirectory" => config.ModDirectory,
+            "fmodLibraryDirectory" => config.FmodLibraryDirectory,
+            "lastProjectFile" => config.LastProjectFile,
+            _ => null,
+        };
+    }
+
+    public static void Write(string key, string value)
+    {
+        var config = SharedConfigService.Load(ConfigFile);
+        switch (key)
+        {
+            case "gameDirectory": config.GameDirectory = value; break;
+            case "unityCacheDirectory": config.UnityCacheDirectory = value; break;
+            case "modDirectory": config.ModDirectory = value; break;
+            case "fmodLibraryDirectory": config.FmodLibraryDirectory = value; break;
+            case "lastProjectFile": config.LastProjectFile = value; break;
+        }
+        SharedConfigService.Save(config, ConfigFile);
+    }
+}

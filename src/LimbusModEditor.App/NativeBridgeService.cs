@@ -1,10 +1,132 @@
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows;
 using LimbusModEditor.Application.Ipc;
+using NLog;
 using static LimbusModEditor.Application.Ipc.IpcJson;
 
 namespace LimbusModEditor.App;
+
+/// <summary>Win32 IFileDialog 真文件夹选择器（无新依赖，FOS_PICKFOLDERS）。</summary>
+internal static class NativeFolderPicker
+{
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+    private static readonly Guid CLSID_FileOpenDialog = new("DC1C5A9C-E88A-4dde-A5A1-60F82A20AEF7");
+    private static readonly Guid IID_IFileDialog = new("42f85136-db7e-439c-85f1-e4075d135fc8");
+
+    [ComImport, Guid("42f85136-db7e-439c-85f1-e4075d135fc8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IFileDialog
+    {
+        [PreserveSig] int Show(IntPtr hwndOwner);
+        void SetFileTypes(uint cTypes, [In] IntPtr rgFilterSpec);
+        void SetFileTypeIndex(uint iFileType);
+        uint GetFileTypeIndex();
+        void Hook(IntPtr ptr);
+        void GetHookResult(out int phresult);
+        void SetOptions(int fos);
+        void GetOptions(out int fos);
+        void SetDefaultFolder(IntPtr psi);
+        void SetFolder(IntPtr psi);
+        void GetFolder(out IntPtr ppsi);
+        void GetCurrentSelection(out IntPtr ppsi);
+        void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string pszName);
+        void GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string pszName);
+        void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string pszTitle);
+        void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string pszText);
+        void SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string pszLabel);
+        void GetResult(out IntPtr ppsi);
+        void AddPlace(IntPtr psi, int fdap);
+        void SetDefaultExtension([MarshalAs(UnmanagedType.LPWStr)] string pszDefaultExtension);
+        void Close(int hr);
+    }
+
+    private const int FOS_PICKFOLDERS = 0x20;
+    private const int FOS_FORCEFILESYSTEM = 0x40;
+    private const int S_OK = 0;
+
+    /// <summary>显示真文件夹选择器。返回选中路径，取消返回 null。</summary>
+    public static string? PickFolder(string? title, string? initialDirectory, IntPtr ownerHandle)
+    {
+        try
+        {
+            var dialogType = Type.GetTypeFromCLSID(CLSID_FileOpenDialog) ?? throw new InvalidOperationException("无法创建 FileOpenDialog");
+            var dialog = (IFileDialog)Activator.CreateInstance(dialogType)!;
+            dialog.SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+
+            if (!string.IsNullOrWhiteSpace(title))
+                dialog.SetTitle(title);
+
+            if (!string.IsNullOrWhiteSpace(initialDirectory) && Directory.Exists(initialDirectory))
+            {
+                // 创建 shell item 从路径
+                var hr = SHCreateItemFromParsingName(initialDirectory, IntPtr.Zero, out IntPtr psi);
+                if (hr >= 0 && psi != IntPtr.Zero)
+                {
+                    dialog.SetFolder(psi);
+                    Marshal.Release(psi);
+                }
+            }
+
+            var result = dialog.Show(ownerHandle);
+            if (result != S_OK)
+                return null; // 用户取消
+
+            dialog.GetResult(out IntPtr psiResult);
+            if (psiResult == IntPtr.Zero)
+                return null;
+
+            try
+            {
+                return GetPathFromShellItem(psiResult);
+            }
+            finally
+            {
+                Marshal.Release(psiResult);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Warn(ex, "NativeFolderPicker: Win32 IFileDialog 失败，回退 OpenFileDialog 惯例");
+            return FallbackPickFolder(title, initialDirectory, ownerHandle);
+        }
+    }
+
+    private static string? FallbackPickFolder(string? title, string? initialDirectory, IntPtr ownerHandle)
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = title ?? "选择文件夹",
+            ValidateNames = false,
+            CheckFileExists = false,
+            FileName = "选择此文件夹",
+        };
+        if (!string.IsNullOrWhiteSpace(initialDirectory) && Directory.Exists(initialDirectory))
+            dialog.InitialDirectory = initialDirectory;
+
+        var wpfOwner = HwndSourceHelper.FromHwnd(ownerHandle)?.RootVisual as Window;
+        var result = wpfOwner is not null ? dialog.ShowDialog(wpfOwner) : dialog.ShowDialog();
+        return result == true ? Path.GetDirectoryName(dialog.FileName) : null;
+    }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+    private static extern int SHCreateItemFromParsingName([MarshalAs(UnmanagedType.LPWStr)] string pszPath, IntPtr pbc, out IntPtr ppsi);
+
+    private static string GetPathFromShellItem(IntPtr psi)
+    {
+        var hr = SHGetNameFromPath(psi, out string? path);
+        return path ?? string.Empty;
+    }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+    private static extern int SHGetNameFromPath(IntPtr psi, [MarshalAs(UnmanagedType.LPWStr)] out string? pszPath);
+}
+
+internal static class HwndSourceHelper
+{
+    public static System.Windows.Interop.HwndSource? FromHwnd(IntPtr hwnd) =>
+        System.Windows.Interop.HwndSource.FromHwnd(hwnd);
+}
 
 /// <summary>
 /// 原生桥服务：处理对话框/剪贴板/Process.Start 回调（WEB-IPC-CONTRACT §6）。
@@ -121,25 +243,11 @@ public static class NativeBridgeService
     {
         var req = request.Payload.Deserialize<DialogFolderPickRequest>(Options)
             ?? throw new ArgumentException("dialog.folderPick 载荷格式错误。");
-        // W1 定案：使用 OpenFileDialog「选择此文件夹」惯例（与既有 ExportMod_Click 一致）
-        // 可选更优体验：Ookii.Dialogs.Wpf VistaFolderBrowserDialog 或 Win32 IFileDialog(FOS_PICKFOLDERS)
-        var dialog = new Microsoft.Win32.OpenFileDialog
-        {
-            Title = req.Title ?? "选择文件夹",
-            ValidateNames = false,
-            CheckFileExists = false,
-            FileName = "选择此文件夹",
-        };
-        if (!string.IsNullOrWhiteSpace(req.StartPath) && Directory.Exists(req.StartPath))
-            dialog.InitialDirectory = req.StartPath;
 
-        bool? result = owner is not null
-            ? dialog.ShowDialog(owner)
-            : dialog.ShowDialog();
+        var ownerHandle = owner != null ? new System.Windows.Interop.WindowInteropHelper(owner).Handle : IntPtr.Zero;
+        var path = NativeFolderPicker.PickFolder(req.Title, req.StartPath, ownerHandle);
 
-        var path = result == true ? Path.GetDirectoryName(dialog.FileName) : null;
-        return IpcResponse.Success(request.Id, new DialogResponse(
-            result == true, path, null));
+        return IpcResponse.Success(request.Id, new DialogResponse(path is not null, path, null));
     }
 
     private static IpcResponse HandleMessageBox(IpcRequest request, Window? owner)

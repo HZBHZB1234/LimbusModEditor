@@ -161,7 +161,7 @@ public partial class WebView2MainWindow : Wpf.Ui.Controls.FluentWindow, IDisposa
         Dispose();
     }
 
-    private void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
+    private async void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
     {
         try
         {
@@ -193,7 +193,7 @@ public partial class WebView2MainWindow : Wpf.Ui.Controls.FluentWindow, IDisposa
             // 数据查询走 IPC 网关（Application 层，无 WPF 依赖）
             if (_gateway is not null)
             {
-                var responseJson = _gateway.HandleRequest(json);
+                var responseJson = await _gateway.HandleRequestAsync(json);
                 _webView?.CoreWebView2.PostWebMessageAsString(responseJson);
             }
             else

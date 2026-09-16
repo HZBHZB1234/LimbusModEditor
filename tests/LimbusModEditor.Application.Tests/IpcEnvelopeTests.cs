@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Application.Catalog;
 using LimbusModEditor.Application.Ipc;
@@ -44,7 +44,7 @@ public sealed class IpcEnvelopeTests : IDisposable
     // ── 消息信封往返 ────────────────────────────────────────────────
 
     [Fact]
-    public void RequestEnvelope_RoundTrip_PreservesIdAndMethod()
+    public async Task RequestEnvelope_RoundTrip_PreservesIdAndMethod()
     {
         var request = IpcRequest.Create("req-0001", "catalog.query", SerializePayload(
             new CatalogQueryRequest(new AssetSearchQuery(), 0, 200)));
@@ -59,7 +59,7 @@ public sealed class IpcEnvelopeTests : IDisposable
     }
 
     [Fact]
-    public void ResponseEnvelope_Success_PreservesIdAndPayload()
+    public async Task ResponseEnvelope_Success_PreservesIdAndPayload()
     {
         var response = IpcResponse.Success("req-0001", new CatalogCountResponse(42));
 
@@ -74,7 +74,7 @@ public sealed class IpcEnvelopeTests : IDisposable
     }
 
     [Fact]
-    public void ResponseEnvelope_Failure_ContainsChineseMessage()
+    public async Task ResponseEnvelope_Failure_ContainsChineseMessage()
     {
         var response = IpcResponse.Failure("req-0002", IpcErrorCode.Cancelled, "用户取消");
 
@@ -90,7 +90,7 @@ public sealed class IpcEnvelopeTests : IDisposable
     }
 
     [Fact]
-    public void EventEnvelope_HasNoId()
+    public async Task EventEnvelope_HasNoId()
     {
         var evt = IpcEvent.Create("progress", SerializePayload(
             new ProgressPayload("export-000", "carra2", 37, 100, "正在重打包…")));
@@ -108,11 +108,11 @@ public sealed class IpcEnvelopeTests : IDisposable
     // ── 网关派发 ────────────────────────────────────────────────────
 
     [Fact]
-    public void UnknownMethod_ReturnsInternalError()
+    public async Task UnknownMethod_ReturnsInternalError()
     {
         var gateway = EmptyGateway();
         var request = IpcRequest.Create("req-999", "unknown.method", SerializePayload(new { }));
-        var responseJson = gateway.HandleRequest(request.ToJson());
+        var responseJson = await gateway.HandleRequestAsync(request.ToJson());
         var response = IpcResponse.FromJson(responseJson);
 
         Assert.Equal("req-999", response.Id);
@@ -122,10 +122,10 @@ public sealed class IpcEnvelopeTests : IDisposable
     }
 
     [Fact]
-    public void MalformedJson_ReturnsParseError()
+    public async Task MalformedJson_ReturnsParseError()
     {
         var gateway = EmptyGateway();
-        var responseJson = gateway.HandleRequest("this is not json{{{");
+        var responseJson = await gateway.HandleRequestAsync("this is not json{{{");
         var response = IpcResponse.FromJson(responseJson);
 
         Assert.False(response.Ok);
@@ -133,12 +133,12 @@ public sealed class IpcEnvelopeTests : IDisposable
     }
 
     [Fact]
-    public void CatalogQuery_EmptyStore_ReturnsZero()
+    public async Task CatalogQuery_EmptyStore_ReturnsZero()
     {
         var gateway = EmptyGateway();
         var request = IpcRequest.Create("req-001", "catalog.query", SerializePayload(
             new CatalogQueryRequest(new AssetSearchQuery(), 0, 20)));
-        var responseJson = gateway.HandleRequest(request.ToJson());
+        var responseJson = await gateway.HandleRequestAsync(request.ToJson());
         var response = IpcResponse.FromJson(responseJson);
 
         Assert.True(response.Ok);
@@ -148,12 +148,12 @@ public sealed class IpcEnvelopeTests : IDisposable
     }
 
     [Fact]
-    public void CatalogCount_EmptyStore_ReturnsZero()
+    public async Task CatalogCount_EmptyStore_ReturnsZero()
     {
         var gateway = EmptyGateway();
         var request = IpcRequest.Create("req-004", "catalog.count", SerializePayload(
             new CatalogCountRequest(new AssetSearchQuery())));
-        var responseJson = gateway.HandleRequest(request.ToJson());
+        var responseJson = await gateway.HandleRequestAsync(request.ToJson());
         var response = IpcResponse.FromJson(responseJson);
 
         Assert.True(response.Ok);
@@ -162,12 +162,12 @@ public sealed class IpcEnvelopeTests : IDisposable
     }
 
     [Fact]
-    public void RelationReveal_NonExistent_ReturnsFalse_DoesNotThrow()
+    public async Task RelationReveal_NonExistent_ReturnsFalse_DoesNotThrow()
     {
         var gateway = EmptyGateway();
         var request = IpcRequest.Create("req-005", "relation.reveal", SerializePayload(
             new RelationRevealRequest("nonexistent/path", "fallback")));
-        var responseJson = gateway.HandleRequest(request.ToJson());
+        var responseJson = await gateway.HandleRequestAsync(request.ToJson());
         var response = IpcResponse.FromJson(responseJson);
 
         Assert.True(response.Ok);
@@ -176,36 +176,36 @@ public sealed class IpcEnvelopeTests : IDisposable
     }
 
     [Fact]
-    public void Cancel_RespondsWithCancelled()
+    public async Task Cancel_RespondsWithCancelled()
     {
         var gateway = EmptyGateway();
         var request = IpcRequest.Create("req-006", "cancel", SerializePayload(
             new CancelPayload("export-000")));
-        var responseJson = gateway.HandleRequest(request.ToJson());
+        var responseJson = await gateway.HandleRequestAsync(request.ToJson());
         var response = IpcResponse.FromJson(responseJson);
 
         Assert.True(response.Ok);
     }
 
     [Fact]
-    public void ConfigRead_UnknownKey_ReturnsNull()
+    public async Task ConfigRead_UnknownKey_ReturnsNull()
     {
         var gateway = EmptyGateway();
         var request = IpcRequest.Create("req-007", "config.read", SerializePayload(
             new ConfigReadRequest("nonexistent.key")));
-        var responseJson = gateway.HandleRequest(request.ToJson());
+        var responseJson = await gateway.HandleRequestAsync(request.ToJson());
         var response = IpcResponse.FromJson(responseJson);
 
         Assert.True(response.Ok);
     }
 
     [Fact]
-    public void UiStateRead_ClampsColumnWidth()
+    public async Task UiStateRead_ClampsColumnWidth()
     {
         var gateway = EmptyGateway();
         var request = IpcRequest.Create("req-008", "uiState.read", SerializePayload(
             new UiStateReadRequest("assets", 9999)));
-        var responseJson = gateway.HandleRequest(request.ToJson());
+        var responseJson = await gateway.HandleRequestAsync(request.ToJson());
         var response = IpcResponse.FromJson(responseJson);
 
         Assert.True(response.Ok);

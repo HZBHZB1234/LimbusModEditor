@@ -138,8 +138,8 @@ public sealed partial class IpcGateway
         _projects = projects ?? new ProjectService();
     }
 
-    /// <summary>处理一条来自页面的请求 JSON，返回响应 JSON。</summary>
-    public string HandleRequest(string requestJson)
+    /// <summary>处理一条来自页面的请求 JSON，返回响应 JSON（async 贯通）。</summary>
+    public async Task<string> HandleRequestAsync(string requestJson)
     {
         IpcRequest request;
         try
@@ -160,7 +160,7 @@ public sealed partial class IpcGateway
 
         try
         {
-            var response = Dispatch(request);
+            var response = await DispatchAsync(request);
             return response.ToJson();
         }
         catch (OperationCanceledException)
@@ -181,72 +181,87 @@ public sealed partial class IpcGateway
             ?? throw new ArgumentException($"无法将 payload 反序列化为 {typeof(T).Name}。");
     }
 
-    private IpcResponse Dispatch(IpcRequest request) => request.Method switch
+    private async Task<IpcResponse> DispatchAsync(IpcRequest request)
     {
-        // ── 2.1 资源目录 ──────────────────────────────────────────────
-        "catalog.query" => HandleCatalogQuery(request),
-        "catalog.count" => HandleCatalogCount(request),
-        "catalog.locate" => HandleCatalogLocate(request),
-        "catalog.containerRoots" => HandleContainerRoots(request),
-        "catalog.containerChildren" => HandleContainerChildren(request),
+        return request.Method switch
+        {
+            // ── 2.1 资源目录 ──────────────────────────────────────────────
+            "catalog.query" => HandleCatalogQuery(request),
+            "catalog.count" => HandleCatalogCount(request),
+            "catalog.locate" => HandleCatalogLocate(request),
+            "catalog.containerRoots" => HandleContainerRoots(request),
+            "catalog.containerChildren" => HandleContainerChildren(request),
 
-        // ── 2.2 资产预览/读取 ────────────────────────────────────────
-        "asset.preview" => HandleAssetPreview(request),
-        "asset.readText" => HandleAssetReadText(request),
+            // ── 2.2 资产预览/读取 ────────────────────────────────────────
+            "asset.preview" => HandleAssetPreview(request),
+            "asset.readText" => await HandleAssetReadTextAsync(request),
 
-        // ── 2.3 资产编辑 ──────────────────────────────────────────────
-        "asset.edit.replacePayload" => HandleAssetEditReplacePayload(request),
-        "asset.edit.fieldEdit" => HandleAssetEditFieldEdit(request),
-        "asset.edit.spriteMetadata" => HandleAssetEditSpriteMetadata(request),
+            // ── 2.3 资产编辑 ──────────────────────────────────────────────
+            "asset.edit.replacePayload" => await HandleAssetEditReplacePayloadAsync(request),
+            "asset.edit.fieldEdit" => HandleAssetEditFieldEdit(request),
+            "asset.edit.spriteMetadata" => HandleAssetEditSpriteMetadata(request),
 
-        // ── 2.4 Spine（服务已迁移至 SpineData，见 t24）──────────────
-        "spine.locate" => HandleSpineLocate(request),
-        "spine.export" => HandleSpineExport(request),
+            // ── 2.4 Spine（服务已迁移至 SpineData，见 t24）──────────────
+            "spine.locate" => await HandleSpineLocateAsync(request),
+            "spine.export" => await HandleSpineExportAsync(request),
 
-        // ── 2.5 关联与精确跳转 ────────────────────────────────────────
-        "relation.reveal" => HandleRelationReveal(request),
-        "relation.describe" => HandleRelationDescribe(request),
-        "relation.links" => HandleRelationLinks(request),
+            // ── 2.5 关联与精确跳转 ────────────────────────────────────────
+            "relation.reveal" => HandleRelationReveal(request),
+            "relation.describe" => HandleRelationDescribe(request),
+            "relation.links" => HandleRelationLinks(request),
 
-        // ── 2.6 项目 / 导出 ──────────────────────────────────────────
-        "project.open" => HandleProjectOpen(request),
-        "project.save" => HandleProjectSave(request),
-        "export.plan" => HandleExportPlan(request),
-        "export.run" => HandleExportRun(request),
+            // ── 2.6 项目 / 导出 ──────────────────────────────────────────
+            "project.open" => await HandleProjectOpenAsync(request),
+            "project.save" => await HandleProjectSaveAsync(request),
+            "export.plan" => HandleExportPlan(request),
+            "export.run" => await HandleExportRunAsync(request),
 
-        // ── 2.7 配置 / UI 状态 ────────────────────────────────────────
-        "config.read" => HandleConfigRead(request),
-        "config.write" => HandleConfigWrite(request),
-        "uiState.read" => HandleUiStateRead(request),
-        "uiState.write" => HandleUiStateWrite(request),
+            // ── 2.7 配置 / UI 状态 ────────────────────────────────────────
+            "config.read" => HandleConfigRead(request),
+            "config.write" => HandleConfigWrite(request),
+            "uiState.read" => HandleUiStateRead(request),
+            "uiState.write" => HandleUiStateWrite(request),
 
-        // ── 音频工作台 ────────────────────────────────────────────────
-        "bank.list" => HandleBankList(request),
-        "bank.samples" => HandleBankSamples(request),
-        "bank.preview" => HandleBankPreview(request),
-        "bank.exportRebank" => HandleBankExportRebank(request),
+            // ── 音频工作台 ────────────────────────────────────────────────
+            "bank.list" => HandleBankList(request),
+            "bank.samples" => HandleBankSamples(request),
+            "bank.preview" => HandleBankPreview(request),
+            "bank.exportRebank" => await HandleBankExportRebankAsync(request),
 
-        // ── 文本工作台 ────────────────────────────────────────────────
-        "lang.activeLanguages" => HandleLangActiveLanguages(request),
-        "lang.files" => HandleLangFiles(request),
-        "lang.search" => HandleLangSearch(request),
-        "lang.readEntry" => HandleLangReadEntry(request),
-        "lang.editEntry" => HandleLangEditEntry(request),
-        "lang.exportPatch" => HandleLangExportPatch(request),
+            // ── 文本工作台 ────────────────────────────────────────────────
+            "lang.activeLanguages" => HandleLangActiveLanguages(request),
+            "lang.files" => HandleLangFiles(request),
+            "lang.search" => HandleLangSearch(request),
+            "lang.readEntry" => HandleLangReadEntry(request),
+            "lang.editEntry" => HandleLangEditEntry(request),
+            "lang.exportPatch" => HandleLangExportPatch(request),
 
-        // ── 静态数据工作台 ────────────────────────────────────────────
-        "static.tableList" => HandleStaticTableList(request),
-        "static.records" => HandleStaticRecords(request),
-        "static.locate" => HandleStaticLocate(request),
-        "static.readRecord" => HandleStaticReadRecord(request),
-        "static.editRecord" => HandleStaticEditRecord(request),
-        "static.exportStaticmod" => HandleStaticExportStaticmod(request),
+            // ── 静态数据工作台 ────────────────────────────────────────────
+            "static.tableList" => HandleStaticTableList(request),
+            "static.records" => HandleStaticRecords(request),
+            "static.locate" => HandleStaticLocate(request),
+            "static.readRecord" => HandleStaticReadRecord(request),
+            "static.editRecord" => HandleStaticEditRecord(request),
+            "static.exportStaticmod" => HandleStaticExportStaticmod(request),
 
-        // ── 取消 ──────────────────────────────────────────────────────
-        "cancel" => HandleCancel(request),
+            // ── 维基页面数据 ────────────────────────────────────────────
+            "wiki.home" => HandleWikiHome(request),
+            "wiki.categoryIndex" => HandleWikiCategoryIndex(request),
+            "wiki.category.load" => HandleWikiCategoryIndex(request),
+            "wiki.page.load" => HandleWikiPageLoad(request),
+            "wiki.getPage" => HandleWikiPageLoad(request),
+            "wiki.search" => HandleWikiSearch(request),
+            "wiki.page.save" => HandleWikiPageSave(request),
+            "wiki.saveContent" => HandleWikiSaveContent(request),
+            "wiki.getEditPlan" => HandleWikiGetEditPlan(request),
+            "wiki.applyEdit" => HandleWikiApplyEdit(request),
 
-        _ => IpcResponse.Failure(request.Id, IpcErrorCode.Internal, "未知方法：" + request.Method)
-    };
+            // ── 取消 ──────────────────────────────────────────────────────
+            "cancel" => HandleCancel(request),
+
+            _ => IpcResponse.Failure(request.Id, IpcErrorCode.Internal, "未知方法：" + request.Method)
+        };
+    }
 
     // ── 2.1 资源目录（统一分页）────────────────────────────────────
 
@@ -319,7 +334,7 @@ public sealed partial class IpcGateway
             "unknown", Array.Empty<PropertyRow>(), null));
     }
 
-    private IpcResponse HandleAssetReadText(IpcRequest request)
+    private async Task<IpcResponse> HandleAssetReadTextAsync(IpcRequest request)
     {
         var req = DeserializePayload<AssetReadTextRequest>(request);
         var project = _projectState.Project;
@@ -332,7 +347,7 @@ public sealed partial class IpcGateway
         var projectRoot = _projectState.ProjectFile != null
             ? Path.GetDirectoryName(_projectState.ProjectFile)
             : null;
-        var text = UnityCacheMaterializationService.MaterializeForEditingAsync(project, asset, projectRoot).GetAwaiter().GetResult();
+        var text = await UnityCacheMaterializationService.MaterializeForEditingAsync(project, asset, projectRoot);
         if (req.CharLimit is { } limit && text.Length > limit)
             text = text[..limit];
         return IpcResponse.Success(request.Id, new AssetReadTextResponse(text));
@@ -340,7 +355,7 @@ public sealed partial class IpcGateway
 
     // ── 2.3 资产编辑 ──────────────────────────────────────────────
 
-    private IpcResponse HandleAssetEditReplacePayload(IpcRequest request)
+    private async Task<IpcResponse> HandleAssetEditReplacePayloadAsync(IpcRequest request)
     {
         var req = DeserializePayload<AssetEditReplacePayloadRequest>(request);
         var project = _projectState.Project;
@@ -355,7 +370,7 @@ public sealed partial class IpcGateway
         var projectDir = _projectState.ProjectFile != null
             ? Path.GetDirectoryName(_projectState.ProjectFile)!
             : Environment.CurrentDirectory;
-        var result = _assetEdits.ReplaceFromFileAsync(project, Guid.Parse(req.AssetId), req.ReplacementPath, projectDir).GetAwaiter().GetResult();
+        var result = await _assetEdits.ReplaceFromFileAsync(project, Guid.Parse(req.AssetId), req.ReplacementPath, projectDir);
         return IpcResponse.Success(request.Id, new { ok = true, storedPath = result.StoredPath, size = result.Size });
     }
 
@@ -395,10 +410,10 @@ public sealed partial class IpcGateway
 
     // ── 2.4 Spine ────────────────────────────────────────────────
 
-    private IpcResponse HandleSpineLocate(IpcRequest request)
+    private async Task<IpcResponse> HandleSpineLocateAsync(IpcRequest request)
     {
         var req = DeserializePayload<SpineLocateRequest>(request);
-        var (data, error) = _spineData.GetSpineDataByPathAsync(req.AssetId).GetAwaiter().GetResult();
+        var (data, error) = await _spineData.GetSpineDataByPathAsync(req.AssetId);
         if (data is null)
             return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound, error ?? "未找到 Spine 素材");
 
@@ -409,7 +424,7 @@ public sealed partial class IpcGateway
         return IpcResponse.Success(request.Id, new SpineLocateResponse(data.Label, files, data.AvailablePages));
     }
 
-    private IpcResponse HandleSpineExport(IpcRequest request)
+    private async Task<IpcResponse> HandleSpineExportAsync(IpcRequest request)
     {
         var req = DeserializePayload<SpineExportRequest>(request);
         var project = _projectState.Project;
@@ -420,7 +435,7 @@ public sealed partial class IpcGateway
         var skipped = new List<string>();
         foreach (var assetId in req.AssetIds)
         {
-            var (data, error) = _spineData.GetSpineDataByPathAsync(assetId).GetAwaiter().GetResult();
+            var (data, error) = await _spineData.GetSpineDataByPathAsync(assetId);
             if (data is null)
             {
                 skipped.Add($"{assetId}：{error ?? "未找到"}");
@@ -468,18 +483,18 @@ public sealed partial class IpcGateway
 
     // ── 2.6 项目 / 导出 ──────────────────────────────────────────
 
-    private IpcResponse HandleProjectOpen(IpcRequest request)
+    private async Task<IpcResponse> HandleProjectOpenAsync(IpcRequest request)
     {
         var req = DeserializePayload<ProjectOpenRequest>(request);
         if (!File.Exists(req.ProjectFile))
             return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound, $"项目文件不存在：{req.ProjectFile}");
 
-        var project = _projects.LoadAsync(req.ProjectFile).GetAwaiter().GetResult();
+        var project = await _projects.LoadAsync(req.ProjectFile);
         _projectState.SetProject(project, req.ProjectFile);
         return IpcResponse.Success(request.Id, new { ok = true, name = project.Name, assetCount = project.Assets.Count });
     }
 
-    private IpcResponse HandleProjectSave(IpcRequest request)
+    private async Task<IpcResponse> HandleProjectSaveAsync(IpcRequest request)
     {
         var req = DeserializePayload<ProjectSaveRequest>(request);
         var project = _projectState.Project;
@@ -487,7 +502,7 @@ public sealed partial class IpcGateway
             return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "请先打开项目");
         var projectFile = _projectState.ProjectFile ?? req.ProjectFile;
 
-        _projects.SaveAsync(project, projectFile).GetAwaiter().GetResult();
+        await _projects.SaveAsync(project, projectFile);
         return IpcResponse.Success(request.Id, new { ok = true });
     }
 
@@ -506,7 +521,7 @@ public sealed partial class IpcGateway
         return IpcResponse.Success(request.Id, new ExportPlanResponse(slots, skipped));
     }
 
-    private IpcResponse HandleExportRun(IpcRequest request)
+    private async Task<IpcResponse> HandleExportRunAsync(IpcRequest request)
     {
         var req = DeserializePayload<ExportRunRequest>(request);
         var project = _projectState.Project;
@@ -517,8 +532,8 @@ public sealed partial class IpcGateway
 
         var plan = _exportPlan.Plan(project, req.TargetDirectory, langEdits, staticEdits);
         var projectRoot = _projectState.ProjectFile != null ? Path.GetDirectoryName(_projectState.ProjectFile)! : string.Empty;
-        var result = _exportService.ExportAsync(project, projectRoot, plan, new ModExportPlanContext(),
-            new Progress<string>(msg => Log.Info("导出进度: {0}", msg)), CancellationToken.None).GetAwaiter().GetResult();
+        var result = await _exportService.ExportAsync(project, projectRoot, plan, new ModExportPlanContext(),
+            new Progress<string>(msg => Log.Info("导出进度: {0}", msg)), CancellationToken.None);
         return IpcResponse.Success(request.Id, new { ok = true, root = result.RootDirectory, slots = result.Slots.Count });
     }
 
@@ -584,7 +599,7 @@ public sealed partial class IpcGateway
         return IpcResponse.Failure(request.Id, IpcErrorCode.Unsupported, "音频试听需要宿主原生播放能力（需 App 侧 FMOD 解码 + MediaPlayer）");
     }
 
-    private IpcResponse HandleBankExportRebank(IpcRequest request)
+    private async Task<IpcResponse> HandleBankExportRebankAsync(IpcRequest request)
     {
         var req = DeserializePayload<BankExportRebankRequest>(request);
         var project = _projectState.Project;
@@ -595,7 +610,7 @@ public sealed partial class IpcGateway
         if (asset is null)
             return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound, $"未找到 Bank：{req.BankId}");
 
-        var fsb = _bankAudio.ReadFsbAsync(asset).GetAwaiter().GetResult();
+        var fsb = await _bankAudio.ReadFsbAsync(asset);
         return IpcResponse.Success(request.Id, new { ok = true, bytesWritten = fsb.Length });
     }
 
@@ -751,5 +766,130 @@ public sealed partial class IpcGateway
         Directory.CreateDirectory(req.TargetDirectory);
         _staticMod.Write(package, outputPath);
         return IpcResponse.Success(request.Id, new { ok = true, written = package.Patches.Count, skipped = 0, outputPath });
+    }
+
+    // ── 维基页面数据处理器 ────────────────────────────────────────
+
+    private static readonly Dictionary<string, string> WikiCategoryLabels = new()
+    {
+        ["persona"] = "人格",
+        ["enemy"] = "敌方单位",
+        ["abnormality"] = "异想体",
+        ["ego"] = "E.G.O 装备",
+        ["ego_gift"] = "E.G.O 饰品",
+        ["announcer"] = "播报员",
+        ["story"] = "剧情",
+        ["stage"] = "关卡",
+        ["item"] = "物品",
+        ["mechanism"] = "机制",
+        ["keyword"] = "关键词",
+    };
+
+    private IpcResponse HandleWikiHome(IpcRequest request)
+    {
+        var store = new WikiPageStore(AppEnvironment.Current.CacheDirectory);
+        if (!store.Exists)
+            return IpcResponse.Success(request.Id, new WikiHomeResponse(
+                Array.Empty<WikiCategoryCardDto>(), Array.Empty<WikiRecentPageDto>(),
+                new WikiStatsDto(0, 0, 0, 0)));
+
+        var categories = WikiCategoryLabels.Select(cat =>
+        {
+            var count = store.CountByCategory(cat.Key);
+            return new WikiCategoryCardDto(cat.Key, cat.Value, "", count, Array.Empty<CategoryPageRefDto>());
+        }).ToList();
+
+        var recent = store.ReadPages().Take(5).Select(p =>
+            new WikiRecentPageDto(p.PageId, p.Title, p.Category, "")).ToList();
+
+        var (auto, revised) = store.SourceStatistics();
+        var stats = new WikiStatsDto(store.ReadPageCount(), store.ReadEntryCount(), store.ReadBindingCount(), revised);
+
+        return IpcResponse.Success(request.Id, new WikiHomeResponse(categories, recent, stats));
+    }
+
+    private IpcResponse HandleWikiCategoryIndex(IpcRequest request)
+    {
+        var req = DeserializePayload<WikiCategoryIndexRequest>(request);
+        var store = new WikiPageStore(AppEnvironment.Current.CacheDirectory);
+        if (!store.Exists || !WikiCategoryLabels.TryGetValue(req.Category, out var label))
+            return IpcResponse.Success(request.Id, new WikiCategoryIndexResponse(req.Category, req.Category, Array.Empty<CategoryPageRefDto>()));
+
+        var pages = store.ReadPages().Where(p => p.Category == req.Category).Select(p =>
+            new CategoryPageRefDto(p.PageId, p.Title, null)).ToList();
+
+        return IpcResponse.Success(request.Id, new WikiCategoryIndexResponse(req.Category, label, pages));
+    }
+
+    private IpcResponse HandleWikiPageLoad(IpcRequest request)
+    {
+        var req = DeserializePayload<WikiPageLoadRequest>(request);
+        var store = new WikiPageStore(AppEnvironment.Current.CacheDirectory);
+        if (!store.Exists)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound, $"页面不存在：{req.PageId}");
+
+        var service = new WikiPageQueryService(store);
+        var detail = service.GetPageDetail(req.PageId);
+        if (detail is null)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound, $"页面不存在：{req.PageId}");
+
+        var page = detail.Page;
+        var sections = detail.SubPages.SelectMany(sub => sub.Entries.Select(entry => new WikiSectionDto(
+            entry.Entry.EntryId, entry.Entry.Title, entry.Entry.Body, false, true))).ToList();
+
+        return IpcResponse.Success(request.Id, new WikiPageResponse(new WikiPageDto(
+            page.PageId, page.Title, page.Category, page.Subtitle, sections,
+            Array.Empty<WikiRelatedPageDto>())));
+    }
+
+    private IpcResponse HandleWikiSearch(IpcRequest request)
+    {
+        var req = DeserializePayload<WikiSearchRequest>(request);
+        var store = new WikiPageStore(AppEnvironment.Current.CacheDirectory);
+        if (!store.Exists)
+            return IpcResponse.Success(request.Id, new WikiSearchResponse(0, Array.Empty<WikiSearchResultDto>()));
+
+        var (total, entries) = new WikiPageQueryService(store).SearchEntries(req.Keyword, req.Offset, req.Limit);
+        return IpcResponse.Success(request.Id, new WikiSearchResponse(
+            total,
+            entries.Select(r => new WikiSearchResultDto(r.SubPageId, r.Title, "", r.Body.Length > 100 ? r.Body[..100] + "…" : r.Body, $"/wiki/page/{r.SubPageId}")).ToList()));
+    }
+
+    private IpcResponse HandleWikiPageSave(IpcRequest request)
+    {
+        var req = DeserializePayload<WikiPageSaveRequest>(request);
+        var store = new WikiPageStore(AppEnvironment.Current.CacheDirectory);
+        var page = new WikiPage(req.Page.Id, req.Page.Title, req.Page.Category, req.Page.Subtitle ?? "", req.Page.Id);
+        store.InsertPageIfNotExists(page);
+        return IpcResponse.Success(request.Id, new WikiSaveResponse(true, null));
+    }
+
+    private IpcResponse HandleWikiSaveContent(IpcRequest request)
+    {
+        var req = DeserializePayload<WikiSaveContentRequest>(request);
+        var store = new WikiPageStore(AppEnvironment.Current.CacheDirectory);
+        var entry = new WikiEntry(req.EntryId ?? Guid.NewGuid().ToString(), req.SectionId ?? "", req.Field, req.NewValue, 0)
+        {
+            Source = "Revised"
+        };
+        store.SaveEntry(entry);
+        return IpcResponse.Success(request.Id, new WikiSaveResponse(true, null));
+    }
+
+    private IpcResponse HandleWikiGetEditPlan(IpcRequest request)
+    {
+        var req = DeserializePayload<WikiGetEditPlanRequest>(request);
+        var exportable = new List<WikiExportableEdit>();
+        foreach (var edit in req.Edits)
+        {
+            exportable.Add(new WikiExportableEdit(edit.Id, edit.Title, "wiki.saveContent"));
+        }
+        return IpcResponse.Success(request.Id, new WikiGetEditPlanResponse(exportable, Array.Empty<WikiNonExportableEdit>()));
+    }
+
+    private IpcResponse HandleWikiApplyEdit(IpcRequest request)
+    {
+        var req = DeserializePayload<WikiApplyEditRequest>(request);
+        return IpcResponse.Success(request.Id, new WikiApplyEditResponse(true, req.Id, "wiki.saveContent", null));
     }
 }

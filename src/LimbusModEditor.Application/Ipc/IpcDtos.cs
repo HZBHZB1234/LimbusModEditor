@@ -265,7 +265,7 @@ public sealed record StaticTableItem(string TableId, string Name, int RecordCoun
 public sealed record StaticTableListResponse(IReadOnlyList<StaticTableItem> Items, long TotalCount, int Offset, int Take);
 
 public sealed record StaticRecordsRequest(string TableId, int Offset = 0, int Take = 200);
-public sealed record StaticRecordItem(string RecordId, string Summary);
+public sealed record StaticRecordItem(string RecordId, string Summary, string? RawJson = null);
 public sealed record StaticRecordsResponse(string TableId, IReadOnlyList<StaticRecordItem> Items, long TotalCount, int Offset, int Take);
 
 public sealed record StaticLocateRequest(string TableId, string RecordId);
@@ -274,3 +274,165 @@ public sealed record StaticReadRecordResponse(string? Json);
 
 public sealed record StaticEditRecordRequest(string TableId, string RecordId, string Json);
 public sealed record StaticExportStaticmodRequest(string TargetDirectory);
+
+// ── 维基编辑 → 导出 ────────────────────────────────────────────────
+
+/// <summary>获取编辑计划：哪些编辑可导出、哪些不可、为什么。</summary>
+public sealed record WikiGetEditPlanRequest(IReadOnlyList<WikiEditItem> Edits);
+
+/// <summary>单条维基编辑。</summary>
+public sealed record WikiEditItem(
+    string Id,
+    string Title,
+    string? Content,
+    WikiWritableSource? WritableSource,
+    string? ReplacementPath,
+    string? NewValue);
+
+/// <summary>可写出处（三类）。</summary>
+public sealed record WikiWritableSource(string Kind, string Value);
+
+/// <summary>编辑计划响应。</summary>
+public sealed record WikiGetEditPlanResponse(
+    IReadOnlyList<WikiExportableEdit> Exportable,
+    IReadOnlyList<WikiNonExportableEdit> NonExportable);
+
+/// <summary>可导出的编辑。</summary>
+public sealed record WikiExportableEdit(
+    string Id,
+    string AssetId,
+    string Method);
+
+/// <summary>不可导出的编辑。</summary>
+public sealed record WikiNonExportableEdit(
+    string Id,
+    string Reason);
+
+/// <summary>应用单条维基编辑。</summary>
+public sealed record WikiApplyEditRequest(
+    string Id,
+    string Title,
+    string? Content,
+    WikiWritableSource? WritableSource,
+    string? ReplacementPath,
+    string? NewValue);
+
+/// <summary>应用编辑响应。</summary>
+public sealed record WikiApplyEditResponse(
+    bool Ok,
+    string? AssetId,
+    string? Method,
+    string? Error);
+
+// ── 维基页面数据 ────────────────────────────────────────────────
+
+/// <summary>首页数据请求（无参数）。</summary>
+public sealed record WikiHomeRequest();
+
+/// <summary>分类索引请求。</summary>
+public sealed record WikiCategoryIndexRequest(string Category);
+
+/// <summary>页面加载请求。</summary>
+public sealed record WikiPageLoadRequest(string PageId);
+
+/// <summary>搜索请求。</summary>
+public sealed record WikiSearchRequest(
+    string Keyword,
+    string? Category = null,
+    int Offset = 0,
+    int Limit = 20);
+
+/// <summary>保存页面请求。</summary>
+public sealed record WikiPageSaveRequest(WikiPageDto Page);
+
+/// <summary>保存内容编辑请求。</summary>
+public sealed record WikiSaveContentRequest(
+    string PageId,
+    string? SectionId,
+    string? EntryId,
+    string Field,
+    string OldValue,
+    string NewValue);
+
+/// <summary>维基页面 DTO（与前端 WikiPage 对应）。</summary>
+public sealed record WikiPageDto(
+    string Id,
+    string Title,
+    string Category,
+    string? Subtitle,
+    IReadOnlyList<WikiSectionDto> Sections,
+    IReadOnlyList<WikiRelatedPageDto> RelatedPages);
+
+/// <summary>分节 DTO。</summary>
+public sealed record WikiSectionDto(
+    string Id,
+    string Title,
+    string Content,
+    bool Collapsible,
+    bool Editable);
+
+/// <summary>相关页面 DTO。</summary>
+public sealed record WikiRelatedPageDto(
+    string Id,
+    string Title,
+    string Category,
+    string Url);
+
+/// <summary>首页数据响应。</summary>
+public sealed record WikiHomeResponse(
+    IReadOnlyList<WikiCategoryCardDto> Categories,
+    IReadOnlyList<WikiRecentPageDto> RecentPages,
+    WikiStatsDto Stats);
+
+/// <summary>分类卡片 DTO。</summary>
+public sealed record WikiCategoryCardDto(
+    string Category,
+    string Label,
+    string Icon,
+    int PageCount,
+    IReadOnlyList<CategoryPageRefDto> FeaturedPages);
+
+/// <summary>分类页面引用 DTO。</summary>
+public sealed record CategoryPageRefDto(
+    string Id,
+    string Title,
+    string? Subtitle);
+
+/// <summary>最近页面 DTO。</summary>
+public sealed record WikiRecentPageDto(
+    string Id,
+    string Title,
+    string Category,
+    string LastModified);
+
+/// <summary>统计 DTO。</summary>
+public sealed record WikiStatsDto(
+    int TotalPages,
+    int TotalEntries,
+    int TotalBindings,
+    int UserEdits);
+
+/// <summary>分类索引响应。</summary>
+public sealed record WikiCategoryIndexResponse(
+    string Category,
+    string Label,
+    IReadOnlyList<CategoryPageRefDto> Pages);
+
+/// <summary>页面加载响应。</summary>
+public sealed record WikiPageResponse(WikiPageDto Page);
+
+/// <summary>搜索结果 DTO。</summary>
+public sealed record WikiSearchResultDto(
+    string PageId,
+    string Title,
+    string Category,
+    string Snippet,
+    string Url);
+
+/// <summary>搜索响应。</summary>
+public sealed record WikiSearchResponse(
+    int Total,
+    IReadOnlyList<WikiSearchResultDto> Results);
+
+/// <summary>保存响应。</summary>
+public sealed record WikiSaveResponse(bool Ok, string? Error);

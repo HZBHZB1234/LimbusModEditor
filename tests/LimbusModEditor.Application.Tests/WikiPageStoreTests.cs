@@ -1,4 +1,4 @@
-﻿using LimbusModEditor.Application.Relations;
+using LimbusModEditor.Application.Relations;
 
 namespace LimbusModEditor.Application.Tests;
 
@@ -252,16 +252,16 @@ public sealed class WikiPageStoreTests : IDisposable
         var sub = SubPage(page.PageId);
         // 先创建页面和二级页面，再添加条目
         store.SavePage(Detail(page, SubDetail(sub)));
-        var humanEntry = Entry(sub.SubPageId, "人工条目", "人工正文", 0);
-        var candidateEntry = Entry(sub.SubPageId, "候选条目", "候选正文", 1);
-        candidateEntry = candidateEntry with { Source = WikiEntrySources.Candidate, CandidateId = "candidate-1" };
+        var autoEntry = Entry(sub.SubPageId, "自动生成条目", "自动生成正文", 0);
+        var revisedEntry = Entry(sub.SubPageId, "用户修订条目", "用户修订正文", 1);
+        revisedEntry = revisedEntry with { Source = WikiEntrySources.Revised };
 
-        store.SaveEntry(humanEntry);
-        store.SaveEntry(candidateEntry);
+        store.SaveEntry(autoEntry);
+        store.SaveEntry(revisedEntry);
 
-        var (human, candidate) = store.SourceStatistics();
-        Assert.Equal(1, human);
-        Assert.Equal(1, candidate);
+        var (auto, revised) = store.SourceStatistics();
+        Assert.Equal(1, auto);
+        Assert.Equal(1, revised);
     }
 
     [Fact]

@@ -40,8 +40,15 @@ async function loadPage() {
   loading.value = true
   error.value = null
   try {
-    const result = await ipc.request<WikiPage>('wiki.getPage', { id: pageId })
-    page.value = result
+    const result = await ipc.request<WikiPage>('wiki.getPage', { pageId })
+    // 后端历史上曾返回 { page: WikiPageDto } 信封，这里兼容两种形态
+    const unwrapped = (result as { page?: WikiPage } | null)?.page ?? result
+    if (!unwrapped || !unwrapped.id) {
+      page.value = null
+      error.value = '页面不存在'
+      return
+    }
+    page.value = unwrapped
   } catch (e) {
     error.value = '加载页面失败，请检查网络连接或稍后重试'
     page.value = null

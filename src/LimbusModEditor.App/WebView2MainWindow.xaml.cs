@@ -124,6 +124,9 @@ public partial class WebView2MainWindow : Wpf.Ui.Controls.FluentWindow, IDisposa
             var staticIndex = new StaticIndexService(staticStore);
             _gateway = new IpcGateway(catalog, projectState, spineData, bankIndex, langText, staticIndex);
 
+            // 事件出口（WEB-IPC-CONTRACT §1/§4）：网关推的 progress / toast 事件经此发给页面
+            _gateway.EventSink = SendEvent;
+
             // ── 6. 注册消息处理器 ──
             _webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
 
@@ -211,6 +214,13 @@ public partial class WebView2MainWindow : Wpf.Ui.Controls.FluentWindow, IDisposa
     {
         if (_webView?.CoreWebView2 is null) return;
         _webView.CoreWebView2.PostWebMessageAsString(response.ToJson());
+    }
+
+    /// <summary>推一条宿主事件给页面（无 id，可多次；契约 §1/§4）。</summary>
+    private void SendEvent(IpcEvent evt)
+    {
+        if (_webView?.CoreWebView2 is null) return;
+        _webView.CoreWebView2.PostWebMessageAsString(evt.ToJson());
     }
 
     private UnityCacheSqliteIndexStore InitializeIndexStore()

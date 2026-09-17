@@ -3,8 +3,6 @@
 
 import { ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { ipc } from '@/ipc'
-import type { WikiPageCategory } from '@/ipc'
 
 const router = useRouter()
 const route = useRoute()
@@ -14,20 +12,9 @@ interface BreadcrumbItem {
   route: string
 }
 
-const props = withDefaults(
-  defineProps<{
-    currentPage?: string
-    breadcrumbs?: BreadcrumbItem[]
-  }>(),
-  {
-    currentPage: '',
-    breadcrumbs: () => [],
-  },
-)
-
-const emit = defineEmits<{
-  (e: 'navigate', route: string): void
-  (e: 'search', query: string): void
+defineProps<{
+  currentPage?: string
+  breadcrumbs?: BreadcrumbItem[]
 }>()
 
 // 11 个分类 + 概览
@@ -48,7 +35,6 @@ const categoryNav = [
 
 const sidebarCollapsed = ref(false)
 const searchQuery = ref('')
-const searchLoading = ref(false)
 
 function navigate(path: string) {
   router.push(path)
@@ -59,13 +45,12 @@ function isActive(routePath: string): boolean {
   return route.path.startsWith(routePath)
 }
 
-function onSearchInput() {
-  // TODO: implement search
-}
-
+/** 侧栏搜索：回车跳搜索路由（复用全局搜索页，不再发 emit） */
 function submitSearch() {
   const q = searchQuery.value.trim()
-  if (q) emit('search', q)
+  if (!q) return
+  router.push({ path: '/wiki/search', query: { q } })
+  searchQuery.value = ''
 }
 </script>
 
@@ -78,6 +63,16 @@ function submitSearch() {
         <button class="sidebar-toggle" :title="sidebarCollapsed ? '展开' : '折叠'" @click="sidebarCollapsed = !sidebarCollapsed">
           {{ sidebarCollapsed ? '▶' : '◀' }}
         </button>
+      </div>
+      <!-- 侧栏搜索：回车跳转搜索页（原 TODO 死代码已接通） -->
+      <div v-if="!sidebarCollapsed" class="sidebar-search">
+        <input
+          v-model="searchQuery"
+          class="sidebar-search-input"
+          type="text"
+          placeholder="搜索维基…"
+          @keyup.enter="submitSearch"
+        />
       </div>
       <ul class="sidebar-nav">
         <li
@@ -121,21 +116,28 @@ function submitSearch() {
 .wiki-sidebar { width: 180px; flex-shrink: 0; background: var(--lme-bg-panel); border-right: 1px solid var(--lme-border); display: flex; flex-direction: column; transition: width 0.2s; }
 .wiki-sidebar.collapsed { width: 56px; }
 .sidebar-header { display: flex; align-items: center; justify-content: space-between; padding: var(--lme-gap-sm) var(--lme-gap-md); border-bottom: 1px solid var(--lme-border); }
-.sidebar-title { font-size: var(--lme-font-size-sm); font-weight: 600; color: var(--lme-text-secondary); }
+.sidebar-title { font-size: var(--lme-font-size-sm); font-weight: 600; color: var(--wiki-section-title); letter-spacing: 1px; }
 .sidebar-toggle { background: none; border: none; color: var(--lme-text-muted); cursor: pointer; font-size: 12px; }
 
+.sidebar-search { padding: var(--lme-gap-sm) var(--lme-gap-md) 0; }
+.sidebar-search-input { width: 100%; padding: var(--lme-gap-xs) var(--lme-gap-sm); background: var(--wiki-shell-search-bg); border: 1px solid var(--lme-border); border-radius: var(--lme-radius-sm); color: var(--lme-text-primary); font-size: var(--lme-font-size-xs); font-family: var(--lme-font-family); }
+.sidebar-search-input:focus { outline: none; border-color: var(--wiki-accent); }
+
 .sidebar-nav { list-style: none; margin: 0; padding: var(--lme-gap-sm); flex: 1; overflow-y: auto; }
-.sidebar-nav-item { display: flex; align-items: center; gap: var(--lme-gap-sm); padding: var(--lme-gap-sm) var(--lme-gap-md); border-radius: var(--lme-radius-md); cursor: pointer; color: var(--lme-text-secondary); transition: background 0.15s, color 0.15s; }
+.sidebar-nav-item { position: relative; display: flex; align-items: center; gap: var(--lme-gap-sm); padding: var(--lme-gap-sm) var(--lme-gap-md); border-radius: var(--lme-radius-md); cursor: pointer; color: var(--lme-text-secondary); transition: background 0.15s, color 0.15s; }
 .sidebar-nav-item:hover { background: var(--lme-bg-hover); color: var(--lme-text-primary); }
-.sidebar-nav-item.active { background: var(--lme-bg-selected); color: var(--lme-text-primary); }
+.sidebar-nav-item.active { background: var(--wiki-nav-active-bg); color: var(--wiki-nav-active-text); font-weight: 600; }
+.sidebar-nav-item.active::before { content: ''; position: absolute; left: 0; top: 6px; bottom: 6px; width: 3px; border-radius: 2px; background: var(--wiki-nav-active-bar); }
 .nav-icon { font-size: var(--lme-font-size-lg); width: 24px; text-align: center; }
 .nav-label { font-size: var(--lme-font-size-sm); }
 
 /* ── 内容区 ── */
 .wiki-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-.wiki-breadcrumb { display: flex; align-items: center; gap: var(--lme-gap-xs); padding: var(--lme-gap-sm) var(--lme-gap-lg); border-bottom: 1px solid var(--lme-border); font-size: var(--lme-font-size-sm); }
-.breadcrumb-link { color: var(--lme-accent); cursor: pointer; }
-.breadcrumb-link.current { color: var(--lme-text-primary); cursor: default; }
+.wiki-breadcrumb { display: flex; align-items: center; gap: var(--lme-gap-xs); padding: var(--lme-gap-sm) var(--lme-gap-lg); border-bottom: 1px solid var(--lme-border); font-size: var(--lme-font-size-sm); background: var(--lme-bg-panel); }
+.breadcrumb-item { display: flex; align-items: center; gap: var(--lme-gap-xs); }
+.breadcrumb-link { color: var(--wiki-breadcrumb-link); cursor: pointer; }
+.breadcrumb-link:hover { text-decoration: underline; }
+.breadcrumb-link.current { color: var(--wiki-breadcrumb-text); cursor: default; }
 .breadcrumb-sep { color: var(--lme-text-muted); }
 
 .wiki-slot { flex: 1; overflow: auto; }

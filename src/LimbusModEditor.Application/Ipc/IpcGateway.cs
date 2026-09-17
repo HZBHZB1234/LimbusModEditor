@@ -223,6 +223,7 @@ public sealed partial class IpcGateway
             "asset.edit.fieldEdit" => HandleAssetEditFieldEdit(request),
             "asset.edit.spriteMetadata" => HandleAssetEditSpriteMetadata(request),
             "asset.edit.batchReplace" => await HandleAssetEditBatchReplaceAsync(request),
+            "asset.edit.clearEdits" => HandleAssetEditClearEdits(request),
 
             // ── 2.4 Spine（服务已迁移至 SpineData，见 t24）──────────────
             "spine.locate" => await HandleSpineLocateAsync(request),
@@ -527,6 +528,38 @@ public sealed partial class IpcGateway
             report.SkippedAlreadyReplaced + report.SkippedByPattern,
             items, warnings, report.Describe()));
     }
+
+    /// <summary>撤销一个资源的全部编辑（替换 / Unity 字段 / Sprite），并同步移除
+    /// 项目编辑清单里的记录，避免「还有 X 处改动」留下幽灵计数。</summary>
+    private IpcResponse HandleAssetEditClearEdits(IpcRequest request)
+    {
+        var req = DeserializePayload<AssetEditClearEditsRequest>(request);
+        var project = _projectState.Project;
+        if (project is null)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "请先打开项目");
+        if (string.IsNullOrWhiteSpace(req.AssetId))
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "缺少资源标识：assetId");
+
+        var asset = ResolveAsset(project, req.AssetId);
+        if (asset is null)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound, $"未找到资源：{req.AssetId}");
+
+        var before = project.Edits.Count;
+        var cleared = _assetEdits.ClearEdits(project, asset, ProjectDirectory());
+        var removed = before - project.Edits.Count;
+        var info = cleared
+            ? $"已撤销「{asset.LogicalPath}」的编辑；项目编辑清单同步移除 {removed} 条，剩余 {project.Edits.Count} 条。"
+            : $"「{asset.LogicalPath}」当前没有可撤销的编辑；项目编辑清单剩余 {project.Edits.Count} 条。";
+        return IpcResponse.Success(request.Id,
+            new AssetEditClearEditsResponse(true, cleared ? 1 : 0, removed, project.Edits.Count, info));
+    }
+
+    /// <summary>按 assetId 定位资源：既接受 AssetId（Guid），也接受逻辑路径
+    /// ——前端两种口径都在用，认不出来就返回 null 交给调用方报 NotFound。</summary>
+    private static AssetRecord? ResolveAsset(ModProject project, string assetId)
+        => Guid.TryParse(assetId, out var id)
+            ? project.Assets.FirstOrDefault(x => x.AssetId == id)
+            : project.Assets.FirstOrDefault(x => x.LogicalPath == assetId);
 
     /// <summary>当前项目的工作目录（替换暂存文件落在这里）。没打开项目时回落到当前目录。</summary>
     private string ProjectDirectory()

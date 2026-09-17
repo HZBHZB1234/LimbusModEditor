@@ -289,7 +289,11 @@ public sealed class AssetEditService
     /// <summary>撤销一个资源上的全部编辑：清除替换文件 / Unity 字段 /
     /// Sprite 元数据三类编辑标记并把资源还原为 Unchanged。替换的暂存文件
     /// （位于项目 edits/assets 下）会被删除；替换前的显示大小由
-    /// originalSize 还原。资源本身没有编辑时返回 false。</summary>
+    /// originalSize 还原。资源本身没有编辑时返回 false。
+    ///
+    /// <para>同时移除 <see cref="ModProject.Edits"/> 里该资源的编辑记录：那份清单是
+    /// ProjectBuildService「还有 X 处改动」的计数来源，只清标记不清记录会留下
+    /// 指向已删文件的幽灵条目，计数虚高。</para></summary>
     public bool ClearEdits(ModProject project, Guid assetId, string? projectDirectory = null)
         => ClearEdits(project, FindAsset(project, assetId), projectDirectory);
 
@@ -328,6 +332,17 @@ public sealed class AssetEditService
         asset.Metadata.Remove("originalSize");
         asset.ModifiedHash = null;
         asset.EditState = AssetEditState.Unchanged;
+        RemoveEditOperations(project, asset.AssetId);
         return true;
+    }
+
+    /// <summary>移除项目编辑清单里该资源的全部记录（替换 / 字段 / Sprite 三类都是同一个 AssetId）。</summary>
+    private static void RemoveEditOperations(ModProject project, Guid assetId)
+    {
+        var stale = project.Edits.Where(x => x.AssetId == assetId).ToList();
+        foreach (var edit in stale) project.Edits.Remove(edit);
+        if (stale.Count > 0)
+            Log.Debug("撤销编辑：从项目编辑清单里移除 {0} 条「{1}」的记录（剩 {2} 条）",
+                stale.Count, assetId, project.Edits.Count);
     }
 }

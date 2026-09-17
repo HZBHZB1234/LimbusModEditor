@@ -246,6 +246,18 @@ public sealed record AssetEditBatchReplaceResponse(
     IReadOnlyList<string> Warnings,
     string Info);
 
+/// <summary>asset.edit.clearEdits 请求载荷。</summary>
+public sealed record AssetEditClearEditsRequest(string AssetId);
+
+/// <summary>asset.edit.clearEdits 响应载荷：同时给出项目编辑清单的同步情况，
+/// 让「还有 X 处改动」的计数不会留下幽灵条目。</summary>
+public sealed record AssetEditClearEditsResponse(
+    bool Ok,
+    int ClearedCount,
+    int RemovedEditOperations,
+    int RemainingEdits,
+    string Info);
+
 public sealed record SpriteRectDto(int X, int Y, int Width, int Height);
 public sealed record SpritePivotDto(float X, float Y);
 public sealed record SpriteBorderDto(int Left, int Top, int Right, int Bottom);

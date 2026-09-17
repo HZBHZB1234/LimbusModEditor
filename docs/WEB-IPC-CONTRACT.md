@@ -68,6 +68,8 @@ asset.edit.spriteMetadata   payload: { assetId, rect, pivot, border, ppu } → {
 asset.edit.batchReplace   payload: { sourceDirectory, namePattern?, onlyUnreplaced? = true }
                           → { replaced, skipped, items: [{ assetId, logicalPath, replacementPath }], warnings, info }
                           按文件名从目录批量登记替换（源目录只读，文件复制进项目 edits/assets）
+asset.edit.clearEdits     payload: { assetId } → { ok, clearedCount, removedEditOperations, remainingEdits, info }
+                          撤销该资源的全部编辑，并同步移除 project.Edits 里对应记录（防幽灵计数）
 asset.edit.applyFieldEdits / asset.edit.undo …（与现有 AssetEditService/UnityFieldEditService/SpriteMetadataEditService 一一对映）
 asset.import                payload: { packagePath, format? } → { imported: int, errors: string[] }
 ```

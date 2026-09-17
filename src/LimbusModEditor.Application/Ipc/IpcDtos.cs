@@ -406,15 +406,48 @@ public sealed record WikiPageDto(
     string Category,
     string? Subtitle,
     IReadOnlyList<WikiSectionDto> Sections,
-    IReadOnlyList<WikiRelatedPageDto> RelatedPages);
+    IReadOnlyList<WikiRelatedPageDto> RelatedPages,
+    IReadOnlyList<WikiInfoboxRowDto> Infobox,
+    IReadOnlyList<string> Tags,
+    IReadOnlyList<WikiGalleryItemDto> Gallery,
+    string? Cover);
 
-/// <summary>分节 DTO。</summary>
+/// <summary>信息框的一行（label → value）。取不到真值就不给这一行。</summary>
+public sealed record WikiInfoboxRowDto(string Label, string Value);
+
+/// <summary>画廊的一项。地址走 <c>lme.data</c> 虚拟主机（禁止 base64）；拿不到真实地址时 Url 为 null。</summary>
+public sealed record WikiGalleryItemDto(string? Url, string Caption, string Kind);
+
+/// <summary>分节 DTO：一个分节下挂若干条目，条目下挂若干资源绑定。</summary>
 public sealed record WikiSectionDto(
     string Id,
     string Title,
     string Content,
     bool Collapsible,
-    bool Editable);
+    bool Editable,
+    IReadOnlyList<WikiEntryDto> Entries,
+    IReadOnlyList<WikiBindingDto> Bindings);
+
+/// <summary>条目 DTO（分节下的可读内容项）。</summary>
+public sealed record WikiEntryDto(
+    string Id,
+    string Title,
+    string Body,
+    string? Authority,
+    string? Confidence,
+    string? SourceDetail);
+
+/// <summary>
+/// 资源绑定 DTO。<c>MediaUrl</c> 只在<b>本地确实有可用地址</b>时给出（<c>lme.data</c> 虚拟主机），
+/// 否则为 null —— 前端据此降级，不占位、不编造。
+/// </summary>
+public sealed record WikiBindingDto(
+    string RefKey,
+    string Kind,
+    string? Display,
+    string? MediaKind,
+    double? DurationSec,
+    string? MediaUrl);
 
 /// <summary>相关页面 DTO。</summary>
 public sealed record WikiRelatedPageDto(
@@ -462,9 +495,6 @@ public sealed record WikiCategoryIndexResponse(
     string Category,
     string Label,
     IReadOnlyList<CategoryPageRefDto> Pages);
-
-/// <summary>页面加载响应。</summary>
-public sealed record WikiPageResponse(WikiPageDto Page);
 
 /// <summary>搜索结果 DTO。</summary>
 public sealed record WikiSearchResultDto(

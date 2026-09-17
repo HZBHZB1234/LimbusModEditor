@@ -39,7 +39,8 @@ export const useWikiStore = defineStore('wiki', () => {
     error.value = null
 
     try {
-      const result = await ipc.request<WikiPage>('wiki.page.load', { pageId })
+      // 方法名已收敛：wiki.page.load 与 wiki.getPage 曾是同一处理器的两个别名
+      const result = await ipc.request<WikiPage>('wiki.getPage', { pageId })
 
       if (gen !== generation) return null // 代际守卫：结果已过期
 

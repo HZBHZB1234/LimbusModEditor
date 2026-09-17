@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using LimbusModEditor.Application.AppConfig;
@@ -249,7 +250,7 @@ public sealed partial class IpcGateway
             "wiki.home" => HandleWikiHome(request),
             "wiki.categoryIndex" => HandleWikiCategoryIndex(request),
             "wiki.category.load" => HandleWikiCategoryIndex(request),
-            "wiki.page.load" => HandleWikiPageLoad(request),
+            // 收敛为一个方法名：历史上 wiki.getPage 与 wiki.page.load 是同一处理器的两个别名。
             "wiki.getPage" => HandleWikiPageLoad(request),
             "wiki.search" => HandleWikiSearch(request),
             "wiki.page.save" => HandleWikiPageSave(request),
@@ -837,13 +838,79 @@ public sealed partial class IpcGateway
             return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound, $"页面不存在：{req.PageId}");
 
         var page = detail.Page;
-        var sections = detail.SubPages.SelectMany(sub => sub.Entries.Select(entry => new WikiSectionDto(
-            entry.Entry.EntryId, entry.Entry.Title, entry.Entry.Body, false, true))).ToList();
 
-        return IpcResponse.Success(request.Id, new WikiPageResponse(new WikiPageDto(
+        // 分节 = sub_pages，条目挂分节下，绑定挂条目下（不再是「一条 entry 假装一个分节」）。
+        var sections = detail.SubPages.Select(sub => new WikiSectionDto(
+            sub.SubPage.SubPageId,
+            sub.SubPage.Title,
+            string.Empty,
+            Collapsible: true,
+            Editable: false,
+            sub.Entries.Select(entry => new WikiEntryDto(
+                entry.Entry.EntryId,
+                entry.Entry.Title,
+                entry.Entry.Body,
+                entry.Entry.Authority,
+                entry.Entry.Confidence,
+                entry.Entry.SourceDetail)).ToList(),
+            sub.Entries.SelectMany(entry => entry.Bindings).Select(binding => new WikiBindingDto(
+                binding.RefKey,
+                binding.Kind,
+                binding.Display,
+                binding.MediaKind,
+                binding.DurationSec,
+                MediaUrlOf(binding))).ToList())).ToList();
+
+        // 画廊：只收图片绑定；拿不到真实地址的项 Url 为 null，前端按降级处理。
+        var gallery = detail.SubPages.SelectMany(sub => sub.Entries)
+            .SelectMany(entry => entry.Bindings)
+            .Where(binding => string.Equals(binding.Kind, "Image", StringComparison.OrdinalIgnoreCase))
+            .Select(binding => new WikiGalleryItemDto(
+                MediaUrlOf(binding), binding.Display ?? binding.RefKey, binding.Kind))
+            .Take(MaxGalleryItems)
+            .ToList();
+
+        // 信息框：只写本地确实拿得到的字段（类别名/标题/副标题/分节数/条目数），不编造。
+        var infobox = new List<WikiInfoboxRowDto>();
+        if (!string.IsNullOrWhiteSpace(page.CategoryLabel))
+            infobox.Add(new WikiInfoboxRowDto("类别", page.CategoryLabel));
+        if (!string.IsNullOrWhiteSpace(page.Subtitle))
+            infobox.Add(new WikiInfoboxRowDto("副标题", page.Subtitle));
+        infobox.Add(new WikiInfoboxRowDto("分节", sections.Count.ToString(CultureInfo.InvariantCulture)));
+        infobox.Add(new WikiInfoboxRowDto("条目",
+            sections.Sum(s => s.Entries.Count).ToString(CultureInfo.InvariantCulture)));
+
+        return IpcResponse.Success(request.Id, new WikiPageDto(
             page.PageId, page.Title, page.Category, page.Subtitle, sections,
-            Array.Empty<WikiRelatedPageDto>())));
+            Array.Empty<WikiRelatedPageDto>(),
+            infobox,
+            string.IsNullOrWhiteSpace(page.CategoryLabel) ? Array.Empty<string>() : [page.CategoryLabel],
+            gallery,
+            CoverUrlOf(page.CoverRef)));
     }
+
+    /// <summary>画廊最多给多少项（超出截断，避免整页塞满同名静态图）。</summary>
+    private const int MaxGalleryItems = 24;
+
+    /// <summary>
+    /// 资源的可展示地址。二进制走 <c>lme.data</c> 虚拟主机（禁止 base64）；
+    /// <c>deep_link</c> / <c>ref_key</c> 是**容器路径不是 URL**，据此拼地址会造出不存在的链接，
+    /// 所以这里只在它本身就是地址时才给，否则返回 null（前端降级、不占位）。
+    /// </summary>
+    private static string? MediaUrlOf(WikiResourceBinding binding)
+    {
+        var candidate = binding.DeepLink;
+        if (string.IsNullOrWhiteSpace(candidate)) return null;
+        return IsUrl(candidate) ? candidate : null;
+    }
+
+    private static string? CoverUrlOf(string? coverRef)
+        => !string.IsNullOrWhiteSpace(coverRef) && IsUrl(coverRef) ? coverRef : null;
+
+    private static bool IsUrl(string value)
+        => value.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+        || value.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+        || value.StartsWith("lme.", StringComparison.OrdinalIgnoreCase);
 
     private IpcResponse HandleWikiSearch(IpcRequest request)
     {

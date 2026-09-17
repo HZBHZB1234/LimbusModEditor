@@ -229,6 +229,8 @@ export interface WikiSection {
   collapsible: boolean
   editable: boolean
   bindings?: ResourceBinding[]
+  /** 分节下的条目（后端 wiki.getPage 下发） */
+  entries?: WikiEntry[]
 }
 
 // ── 目录项 ──────────────────────────────────────────────────
@@ -251,6 +253,8 @@ export interface WikiPage {
   gallery?: GalleryImage[]
   relatedPages?: WikiRelatedPage[]
   tags?: string[]
+  /** 封面地址（lme.data 虚拟主机；拿不到真实地址时为 null） */
+  cover?: string | null
   lastModified?: string
 }
 
@@ -292,6 +296,8 @@ export interface ResourceBinding {
   previewText?: string
   mediaKind?: string
   durationSec?: number
+  /** 可展示地址（lme.data 虚拟主机）；本地拿不到真实地址时为 null，前端降级不渲染 */
+  mediaUrl?: string | null
 }
 
 // ── 内容编辑 ────────────────────────────────────────────────

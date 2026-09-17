@@ -9,14 +9,39 @@ import type { ResourceBinding } from '@/ipc/types'
  * （Audio 形如 `...\Voice_*.bank\0事件名`，Image/Spine 形如 `Assets/...`），
  * 前端**不许**据此拼接 lme.data 地址 —— 拼出来就是不存在的地址。
  *
- * 后端 DTO 当前未下发 mediaUrl / audioUrl，因此这里读不到就返回 null：
+ * 地址一律由后端下发：Image 用 mediaUrl，Audio 用 audioUrl（缺则回落 mediaUrl），
+ * Spine 用 skeletonUrl / atlasUrl / textureUrls。读不到就返回 null：
  * 调用方（WikiAudioPlayer / WikiGallery / WikiSpineViewer）按降级处理
  * （显示「无可用地址」或不渲染），不占位、不编造。
- *
- * 待后端 DTO 下发 mediaUrl / audioUrl 后本函数自动生效，调用方无需改动。
  */
+
+/** 图片 / 预览地址 */
 export function resolveMediaUrl(binding: ResourceBinding): string | null {
-  const candidate =
-    (binding as { mediaUrl?: string }).mediaUrl ?? (binding as { audioUrl?: string }).audioUrl
-  return typeof candidate === 'string' && candidate !== '' ? candidate : null
+  return firstUrl(binding.mediaUrl)
+}
+
+/** 音频地址：优先后端解码出的 WAV（audioUrl），缺则回落到通用预览地址 */
+export function resolveAudioUrl(binding: ResourceBinding): string | null {
+  return firstUrl(binding.audioUrl) ?? firstUrl(binding.mediaUrl)
+}
+
+export interface SpineAssets {
+  skeletonUrl: string
+  atlasUrl: string
+  textureUrls: Record<string, string>
+}
+
+/** Spine 三件套齐备才返回；缺任一返回 null（调用方整块不渲染，不做半成品动画） */
+export function resolveSpineAssets(binding: ResourceBinding): SpineAssets | null {
+  const skeletonUrl = firstUrl(binding.skeletonUrl)
+  const atlasUrl = firstUrl(binding.atlasUrl)
+  const textureUrls = binding.textureUrls ?? undefined
+  if (!skeletonUrl || !atlasUrl || !textureUrls || Object.keys(textureUrls).length === 0) {
+    return null
+  }
+  return { skeletonUrl, atlasUrl, textureUrls }
+}
+
+function firstUrl(value: string | null | undefined): string | null {
+  return typeof value === 'string' && value !== '' ? value : null
 }

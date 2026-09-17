@@ -21,7 +21,8 @@ import WikiAudioPlayer from '@/components/wiki/WikiAudioPlayer.vue'
 import WikiGallery from '@/components/wiki/WikiGallery.vue'
 import WikiSpineViewer from '@/components/wiki/WikiSpineViewer.vue'
 import WikiSourceBadge from '@/components/wiki/WikiSourceBadge.vue'
-import { resolveMediaUrl } from '@/components/wiki/mediaUrl'
+import { resolveMediaUrl, resolveAudioUrl, resolveSpineAssets } from '@/components/wiki/mediaUrl'
+import { type SpineAssets } from '@/components/wiki/mediaUrl'
 import WikiStoryView from '@/views/WikiStoryView.vue'
 import type {
   WikiPage,
@@ -266,20 +267,19 @@ function otherBindingsOf(section: WikiSection): ResourceBinding[] {
   )
 }
 
-/** Spine：需要 skeleton + atlas 两个地址齐备才渲染，缺一个就不显示 */
-const spineMap = computed<Record<string, { skeletonUrl: string; atlasUrl: string }>>(() => {
-  const map: Record<string, { skeletonUrl: string; atlasUrl: string }> = {}
+/**
+ * Spine：骨架 / 图集 / 纹理三个地址由后端下发，缺任一整块不渲染。
+ * 实测 134 条 Spine 绑定的 ref_key 全是 .prefab —— 本地没有对应的三件套，
+ * 后端因此全给 null，块不会渲染；这是数据缺口，不是渲染逻辑问题。
+ */
+const spineMap = computed<Record<string, SpineAssets>>(() => {
+  const map: Record<string, SpineAssets> = {}
   for (const section of bodySections.value) {
     const spine = bindingsOf(section).find((b) => b.kind === 'Spine')
     if (!spine) continue
-    const skeletonUrl = resolveMediaUrl(spine)
-    if (!skeletonUrl) continue
-    const atlas = bindingsOf(section).find((b) =>
-      (b.display + b.refKey).toLowerCase().endsWith('.atlas'),
-    )
-    const atlasUrl = atlas ? resolveMediaUrl(atlas) : null
-    if (!atlasUrl) continue
-    map[section.id] = { skeletonUrl, atlasUrl }
+    const assets = resolveSpineAssets(spine)
+    if (!assets) continue
+    map[section.id] = assets
   }
   return map
 })
@@ -540,7 +540,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
                   <WikiAudioPlayer
                     v-if="audioOf(section).length > 0"
                     :items="audioOf(section)"
-                    :url-for="resolveMediaUrl"
+                    :url-for="resolveAudioUrl"
                     title="语音"
                   />
                   <WikiGallery
@@ -626,7 +626,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
                 <WikiAudioPlayer
                   v-if="audioOf(section).length > 0"
                   :items="audioOf(section)"
-                  :url-for="resolveMediaUrl"
+                  :url-for="resolveAudioUrl"
                   title="语音"
                 />
                 <WikiGallery

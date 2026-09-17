@@ -304,6 +304,14 @@ export interface ResourceBinding {
   durationSec?: number
   /** 可展示地址（lme.data 虚拟主机）；本地拿不到真实地址时为 null，前端降级不渲染 */
   mediaUrl?: string | null
+  /** 音频地址（后端解码为 WAV 后下发）；拿不到时为 null */
+  audioUrl?: string | null
+  /** Spine 骨架地址（.json / .skel），拿不到时为 null */
+  skeletonUrl?: string | null
+  /** Spine 图集地址（.atlas），拿不到时为 null */
+  atlasUrl?: string | null
+  /** Spine 纹理：atlas 页名 → 地址；拿不到时为 null 或空对象 */
+  textureUrls?: Record<string, string> | null
 }
 
 // ── 内容编辑 ────────────────────────────────────────────────

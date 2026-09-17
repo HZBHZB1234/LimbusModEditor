@@ -108,9 +108,17 @@ export interface AssetPreviewResult {
 
 // ── 关联资源 ──────────────────────────────────────────────
 export interface RelationSubject {
-  id: string
+  subjectId: string
+  displayName: string
   category: string
-  label: string
+  categoryLabel: string
+  subtitle: string
+  character: string
+  kind: string
+  kindLabel: string
+  display: string
+  detail: string | null
+  pageId: string | null
 }
 
 export interface RelationLink {

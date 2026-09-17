@@ -7,12 +7,13 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useCatalogStore } from '@/stores/catalog'
 import { useUiStateStore } from '@/stores/uiState'
+import { ipc } from '@/ipc'
+import type { AssetSearchQuery, RelationSubject } from '@/ipc'
 import SearchFilters from '@/components/SearchFilters.vue'
 import VirtualList from '@/components/VirtualList.vue'
 import PreviewPane from '@/components/PreviewPane.vue'
 import PageBar from '@/components/PageBar.vue'
 import ContainerTree from '@/components/ContainerTree.vue'
-import type { AssetSearchQuery } from '@/ipc'
 
 const catalog = useCatalogStore()
 const uiState = useUiStateStore()
@@ -151,6 +152,28 @@ watch(containerFromQuery, async (path) => {
   clearContainerParam()
 })
 
+// ═══════════ 关联对象（只读列表，relation.describe）═══════════
+
+/** 选中资源命中的对象行；失败/没命中就留空数组 */
+const relatedSubjects = ref<RelationSubject[]>([])
+
+watch(
+  () => catalog.selectedAssetId,
+  async (assetId) => {
+    relatedSubjects.value = []
+    if (!assetId) return
+    try {
+      const res = await ipc.request<{ subjects?: RelationSubject[] }>('relation.describe', {
+        assetId,
+      })
+      relatedSubjects.value = res?.subjects ?? []
+    } catch {
+      // 调用失败就什么都不显示（不抛、不重试）
+      relatedSubjects.value = []
+    }
+  },
+)
+
 // 虚拟列表高度自适应
 const listHeight = ref(600)
 </script>
@@ -267,6 +290,17 @@ const listHeight = ref(600)
     <!-- 预览列 -->
     <div class="preview-column" :style="{ width: uiState.previewColumnWidth + 'px' }">
       <PreviewPane :asset="catalog.selectedAsset" />
+
+      <!-- 关联对象：只读列表，数据来自 relation.describe -->
+      <div v-if="catalog.selectedAsset" class="related-subjects">
+        <div class="related-title">关联对象</div>
+        <ul class="related-list">
+          <li v-for="s in relatedSubjects" :key="s.subjectId">
+            {{ s.displayName }}（{{ s.categoryLabel }}） · {{ s.kindLabel }} · {{ s.display }}
+          </li>
+          <li v-if="relatedSubjects.length === 0">未找到关联对象</li>
+        </ul>
+      </div>
     </div>
 
     <!-- 性能面板 -->
@@ -463,6 +497,26 @@ const listHeight = ref(600)
   overflow: hidden;
   background: var(--lme-bg-panel);
   min-width: 260px;
+}
+
+/* ── 关联对象 ── */
+.related-subjects {
+  padding: 8px 12px;
+  border-top: 1px solid var(--lme-border);
+  overflow-y: auto;
+}
+
+.related-title {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.related-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 /* ── 加载态 ── */

@@ -377,7 +377,9 @@ public sealed class WikiAutoGenerationService
                     entryId,
                     subPageId,
                     fact?.Display ?? entryDetail.Entry.Title,
-                    FirstNonEmpty(binding?.PreviewText, fact?.PreviewText) ?? string.Empty,
+                    // 真正文优先：权威 provider 当次抽到的 Detail/PreviewText 排在前面，
+                    // 关系索引里缓存的 preview_text 只作兜底（它可能是历史计数串）。
+                    NonPlaceholder(FirstNonEmpty(fact?.Detail, fact?.PreviewText, binding?.PreviewText)) ?? string.Empty,
                     index)
                 {
                     Source = WikiEntrySources.Auto,
@@ -401,6 +403,10 @@ public sealed class WikiAutoGenerationService
                     MediaKind = binding.MediaKind,
                     DurationSec = binding.DurationSec ?? fact?.DurationSec,
                 };
+
+                // 推不出正文、又不是可直接展示的媒体（图/音/视频/Spine）→ 不落条目，
+                // 页面上不留「有标题、无内容」的空壳。
+                if (entry.Body.Length == 0 && !IsRenderableMedia(binding!.Kind)) continue;
 
                 entries.Add(new WikiEntryDetail(entry, [stableBinding]));
                 index++;
@@ -432,9 +438,10 @@ public sealed class WikiAutoGenerationService
     /// </summary>
     private static WikiEntryDetail? BuildOverviewEntry(RelationSubject subject, string subPageId)
     {
-        if (string.IsNullOrWhiteSpace(subject.PreviewText)) return null;
+        var summary = NonPlaceholder(subject.PreviewText);
+        if (summary is null) return null;                        // 摘要是计数串/空 = 没有可展示正文 → 不占位
         var entry = new WikiEntry(WikiStableIds.Of(subPageId, "overview:summary"), subPageId,
-            "摘要", subject.PreviewText, 0)
+            "摘要", summary, 0)
         {
             Source = WikiEntrySources.Auto,
             Authority = nameof(AuthoritySource.Unknown),
@@ -505,7 +512,7 @@ public sealed class WikiAutoGenerationService
                 WikiStableIds.Of(StoryIndexPageId, WikiSectionTables.StoryChapters, "chapter:" + key),
                 WikiStableIds.Of(StoryIndexPageId, WikiSectionTables.StoryChapters),
                 key,
-                $"本章 {chapter.Count} 个剧情文件",
+                ChapterFileList(chapter),
                 chapterNav.Count)
             {
                 Source = WikiEntrySources.Auto,
@@ -522,12 +529,11 @@ public sealed class WikiAutoGenerationService
         foreach (var chapter in chapters)
         {
             var key = StoryDataReader.ChapterKeyOf(chapter[0].RefKey);
-            var lines = chapter.Sum(f => DialogOf(f.RefKey).Count);
             contentEntries.Add(new WikiEntryDetail(new WikiEntry(
                 WikiStableIds.Of(StoryIndexPageId, WikiSectionTables.StoryContent, "content:" + key),
                 WikiStableIds.Of(StoryIndexPageId, WikiSectionTables.StoryContent),
                 key,
-                lines > 0 ? $"共 {lines} 句对白" : string.Empty,
+                ChapterDialogExcerpt(chapter, DialogOf),
                 contentEntries.Count)
             {
                 Source = WikiEntrySources.Auto,
@@ -631,9 +637,68 @@ public sealed class WikiAutoGenerationService
         return pages;
     }
 
+    /// <summary>剧情摘录/章节列表的截断上限（行）。</summary>
+    private const int MaxStoryExcerptLines = 3;
+
+    /// <summary>
+    /// 可以直接展示出来的媒体绑定：即使没有正文，图片/音频/视频/动画本身也是内容。
+    /// 其余（<c>StaticData</c> / <c>Text</c> / <c>Prefab</c> / <c>Mesh</c> …）拿不到正文就不渲染。
+    /// </summary>
+    private static bool IsRenderableMedia(string? kind)
+        => string.Equals(kind, "Image", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(kind, "Audio", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(kind, "Video", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(kind, "Spine", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 本章的剧情文件清单（真实文件名）。写不出文件名时返回空串 —— 不写「N 个文件」这种计数串。
+    /// </summary>
+    private static string ChapterFileList(IReadOnlyList<AuthorityFact> chapter)
+    {
+        var names = new List<string>();
+        foreach (var fact in chapter)
+        {
+            var name = FirstNonEmpty(fact.Display, FileNameOf(fact.RefKey));
+            if (name is not null) names.Add(name);
+        }
+        return names.Count == 0 ? string.Empty : string.Join('\n', names);
+    }
+
+    /// <summary>路径的最后一段（lang 的 refKey 用 <c>/</c> 分隔）。</summary>
+    private static string? FileNameOf(string? refKey)
+    {
+        if (string.IsNullOrWhiteSpace(refKey)) return null;
+        var index = refKey.LastIndexOf('/');
+        var name = index >= 0 ? refKey[(index + 1)..] : refKey;
+        return string.IsNullOrWhiteSpace(name) ? null : name;
+    }
+
+    /// <summary>
+    /// 本章的真实台词摘录（前若干行，含说话人）。读不到台词时返回空串 —— 不写「N 句对白」。
+    /// </summary>
+    private static string ChapterDialogExcerpt(
+        IReadOnlyList<AuthorityFact> chapter, Func<string, IReadOnlyList<StoryDialogLine>> dialogOf)
+    {
+        var texts = new List<string>();
+        foreach (var fact in chapter)
+        {
+            foreach (var line in dialogOf(fact.RefKey))
+            {
+                var speaker = line.Teller ?? line.Model;
+                var content = line.Content?.Trim();
+                if (string.IsNullOrEmpty(content)) continue;
+                texts.Add(string.IsNullOrWhiteSpace(speaker) ? content : $"{speaker}：{content}");
+                if (texts.Count >= MaxStoryExcerptLines) break;
+            }
+            if (texts.Count >= MaxStoryExcerptLines) break;
+        }
+        return texts.Count == 0 ? string.Empty : string.Join('\n', texts);
+    }
+
     /// <summary>
     /// 本章的登场角色：对白行里的 <c>model</c> / <c>teller</c> 字段值（实测是角色名），
-    /// 按出现句数从多到少排。文件里没有说话人标注时返回空 —— 不猜、不占位。
+    /// 按出现句数从多到少排；正文写该角色在本章的**第一句真实台词**（不是句数）。
+    /// 文件里没有说话人标注时返回空 —— 不猜、不占位。
     /// </summary>
     private static List<WikiEntryDetail> ChapterSpeakers(
         string pageId,
@@ -642,6 +707,7 @@ public sealed class WikiAutoGenerationService
     {
         var lines = new Dictionary<string, int>(StringComparer.Ordinal);
         var firstFile = new Dictionary<string, string>(StringComparer.Ordinal);
+        var firstLine = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var fact in chapter)
         {
             foreach (var line in dialogOf(fact.RefKey))
@@ -650,6 +716,8 @@ public sealed class WikiAutoGenerationService
                 if (name is null) continue;
                 lines[name] = lines.GetValueOrDefault(name) + 1;
                 firstFile.TryAdd(name, fact.RefKey);
+                var content = line.Content?.Trim();
+                if (!string.IsNullOrEmpty(content)) firstLine.TryAdd(name, content);
             }
         }
 
@@ -659,11 +727,14 @@ public sealed class WikiAutoGenerationService
                      .Select(pair => pair.Key))
         {
             var path = firstFile[name];
+            // 正文必须是真台词；拿不到台词的角色不落条目（不写「N 句对白」，不占位）。
+            var spoken = firstLine.GetValueOrDefault(name);
+            if (string.IsNullOrWhiteSpace(spoken)) continue;
             entries.Add(new WikiEntryDetail(new WikiEntry(
                 WikiStableIds.Of(pageId, WikiSectionTables.StoryCharacters, "speaker:" + name),
                 WikiStableIds.Of(pageId, WikiSectionTables.StoryCharacters),
                 name,
-                $"{lines[name]} 句对白",
+                spoken.Length > 160 ? spoken[..160] + "…" : spoken,
                 entries.Count)
             {
                 Source = WikiEntrySources.Auto,
@@ -697,7 +768,7 @@ public sealed class WikiAutoGenerationService
             WikiStableIds.Of(pageId, sectionId, fact.RefKey),
             WikiStableIds.Of(pageId, sectionId),
             fact.Display ?? fact.RefKey,
-            string.Empty,
+            fact.PreviewText ?? string.Empty,
             order)
         {
             Source = WikiEntrySources.Auto,
@@ -715,7 +786,12 @@ public sealed class WikiAutoGenerationService
     {
         var entries = new List<WikiEntryDetail>();
         foreach (var fact in facts.Where(f => f.ContentType == contentType).OrderBy(f => f.RefKey, StringComparer.Ordinal))
-            entries.Add(FactEntry(pageId, sectionId, fact, entries.Count, stats));
+        {
+            var entry = FactEntry(pageId, sectionId, fact, entries.Count, stats);
+            // 推不出真正文的事实不落条目：页面上不留「有标题、无正文」的空壳。
+            if (string.IsNullOrWhiteSpace(entry.Entry.Body)) continue;
+            entries.Add(entry);
+        }
         AddSubPage(subPages, pageId, sectionId, entries);
     }
 
@@ -740,5 +816,17 @@ public sealed class WikiAutoGenerationService
         foreach (var value in values)
             if (!string.IsNullOrWhiteSpace(value)) return value;
         return null;
+    }
+
+    /// <summary>
+    /// 拦掉「N 条可解析文本 / N 句对白 / N 个剧情文件」这类**计数串**：它们不是正文，
+    /// 写进 <c>body</c> 就是「标题对了、正文是空的」。拦截后返回 null，由调用方决定降级。
+    /// </summary>
+    private static string? NonPlaceholder(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var value = text.Trim();
+        return System.Text.RegularExpressions.Regex.IsMatch(
+            value, @"^\d+\s*(条可解析文本|句对白|个剧情文件|条事实)$") ? null : value;
     }
 }

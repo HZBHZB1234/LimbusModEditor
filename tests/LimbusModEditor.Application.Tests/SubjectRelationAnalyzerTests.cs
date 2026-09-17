@@ -362,7 +362,9 @@ public sealed class SubjectRelationAnalyzerTests
 
         var link = Assert.Single(graph.Links, x => x.Kind == RelationKind.StaticData);
         Assert.Equal("persona:10201", link.SubjectId);
-        Assert.Equal("1 条可解析文本", link.PreviewText);
+        // 预览文本必须是锚点的**真文本**，不是「命中了几条」这种计数串
+        // （计数串落到维基页面上就是「标题对了、正文是空的」）。
+        Assert.Equal("穿刺抵抗：受到的穿刺伤害降低", link.PreviewText);
         Assert.Equal(RelationPreviewKind.Derived, link.PreviewKind);
 
         var edge = Assert.Single(graph.Xrefs, x => x.Relation == RelationXrefKinds.StaticToLang);

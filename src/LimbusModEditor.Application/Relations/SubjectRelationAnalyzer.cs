@@ -573,7 +573,7 @@ public static class SubjectRelationAnalyzer
                     var subjectId = SubjectIds.Make(category, key);
                     AddLink(category, key, RelationKind.StaticData, table.ContainerEntry, table.Name,
                         detailBase + " · " + HumanSize(table.SizeBytes), table.SizeBytes,
-                        previewText: hitAnchors.Count > 0 ? hitAnchors.Count + " 条可解析文本" : null,
+                        previewText: AnchorPreview(anchors, hitAnchors),
                         previewKind: hitAnchors.Count > 0 ? RelationPreviewKind.Derived : RelationPreviewKind.None,
                         mediaKind: "static",
                         refPath: table.ContainerEntry,
@@ -590,8 +590,64 @@ public static class SubjectRelationAnalyzer
             }
         }
 
-        /// <summary>
-        /// lang 文件挂接。四路：
+    /// <summary>预览正文里最多列出几条锚点文本。</summary>
+    private const int MaxAnchorPreviewLines = 8;
+
+    /// <summary>单条锚点文本的截断长度。</summary>
+    private const int MaxAnchorPreviewChars = 160;
+
+    /// <summary>
+    /// 把命中的锚点拼成**可展示正文**（真实 <c>name</c>/<c>desc</c>/<c>dlg</c>），
+    /// 而不是「命中了几条」这种计数串 —— 计数串落到维基页面上就是「标题对了、正文是空的」。
+    /// 去重、限条数、截断；超出部分给可核查的余量说明；一条真文本都拼不出时返回 null（不占位）。
+    /// </summary>
+    private static string? AnchorPreview(
+        IReadOnlyDictionary<string, RelationTextAnchor> anchors, IReadOnlyList<string> anchorRefs)
+    {
+        if (anchorRefs.Count == 0) return null;
+
+        var lines = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var total = 0;
+        foreach (var anchorRef in anchorRefs)
+        {
+            if (string.IsNullOrEmpty(anchorRef)) continue;
+            if (!seen.Add(anchorRef)) continue;
+            total++;
+            if (!anchors.TryGetValue(anchorRef, out var anchor)) continue;
+            var text = AnchorText(anchor);
+            if (text is null) continue;
+            if (lines.Count < MaxAnchorPreviewLines) lines.Add(text);
+        }
+        if (lines.Count == 0) return null;
+
+        var hidden = total - lines.Count;
+        return hidden > 0
+            ? string.Join('\n', lines) + $"\n…（另有 {hidden} 条未列出）"
+            : string.Join('\n', lines);
+    }
+
+    /// <summary>一条锚点的可展示文本；<c>name</c> 与 <c>desc/dlg</c> 都有时拼成「名：释」。</summary>
+    private static string? AnchorText(RelationTextAnchor anchor)
+    {
+        var name = NullIfBlank(anchor.Name);
+        var body = NullIfBlank(anchor.Desc) ?? NullIfBlank(anchor.Body);
+        if (name is null) return Clip(body);
+        return body is null ? Clip(name) : Clip(name + "：" + body);
+    }
+
+    private static string? Clip(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var value = text.Trim();
+        return value.Length <= MaxAnchorPreviewChars ? value : value[..MaxAnchorPreviewChars] + "…";
+    }
+
+    private static string? NullIfBlank(string? text)
+        => string.IsNullOrWhiteSpace(text) ? null : text.Trim();
+
+    /// <summary>
+    /// lang 文件挂接。四路：
         /// ① 语音文件名里的 5 位 id → 该人格（精确）；
         /// ② <c>AbDlg_&lt;角色&gt;.json</c> → 该角色的全部人格；
         /// ③ <c>BattleAnnouncerDlg/Announcer_&lt;角色&gt;_&lt;n&gt;.json</c> → 该角色的播报员；

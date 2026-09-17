@@ -243,7 +243,7 @@ public sealed partial class IpcGateway
             // ── 音频工作台 ────────────────────────────────────────────────
             "bank.list" => HandleBankList(request),
             "bank.samples" => HandleBankSamples(request),
-            "bank.preview" => HandleBankPreview(request),
+            "bank.preview" => await HandleBankPreviewAsync(request),
             "bank.exportRebank" => await HandleBankExportRebankAsync(request),
 
             // ── 文本工作台 ────────────────────────────────────────────────
@@ -691,10 +691,47 @@ public sealed partial class IpcGateway
         return IpcResponse.Success(request.Id, new BankSamplesResponse(req.BankId, items));
     }
 
-    private IpcResponse HandleBankPreview(IpcRequest request)
+    /// <summary>
+    /// bank.preview：<b>一条样本 → 一个可播放地址</b>。
+    ///
+    /// <para>链路与维基语音试听<b>完全同一条</b>（<see cref="WikiMediaResolver"/>）：
+    /// <c>bank 路径 + 样本名 → bank 索引行 → FSB 分片 → FMOD 解码为 WAV → 落到
+    /// wwwroot/data/wiki → https://lme.data/wiki/{hash}.wav</c>。不另写一套解码，
+    /// 同一条样本在维基页与音频工作台拿到的是同一个地址（缓存与复用也一并继承）。</para>
+    ///
+    /// <para>解不出来（bank 索引未就绪 / 索引里没这条样本 / FSB 取不到 / FMOD DLL 不可用）
+    /// 一律 <see cref="IpcErrorCode.Unsupported"/> + 中文原因，不返回空地址、不编造。</para>
+    /// </summary>
+    private async Task<IpcResponse> HandleBankPreviewAsync(IpcRequest request)
     {
-        // 试听需要宿主原生 FMOD 解码 + 播放能力（WPF MediaPlayer）
-        return IpcResponse.Failure(request.Id, IpcErrorCode.Unsupported, "音频试听需要宿主原生播放能力（需 App 侧 FMOD 解码 + MediaPlayer）");
+        var req = DeserializePayload<BankPreviewRequest>(request);
+        if (string.IsNullOrWhiteSpace(req.BankId))
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "缺少 bank（bankId）");
+        if (string.IsNullOrWhiteSpace(req.SampleName))
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "缺少样本名（sampleName）");
+
+        // 复用解析器的音频入口：它就吃「bank 路径 + '\0' + 样本名」这份深链载荷。
+        var binding = new WikiResourceBinding("bank-preview", "bank-preview", req.BankId, "Audio", req.SampleName, 0)
+        {
+            DeepLink = RelationDeepLink.ForAudio(req.BankId, req.SampleName),
+        };
+
+        WikiMediaResolution resolution;
+        try
+        {
+            resolution = await _wikiMedia.ResolveAsync(binding, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
+        {
+            Log.Warn(ex, "bank.preview 解码失败：bank={0} sample={1}", req.BankId, req.SampleName);
+            return IpcResponse.Failure(request.Id, IpcErrorCode.Unsupported, $"读取 bank 失败：{ex.Message}");
+        }
+
+        if (resolution.AudioUrl is null)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.Unsupported,
+                "这条样本暂时给不出可播放地址：bank 索引未就绪 / 索引里没有这条样本 / FSB 取不到 / FMOD 解码器不可用（详见 logs/current.log）。");
+
+        return IpcResponse.Success(request.Id, new BankPreviewResponse(req.BankId, req.SampleName, resolution.AudioUrl));
     }
 
     private async Task<IpcResponse> HandleBankExportRebankAsync(IpcRequest request)

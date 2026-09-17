@@ -287,6 +287,12 @@ public sealed record SampleListItem(string Name, double DurationSec, string Code
 public sealed record BankSamplesResponse(string BankId, IReadOnlyList<SampleListItem> Samples);
 
 public sealed record BankPreviewRequest(string BankId, string SampleName);
+
+/// <summary>bank.preview 响应载荷。</summary>
+/// <param name="AudioUrl">可播放地址（<c>lme.data</c> 虚拟主机上的 WAV）；
+/// 解不出来时整个方法按 Unsupported 失败，不给空地址、不编造。</param>
+public sealed record BankPreviewResponse(string BankId, string SampleName, string AudioUrl);
+
 public sealed record BankExportRebankRequest(string BankId, string TargetDirectory);
 
 // ── 文本工作台 ────────────────────────────────────────────────────

@@ -66,7 +66,8 @@ public sealed class ProjectService : IProjectService
         finally { if (File.Exists(temp)) File.Delete(temp); }
     }
 
-    private static string SanitizeFileName(string value)
+    /// <summary>项目名 → 合法文件名（非法字符替换为 '_'）。</summary>
+    internal static string SanitizeFileName(string value)
     {
         var invalid = Path.GetInvalidFileNameChars();
         return string.Concat(value.Select(ch => invalid.Contains(ch) ? '_' : ch));

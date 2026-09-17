@@ -98,6 +98,7 @@ public sealed partial class IpcGateway
     private readonly WikiMediaResolver _wikiMedia;
     private readonly RelationQueryService _relations;
     private readonly string _cacheDirectory;
+    private readonly AppEnvironment _environment;
 
     /// <summary>组合根：从既有服务构造完整网关（由 App 宿主调用）。</summary>
     public static IpcGateway Create(
@@ -112,10 +113,11 @@ public sealed partial class IpcGateway
         ModPackExportService? exportService = null,
         ProjectService? projects = null,
         RelationQueryService? relations = null,
-        string? cacheDirectory = null)
+        string? cacheDirectory = null,
+        AppEnvironment? environment = null)
     {
         return new IpcGateway(catalog, projectState, spineData, bankIndex, langText, staticIndex,
-            assetEdits, exportPlan, exportService, projects, relations, cacheDirectory);
+            assetEdits, exportPlan, exportService, projects, relations, cacheDirectory, environment);
     }
 
     public IpcGateway(
@@ -130,8 +132,10 @@ public sealed partial class IpcGateway
         ModPackExportService? exportService = null,
         ProjectService? projects = null,
         RelationQueryService? relations = null,
-        string? cacheDirectory = null)
+        string? cacheDirectory = null,
+        AppEnvironment? environment = null)
     {
+        _environment = environment ?? AppEnvironment.Current;
         _cacheDirectory = string.IsNullOrWhiteSpace(cacheDirectory)
             ? AppEnvironment.Current.CacheDirectory
             : cacheDirectory;
@@ -230,6 +234,8 @@ public sealed partial class IpcGateway
 
             // ── 2.6 项目 / 导出 ──────────────────────────────────────────
             "project.open" => await HandleProjectOpenAsync(request),
+            "project.create" => await HandleProjectCreateAsync(request),
+            "project.recent" => HandleProjectRecent(request),
             "project.save" => await HandleProjectSaveAsync(request),
             "export.plan" => HandleExportPlan(request),
             "export.run" => await HandleExportRunAsync(request),
@@ -592,6 +598,51 @@ public sealed partial class IpcGateway
         return IpcResponse.Success(request.Id, new { ok = true, name = project.Name, assetCount = project.Assets.Count });
     }
 
+    /// <summary>
+    /// 新建项目：落盘 + 置为当前项目 + 登记最近项目。
+    /// <b>同名项目文件已存在时报错退出，不覆盖</b>（覆盖会毁掉用户已有模组）。
+    /// </summary>
+    private async Task<IpcResponse> HandleProjectCreateAsync(IpcRequest request)
+    {
+        var req = DeserializePayload<ProjectCreateRequest>(request);
+        var name = string.IsNullOrWhiteSpace(req.Name) ? "未命名模组" : req.Name!.Trim();
+        var root = string.IsNullOrWhiteSpace(req.Directory)
+            ? Path.Combine(_environment.ProjectsDirectory, ProjectService.SanitizeFileName(name))
+            : Path.GetFullPath(req.Directory!);
+        var projectFile = Path.Combine(root, ProjectService.SanitizeFileName(name) + ".lmeproj");
+        if (File.Exists(projectFile))
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery,
+                $"同名项目已存在，未覆盖：{projectFile}（请换一个名称或目录）");
+
+        var project = await _projects.CreateAsync(root, name);
+        _projectState.SetProject(project, projectFile);
+        _environment.RegisterRecentProject(projectFile, project.Name);
+        return IpcResponse.Success(request.Id, new ProjectCreateResponse(projectFile, project.Name, root));
+    }
+
+    /// <summary>
+    /// 最近项目：读共享配置里登记的条目（程序目录 config/shared-config.json）。
+    /// 配置里没有（或文件已被删掉）→ 空列表 + 中文说明，不编造记录。
+    /// </summary>
+    private IpcResponse HandleProjectRecent(IpcRequest request)
+    {
+        var recorded = _environment.Config.RecentProjects;
+        var alive = recorded.Where(x => File.Exists(x.Path)).ToList();
+        var dropped = recorded.Count - alive.Count;
+        var items = alive
+            .OrderByDescending(x => x.LastOpenedAt)
+            .Select(x => new ProjectRecentItem(x.Name, x.Path, x.LastOpenedAt.ToString("O")))
+            .ToList();
+        var info = items.Count == 0
+            ? recorded.Count == 0
+                ? "还没有最近项目记录（新建或打开一个项目后会出现在这里）"
+                : "最近项目记录里的文件都已不存在（可能已被移动或删除）"
+            : dropped > 0
+                ? $"共 {items.Count} 个可打开的项目（另有 {dropped} 条记录的文件已不存在，已隐藏）"
+                : $"共 {items.Count} 个最近项目";
+        return IpcResponse.Success(request.Id, new ProjectRecentResponse(items, info));
+    }
+
     private async Task<IpcResponse> HandleProjectSaveAsync(IpcRequest request)
     {
         var req = DeserializePayload<ProjectSaveRequest>(request);
@@ -632,6 +683,7 @@ public sealed partial class IpcGateway
         var projectRoot = _projectState.ProjectFile != null ? Path.GetDirectoryName(_projectState.ProjectFile)! : string.Empty;
         var result = await _exportService.ExportAsync(project, projectRoot, plan, new ModExportPlanContext(),
             new Progress<string>(msg => Log.Info("导出进度: {0}", msg)), CancellationToken.None);
+
         return IpcResponse.Success(request.Id, new { ok = true, root = result.RootDirectory, slots = result.Slots.Count });
     }
 

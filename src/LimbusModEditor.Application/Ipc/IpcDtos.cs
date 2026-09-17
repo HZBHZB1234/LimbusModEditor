@@ -247,6 +247,30 @@ public sealed record SpineExportResponse(
 public sealed record ProjectOpenRequest(string ProjectFile);
 public sealed record ProjectSaveRequest(string ProjectFile);
 
+/// <summary>
+/// project.create 载荷。<paramref name="Directory"/> 缺省时落在程序目录的
+/// projects 子目录，<paramref name="Name"/> 缺省时为「未命名模组」。
+/// </summary>
+public sealed record ProjectCreateRequest(string? Directory, string? Name);
+
+/// <summary>project.create 响应载荷。</summary>
+/// <param name="Path">项目文件（.lmeproj）全路径。</param>
+/// <param name="Name">项目名。</param>
+/// <param name="Directory">项目根（sources/workspace/… 的父目录）。</param>
+public sealed record ProjectCreateResponse(string Path, string Name, string Directory);
+
+/// <summary>project.recent 响应里的一行。</summary>
+public sealed record ProjectRecentItem(string Name, string Path, string LastOpened);
+
+/// <summary>
+/// project.recent 响应载荷。最近项目读的是程序目录
+/// <c>config/shared-config.json</c>（<see cref="LimbusModEditor.Application.AppConfig.SharedAppConfig.RecentProjects"/>）；
+/// 一条都没有时 <paramref name="Projects"/> 为空，<paramref name="Info"/> 给中文说明。
+/// </summary>
+public sealed record ProjectRecentResponse(
+    IReadOnlyList<ProjectRecentItem> Projects,
+    string Info);
+
 /// <summary>export.plan 请求载荷。</summary>
 public sealed record ExportPlanRequest;
 

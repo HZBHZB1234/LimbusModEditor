@@ -87,6 +87,72 @@
   --lme-state-deleted-bg: rgba(217, 83, 79, 0.1);
   --lme-overlay-bg: rgba(30, 30, 46, 0.7);
   --lme-error-banner-bg: rgba(217, 83, 79, 0.15);
+
+  /* ── z-index 层级（全局统一，禁止组件自定数值） ── */
+  --lme-z-base: 0;        /* 常规文档流 */
+  --lme-z-raised: 10;     /* 悬浮卡片、tooltip */
+  --lme-z-sticky: 100;    /* 维基目录吸顶、粘性表头 */
+  --lme-z-dropdown: 200;  /* 下拉菜单、自动补全 */
+  --lme-z-overlay: 300;   /* 播放器浮层、灯箱 */
+  --lme-z-modal: 400;     /* 模态对话框 */
+  --lme-z-toast: 500;     /* 全局通知 */
+
+  /* ── 维基：强调金（对齐目标维基深色 + 金黄主题） ── */
+  --wiki-accent: #e6b646;            /* 主金黄：标题/强调/激活态 */
+  --wiki-accent-strong: #f0c75e;     /* hover 提亮 */
+  --wiki-accent-dim: #b08c30;        /* 弱化描边/分割 */
+  --wiki-title: #eec95e;             /* 超大页面标题色 */
+  --wiki-section-title: #edc55f;     /* 分节标题色 */
+  --wiki-link: #f2d478;              /* 正文内链色 */
+
+  /* ── 维基：信息框（右栏卡片） ── */
+  --wiki-infobox-bg: var(--lme-bg-elevated);
+  --wiki-infobox-border: var(--lme-border);
+  --wiki-infobox-header-bg: #e8b939;      /* 黄底标题栏 */
+  --wiki-infobox-header-text: #241f10;    /* 黄底上的深字 */
+  --wiki-infobox-subtitle-text: #4a422a;  /* 黄底上的次级字 */
+  --wiki-infobox-label-text: var(--lme-text-secondary);
+  --wiki-infobox-value-text: var(--lme-text-primary);
+  --wiki-infobox-width: 300px;
+
+  /* ── 维基：标签胶囊（chip） ── */
+  --wiki-chip-bg: rgba(230, 182, 70, 0.12);
+  --wiki-chip-border: rgba(230, 182, 70, 0.35);
+  --wiki-chip-text: var(--wiki-accent);
+  --wiki-chip-active-bg: var(--wiki-accent);
+  --wiki-chip-active-text: #241f10;
+  --wiki-chip-radius: 999px;
+
+  /* ── 维基：引用块（页面引言） ── */
+  --wiki-quote-bg: rgba(42, 42, 60, 0.6);
+  --wiki-quote-border: var(--wiki-accent);
+  --wiki-quote-text: #d8d0b8;
+  --wiki-quote-mark: rgba(230, 182, 70, 0.4);
+
+  /* ── 维基：提示块（需改进/注意） ── */
+  --wiki-notice-bg: var(--lme-bg-elevated);
+  --wiki-notice-border: var(--wiki-accent);
+  --wiki-notice-text: var(--lme-text-primary);
+
+  /* ── 维基：目录（左侧编号目录） ── */
+  --wiki-toc-text: var(--lme-text-muted);
+  --wiki-toc-text-hover: var(--wiki-accent);
+  --wiki-toc-active: var(--wiki-accent);
+  --wiki-toc-width: 180px;
+
+  /* ── 维基：画廊与媒体 ── */
+  --wiki-gallery-thumb-min: 96px;   /* 缩略图最小边 */
+  --wiki-gallery-thumb-max: 140px;  /* 缩略图最大边 */
+  --wiki-gallery-bg: var(--lme-bg-panel);
+  --wiki-media-radius: var(--lme-radius-md);
+  --wiki-audio-row-height: 40px;    /* 音频列表行高 */
+  --wiki-audio-row-hover: var(--lme-bg-hover);
+  --wiki-audio-playing-bg: rgba(230, 182, 70, 0.15);
+
+  /* ── 维基：正文区 ── */
+  --wiki-content-max-width: 980px;
+  --wiki-body-text: var(--lme-text-primary);
+  --wiki-entry-title: var(--lme-text-primary);
 }
 
 /* ── 全局基础 ── */

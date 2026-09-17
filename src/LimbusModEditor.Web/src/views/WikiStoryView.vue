@@ -6,7 +6,8 @@
  *   章节键标题 → 章节导航（上一章 / 下一章）→ 对话流（说话人 + 台词，区分旁白）→ 媒体
  * 剧情页**不用右栏信息框**（本地无剧情数值面板来源），改为单栏 + 宽对话区。
  *
- * 台词来源：分节 content（实测 story:1D101 的章节正文为真台词）。
+ * 台词来源：分节 content + 分节内条目 body（实测 story:1D101 的台词在 entries[].body，
+ * 只看 content 会误判为空）。
  * 纯展示 + 纯文本渲染（不解析 HTML，杜绝 XSS）。
  */
 
@@ -61,7 +62,16 @@ interface DialogueLine {
 const SPEECH_PATTERN = /^([^：:]{1,24})[：:]\s*(.+)$/
 
 const lines = computed<DialogueLine[]>(() => {
-  const content = current.value?.content ?? ''
+  // 正文可能在分节 content，也可能落在条目 body（后端两种都下发过）：
+  // 只看 content 会把「条目里明明有台词」的章节误判成无可解析文本。
+  const sources = [
+    current.value?.content ?? '',
+    ...(current.value?.entries ?? []).map((entry) => entry.body ?? ''),
+  ]
+  const content = sources
+    .map((text) => text.trim())
+    .filter((text) => text !== '')
+    .join('\n')
   return content
     .split(/\r?\n/)
     .map((raw) => raw.trim())

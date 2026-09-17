@@ -1,0 +1,32 @@
+{
+  "method": "wiki.page.load",
+  "response": {
+    "id": "abnormality:8003",
+    "title": "Aztec",
+    "category": "abnormality",
+    "infobox": {
+      "title": "Aztec",
+      "fields": [],
+      "imageUrl": ""
+    },
+    "sections": [
+      {
+        "id": "overview",
+        "title": "\u6982\u8FF0\uFF082 \u6761\u4E8B\u5B9E\uFF09",
+        "level": 1,
+        "toc": [
+          {
+            "id": "overview",
+            "title": "\u6982\u8FF0\uFF082 \u6761\u4E8B\u5B9E\uFF09",
+            "level": 1
+          }
+        ],
+        "entries": []
+      }
+    ],
+    "gallery": [],
+    "relatedPages": [],
+    "tags": []
+  },
+  "delay": 5
+}

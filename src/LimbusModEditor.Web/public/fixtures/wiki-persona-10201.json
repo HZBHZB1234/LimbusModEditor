@@ -1,0 +1,43 @@
+{
+  "method": "wiki.page.load",
+  "response": {
+    "id": "persona:10201",
+    "title": "格里高尔",
+    "category": "persona",
+    "subtitle": "LCB罪人",
+    "infobox": {
+      "title": "格里高尔",
+      "fields": [
+        { "label": "身份", "value": "LCB罪人", "type": "text", "editable": false },
+        { "label": "武器", "value": "害虫之镰", "type": "text", "editable": false },
+        { "label": "初始E.G.O", "value": "观澜刀", "type": "text", "editable": false }
+      ]
+    },
+    "sections": [
+      {
+        "id": "overview",
+        "title": "概述",
+        "content": "格里高尔是边狱公司的罪人之一，使用武器「害虫之镰」。",
+        "bindings": []
+      },
+      {
+        "id": "story",
+        "title": "剧情",
+        "content": "格里高尔的剧情章节包括...",
+        "bindings": []
+      },
+      {
+        "id": "ego",
+        "title": "E.G.O",
+        "content": "观澜刀（ZAYIN）",
+        "bindings": []
+      }
+    ],
+    "toc": [
+      { "id": "overview", "title": "概述", "level": 1 },
+      { "id": "story", "title": "剧情", "level": 1 },
+      { "id": "ego", "title": "E.G.O", "level": 1 }
+    ],
+    "tags": ["人格", "LCB", "格里高尔"]
+  }
+}

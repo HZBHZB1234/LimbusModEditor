@@ -21,4 +21,11 @@ interface Window {
       ) => void
     }
   }
+  // 验证专用接缝（仅 ?harness=1 模式）
+  __lmeIpc?: {
+    postMessage: (message: string) => void
+    addEventListener: (type: string, handler: (event: { data: string }) => void) => void
+    removeEventListener: (type: string, handler: (event: { data: string }) => void) => void
+    __messageHandler?: (event: { data: string }) => void
+  }
 }

@@ -9,6 +9,7 @@ import type {
   IpcMessage,
   IpcErrorCode,
 } from './types'
+import { getHarnessBridge } from './harness'
 
 type PendingReq = {
   resolve: (payload: unknown) => void
@@ -39,6 +40,23 @@ export class IpcClient {
   }
 
   private attachHost(): void {
+    // 优先检查验证接缝（?harness=1 模式）
+    const harnessBridge = getHarnessBridge()
+    if (harnessBridge) {
+      this.messageHandler = (event: { data: string }) => {
+        try {
+          const msg = JSON.parse(event.data) as IpcMessage
+          this.dispatch(msg)
+        } catch (e) {
+          console.error('[IPC] 消息解析失败', e)
+        }
+      }
+      harnessBridge.addEventListener('message', this.messageHandler)
+      this.connected = true
+      return
+    }
+
+    // 生产模式：使用 WebView2 桥接
     const w = window as unknown as {
       chrome?: {
         webview?: {
@@ -69,10 +87,16 @@ export class IpcClient {
   /** 销毁客户端，退订所有事件监听（F-04 fix） */
   destroy(): void {
     if (this.messageHandler) {
-      const w = window as unknown as {
-        chrome?: { webview?: { removeEventListener?: (t: string, l: (e: { data: string }) => void) => void } }
+      // 优先检查验证接缝
+      const harnessBridge = getHarnessBridge()
+      if (harnessBridge) {
+        harnessBridge.removeEventListener('message', this.messageHandler)
+      } else {
+        const w = window as unknown as {
+          chrome?: { webview?: { removeEventListener?: (t: string, l: (e: { data: string }) => void) => void } }
+        }
+        w.chrome?.webview?.removeEventListener?.('message', this.messageHandler)
       }
-      w.chrome?.webview?.removeEventListener?.('message', this.messageHandler)
       this.messageHandler = null
     }
     this.listeners.clear()
@@ -160,6 +184,14 @@ export class IpcClient {
   }
 
   private post(msg: IpcRequest): void {
+    // 优先使用验证接缝
+    const harnessBridge = getHarnessBridge()
+    if (harnessBridge) {
+      harnessBridge.postMessage(JSON.stringify(msg))
+      return
+    }
+
+    // 生产模式：使用 WebView2 桥接
     const w = window as unknown as {
       chrome?: { webview?: { postMessage?: (m: string) => void } }
     }

@@ -1,0 +1,32 @@
+{
+  "method": "wiki.page.load",
+  "response": {
+    "id": "ego:21005",
+    "title": "9\u7AE02\u8282",
+    "category": "ego",
+    "infobox": {
+      "title": "9\u7AE02\u8282",
+      "fields": [],
+      "imageUrl": ""
+    },
+    "sections": [
+      {
+        "id": "overview",
+        "title": "\u6982\u8FF0\uFF080 \u6761\u4E8B\u5B9E\uFF09",
+        "level": 1,
+        "toc": [
+          {
+            "id": "overview",
+            "title": "\u6982\u8FF0\uFF080 \u6761\u4E8B\u5B9E\uFF09",
+            "level": 1
+          }
+        ],
+        "entries": []
+      }
+    ],
+    "gallery": [],
+    "relatedPages": [],
+    "tags": []
+  },
+  "delay": 5
+}

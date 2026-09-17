@@ -1,0 +1,32 @@
+{
+  "method": "wiki.page.load",
+  "response": {
+    "id": "ego_gift:9182",
+    "title": "1B\u578B\u516B\u89D2\u87BA\u6813",
+    "category": "ego_gift",
+    "infobox": {
+      "title": "1B\u578B\u516B\u89D2\u87BA\u6813",
+      "fields": [],
+      "imageUrl": ""
+    },
+    "sections": [
+      {
+        "id": "overview",
+        "title": "\u6982\u8FF0\uFF080 \u6761\u4E8B\u5B9E\uFF09",
+        "level": 1,
+        "toc": [
+          {
+            "id": "overview",
+            "title": "\u6982\u8FF0\uFF080 \u6761\u4E8B\u5B9E\uFF09",
+            "level": 1
+          }
+        ],
+        "entries": []
+      }
+    ],
+    "gallery": [],
+    "relatedPages": [],
+    "tags": []
+  },
+  "delay": 5
+}

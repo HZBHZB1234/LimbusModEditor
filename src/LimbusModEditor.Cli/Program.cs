@@ -24,6 +24,10 @@ if (args.Length == 0 || args[0] is "help" or "--help" or "-h")
     Console.WriteLine("                                           Headless 生成维基页面（与 Wiki 首页按钮同链路）；");
     Console.WriteLine("                                           给 pageId（可逗号分隔多个）时把该页完整内容（含权威标注）导出到 out.json");
     Console.WriteLine("                                           环境变量 LME_BASE=<程序目录> 指定共享配置/缓存目录");
+    Console.WriteLine("  wiki-export-ipc <project.lmeproj> \"<id1>,<id2>,…\" <out.json>");
+    Console.WriteLine("                                           真实 IPC 导出：经 IpcGateway 序列化的 wiki.getPage 响应 payload（camelCase，与前端契约一致）");
+    Console.WriteLine("                                           须在与宿主同布局的目录运行（cache/config/fmod 与 exe 同级，LME_BASE 无效）");
+    Console.WriteLine("                                           例：wiki-export-ipc app.lmeproj \"persona:10201,story:1D101\" out.json");
     Console.WriteLine("  logs                                      Print the log directory");
     NLogBootstrap.Shutdown();
     return;
@@ -57,6 +61,9 @@ try
                 Environment.GetEnvironmentVariable("LME_BASE"),
                 args.Length >= 3 ? args[2] : null,
                 args.Length >= 4 ? args[3] : null);
+            break;
+        case "wiki-export-ipc" when args.Length >= 4:
+            Environment.ExitCode = await WikiExportIpcCommand.RunAsync(args[1], args[2], args[3]);
             break;
         case "logs":
             Console.WriteLine(logging.CurrentFile ?? logging.Describe());

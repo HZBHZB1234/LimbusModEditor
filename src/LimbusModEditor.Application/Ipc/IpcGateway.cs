@@ -255,7 +255,7 @@ public sealed partial class IpcGateway
 
             // ── 静态数据工作台 ────────────────────────────────────────────
             "static.tableList" => HandleStaticTableList(request),
-            "static.records" => HandleStaticRecords(request),
+            "static.records" => await HandleStaticRecordsAsync(request),
             "static.locate" => HandleStaticLocate(request),
             "static.readRecord" => HandleStaticReadRecord(request),
             "static.editRecord" => HandleStaticEditRecord(request),
@@ -778,10 +778,57 @@ public sealed partial class IpcGateway
         return IpcResponse.Success(request.Id, new StaticTableListResponse(items, entries.Count, req.Offset, req.Take));
     }
 
-    private IpcResponse HandleStaticRecords(IpcRequest request)
+    /// <summary>
+    /// static.records：一张静态表的记录分页。
+    ///
+    /// <para>链路全部复用既有能力：<see cref="StaticIndexService.LocateForReads"/> 定位 bundle →
+    /// 索引里按 <c>tableId</c>（容器路径或表名）取表元数据 →
+    /// <see cref="StaticIndexService.LoadDocumentAsync"/> 读正文（<c>documents</c> 缓存优先）→
+    /// <see cref="StaticTableRows.Parse"/> 解析行集合 → 按 offset/take 取一页。</para>
+    ///
+    /// <para>前提缺失一律中文错误、不返回空列表充数（未开项目 / 定位不到 bundle /
+    /// 索引里没这张表 / 正文读不到）。</para>
+    /// </summary>
+    private async Task<IpcResponse> HandleStaticRecordsAsync(IpcRequest request)
     {
-        // 静态表记录需要 bundle 定位（W3 实现）
-        return IpcResponse.Failure(request.Id, IpcErrorCode.Unsupported, "静态表记录查询需要 bundle 定位（W3 实现）");
+        var req = DeserializePayload<StaticRecordsRequest>(request);
+        if (string.IsNullOrWhiteSpace(req.TableId))
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "缺少表 id（tableId）");
+
+        var project = _projectState.Project;
+        if (project is null)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "请先打开项目");
+
+        var location = StaticIndexService.LocateForReads(_staticIndex.Store, project.GameDirectory,
+            StaticIndexService.CacheRoots(project.UnityCacheDirectory));
+        if (location is null || !location.IsCached)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound,
+                "无法定位静态数据 bundle（运行时 catalog 与 Unity 缓存均未命中）。请确认游戏目录与 Unity 缓存目录已配置。");
+
+        var entries = _staticIndex.Store.ReadEntries();
+        var entry = entries.FirstOrDefault(e =>
+            string.Equals(e.ContainerEntry, req.TableId, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(e.Name, req.TableId, StringComparison.OrdinalIgnoreCase));
+        if (entry is null)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound,
+                $"静态表索引里没有这张表：{req.TableId}（索引共 {entries.Count} 张表）");
+
+        var document = await _staticIndex.LoadDocumentAsync(location, entry).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(document.Text))
+            return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound,
+                $"表 {entry.Name} 的正文读不到（非 UTF-8，或该条目已不在当前 bundle 里）。");
+
+        var rows = StaticTableRecords.Rows(document.Text);
+        if (rows.Count == 0)
+            return IpcResponse.Success(request.Id, new StaticRecordsResponse(req.TableId, [], 0, 0, 0,
+                $"表 {entry.Name} 的正文没能解析出记录（正文 {entry.SizeLabel}，不是 list/数组/单对象形态）。"));
+
+        var take = req.Take <= 0 ? IpcGatewayConstants.DefaultPageSize : req.Take;
+        var offset = Math.Max(0, req.Offset);
+        var items = StaticTableRecords.Page(rows, offset, take)
+            .Select(r => new StaticRecordItem(r.RecordId, r.Summary, r.RawJson)).ToList();
+        return IpcResponse.Success(request.Id,
+            new StaticRecordsResponse(req.TableId, items, rows.Count, offset, take));
     }
 
     private IpcResponse HandleStaticLocate(IpcRequest request)

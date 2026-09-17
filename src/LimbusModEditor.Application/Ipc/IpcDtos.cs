@@ -315,7 +315,18 @@ public sealed record StaticTableListResponse(IReadOnlyList<StaticTableItem> Item
 
 public sealed record StaticRecordsRequest(string TableId, int Offset = 0, int Take = 200);
 public sealed record StaticRecordItem(string RecordId, string Summary, string? RawJson = null);
-public sealed record StaticRecordsResponse(string TableId, IReadOnlyList<StaticRecordItem> Items, long TotalCount, int Offset, int Take);
+
+/// <summary>static.records 响应载荷（一张表的记录分页）。</summary>
+/// <param name="Items">本页记录。</param>
+/// <param name="TotalCount">表内记录总数（不是本页条数）。</param>
+/// <param name="Info">中文说明；只在「正文读到了但解析不出记录」这类情况下给，正常分页为 null。</param>
+public sealed record StaticRecordsResponse(
+    string TableId,
+    IReadOnlyList<StaticRecordItem> Items,
+    long TotalCount,
+    int Offset,
+    int Take,
+    string? Info = null);
 
 public sealed record StaticLocateRequest(string TableId, string RecordId);
 public sealed record StaticReadRecordRequest(string TableId, string RecordId);

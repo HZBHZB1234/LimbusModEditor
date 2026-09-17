@@ -247,6 +247,25 @@ public sealed class AssetCatalog
     }
 
     /// <summary>
+    /// 按 Unity <b>容器路径</b>（<c>assets.container_entry</c>）取记录，返回<b>全部</b>匹配行。
+    ///
+    /// <para>与 <see cref="Locate"/> 的分工：后者吃的是 LogicalPath（维基绑定给的不是它），
+    /// 而这里吃的是容器路径 —— 维基资源绑定、封面引用都是这个口径。</para>
+    ///
+    /// <para>同一路径通常回来 <b>两行</b>（Texture2D + Sprite），由调用方挑；
+    /// 排序与取舍的口径见 <c>PresetWorkbenchService.Preferable</c>（Texture 必须赢）。</para>
+    /// </summary>
+    public IReadOnlyList<AssetRecord> FindByContainerEntry(string containerEntry)
+    {
+        if (string.IsNullOrWhiteSpace(containerEntry)) return [];
+        var rows = _store.ReadByContainerEntry(containerEntry);
+        if (rows.Count == 0) return [];
+        var records = new List<AssetRecord>(rows.Count);
+        foreach (var row in rows) records.Add(Materialize(row));
+        return records;
+    }
+
+    /// <summary>
     /// 在**给定筛选与排序下**它是命中的第几条（0 基）；没命中返回 null。
     /// <para>这是「翻到那一页并选中」真正要的那个数：列表下标是**命中集内**的下标，
     /// 带筛选时与全局名次不是一个数。开销 = 一次完整判据扫描，与取页同级。</para>

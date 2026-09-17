@@ -824,6 +824,42 @@ public sealed class UnityCacheSqliteIndexStore
     }
 
     /// <summary>
+    /// 按 <c>container_entry</c> <b>精确</b>取行（返回顺序 = 名次升序）。
+    ///
+    /// <para>这是<b>维基资源绑定</b>的取数入口：绑的是 Unity 容器路径
+    /// （<c>Assets/Resources_moved/Sprite/SkillIcon/1000101.png</c>），既不是 LogicalPath
+    /// 也不是 URL，<see cref="AssetCatalog.Locate"/> 那种「先解析出 {outer}/{inner}/{CAB}/{pathId}.{typeId}
+    /// 再反查」的路子对它根本不适用 —— 它压根不是那个形状。</para>
+    ///
+    /// <para><b>返回全部匹配行</b>是刻意的：同一个容器路径在库里通常有<b>两行</b>
+    /// —— <c>type_id=28</c>（Texture2D）与 <c>type_id=213</c>（Sprite）。
+    /// 只留一行会让解码必然失败（读位图只能按 Texture2D 的 pathId 解），
+    /// 由调用方按 <c>PresetWorkbenchService.Preferable</c> 的同口径自己挑。</para>
+    ///
+    /// <para>命中走 <c>ix_assets_container</c>（<c>container_entry</c> 打头），
+    /// 再按 <c>(bundle_id, bundle_index)</c> 回到名次表拿完整行。</para>
+    /// </summary>
+    public IReadOnlyList<UnityCachePageRow> ReadByContainerEntry(
+        string containerEntry, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(containerEntry)) return [];
+        using var connection = OpenEnsured();
+        EnsureDerivedForQuery(connection);
+        using var command = connection.CreateCommand();
+        command.CommandText = PageColumns + " WHERE a.container_entry = $ce ORDER BY k.r";
+        command.Parameters.AddWithValue("$ce", containerEntry);
+        using var reader = command.ExecuteReader();
+        var rows = new List<UnityCachePageRow>(2);
+        while (reader.Read())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            rows.Add(new(reader.GetInt32(0), ReadBundle(reader, 1), ReadRow(reader, 7)));
+        }
+        Log.Debug("按容器条目查资源「{0}」：命中 {1} 行", containerEntry, rows.Count);
+        return rows;
+    }
+
+    /// <summary>
     /// 按名次**流式**读行：一个连接内分批（<see cref="RankChunk"/>，压在 SQLite 参数上限之下）。
     /// <para>为什么要流式：资源列表按页查询时候选集可能有几十万条，一次性返回既费内存，
     /// 又会让每批都重开一次连接（WAL 下每次 open 都要读 schema）。调用方在这条流上

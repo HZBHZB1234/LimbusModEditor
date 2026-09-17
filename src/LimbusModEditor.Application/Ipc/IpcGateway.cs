@@ -12,6 +12,7 @@ using LimbusModEditor.Application.Scanning;
 using LimbusModEditor.Application.SpineData;
 using LimbusModEditor.Application.StaticMods;
 using LimbusModEditor.Application.Texts;
+using LimbusModEditor.Application.Wiki;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Domain.Projects;
 using LimbusModEditor.Formats.Bank;
@@ -93,6 +94,7 @@ public sealed partial class IpcGateway
     private readonly LangTextPatchService _langPatch;
     private readonly StaticModService _staticMod;
     private readonly StaticIndexService _staticIndex;
+    private readonly WikiMediaResolver _wikiMedia;
 
     /// <summary>组合根：从既有服务构造完整网关（由 App 宿主调用）。</summary>
     public static IpcGateway Create(
@@ -138,6 +140,8 @@ public sealed partial class IpcGateway
         _exportPlan = exportPlan ?? new ModExportPlanService();
         _exportService = exportService ?? new ModPackExportService();
         _projects = projects ?? new ProjectService();
+        // 维基资源绑定给的是容器路径，要落成真地址只能靠解析器（无 DI，就地组合）。
+        _wikiMedia = new WikiMediaResolver(_catalog, _bankIndex, _spineData, _bankAudio);
     }
 
     /// <summary>处理一条来自页面的请求 JSON，返回响应 JSON（async 贯通）。</summary>
@@ -251,7 +255,7 @@ public sealed partial class IpcGateway
             "wiki.categoryIndex" => HandleWikiCategoryIndex(request),
             "wiki.category.load" => HandleWikiCategoryIndex(request),
             // 收敛为一个方法名：历史上 wiki.getPage 与 wiki.page.load 是同一处理器的两个别名。
-            "wiki.getPage" => HandleWikiPageLoad(request),
+            "wiki.getPage" => await HandleWikiPageLoadAsync(request),
             "wiki.search" => HandleWikiSearch(request),
             "wiki.page.save" => HandleWikiPageSave(request),
             "wiki.saveContent" => HandleWikiSaveContent(request),
@@ -825,7 +829,7 @@ public sealed partial class IpcGateway
         return IpcResponse.Success(request.Id, new WikiCategoryIndexResponse(req.Category, label, pages));
     }
 
-    private IpcResponse HandleWikiPageLoad(IpcRequest request)
+    private async Task<IpcResponse> HandleWikiPageLoadAsync(IpcRequest request)
     {
         var req = DeserializePayload<WikiPageLoadRequest>(request);
         var store = new WikiPageStore(AppEnvironment.Current.CacheDirectory);
@@ -838,6 +842,17 @@ public sealed partial class IpcGateway
             return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound, $"页面不存在：{req.PageId}");
 
         var page = detail.Page;
+
+        // 绑定给的是 Unity 容器路径，先整页解析一遍（按 ref_key 去重、带配额）。
+        // 分节、画廊、封面共用这一份结果 —— 同一张图不解码两次。
+        var allBindings = detail.SubPages.SelectMany(sub => sub.Entries)
+            .SelectMany(entry => entry.Bindings).ToList();
+        var resolutions = await _wikiMedia.ResolveManyAsync(allBindings).ConfigureAwait(false);
+        var byBinding = new Dictionary<WikiResourceBinding, WikiMediaResolution>(allBindings.Count);
+        for (var i = 0; i < allBindings.Count; i++) byBinding.TryAdd(allBindings[i], resolutions[i]);
+
+        WikiMediaResolution ResolutionOf(WikiResourceBinding binding)
+            => byBinding.TryGetValue(binding, out var resolution) ? resolution : WikiMediaResolution.None;
 
         // 分节 = sub_pages，条目挂分节下，绑定挂条目下（不再是「一条 entry 假装一个分节」）。
         var sections = detail.SubPages.Select(sub => new WikiSectionDto(
@@ -853,22 +868,32 @@ public sealed partial class IpcGateway
                 entry.Entry.Authority,
                 entry.Entry.Confidence,
                 entry.Entry.SourceDetail)).ToList(),
-            sub.Entries.SelectMany(entry => entry.Bindings).Select(binding => new WikiBindingDto(
-                binding.RefKey,
-                binding.Kind,
-                binding.Display,
-                binding.MediaKind,
-                binding.DurationSec,
-                MediaUrlOf(binding))).ToList())).ToList();
+            sub.Entries.SelectMany(entry => entry.Bindings).Select(binding =>
+            {
+                var resolution = ResolutionOf(binding);
+                return new WikiBindingDto(
+                    binding.RefKey,
+                    binding.Kind,
+                    binding.Display,
+                    binding.MediaKind,
+                    binding.DurationSec,
+                    resolution.MediaUrl ?? MediaUrlOf(binding),
+                    resolution.AudioUrl,
+                    resolution.SkeletonUrl,
+                    resolution.AtlasUrl,
+                    resolution.TextureUrls);
+            }).ToList())).ToList();
 
         // 画廊：只收图片绑定；拿不到真实地址的项 Url 为 null，前端按降级处理。
-        var gallery = detail.SubPages.SelectMany(sub => sub.Entries)
-            .SelectMany(entry => entry.Bindings)
+        var gallery = allBindings
             .Where(binding => string.Equals(binding.Kind, "Image", StringComparison.OrdinalIgnoreCase))
             .Select(binding => new WikiGalleryItemDto(
-                MediaUrlOf(binding), binding.Display ?? binding.RefKey, binding.Kind))
+                ResolutionOf(binding).MediaUrl ?? MediaUrlOf(binding),
+                binding.Display ?? binding.RefKey, binding.Kind))
             .Take(MaxGalleryItems)
             .ToList();
+
+        var cover = await _wikiMedia.ResolveImageAsync(page.CoverRef).ConfigureAwait(false);
 
         // 信息框：只写本地确实拿得到的字段（类别名/标题/副标题/分节数/条目数），不编造。
         var infobox = new List<WikiInfoboxRowDto>();
@@ -886,7 +911,7 @@ public sealed partial class IpcGateway
             infobox,
             string.IsNullOrWhiteSpace(page.CategoryLabel) ? Array.Empty<string>() : [page.CategoryLabel],
             gallery,
-            CoverUrlOf(page.CoverRef)));
+            cover.MediaUrl ?? CoverUrlOf(page.CoverRef)));
     }
 
     /// <summary>画廊最多给多少项（超出截断，避免整页塞满同名静态图）。</summary>

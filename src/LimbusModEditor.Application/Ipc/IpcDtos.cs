@@ -438,8 +438,11 @@ public sealed record WikiEntryDto(
     string? SourceDetail);
 
 /// <summary>
-/// 资源绑定 DTO。<c>MediaUrl</c> 只在<b>本地确实有可用地址</b>时给出（<c>lme.data</c> 虚拟主机），
+/// 资源绑定 DTO。地址只在<b>本地确实有可用地址</b>时给出（<c>lme.data</c> 虚拟主机），
 /// 否则为 null —— 前端据此降级，不占位、不编造。
+/// <para><c>MediaUrl</c> = 图片/预览地址；<c>AudioUrl</c> / <c>SkeletonUrl</c> /
+/// <c>AtlasUrl</c> / <c>TextureUrls</c> 是音频与 Spine 各自的地址
+/// （<c>TextureUrls</c> 为图集页名 → 地址）。本轮只有图片会真的给出地址。</para>
 /// </summary>
 public sealed record WikiBindingDto(
     string RefKey,
@@ -447,7 +450,11 @@ public sealed record WikiBindingDto(
     string? Display,
     string? MediaKind,
     double? DurationSec,
-    string? MediaUrl);
+    string? MediaUrl,
+    string? AudioUrl = null,
+    string? SkeletonUrl = null,
+    string? AtlasUrl = null,
+    IReadOnlyDictionary<string, string>? TextureUrls = null);
 
 /// <summary>相关页面 DTO。</summary>
 public sealed record WikiRelatedPageDto(

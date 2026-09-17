@@ -11,7 +11,6 @@ const navItems = [
   { key: 'bank', label: '音频', icon: '🎵', route: '/bank' },
   { key: 'text', label: '文本', icon: '📝', route: '/text' },
   { key: 'static', label: '静态数据', icon: '📊', route: '/static' },
-  { key: 'presets', label: '预设卡片', icon: '🃏', route: '/presets' },
   { key: 'export', label: '导出', icon: '📤', route: '/export' },
   { key: 'project', label: '项目', icon: '📁', route: '/project' },
   { key: 'settings', label: '设置', icon: '⚙️', route: '/settings' },

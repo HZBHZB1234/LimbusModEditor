@@ -26,11 +26,6 @@ const router = createRouter({
       component: () => import('@/views/StaticView.vue'),
     },
     {
-      path: '/presets',
-      name: 'presets',
-      component: () => import('@/views/PresetsView.vue'),
-    },
-    {
       path: '/export',
       name: 'export',
       component: () => import('@/views/ExportView.vue'),

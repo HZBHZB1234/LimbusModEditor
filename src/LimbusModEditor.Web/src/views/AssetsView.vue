@@ -156,20 +156,26 @@ watch(containerFromQuery, async (path) => {
 
 /** 选中资源命中的对象行；失败/没命中就留空数组 */
 const relatedSubjects = ref<RelationSubject[]>([])
+/** 后端给的中文说明（也解释「为什么没有行」） */
+const relatedInfo = ref('')
 
 watch(
   () => catalog.selectedAssetId,
   async (assetId) => {
     relatedSubjects.value = []
+    relatedInfo.value = ''
     if (!assetId) return
     try {
-      const res = await ipc.request<{ subjects?: RelationSubject[] }>('relation.describe', {
-        assetId,
-      })
+      const res = await ipc.request<{ subjects?: RelationSubject[]; info?: string }>(
+        'relation.describe',
+        { assetId },
+      )
       relatedSubjects.value = res?.subjects ?? []
+      relatedInfo.value = res?.info ?? ''
     } catch {
       // 调用失败就什么都不显示（不抛、不重试）
       relatedSubjects.value = []
+      relatedInfo.value = ''
     }
   },
 )
@@ -297,9 +303,11 @@ const listHeight = ref(600)
         <ul class="related-list">
           <li v-for="s in relatedSubjects" :key="s.subjectId">
             {{ s.displayName }}（{{ s.categoryLabel }}） · {{ s.kindLabel }} · {{ s.display }}
+            <RouterLink v-if="s.pageId" :to="`/wiki/page/${s.pageId}`">打开维基页</RouterLink>
           </li>
           <li v-if="relatedSubjects.length === 0">未找到关联对象</li>
         </ul>
+        <div v-if="relatedInfo" class="related-info">{{ relatedInfo }}</div>
       </div>
     </div>
 
@@ -517,6 +525,12 @@ const listHeight = ref(600)
   padding-left: 18px;
   font-size: 12px;
   line-height: 1.6;
+}
+
+.related-info {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--lme-text-secondary, #888);
 }
 
 /* ── 加载态 ── */

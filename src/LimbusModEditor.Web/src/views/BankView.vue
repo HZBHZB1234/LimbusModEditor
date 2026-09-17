@@ -4,7 +4,7 @@
 // 布局：三列（浏览 | 分隔条 | 预览），与 AssetsView 一致
 
 import { ref, reactive, computed, onMounted, watch } from 'vue'
-import { ipc } from '@/ipc'
+import { ipc, IpcClientError } from '@/ipc'
 import VirtualList from '@/components/VirtualList.vue'
 import PageBar from '@/components/PageBar.vue'
 import { useUiStateStore } from '@/stores/uiState'
@@ -93,8 +93,10 @@ const sampleLoading = ref(false)
 const sampleError = ref<string | null>(null)
 const sampleGeneration = ref(0)
 
-/** 当前选中采样的音频预览 URL（走 lme.data 虚拟主机） */
+/** 当前选中采样的音频预览 URL（bank.preview 给的 WAV 地址，可直接播） */
 const audioPreviewUrl = ref<string | null>(null)
+/** 后端明确回 unsupported 才置真：此时才显示「未实现」提示 */
+const audioPreviewUnsupported = ref(false)
 
 // ── 计算属性 ──────────────────────────────────────────────────
 
@@ -246,6 +248,7 @@ async function selectBank(bankId: string) {
   selectedBankId.value = bankId
   selectedSampleId.value = null
   audioPreviewUrl.value = null
+  audioPreviewUnsupported.value = false
   await loadSamples(bankId)
 }
 
@@ -300,17 +303,20 @@ async function loadSamples(bankId: string) {
 async function selectSample(sample: SampleInfo) {
   selectedSampleId.value = sample.sampleId
   audioPreviewUrl.value = null
+  audioPreviewUnsupported.value = false
 
   try {
-    // 契约方法 bank.preview：载荷 { bankId, sampleName }（宿主侧 FMOD 解码未实现，会回 unsupported）
-    const result = await ipc.request<{ url: string }>('bank.preview', {
+    // 契约方法 bank.preview：载荷 { bankId, sampleName } → { audioUrl }（可直接播放的 WAV 地址）
+    const result = await ipc.request<{ audioUrl: string }>('bank.preview', {
       bankId: sample.bankId,
       sampleName: sample.name,
     })
-    audioPreviewUrl.value = result.url
-  } catch {
-    // 音频预览 IPC 未实现时显示提示，不阻塞 UI
+    audioPreviewUrl.value = result?.audioUrl ?? null
+    audioPreviewUnsupported.value = !audioPreviewUrl.value
+  } catch (e: unknown) {
+    // 只有后端明确回 unsupported 时才显示「未实现」提示；其它失败不阻塞 UI，也不谎报未实现
     audioPreviewUrl.value = null
+    audioPreviewUnsupported.value = e instanceof IpcClientError && e.code === 'unsupported'
   }
 }
 
@@ -616,11 +622,14 @@ const sampleListHeight = ref(400)
         </div>
 
         <!-- 未实现提示 -->
-        <div v-else-if="selectedSample && !sampleLoading" class="audio-unimplemented">
+        <div
+          v-else-if="selectedSample && !sampleLoading && audioPreviewUnsupported"
+          class="audio-unimplemented"
+        >
           <span class="empty-icon">🔇</span>
           <span>音频预览暂未实现</span>
           <span class="unimplemented-hint">
-            对应的 IPC 方法 bank.preview 尚未在宿主实现（需 FMOD 解码）
+            后端 bank.preview 返回 unsupported：该样本暂无法解码（需 FMOD 链路）
           </span>
         </div>
 

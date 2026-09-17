@@ -156,6 +156,15 @@ function navigateToPage(id: string) {
   router.push(`/wiki/page/${id}`)
 }
 
+// 封面加载失败 → 记入失效集合，卡片回落中性占位（不伪造图片）
+const brokenCovers = ref(new Set<string>())
+
+function onCoverError(pageId: string) {
+  const next = new Set(brokenCovers.value)
+  next.add(pageId)
+  brokenCovers.value = next
+}
+
 function performSearch() {
   currentPage.value = 1
 }
@@ -204,7 +213,7 @@ onUnmounted(() => {
       <div class="wiki-category-container">
         <!-- ── 分类头部 ── -->
         <header class="category-header">
-          <h1 class="category-title">{{ categoryLabel }}</h1>
+          <h1 class="category-title"><span class="title-prefix">分类:</span>{{ categoryLabel }}</h1>
           <p class="category-description">{{ categoryDescription }}</p>
         </header>
 
@@ -257,13 +266,13 @@ onUnmounted(() => {
           <span>加载分类数据中…</span>
         </div>
 
-        <!-- ── 结果统计 ── -->
+        <!-- ── 结果统计（对齐灰机措辞） ── -->
         <div v-else class="results-info">
           <span v-if="searchText.trim()">
             找到 <strong>{{ totalPages }}</strong> 个匹配页面
           </span>
           <span v-else>
-            共 <strong>{{ totalPages }}</strong> 个页面
+            以下 <strong>{{ totalPages }}</strong> 个页面属于本分类
           </span>
           <span v-if="totalPageCount > 1" class="page-info">
             · 第 {{ currentPage }} / {{ totalPageCount }} 页
@@ -323,10 +332,11 @@ onUnmounted(() => {
             <div class="col-thumb">
               <div class="list-thumb">
                 <img
-                  v-if="page.thumbnailUrl"
+                  v-if="page.thumbnailUrl && !brokenCovers.has(page.id)"
                   :src="page.thumbnailUrl"
                   :alt="page.title"
                   class="thumb-img"
+                  @error="onCoverError(page.id)"
                 />
                 <span v-else class="thumb-icon-small">📄</span>
               </div>
@@ -409,20 +419,26 @@ onUnmounted(() => {
   gap: var(--lme-gap-lg);
 }
 
-/* ── 分类头部 ── */
+/* ── 分类头部（对齐灰机分类页：金色大标题 + 描述 + 分隔线） ── */
 .category-header {
   display: flex;
   flex-direction: column;
   gap: var(--lme-gap-sm);
   padding-bottom: var(--lme-gap-lg);
-  border-bottom: 1px solid var(--lme-border);
+  border-bottom: 1px solid var(--wiki-section-head-border);
 }
 
 .category-title {
   margin: 0;
-  font-size: 28px;
+  font-size: var(--wiki-title-size);
   font-weight: 700;
-  color: var(--lme-text-primary);
+  line-height: var(--wiki-title-line);
+  color: var(--wiki-title);
+}
+
+.category-title .title-prefix {
+  font-weight: 400;
+  color: var(--wiki-hero-subtitle);
 }
 
 .category-description {
@@ -516,9 +532,9 @@ onUnmounted(() => {
 }
 
 .toggle-btn.active {
-  background: var(--lme-accent-muted);
-  border-color: var(--lme-accent);
-  color: var(--lme-text-primary);
+  background: var(--wiki-tab-active-bg);
+  border-color: var(--wiki-tab-active-border);
+  color: var(--wiki-tab-active-text);
 }
 
 /* ── 加载状态 ── */
@@ -556,23 +572,24 @@ onUnmounted(() => {
 .page-card {
   display: flex;
   flex-direction: column;
-  background: var(--lme-bg-panel);
-  border: 1px solid var(--lme-border);
+  background: var(--wiki-card-bg);
+  border: 1px solid var(--wiki-card-border);
   border-radius: var(--lme-radius-md);
   overflow: hidden;
   cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
+  transition: border-color 0.15s, background 0.15s, transform 0.15s;
 }
 
 .page-card:hover {
-  border-color: var(--lme-accent);
-  background: var(--lme-bg-hover);
+  border-color: var(--wiki-card-hover-border);
+  background: var(--wiki-card-hover-bg);
+  transform: translateY(-1px);
 }
 
 .page-thumb {
   width: 100%;
   aspect-ratio: 16 / 9;
-  background: var(--lme-bg-elevated);
+  background: var(--wiki-thumb-bg);
   overflow: hidden;
   display: flex;
   align-items: center;
@@ -595,7 +612,17 @@ onUnmounted(() => {
 
 .thumb-icon {
   font-size: 32px;
-  opacity: 0.5;
+  opacity: 0.4;
+  color: var(--wiki-thumb-icon);
+}
+
+/* 真实封面加载失败时也不伪造：降级为中性占位 */
+.thumb-img {
+  font-size: 0;
+}
+
+.thumb-img:not([src]) {
+  display: none;
 }
 
 .page-info {
@@ -681,7 +708,7 @@ onUnmounted(() => {
   height: 32px;
   border-radius: var(--lme-radius-sm);
   overflow: hidden;
-  background: var(--lme-bg-elevated);
+  background: var(--wiki-thumb-bg);
   display: flex;
   align-items: center;
   justify-content: center;

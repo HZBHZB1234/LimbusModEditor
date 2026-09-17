@@ -4,7 +4,7 @@
 // 差异说明见文件底部注释
 
 import { ref, computed, onMounted, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useCatalogStore } from '@/stores/catalog'
 import { useUiStateStore } from '@/stores/uiState'
 import SearchFilters from '@/components/SearchFilters.vue'
@@ -17,6 +17,7 @@ import type { AssetSearchQuery } from '@/ipc'
 const catalog = useCatalogStore()
 const uiState = useUiStateStore()
 const route = useRoute()
+const router = useRouter()
 
 // 性能测量状态
 const perfMeasurements = ref<
@@ -125,19 +126,29 @@ async function focusContainer(path: string) {
   if (hit) catalog.selectAsset(hit.assetId)
 }
 
+/** 定位完就摘掉 container 参数：刷新（或后退重进）不会再重复触发一次定位 */
+function clearContainerParam() {
+  if (route.query.container === undefined) return
+  const next = { ...route.query }
+  delete next.container
+  void router.replace({ path: route.path, query: next })
+}
+
 // 初始加载
-onMounted(() => {
+onMounted(async () => {
   const t0 = performance.now()
   const target = containerFromQuery.value
-  const task = target ? focusContainer(target) : catalog.search()
-  task.then(() => {
-    recordPerf(target ? '按容器路径定位' : '初始加载', performance.now() - t0)
-  })
+  if (target) await focusContainer(target)
+  else await catalog.search()
+  recordPerf(target ? '按容器路径定位' : '初始加载', performance.now() - t0)
+  if (target) clearContainerParam()
 })
 
-// 已挂载时再从维基点一次「去编辑」：query 变了就重新定位
-watch(containerFromQuery, (path) => {
-  if (path) void focusContainer(path)
+// 已挂载时再从维基点一次「去编辑」：query 变了就重新定位，定位完清掉参数
+watch(containerFromQuery, async (path) => {
+  if (!path) return
+  await focusContainer(path)
+  clearContainerParam()
 })
 
 // 虚拟列表高度自适应

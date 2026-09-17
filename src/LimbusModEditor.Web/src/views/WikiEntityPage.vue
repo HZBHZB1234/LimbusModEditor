@@ -584,14 +584,14 @@ function formatFieldValue(field: { value: string; type: string }): string {
                       <li v-for="b in otherBindingsOf(section)" :key="b.refKey" class="binding-item">
                         <span class="binding-kind">{{ b.kind }}</span>
                         <span class="binding-display">{{ b.display }}</span>
-                        <button
-                          v-if="assetEditUrl(b.refKey)"
+                        <RouterLink
+                          v-if="b.refKey"
                           class="binding-edit-btn"
                           title="到资源工作台定位这条容器路径"
-                          @click="goEditAsset(assetEditUrl(b.refKey)!)"
+                          :to="{ path: '/assets', query: { container: b.refKey } }"
                         >
                           去编辑
-                        </button>
+                        </RouterLink>
                       </li>
                     </ul>
                   </div>
@@ -679,14 +679,14 @@ function formatFieldValue(field: { value: string; type: string }): string {
                     <li v-for="b in otherBindingsOf(section)" :key="b.refKey" class="binding-item">
                       <span class="binding-kind">{{ b.kind }}</span>
                       <span class="binding-display">{{ b.display }}</span>
-                      <button
-                        v-if="assetEditUrl(b.refKey)"
+                      <RouterLink
+                        v-if="b.refKey"
                         class="binding-edit-btn"
                         title="到资源工作台定位这条容器路径"
-                        @click="goEditAsset(assetEditUrl(b.refKey)!)"
+                        :to="{ path: '/assets', query: { container: b.refKey } }"
                       >
                         去编辑
-                      </button>
+                      </RouterLink>
                     </li>
                   </ul>
                 </div>
@@ -1061,6 +1061,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
 
 .binding-edit-btn {
   flex-shrink: 0;
+  text-decoration: none;
   padding: 1px 8px;
   background: var(--lme-bg-elevated);
   border: 1px solid var(--lme-border);

@@ -147,6 +147,20 @@ public sealed class StaticRowCatalog : IDisposable
     /// <summary>表是否存在（不加载正文）。</summary>
     public bool HasTable(string tableName) => _tables.ContainsKey(tableName);
 
+    /// <summary>
+    /// 表名候选：先<b>精确同名</b>（如 <c>passive</c>），再按前缀展开（如 <c>personality-</c> →
+    /// 16 张人格表），按名称排序保证确定性。用于「扫一类表找行」的场景。
+    /// </summary>
+    public IEnumerable<string> TableNames(string prefixOrName)
+    {
+        if (_tables.ContainsKey(prefixOrName)) yield return prefixOrName;
+        foreach (var name in _tables.Keys
+                     .Where(n => n.Length != prefixOrName.Length &&
+                                 n.StartsWith(prefixOrName, StringComparison.OrdinalIgnoreCase))
+                     .OrderBy(n => n, StringComparer.OrdinalIgnoreCase))
+            yield return name;
+    }
+
     /// <summary>诊断：正文缓存命中数 / 现读数。</summary>
     public (int CacheHits, int FreshReads) DocumentStats => (_cacheHits, _freshReads);
 

@@ -383,7 +383,12 @@ const noticeText = computed(() => {
   if (!page.value) return ''
   const list = page.value.sections ?? []
   if (list.length === 0) return '该页面当前没有可展示的分节内容。'
-  if (list.every((s) => (s.content ?? '').trim() === '')) return '该页面的分节正文目前均为空。'
+  // 有正文的判据：content 非空，或分节内有条目且至少一条条目带非空 body。
+  // 只看 content 会漏掉"正文都在 entries 里"的页面（后端现在就是这么下发的）。
+  const hasBody = (s: WikiSection) =>
+    (s.content ?? '').trim() !== '' ||
+    (s.entries ?? []).some((e) => (e.body ?? '').trim() !== '')
+  if (!list.some(hasBody)) return '该页面的分节正文目前均为空。'
   return ''
 })
 

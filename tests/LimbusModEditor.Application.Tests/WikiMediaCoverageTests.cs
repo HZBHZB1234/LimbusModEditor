@@ -26,6 +26,10 @@ namespace LimbusModEditor.Application.Tests;
 /// <para><b>时间预算</b>：图片解码实测一条数秒，抽样受 <see cref="BudgetSeconds"/> 约束，
 /// 超预算就停止抽样并在输出里写明「只测了 N/M 条」。</para>
 /// </summary>
+/// <remarks>与 <see cref="WikiMediaResolverBatchTests"/> 同集合（"wiki-media"）：两者都读写
+/// testhost 的 <c>wwwroot/data/wiki</c> 落地目录（本类的冷缓存测量会整个删掉它），
+/// 并行执行会互相拆台。</remarks>
+[Collection("wiki-media")]
 public sealed class WikiMediaCoverageTests
 {
     /// <summary>抽样时间预算（秒）：CI 不能被慢盘拖成小时级。</summary>

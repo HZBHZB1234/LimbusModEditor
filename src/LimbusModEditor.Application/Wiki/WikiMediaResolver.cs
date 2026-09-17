@@ -66,6 +66,13 @@ public sealed class WikiMediaResolver
     /// <summary>最多缓存几个 bank 的样本表（每张几千行，封顶 8 张）。</summary>
     private const int MaxCachedSampleTables = 8;
 
+    /// <summary>
+    /// 图片解析的有界并行度。冷缓存实测一条图片解码数秒（重载 bundle + DXT 解码 + PNG 编码），
+    /// 串行 16 条就是整页加载的大头；4 路能把等待摊薄到约 1/4，又不至于让十几个线程
+    /// 各自同时展开一个上百 MB 的 bundle（内存峰值与解码并行度成正比）。
+    /// </summary>
+    private const int MaxParallelImageResolutions = 4;
+
     private const string ImageKind = "Image";
     private const string AudioKind = "Audio";
     private const string SpineKind = "Spine";
@@ -127,12 +134,20 @@ public sealed class WikiMediaResolver
     /// <b>配额按形态分开</b>（<see cref="ImageQuotaPerPage"/> / <see cref="AudioQuotaPerPage"/> /
     /// <see cref="SpineQuotaPerPage"/>）：超出的给 <see cref="WikiMediaResolution.None"/>，
     /// 病态页面拖不住加载，某一种形态也吃不掉别人的预算。</para>
+    ///
+    /// <para><b>两遍执行</b>：第一遍串行做去重与配额扣减（纯字典操作，微秒级）——
+    /// 并行场景下没法边解边扣；第二遍解码，<b>Image 按
+    /// <see cref="MaxParallelImageResolutions"/> 有界并行</b>（解码链无共享可变状态：
+    /// <c>UnityAssetService</c>/<c>AssetsToolsBackend</c> 每次调用新建实例、SQLite 索引每查询
+    /// 新开连接），<b>Audio / Spine 保持串行</b>：Audio 并发会让同 bank 的上百 MB 整读在
+    /// FSB 缓存就位前重复发生，Spine 网关共享单个 backend（非线程安全）。两路同时起步互不等待。</para>
     /// </summary>
     public async Task<IReadOnlyList<WikiMediaResolution>> ResolveManyAsync(
         IReadOnlyList<WikiResourceBinding> bindings, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(bindings);
         if (bindings.Count == 0) return [];
+        var sync = new object();
         var cache = new Dictionary<string, WikiMediaResolution>(StringComparer.OrdinalIgnoreCase);
         var budgets = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
         {
@@ -140,34 +155,114 @@ public sealed class WikiMediaResolver
             [AudioKind] = AudioQuotaPerPage,
             [SpineKind] = SpineQuotaPerPage,
         };
-        var results = new List<WikiMediaResolution>(bindings.Count);
-        var resolved = 0;
-        foreach (var binding in bindings)
+        var results = new WikiMediaResolution?[bindings.Count];
+        var scheduled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var duplicates = new List<(int Index, string Key)>();
+        var imageWork = new List<(int Index, string? Key, string? DeepLink)>();
+        var serialWork = new List<(int Index, string Kind, string? Key, string? DeepLink)>();
+
+        // ── 第一遍（串行）：去重 + 配额，切出待解码工作项 ─────────────────
+        // 串行版是「边解边填缓存」顺带完成去重的；并行版必须先把重复键识别出来
+        //（scheduled 集合）：重复键不占配额、不排工作项，等首例解完再从缓存回填。
+        for (var index = 0; index < bindings.Count; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var binding = bindings[index];
             var key = binding.RefKey;
-            if (!string.IsNullOrEmpty(key) && cache.TryGetValue(key, out var cached))
+            if (!string.IsNullOrEmpty(key) && !scheduled.Add(key))
             {
-                results.Add(cached);
+                duplicates.Add((index, key));
                 continue;
             }
             if (!budgets.TryGetValue(binding.Kind, out var left) || left <= 0)
             {
                 // 未支持的形态（除 Image / Audio / Spine 之外的 kind）与超配额一样给空结果。
-                results.Add(WikiMediaResolution.None);
+                results[index] = WikiMediaResolution.None;
                 continue;
             }
             budgets[binding.Kind] = left - 1;
-            resolved++;
-            var resolution = await ResolveCoreAsync(binding.Kind, key, binding.DeepLink, cancellationToken)
-                .ConfigureAwait(false);
-            if (!string.IsNullOrEmpty(key)) cache[key] = resolution;
-            results.Add(resolution);
+            if (string.Equals(binding.Kind, ImageKind, StringComparison.OrdinalIgnoreCase))
+                imageWork.Add((index, key, binding.DeepLink));
+            else
+                serialWork.Add((index, binding.Kind, key, binding.DeepLink));
+        }
+
+        // ── 第二遍（解码）：Image 有界并行，Audio/Spine 串行，两路并发 ─────
+        using var gate = new SemaphoreSlim(MaxParallelImageResolutions);
+        var tasks = new List<Task>();
+        if (imageWork.Count > 0)
+        {
+            tasks.Add(Task.Run(async () =>
+            {
+                var wave = new List<Task>(imageWork.Count);
+                foreach (var item in imageWork)
+                {
+                    await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    wave.Add(Task.Run(async () =>
+                    {
+                        try
+                        {
+                            var resolution = await ResolveCoreAsync(ImageKind, item.Key, item.DeepLink, cancellationToken)
+                                .ConfigureAwait(false);
+                            Store(sync, cache, item.Key, resolution, results, item.Index);
+                        }
+                        finally
+                        {
+                            gate.Release();
+                        }
+                    }, cancellationToken));
+                }
+                await Task.WhenAll(wave).ConfigureAwait(false);
+            }, cancellationToken));
+        }
+        if (serialWork.Count > 0)
+        {
+            tasks.Add(Task.Run(async () =>
+            {
+                foreach (var item in serialWork)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var resolution = await ResolveCoreAsync(item.Kind, item.Key, item.DeepLink, cancellationToken)
+                        .ConfigureAwait(false);
+                    Store(sync, cache, item.Key, resolution, results, item.Index);
+                }
+            }, cancellationToken));
+        }
+        await Task.WhenAll(tasks).ConfigureAwait(false);
+
+        var resolved = imageWork.Count + serialWork.Count;
+        var flat = new WikiMediaResolution[bindings.Count];
+        for (var index = 0; index < flat.Length; index++)
+            flat[index] = results[index] ?? WikiMediaResolution.None;
+        // 重复键的槽位：从缓存回填首例的结果（首例已解完；解不出来时缓存里也是
+        // 全 null 的 <see cref="WikiMediaResolution.None"/>，口径与串行版一致）。
+        foreach (var (index, key) in duplicates)
+        {
+            lock (sync)
+            {
+                flat[index] = cache.TryGetValue(key, out var first) ? first : WikiMediaResolution.None;
+            }
         }
         Log.Debug("维基资源解析：绑定 {0} 条，实际解码 {1} 条，命中地址 {2} 条",
-            bindings.Count, resolved, results.Count(r => r.MediaUrl is not null || r.AudioUrl is not null
+            bindings.Count, resolved, flat.Count(r => r.MediaUrl is not null || r.AudioUrl is not null
                 || r.SkeletonUrl is not null));
-        return results;
+        return flat;
+    }
+
+    /// <summary>把一条解析结果写回去重缓存（key 非空时）与结果槽位（并行写互不重叠）。</summary>
+    private static void Store(
+        object sync,
+        Dictionary<string, WikiMediaResolution> cache,
+        string? key,
+        WikiMediaResolution resolution,
+        WikiMediaResolution?[] results,
+        int index)
+    {
+        if (!string.IsNullOrEmpty(key))
+        {
+            lock (sync) cache[key] = resolution;
+        }
+        results[index] = resolution;
     }
 
     /// <summary>

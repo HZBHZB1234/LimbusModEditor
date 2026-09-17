@@ -19,6 +19,28 @@ public sealed record RelationSubjectLookup(IReadOnlyList<RelationSubjectRow> Row
 }
 
 /// <summary>
+/// 一条「资源 → 对象」命中：<b>对象身份 + 命中的那条引用的形态</b>（IPC relation.describe 的一行）。
+///
+/// <para>为什么不是 <see cref="RelationSubjectRow"/>：后者只给「标题 + 各类条数摘要」，
+/// 回答不了「这条引用是图像还是音频、引用的文件叫什么」——而资源工作台的反查面板
+/// 正好要按「引用的 kind / display」分行（一个资源可能以多种形态属于同一个对象）。</para>
+/// </summary>
+public sealed record RelationSubjectHit(
+    string SubjectId,
+    string DisplayName,
+    string Category,
+    string CategoryLabel,
+    string Kind,
+    string KindLabel,
+    string Display,
+    string? Detail,
+    string Subtitle,
+    string Character);
+
+/// <summary>一次反查结果；<paramref name="Info"/> 解释「为什么没有命中」。</summary>
+public sealed record RelationSubjectHits(IReadOnlyList<RelationSubjectHit> Hits, string Info);
+
+/// <summary>
 /// 关联图的<b>查询门面</b>：把 <see cref="RelationStore"/> 的原始行整理成 UI 能直接绑定的结果。
 ///
 /// <para>两个方向都覆盖：</para>
@@ -139,5 +161,53 @@ public sealed class RelationQueryService
                 string.Join(" · ", composition)));
         }
         return new RelationSubjectLookup(rows, $"该资源被 {rows.Count} 个预设对象引用（点「查看」在资源列表里搜索该人格 id）。");
+    }
+
+    /// <summary>
+    /// IPC <c>relation.describe</c> 的取数：一个资源 → 引用了它的对象 + 每条引用的形态。
+    ///
+    /// <para>与 <see cref="DescribeSubjectsForAsset"/> 的分工：那是给 WPF 预览面板的
+    /// 「标题 + 摘要」行；这条给 Web 反查面板的<b>结构化行</b>（前端要按 kind/display 分行、要拿
+    /// 对象 id 当维基页面 id）。库没建好 / 资源没有容器路径 / 没命中都返回<b>空列表 + 中文原因</b>，
+    /// 绝不抛异常、绝不编造。</para>
+    /// </summary>
+    public RelationSubjectHits DescribeHitsForAsset(AssetRecord asset)
+    {
+        ArgumentNullException.ThrowIfNull(asset);
+        if (!IsReady) return new RelationSubjectHits([], "关联图还没建立（启动扫描会自动分析四个索引库）。");
+
+        var refKeys = RefKeysForAsset(asset);
+        if (refKeys.Count == 0)
+            return new RelationSubjectHits([], "此资源没有游戏内容器路径，无法用关联图定位（关联键是容器路径 / 相对路径）。");
+
+        var subjects = FindSubjectsByRefKeys(refKeys);
+        if (subjects.Count == 0)
+            return new RelationSubjectHits([], "此资源没有关联到任何预设对象（它不属于任何已登记的对象资源）。");
+
+        var keys = new HashSet<string>(refKeys, StringComparer.OrdinalIgnoreCase);
+        var hits = new List<RelationSubjectHit>();
+        foreach (var subject in subjects)
+        {
+            var categoryLabel = string.IsNullOrWhiteSpace(subject.CategoryLabel)
+                ? RelationCategories.Label(subject.SubjectKind)
+                : subject.CategoryLabel;
+            foreach (var link in Links(subject.SubjectId).Where(x => keys.Contains(x.RefKey)))
+            {
+                hits.Add(new RelationSubjectHit(
+                    subject.SubjectId,
+                    subject.DisplayName,
+                    subject.SubjectKind,
+                    categoryLabel,
+                    link.Kind.ToString(),
+                    RelationDisplayRules.KindLabel(link.Kind),
+                    link.Display,
+                    link.Detail,
+                    subject.Subtitle,
+                    subject.Character));
+            }
+        }
+
+        return new RelationSubjectHits(hits,
+            $"该资源被 {hits.Count} 条关联引用命中（来自 {subjects.Count} 个对象）。");
     }
 }

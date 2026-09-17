@@ -85,8 +85,57 @@ public sealed record RelationRevealResponse(bool Located);
 /// <summary>relation.describe 请求载荷。</summary>
 public sealed record RelationDescribeRequest(string AssetId);
 
+/// <summary>
+/// relation.describe 响应里的一行：对象身份 + <b>命中的那条引用</b>的形态。
+///
+/// <para><paramref name="SubjectId"/> 形如 <c>persona:10201</c>，它<b>同时也是维基页面 id</b>
+/// （<c>/wiki/page/persona:10201</c>）；<paramref name="PageId"/> 是「维基里真的生成过这一页」
+/// 的确认值——没生成过给 null，前端就不画跳转（不猜 id）。</para>
+/// </summary>
+public sealed record RelationDescribeSubjectDto(
+    string SubjectId,
+    string DisplayName,
+    string Category,
+    string CategoryLabel,
+    string Subtitle,
+    string Character,
+    string Kind,
+    string KindLabel,
+    string Display,
+    string? Detail,
+    string? PageId);
+
+/// <summary>relation.describe 响应载荷（资源 → 所属对象，反向索引）。</summary>
+/// <param name="Subjects">命中的对象行（可为空）。</param>
+/// <param name="Info">中文说明（也解释「为什么没有行」）。</param>
+public sealed record RelationDescribeResponse(
+    IReadOnlyList<RelationDescribeSubjectDto> Subjects,
+    string Info);
+
 /// <summary>relation.links 请求载荷。</summary>
 public sealed record RelationLinksRequest(string SubjectId);
+
+/// <summary>relation.links 响应里的一行（<see cref="RelationLink"/> 的契约投影）。</summary>
+public sealed record RelationLinkDto(
+    string SubjectId,
+    string Category,
+    string Kind,
+    string RefKey,
+    string Display,
+    string? Detail,
+    string? PreviewText,
+    string PreviewKind,
+    string MediaKind,
+    double? DurationSec,
+    string? RefPath,
+    string? DeepLink,
+    string? TargetSubjectId,
+    long SizeBytes);
+
+/// <summary>relation.links 响应载荷（对象 → 资源）。</summary>
+/// <param name="Links">该对象的全部关联资源（可为空）。</param>
+/// <param name="Info">中文说明（也解释「为什么没有」）。</param>
+public sealed record RelationLinksResponse(IReadOnlyList<RelationLinkDto> Links, string Info);
 
 // ── 2.7 配置 / UI 状态 ──────────────────────────────────────────
 

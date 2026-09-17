@@ -95,6 +95,8 @@ public sealed partial class IpcGateway
     private readonly StaticModService _staticMod;
     private readonly StaticIndexService _staticIndex;
     private readonly WikiMediaResolver _wikiMedia;
+    private readonly RelationQueryService _relations;
+    private readonly string _cacheDirectory;
 
     /// <summary>组合根：从既有服务构造完整网关（由 App 宿主调用）。</summary>
     public static IpcGateway Create(
@@ -107,10 +109,12 @@ public sealed partial class IpcGateway
         AssetEditService? assetEdits = null,
         ModExportPlanService? exportPlan = null,
         ModPackExportService? exportService = null,
-        ProjectService? projects = null)
+        ProjectService? projects = null,
+        RelationQueryService? relations = null,
+        string? cacheDirectory = null)
     {
         return new IpcGateway(catalog, projectState, spineData, bankIndex, langText, staticIndex,
-            assetEdits, exportPlan, exportService, projects);
+            assetEdits, exportPlan, exportService, projects, relations, cacheDirectory);
     }
 
     public IpcGateway(
@@ -123,8 +127,13 @@ public sealed partial class IpcGateway
         AssetEditService? assetEdits = null,
         ModExportPlanService? exportPlan = null,
         ModPackExportService? exportService = null,
-        ProjectService? projects = null)
+        ProjectService? projects = null,
+        RelationQueryService? relations = null,
+        string? cacheDirectory = null)
     {
+        _cacheDirectory = string.IsNullOrWhiteSpace(cacheDirectory)
+            ? AppEnvironment.Current.CacheDirectory
+            : cacheDirectory;
         _catalog = catalog;
         _projectState = projectState;
         _spineData = spineData ?? throw new ArgumentNullException(nameof(spineData));
@@ -142,6 +151,8 @@ public sealed partial class IpcGateway
         _projects = projects ?? new ProjectService();
         // 维基资源绑定给的是容器路径，要落成真地址只能靠解析器（无 DI，就地组合）。
         _wikiMedia = new WikiMediaResolver(_catalog, _bankIndex, _spineData, _bankAudio);
+        // 关联图是派生缓存（cache/relation-index.db），目录沿用 AppEnvironment，不新造路径。
+        _relations = relations ?? new RelationQueryService(new RelationStore(_cacheDirectory));
     }
 
     /// <summary>处理一条来自页面的请求 JSON，返回响应 JSON（async 贯通）。</summary>
@@ -479,14 +490,87 @@ public sealed partial class IpcGateway
 
     private IpcResponse HandleRelationDescribe(IpcRequest request)
     {
-        // TODO W2: 需 RelationStore
-        return IpcResponse.Success(request.Id, new { subjects = Array.Empty<object>() });
+        var req = DeserializePayload<RelationDescribeRequest>(request);
+        var asset = ResolveAsset(req.AssetId);
+        if (asset is null)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound, $"未找到资源：{req.AssetId}");
+
+        // 库没建好 / 资源没有容器路径 / 没命中：服务返回空列表 + 中文原因，不抛、不编造。
+        var hits = _relations.DescribeHitsForAsset(asset);
+        var rows = new List<RelationDescribeSubjectDto>(hits.Hits.Count);
+        var existingPages = hits.Hits.Count == 0 ? null : ReadExistingWikiPageIds();
+        foreach (var hit in hits.Hits)
+        {
+            rows.Add(new RelationDescribeSubjectDto(
+                hit.SubjectId,
+                hit.DisplayName,
+                hit.Category,
+                hit.CategoryLabel,
+                hit.Subtitle,
+                hit.Character,
+                hit.Kind,
+                hit.KindLabel,
+                hit.Display,
+                hit.Detail,
+                // 页面 id 就是对象 id，但只有维基里真的有这一页才给，避免前端点了跳 404。
+                existingPages?.Contains(hit.SubjectId) == true ? hit.SubjectId : null));
+        }
+        return IpcResponse.Success(request.Id, new RelationDescribeResponse(rows, hits.Info));
     }
 
     private IpcResponse HandleRelationLinks(IpcRequest request)
     {
-        // TODO W2: 需 RelationStore
-        return IpcResponse.Success(request.Id, new { links = Array.Empty<object>() });
+        var req = DeserializePayload<RelationLinksRequest>(request);
+        if (string.IsNullOrWhiteSpace(req.SubjectId))
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "缺少对象 id（subjectId）");
+        if (!_relations.IsReady)
+            return IpcResponse.Success(request.Id, new RelationLinksResponse([],
+                "关联图还没建立（启动扫描会自动分析四个索引库）。"));
+
+        var links = _relations.Links(req.SubjectId);
+        var rows = links.Select(link => new RelationLinkDto(
+            link.SubjectId,
+            link.Category,
+            link.Kind.ToString(),
+            link.RefKey,
+            link.Display,
+            link.Detail,
+            link.PreviewText,
+            link.PreviewKind.ToString(),
+            link.MediaKind,
+            link.DurationSec,
+            link.RefPath,
+            link.DeepLink,
+            link.TargetSubjectId,
+            link.SizeBytes)).ToList();
+        return IpcResponse.Success(request.Id, new RelationLinksResponse(rows,
+            links.Count == 0 ? $"对象 {req.SubjectId} 没有登记任何关联资源。" : $"共 {links.Count} 条关联资源。"));
+    }
+
+    /// <summary>
+    /// 维基里已生成过的页面 id 集合（一次读全表，避免每条命中各查一次）。
+    /// 库不存在时返回空集合（= 前端不画跳转，而不是假装页面存在）。
+    /// </summary>
+    private HashSet<string>? ReadExistingWikiPageIds()
+    {
+        var pages = new WikiPageStore(_cacheDirectory);
+        if (!pages.Exists) return null;
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var page in pages.ReadPages()) ids.Add(page.PageId);
+        return ids;
+    }
+
+    /// <summary>
+    /// 按 <c>assetId</c> 取资源：先按 LogicalPath（资源列表行的稳定键），
+    /// 再按 Unity 容器路径（维基绑定 / 目录树挑的是这个口径）。取不到返回 null。
+    /// </summary>
+    private AssetRecord? ResolveAsset(string assetId)
+    {
+        if (string.IsNullOrWhiteSpace(assetId)) return null;
+        var byPath = _catalog.Resolve(new[] { assetId });
+        if (byPath.Count > 0) return byPath[0];
+        var byContainer = _catalog.FindByContainerEntry(assetId);
+        return byContainer.Count > 0 ? byContainer[0] : null;
     }
 
     // ── 2.6 项目 / 导出 ──────────────────────────────────────────

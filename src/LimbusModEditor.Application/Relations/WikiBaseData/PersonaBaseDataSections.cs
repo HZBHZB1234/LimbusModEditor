@@ -12,7 +12,8 @@ namespace LimbusModEditor.Application.Relations.WikiBaseData;
 /// <item>基础数值：扫 16 张 <c>personality-*</c> 表按行 <c>id == 人格数值 id</c> 精确匹配
 /// （坑 1：不信文件级 links）；体力 <c>hp.defaultStat + incrementByLevel</c>（注明按等级推导）、
 /// 速度 <c>min/maxSpeedList</c>（按理智档位）、防御修正、抗性（斩击/突刺/打击倍率）、
-/// 混乱阈值分段 <c>breakSection.sectionList</c>、属性/稀有度/赛季。</item>
+/// 混乱阈值分段 <c>breakSection.sectionList</c>、属性/稀有度/赛季、
+/// 登场时间 <c>updatedDate</c>（<c>yyyymmdd</c> → <c>yyyy.MM.dd</c>）。</item>
 /// <item>技能：槽位来自人格行 <c>attributeList</c>（skillId+数量）与 <c>defenseSkillIDList</c>；
 /// 数值按 skillId 回 <c>personality-skill-*</c> 表行级匹配（觉醒等级分档的威力/硬币）；
 /// 名称/描述按 Lang <c>Skills*.json</c> 文件类别取（坑 2：禁 xref）。</item>
@@ -80,6 +81,12 @@ public static class PersonaBaseDataSections
             entries.Add(new PreparedEntry("base:desc", "人格描述", OneLine(desc),
                 $"Lang Personalities.json id={personaId}",
                 nameof(AuthoritySource.LangAuthoritativeList)));
+
+        // 登场时间：行内 updatedDate（yyyymmdd 整数）→ yyyy.MM.dd。
+        // 16 张 personality-* 表 185 行里唯一的日期列且 185/185 有值，与真实维基「登场时间」一致。
+        if (FormatDate(row, "updatedDate") is { } debut)
+            entries.Add(new PreparedEntry("base:debut", "登场时间", debut, TableDetail(),
+                nameof(AuthoritySource.StaticTableForeignKey)));
 
         // 体力：defaultStat + incrementByLevel（游戏按等级成长 —— 注明推导，不造具体等级值）。
         if (row.TryGetProperty("hp", out var hp) && hp.ValueKind == JsonValueKind.Object)
@@ -397,6 +404,19 @@ public static class PersonaBaseDataSections
         return double.TryParse(raw, CultureInfo.InvariantCulture, out var number)
             ? number.ToString(number % 1 == 0 ? "0" : "0.###", CultureInfo.InvariantCulture)
             : raw;
+    }
+
+    /// <summary>
+    /// 静态表日期列（<c>yyyymmdd</c> 整数，如 20230227）→ <c>yyyy.MM.dd</c>。
+    /// 缺列 / 非数字 / 不是合法日期 → null（不占位、不外推）。
+    /// </summary>
+    internal static string? FormatDate(JsonElement row, string property)
+    {
+        if (!row.TryGetProperty(property, out var value)) return null;
+        if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt64(out var raw)) return null;
+        if (!DateOnly.TryParseExact(raw.ToString("00000000", CultureInfo.InvariantCulture), "yyyyMMdd",
+                CultureInfo.InvariantCulture, DateTimeStyles.None, out var date)) return null;
+        return $"{date.Year:0000}.{date.Month:00}.{date.Day:00}";
     }
 
     private static string OneLine(string text)

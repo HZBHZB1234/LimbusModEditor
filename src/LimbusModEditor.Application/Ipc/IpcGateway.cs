@@ -222,6 +222,7 @@ public sealed partial class IpcGateway
             "asset.edit.replacePayload" => await HandleAssetEditReplacePayloadAsync(request),
             "asset.edit.fieldEdit" => HandleAssetEditFieldEdit(request),
             "asset.edit.spriteMetadata" => HandleAssetEditSpriteMetadata(request),
+            "asset.edit.batchReplace" => await HandleAssetEditBatchReplaceAsync(request),
 
             // ── 2.4 Spine（服务已迁移至 SpineData，见 t24）──────────────
             "spine.locate" => await HandleSpineLocateAsync(request),
@@ -490,6 +491,48 @@ public sealed partial class IpcGateway
         _spriteMetaEdits.Set(project, asset, metadata);
         return IpcResponse.Success(request.Id, new { ok = true });
     }
+
+    /// <summary>从一个目录里按文件名批量登记替换（源目录只读，文件复制进项目
+    /// edits/assets）。逐条给出登记结果与跳过原因，匹配不到的不动。</summary>
+    private async Task<IpcResponse> HandleAssetEditBatchReplaceAsync(IpcRequest request)
+    {
+        var req = DeserializePayload<AssetEditBatchReplaceRequest>(request);
+        var project = _projectState.Project;
+        if (project is null)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "请先打开项目");
+        if (string.IsNullOrWhiteSpace(req.SourceDirectory))
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "缺少替换目录：sourceDirectory");
+        if (!Directory.Exists(req.SourceDirectory))
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, $"替换目录不存在：{req.SourceDirectory}");
+
+        var projectDir = ProjectDirectory();
+        var report = await _assetEdits.BatchReplaceFromDirectoryAsync(
+            project, req.SourceDirectory, projectDir, req.OnlyUnreplaced, req.NamePattern);
+
+        var items = report.Items
+            .Select(x => new AssetBatchReplaceItem(x.AssetId.ToString(), x.LogicalPath, x.ReplacementPath))
+            .ToList();
+        var warnings = new List<string>();
+        foreach (var file in report.FilesWithoutAsset)
+            warnings.Add($"目录里的「{file}」在项目里没有同名资源，未登记");
+        if (report.SkippedAlreadyReplaced > 0)
+            warnings.Add($"已有替换标记、未覆盖 {report.SkippedAlreadyReplaced} 个资源（先撤销再批量）");
+        if (report.SkippedByPattern > 0)
+            warnings.Add($"文件名不匹配「{req.NamePattern}」，未处理 {report.SkippedByPattern} 个文件");
+        if (report.AssetsWithoutFile.Count > 0)
+            warnings.Add($"{report.AssetsWithoutFile.Count} 个资源在目录里没有提供文件（未改动）");
+
+        return IpcResponse.Success(request.Id, new AssetEditBatchReplaceResponse(
+            items.Count,
+            report.SkippedAlreadyReplaced + report.SkippedByPattern,
+            items, warnings, report.Describe()));
+    }
+
+    /// <summary>当前项目的工作目录（替换暂存文件落在这里）。没打开项目时回落到当前目录。</summary>
+    private string ProjectDirectory()
+        => _projectState.ProjectFile is not null
+            ? Path.GetDirectoryName(_projectState.ProjectFile)!
+            : Environment.CurrentDirectory;
 
     // ── 2.4 Spine ────────────────────────────────────────────────
 

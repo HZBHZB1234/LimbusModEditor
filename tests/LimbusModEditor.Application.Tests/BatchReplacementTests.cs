@@ -83,7 +83,7 @@ public class BatchReplacementTests : IDisposable
     [Fact]
     public void Describe_reports_counts()
     {
-        var report = new BatchReplacementReport(3, ["a.png"], ["x", "y"], 1);
+        var report = new BatchReplacementReport(3, ["a.png"], ["x", "y"], 1, []);
         Assert.Contains("3 个替换", report.Describe());
         Assert.Contains("2 个资源没有提供文件", report.Describe());
     }

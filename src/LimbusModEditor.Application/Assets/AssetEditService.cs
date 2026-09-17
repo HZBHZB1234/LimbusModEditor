@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text.RegularExpressions;
 using LimbusModEditor.Application.Assets.Preview;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Domain.Edits;
@@ -9,16 +10,22 @@ namespace LimbusModEditor.Application.Assets;
 
 public sealed record AssetReplacementResult(Guid AssetId, string StoredPath, long Size, string Hash);
 
+/// <summary>批量替换里登记成功的一条：资源、逻辑路径、落到项目内的暂存文件。</summary>
+public sealed record BatchReplacementItem(Guid AssetId, string LogicalPath, string ReplacementPath);
+
 /// <summary>Outcome of a batch replacement registration (P3.3 工作流).</summary>
 public sealed record BatchReplacementReport(
     int Matched,
     IReadOnlyList<string> FilesWithoutAsset,
     IReadOnlyList<string> AssetsWithoutFile,
-    int SkippedAlreadyReplaced)
+    int SkippedAlreadyReplaced,
+    IReadOnlyList<BatchReplacementItem> Items,
+    int SkippedByPattern = 0)
 {
     public string Describe() =>
         $"匹配并登记 {Matched} 个替换；{FilesWithoutAsset.Count} 个文件没有对应的资源；" +
-        $"{AssetsWithoutFile.Count} 个资源没有提供文件；跳过已替换 {SkippedAlreadyReplaced} 个。";
+        $"{AssetsWithoutFile.Count} 个资源没有提供文件；跳过已替换 {SkippedAlreadyReplaced} 个" +
+        (SkippedByPattern > 0 ? $"；文件名不匹配被跳过 {SkippedByPattern} 个" : string.Empty) + "。";
 }
 
 /// <summary>
@@ -46,33 +53,42 @@ public sealed class AssetEditService
     /// <summary>批量登记替换：matches files in a folder to project assets by
     /// file name (case-insensitive) and registers every match through the same
     /// reversible pipeline as single replacement.</summary>
+    /// <param name="namePattern">可选的文件名通配符（<c>*</c> / <c>?</c>，大小写不敏感）。
+    /// 给了就只处理命中的文件，其余计入 <see cref="BatchReplacementReport.SkippedByPattern"/>
+    /// ——它们本来就不在本次范围内，不算「没匹配上资源」。</param>
     public async Task<BatchReplacementReport> BatchReplaceFromDirectoryAsync(
         ModProject project,
         string folder,
         string projectDirectory,
         bool onlyUnreplaced = true,
+        string? namePattern = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentException.ThrowIfNullOrWhiteSpace(folder);
         ArgumentException.ThrowIfNullOrWhiteSpace(projectDirectory);
         if (!Directory.Exists(folder)) throw new DirectoryNotFoundException($"替换文件夹不存在：{folder}");
+        var pattern = BuildNamePatternRegex(namePattern);
         var byFileName = project.Assets
             .GroupBy(x => Path.GetFileName(x.LogicalPath), StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
         var matched = 0;
         var skipped = 0;
+        var skippedByPattern = 0;
         var filesWithoutAsset = new List<string>();
+        var items = new List<BatchReplacementItem>();
         var matchedAssets = new HashSet<Guid>();
         foreach (var file in Directory.EnumerateFiles(folder, "*", SearchOption.TopDirectoryOnly))
         {
             cancellationToken.ThrowIfCancellationRequested();
             var fileName = Path.GetFileName(file);
             if (fileName.StartsWith(".", StringComparison.Ordinal)) continue; // skip sidecar/temp files
+            if (pattern is not null && !pattern.IsMatch(fileName)) { skippedByPattern++; continue; }
             if (!byFileName.TryGetValue(fileName, out var asset)) { filesWithoutAsset.Add(fileName); continue; }
             if (onlyUnreplaced && asset.Metadata.ContainsKey("replacementPath")) { skipped++; continue; }
-            await ReplaceFromFileAsync(project, asset, file, projectDirectory, cancellationToken);
+            var replacement = await ReplaceFromFileAsync(project, asset, file, projectDirectory, cancellationToken);
             matchedAssets.Add(asset.AssetId);
+            items.Add(new BatchReplacementItem(asset.AssetId, asset.LogicalPath, replacement.StoredPath));
             matched++;
         }
         var assetsWithoutFile = project.Assets
@@ -80,7 +96,16 @@ public sealed class AssetEditService
                         (!onlyUnreplaced || !x.Metadata.ContainsKey("replacementPath")))
             .Select(x => x.LogicalPath)
             .ToList();
-        return new BatchReplacementReport(matched, filesWithoutAsset, assetsWithoutFile, skipped);
+        return new BatchReplacementReport(matched, filesWithoutAsset, assetsWithoutFile, skipped, items, skippedByPattern);
+    }
+
+    /// <summary>把用户给的 <c>*</c> / <c>?</c> 通配串编译成正则；空串/null 表示不过滤（返回 null）。</summary>
+    private static Regex? BuildNamePatternRegex(string? namePattern)
+    {
+        if (string.IsNullOrWhiteSpace(namePattern)) return null;
+        var escaped = Regex.Escape(namePattern.Trim());
+        return new Regex("^" + escaped.Replace("\\*", ".*").Replace("\\?", ".") + "$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     }
 
     /// <summary>按 AssetId 在项目里找资源。**这是编辑热路径上的一处 O(N) 陷阱**：

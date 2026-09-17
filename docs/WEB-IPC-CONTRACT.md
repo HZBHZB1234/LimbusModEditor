@@ -65,6 +65,9 @@ asset.readText      payload: { assetId, charLimit? } → { text }（超长由宿
 asset.edit.replacePayload  ★   payload: { assetId, replacementPath } → { ok }
 asset.edit.fieldEdit       payload: { assetId, edits: UnityFieldEditSet } → { ok }（写回前校验在宿主）
 asset.edit.spriteMetadata   payload: { assetId, rect, pivot, border, ppu } → { ok }
+asset.edit.batchReplace   payload: { sourceDirectory, namePattern?, onlyUnreplaced? = true }
+                          → { replaced, skipped, items: [{ assetId, logicalPath, replacementPath }], warnings, info }
+                          按文件名从目录批量登记替换（源目录只读，文件复制进项目 edits/assets）
 asset.edit.applyFieldEdits / asset.edit.undo …（与现有 AssetEditService/UnityFieldEditService/SpriteMetadataEditService 一一对映）
 asset.import                payload: { packagePath, format? } → { imported: int, errors: string[] }
 ```

@@ -228,6 +228,24 @@ public sealed record AssetEditSpriteMetadataRequest(
     SpriteBorderDto Border,
     int Ppu);
 
+/// <summary>asset.edit.batchReplace 请求载荷：从一个目录里按文件名批量登记替换。
+/// 源目录只读（文件会被复制进项目 edits/assets），namePattern 为空 = 不限文件名。</summary>
+public sealed record AssetEditBatchReplaceRequest(
+    string SourceDirectory,
+    string? NamePattern = null,
+    bool OnlyUnreplaced = true);
+
+/// <summary>asset.edit.batchReplace 响应里登记成功的一条。</summary>
+public sealed record AssetBatchReplaceItem(string AssetId, string LogicalPath, string ReplacementPath);
+
+/// <summary>asset.edit.batchReplace 响应载荷。</summary>
+public sealed record AssetEditBatchReplaceResponse(
+    int Replaced,
+    int Skipped,
+    IReadOnlyList<AssetBatchReplaceItem> Items,
+    IReadOnlyList<string> Warnings,
+    string Info);
+
 public sealed record SpriteRectDto(int X, int Y, int Width, int Height);
 public sealed record SpritePivotDto(float X, float Y);
 public sealed record SpriteBorderDto(int Left, int Top, int Right, int Bottom);

@@ -17,7 +17,7 @@ export type {
   WikiPageCategory,
   WikiPageCategoryLabels,
   InfoboxField,
-  Infobox,
+  InfoboxRow,
   WikiSection,
   TocItem,
   WikiPage,

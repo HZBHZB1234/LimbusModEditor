@@ -214,11 +214,12 @@ export interface InfoboxField {
   source?: string // WritableSource 出处
 }
 
-// ── 信息框 ──────────────────────────────────────────────────
-export interface Infobox {
-  title: string
-  imageUrl?: string
-  fields: InfoboxField[]
+// ── 信息框行 ────────────────────────────────────────────────
+// 后端 wiki.getPage 经 IPC 下发的信息框是「行数组」（WikiInfoboxRowDto：
+// [{label,value},…]），不是对象——契约按真实字节写，别再写成 {title,fields}。
+export interface InfoboxRow {
+  label: string
+  value: string
 }
 
 // ── 分节 ────────────────────────────────────────────────────
@@ -247,7 +248,7 @@ export interface WikiPage {
   title: string
   category: WikiPageCategory
   subtitle?: string
-  infobox?: Infobox
+  infobox?: InfoboxRow[]
   sections: WikiSection[]
   toc: TocItem[]
   gallery?: GalleryImage[]

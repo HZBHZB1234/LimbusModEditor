@@ -26,7 +26,7 @@ import { type SpineAssets } from '@/components/wiki/mediaUrl'
 import WikiStoryView from '@/views/WikiStoryView.vue'
 import type {
   WikiPage,
-  Infobox,
+  InfoboxRow,
   InfoboxField,
   WikiSection,
   WikiEntry,
@@ -80,14 +80,15 @@ watch(() => route.params.id, loadPage)
 
 // ═══════════════ 基础计算属性 ═══════════════
 
-const infobox = computed<Infobox | undefined>(() => page.value?.infobox)
+const infobox = computed<InfoboxRow[] | undefined>(() => page.value?.infobox)
 /** 封面：后端解析不出真实地址时为 null —— 一律不显示占位图 */
 const coverUrl = computed<string | null>(() => page.value?.cover ?? null)
 
 /**
- * 信息框卡片：有 infobox 或只要解析出了封面才渲染。
- * 立绘位优先取 infobox.imageUrl，回落到 page.cover；两者皆无则不传 imageUrl，
- * 由卡片内部按「无图不渲染」处理（不出现占位立绘）。
+ * 信息框卡片：有信息框行或只要解析出了封面才渲染。
+ * IPC 下发的信息框是 [{label,value}] 行数组（WikiInfoboxRowDto），卡片要的
+ * 是字段行——就地适配成只读文本字段，不改后端契约（wiki-export-ipc/wiki-shot
+ * 夹具管线都吃这个数组）。
  */
 const infoboxCard = computed<{
   title: string
@@ -95,16 +96,21 @@ const infoboxCard = computed<{
   imageUrl?: string
   fields: InfoboxField[]
 } | null>(() => {
-  const box = infobox.value
+  const rows = infobox.value
   const cover = coverUrl.value
-  if (!box && !cover) return null
-  const title = box?.title?.trim() ? box.title : (page.value?.title ?? '')
+  if ((!rows || rows.length === 0) && !cover) return null
+  const title = page.value?.title ?? ''
   if (!title) return null
   return {
     title,
-    subtitle: box && page.value && page.value.title !== box.title ? page.value.title : undefined,
-    imageUrl: (box?.imageUrl ?? cover) || undefined,
-    fields: box?.fields ?? [],
+    subtitle: page.value?.subtitle || undefined,
+    imageUrl: cover || undefined,
+    fields: (rows ?? []).map((row) => ({
+      label: row.label,
+      value: row.value,
+      type: 'text',
+      editable: false,
+    })),
   }
 })
 const gallery = computed<GalleryImage[]>(() => page.value?.gallery ?? [])

@@ -125,7 +125,7 @@ public sealed class ModAuthoringEndToEndTests : IDisposable
             $"命中={page.TotalCount} 本页={page.Items.Count} 选中={target?.LogicalPath}（类型 {target?.Type}，大小 {target?.Size}）");
         Assert.NotNull(target);
 
-        // ── 步骤 3：替换该资源（先走 asset.edit.replacePayload，走不通再走 batchReplace）──
+        // ── 步骤 3：替换该资源（单条入口 assetId 两种口径都要成立）──────────
         var replacement = await WriteRealPngAsync(Path.Combine(_root, "replacement.png"));
 
         var byId = await Call("asset.edit.replacePayload",
@@ -135,26 +135,25 @@ public sealed class ModAuthoringEndToEndTests : IDisposable
         Step("3 asset.edit.replacePayload",
             $"按 assetId（Guid）：ok={byId.Ok} {byId.Error?.Code.ToString() ?? "-"} {byId.Error?.Message ?? "-"}\n" +
             $"                    按 logicalPath：ok={byPath.Ok} {byPath.Error?.Code.ToString() ?? "-"} {byPath.Error?.Message ?? "-"}");
+        Assert.True(byId.Ok, byId.Error?.Message);
+        Assert.True(byPath.Ok, byPath.Error?.Message);
 
-        string storedPath;
-        if (byId.Ok || byPath.Ok)
-        {
-            storedPath = Payload<ReplacePayload>(byId.Ok ? byId : byPath).StoredPath;
-        }
-        else
-        {
-            // 单条入口走不通 → 用批量入口（按文件名匹配，同一套可逆登记管线）继续验证链路。
-            var folder = Path.Combine(_root, "drop");
-            Directory.CreateDirectory(folder);
-            File.Copy(replacement, Path.Combine(folder, Path.GetFileName(target.LogicalPath)), true);
-            var batch = await Call("asset.edit.batchReplace", new AssetEditBatchReplaceRequest(folder, null, false));
-            Assert.True(batch.Ok, batch.Error?.Message);
-            var batchPayload = Payload<AssetEditBatchReplaceResponse>(batch);
-            Step("3b asset.edit.batchReplace（回退路径）",
-                $"登记={batchPayload.Replaced} 跳过={batchPayload.Skipped} 说明={batchPayload.Info}");
-            Assert.Equal(1, batchPayload.Replaced);
-            storedPath = batchPayload.Items[0].ReplacementPath;
-        }
+        // 与批量入口对账：同一套可逆登记管线，登记结果（暂存文件名）必须一致。
+        var folder = Path.Combine(_root, "drop");
+        Directory.CreateDirectory(folder);
+        File.Copy(replacement, Path.Combine(folder, Path.GetFileName(target.LogicalPath)), true);
+        var batch = await Call("asset.edit.batchReplace", new AssetEditBatchReplaceRequest(folder, null, false));
+        Assert.True(batch.Ok, batch.Error?.Message);
+        var batchPayload = Payload<AssetEditBatchReplaceResponse>(batch);
+        Step("3b asset.edit.batchReplace（对账）",
+            $"登记={batchPayload.Replaced} 跳过={batchPayload.Skipped} 暂存={batchPayload.Items[0].ReplacementPath} 说明={batchPayload.Info}");
+        Assert.Equal(1, batchPayload.Replaced);
+        // 同一资源、同一条登记管线：批量入口登记到的就是步骤 2 挑的那个资源。
+        // 暂存文件名带源文件扩展名（单条 .png / 批量按资源名 .213），故只比 AssetId，不比路径。
+        Assert.Equal(target.AssetId.ToString(), batchPayload.Items[0].AssetId);
+        Assert.True(File.Exists(batchPayload.Items[0].ReplacementPath));
+
+        var storedPath = Payload<ReplacePayload>(byPath).StoredPath;
 
         // 无论走哪条入口：编辑记录真的落进项目 + 替换文件真在盘上。
         Step("3 结果",

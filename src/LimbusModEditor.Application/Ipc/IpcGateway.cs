@@ -440,22 +440,45 @@ public sealed partial class IpcGateway
 
     // ── 2.3 资产编辑 ──────────────────────────────────────────────
 
+    /// <summary>
+    /// 按 <c>assetId</c> 在当前项目里定位资源：<b>两种口径都收</b> ——
+    /// 资源的 <see cref="AssetRecord.AssetId"/>（Guid）与 <see cref="AssetRecord.LogicalPath"/>
+    /// （资源列表行的稳定键，维基绑定 / 目录树也是这个口径）。
+    ///
+    /// <para>为什么不能只认一种：列表行给的是 LogicalPath，而旧代码用 LogicalPath 找到资源后
+    /// 又把它交给 <c>Guid.Parse</c>（登记阶段）——两条口径各错一半，单条替换入口因此完全不可用。
+    /// 取不到返回 null，由调用方给中文 NotFound，不再抛格式异常。</para>
+    /// </summary>
+    private AssetRecord? ResolveProjectAsset(string? assetId)
+    {
+        if (string.IsNullOrWhiteSpace(assetId)) return null;
+        var assets = _projectState.Project?.Assets;
+        if (assets is null) return null;
+        if (Guid.TryParse(assetId, out var guid))
+        {
+            var byId = assets.FirstOrDefault(a => a.AssetId == guid);
+            if (byId is not null) return byId;
+        }
+        return assets.FirstOrDefault(a => string.Equals(a.LogicalPath, assetId, StringComparison.Ordinal));
+    }
+
     private async Task<IpcResponse> HandleAssetEditReplacePayloadAsync(IpcRequest request)
     {
         var req = DeserializePayload<AssetEditReplacePayloadRequest>(request);
         var project = _projectState.Project;
         if (project is null)
             return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "请先打开项目");
-        var asset = project.Assets.FirstOrDefault(a => a.LogicalPath == req.AssetId);
+        var asset = ResolveProjectAsset(req.AssetId);
         if (asset is null)
-            return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound, $"未找到资源：{req.AssetId}");
+            return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound,
+                $"未找到资源：{req.AssetId}（assetId 传资源的 AssetId 或 LogicalPath；当前项目共 {project.Assets.Count} 条资源）");
         if (!File.Exists(req.ReplacementPath))
             return IpcResponse.Failure(request.Id, IpcErrorCode.IoError, $"替换文件不存在：{req.ReplacementPath}");
 
         var projectDir = _projectState.ProjectFile != null
             ? Path.GetDirectoryName(_projectState.ProjectFile)!
             : Environment.CurrentDirectory;
-        var result = await _assetEdits.ReplaceFromFileAsync(project, Guid.Parse(req.AssetId), req.ReplacementPath, projectDir);
+        var result = await _assetEdits.ReplaceFromFileAsync(project, asset, req.ReplacementPath, projectDir);
         return IpcResponse.Success(request.Id, new { ok = true, storedPath = result.StoredPath, size = result.Size });
     }
 

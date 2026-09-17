@@ -307,6 +307,33 @@ public sealed record LangReadEntryResponse(string? Value);
 public sealed record LangEditEntryRequest(string Language, string RelativePath, string KeyPath, string Value);
 public sealed record LangExportPatchRequest(string Language, string TargetDirectory);
 
+/// <summary>lang.fileEntries 请求载荷：一个 lang 文件的<b>键值分页</b>（不一次全量返回）。</summary>
+public sealed record LangFileEntriesRequest(string RelativePath, int Offset = 0, int Take = 200, string? Language = null);
+public sealed record LangFileEntryItem(string KeyPath, string Value);
+public sealed record LangFileEntriesResponse(
+    string RelativePath,
+    IReadOnlyList<LangFileEntryItem> Items,
+    int TotalCount,
+    int Offset,
+    int Take);
+
+/// <summary>lang.applyPatch 里的一条改动：<paramref name="Value"/> 为 null 表示删除该键。</summary>
+public sealed record LangKeyEditDto(string KeyPath, string? Value);
+
+/// <summary>lang.applyPatch 请求载荷：<b>按 key 写回</b>（不是整份文本替换）。</summary>
+public sealed record LangApplyPatchRequest(
+    string RelativePath,
+    IReadOnlyList<LangKeyEditDto> Edits,
+    string? Language = null);
+
+/// <summary>lang.applyPatch 响应载荷：逐条给结论（生效 / 找不到 / 被拒），不静默丢弃。</summary>
+public sealed record LangApplyPatchResponse(
+    string RelativePath,
+    IReadOnlyList<string> Applied,
+    IReadOnlyList<string> Missing,
+    IReadOnlyList<string> Rejected,
+    string Info);
+
 // ── 静态数据工作台 ────────────────────────────────────────────────
 
 public sealed record StaticTableListRequest(int Offset = 0, int Take = 200);

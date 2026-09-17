@@ -14,6 +14,7 @@ using LimbusModEditor.Application.StaticMods;
 using LimbusModEditor.Application.Texts;
 using LimbusModEditor.Application.Wiki;
 using LimbusModEditor.Domain.Assets;
+using LimbusModEditor.Domain.Edits;
 using LimbusModEditor.Domain.Projects;
 using LimbusModEditor.Formats.Bank;
 using LimbusModEditor.Formats.Unity;
@@ -252,6 +253,11 @@ public sealed partial class IpcGateway
             "lang.readEntry" => HandleLangReadEntry(request),
             "lang.editEntry" => HandleLangEditEntry(request),
             "lang.exportPatch" => HandleLangExportPatch(request),
+            "lang.fileEntries" => HandleLangFileEntries(request),
+            // 前端历史名（text.*）与 lang.* 是同一处理器的别名，收敛到一处实现。
+            "text.fileEntries" => HandleLangFileEntries(request),
+            "lang.applyPatch" => HandleLangApplyPatch(request),
+            "text.applyPatch" => HandleLangApplyPatch(request),
 
             // ── 静态数据工作台 ────────────────────────────────────────────
             "static.tableList" => HandleStaticTableList(request),
@@ -708,9 +714,17 @@ public sealed partial class IpcGateway
 
     // ── 文本工作台 ────────────────────────────────────────────────
 
+    /// <summary>
+    /// 定位 lang 根：<b>共享配置 → 当前项目</b>（<see cref="AppEnvironment.EffectiveGameDirectory"/>）。
+    ///
+    /// <para>为什么不能直接把 null 交给服务：它只认显式游戏目录（传 null 恒返回 null），
+    /// 那样文本工作台会一律得到「未配置游戏目录」。</para>
+    /// </summary>
+    private string? LangRoot() => _langText.ResolveLangRoot(AppEnvironment.Current.EffectiveGameDirectory(_projectState.Project));
+
     private IpcResponse HandleLangActiveLanguages(IpcRequest request)
     {
-        var langRoot = _langText.ResolveLangRoot(null);
+        var langRoot = LangRoot();
         var activeLang = langRoot is not null ? _langText.ReadActiveLanguage(langRoot) : null;
         var languages = new List<string>();
         if (activeLang is not null) languages.Add(activeLang);
@@ -720,7 +734,7 @@ public sealed partial class IpcGateway
     private IpcResponse HandleLangFiles(IpcRequest request)
     {
         var req = DeserializePayload<LangFilesRequest>(request);
-        var langRoot = _langText.ResolveLangRoot(null);
+        var langRoot = LangRoot();
         if (langRoot is null)
             return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "未配置游戏目录");
         var files = _langText.EnumerateFiles(langRoot);
@@ -732,7 +746,7 @@ public sealed partial class IpcGateway
     private IpcResponse HandleLangSearch(IpcRequest request)
     {
         var req = DeserializePayload<LangSearchRequest>(request);
-        var langRoot = _langText.ResolveLangRoot(null);
+        var langRoot = LangRoot();
         if (langRoot is null)
             return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "未配置游戏目录");
         var files = _langText.EnumerateFiles(langRoot);
@@ -758,6 +772,109 @@ public sealed partial class IpcGateway
         _langText.BeginEdit(req.RelativePath);
         _langText.SetModified(req.RelativePath, req.Value);
         return IpcResponse.Success(request.Id, new { ok = true });
+    }
+
+    /// <summary>
+    /// lang.fileEntries：一个 lang 文件的<b>键值分页</b>（深链 <c>?file=&amp;key=</c> 用它在页内滚动定位）。
+    ///
+    /// <para>键路径口径与搜索命中完全一致（同一份叶子遍历），所以搜索结果里的 keyPath
+    /// 一定能在这里翻到。文本取「编辑集里的当前文本」，没有则读原文。</para>
+    /// </summary>
+    private IpcResponse HandleLangFileEntries(IpcRequest request)
+    {
+        var req = DeserializePayload<LangFileEntriesRequest>(request);
+        if (string.IsNullOrWhiteSpace(req.RelativePath))
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "缺少文件路径（relativePath）");
+
+        var text = _langText.TryReadText(req.RelativePath);
+        if (text is null)
+        {
+            var langRoot = LangRoot();
+            if (langRoot is null)
+                return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "未配置游戏目录");
+            _langText.AttachLangRoot(langRoot);
+            text = _langText.TryReadText(req.RelativePath);
+        }
+        if (text is null)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound,
+                $"读不到该文件：{req.RelativePath}（请先调用 lang.files 定位 lang 根；文件需是合法 UTF-8 JSON）");
+
+        var entries = LangTextWorkbenchService.Entries(text);
+        var take = Math.Clamp(req.Take <= 0 ? IpcGatewayConstants.DefaultPageSize : req.Take, 1, 500);
+        var offset = Math.Max(0, req.Offset);
+        var items = entries.Skip(offset).Take(take)
+            .Select(e => new LangFileEntryItem(e.KeyPath, e.Value)).ToList();
+        return IpcResponse.Success(request.Id,
+            new LangFileEntriesResponse(req.RelativePath, items, entries.Count, offset, take));
+    }
+
+    /// <summary>
+    /// lang.applyPatch：<b>按 key 写回</b>——只改给定键，文件里其它内容原样保留。
+    ///
+    /// <para>为什么不能复用 lang.editEntry：后者是「整份文本替换」，逐条调用会互相覆盖
+    /// （第二条把第一条的改动冲掉）。这里先取当前文本、按 key 打补丁、再整体写回编辑集。</para>
+    ///
+    /// <para>写回仍走既有编辑集（<c>BeginEdit</c> 留官方基线 + <c>SetModified</c>），
+    /// 并向当前项目的 <c>Edits</c> 追加一条 PatchJson 记录，导出清单才看得到。</para>
+    /// </summary>
+    private IpcResponse HandleLangApplyPatch(IpcRequest request)
+    {
+        var req = DeserializePayload<LangApplyPatchRequest>(request);
+        if (string.IsNullOrWhiteSpace(req.RelativePath))
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "缺少文件路径（relativePath）");
+        if (req.Edits is null || req.Edits.Count == 0)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "没有要应用的改动（edits 为空）");
+
+        var project = _projectState.Project;
+        if (project is null)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "请先打开项目");
+
+        string baseText;
+        try
+        {
+            var langRoot = LangRoot();
+            if (langRoot is null)
+                return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "未配置游戏目录");
+            _langText.AttachLangRoot(langRoot);
+            baseText = _langText.TryGetModifiedText(req.RelativePath) ?? _langText.BeginEdit(req.RelativePath);
+        }
+        catch (FileNotFoundException ex)
+        {
+            return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound, $"lang 文件不存在：{ex.FileName}");
+        }
+        catch (InvalidDataException ex)
+        {
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, ex.Message);
+        }
+
+        var edits = req.Edits.Select(e => new LangKeyEdit(e.KeyPath, e.Value)).ToList();
+        LangPatchOutcome outcome;
+        try
+        {
+            outcome = LangTextWorkbenchService.ApplyEdits(baseText, edits);
+        }
+        catch (JsonException ex)
+        {
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery,
+                $"该文件不是合法 JSON，无法按 key 打补丁：{req.RelativePath}（{ex.Message}）");
+        }
+
+        if (outcome.Applied.Count == 0)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound,
+                $"一条都没生效：{req.RelativePath} 里找不到这些键 —— {string.Join("、", edits.Select(e => e.KeyPath).Take(5))}");
+
+        _langText.SetModified(req.RelativePath, outcome.Text);
+        project.Edits.Add(new EditOperation
+        {
+            Kind = EditOperationKind.PatchJson,
+            TargetPath = req.RelativePath,
+        });
+
+        var info = $"已按 key 写入 {req.RelativePath}：生效 {outcome.Applied.Count} 条";
+        if (outcome.Missing.Count > 0) info += $"，找不到 {outcome.Missing.Count} 条";
+        if (outcome.Rejected.Count > 0) info += $"，拒绝 {outcome.Rejected.Count} 条（数组元素不支持删除）";
+        return IpcResponse.Success(request.Id, new LangApplyPatchResponse(
+            req.RelativePath, outcome.Applied, outcome.Missing, outcome.Rejected, info));
     }
 
     private IpcResponse HandleLangExportPatch(IpcRequest request)

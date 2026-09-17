@@ -38,6 +38,27 @@ public enum LangTextSearchKind
 /// <param name="Snippet">命中片段（值命中时截取匹配附近窗口）。</param>
 public sealed record LangTextSearchHit(string RelativePath, LangTextSearchKind Kind, string? KeyPath, string? Snippet);
 
+/// <summary>一个 lang 文件里的一条键值（展平后的键路径 + 叶子文本）。</summary>
+/// <param name="KeyPath">展平键路径，与搜索命中的口径一致（如 <c>dataList/0/dialog</c>）。</param>
+/// <param name="Value">叶子值文本（字符串取原文，其它类型取 JSON 文本）。</param>
+public sealed record LangTextEntry(string KeyPath, string Value);
+
+/// <summary>一条按 key 的改动。</summary>
+/// <param name="KeyPath">展平键路径（<see cref="LangTextEntry.KeyPath"/> 同一口径）。</param>
+/// <param name="Value">新值；<b>null 表示删除该键</b>。</param>
+public sealed record LangKeyEdit(string KeyPath, string? Value);
+
+/// <summary>按 key 打补丁的结果（一次调用里逐条给结论，调用方据此回话，不静默丢弃）。</summary>
+/// <param name="Text">打完补丁后的整份 JSON 文本（无一条生效时等于原文）。</param>
+/// <param name="Applied">生效的键路径。</param>
+/// <param name="Missing">文件里找不到该键路径的改动（键名写错/已删）。</param>
+/// <param name="Rejected">被拒的改动：数组元素不支持删除（删了会打乱后续下标）。</param>
+public sealed record LangPatchOutcome(
+    string Text,
+    IReadOnlyList<string> Applied,
+    IReadOnlyList<string> Missing,
+    IReadOnlyList<string> Rejected);
+
 /// <summary>导出补丁时单个被编辑文件的结果。</summary>
 public sealed record LangTextExportFileStatus(string RelativePath, int OperationCount, string? Note = null);
 
@@ -441,6 +462,109 @@ public sealed class LangTextWorkbenchService
     public static LangTextSearchHit FileNameHitCandidate(string relativePath)
         => new(relativePath, LangTextSearchKind.FileName, null, relativePath);
 
+    // ── 按 key 的分页读取 / 写回 ───────────────────────────────────────
+
+    /// <summary>写盘用：与 <see cref="LangTextPatchService"/> 一致的缩进风格。</summary>
+    private static readonly JsonSerializerOptions Indented = new() { WriteIndented = true };
+
+    /// <summary>
+    /// 一个 lang 文件的<b>全部键值</b>（顺序与搜索命中一致：都走同一份叶子遍历）。
+    /// 空文本 / 非法 JSON → 空集合（不抛，调用方按「读不出来」处理）。
+    /// </summary>
+    public static IReadOnlyList<LangTextEntry> Entries(string? jsonText)
+    {
+        if (string.IsNullOrWhiteSpace(jsonText)) return [];
+        JsonNode? root;
+        try { root = JsonNode.Parse(jsonText); }
+        catch (JsonException) { return []; }
+        if (root is null) return [];
+        return EnumerateLeaves(root, string.Empty)
+            .Select(x => new LangTextEntry(x.Path, LeafToText(x.Node)))
+            .ToList();
+    }
+
+    /// <summary>
+    /// 按 key 打补丁：<b>只动给定键，文件里其它内容原样保留</b>（区别于整份文本替换——
+    /// 后者逐条调用会互相覆盖）。值 null = 删除该键。
+    ///
+    /// <para>逐条给结论：<c>Applied</c> 生效、<c>Missing</c> 键路径在文件里不存在、
+    /// <c>Rejected</c> 拒绝（数组元素删除会打乱下标，不做）。没有任何一条生效时
+    /// <c>Text</c> 等于原文，调用方不必担心写坏。</para>
+    /// </summary>
+    public static LangPatchOutcome ApplyEdits(string jsonText, IEnumerable<LangKeyEdit> edits)
+    {
+        var root = JsonNode.Parse(jsonText) ?? throw new JsonException("JSON 正文为空");
+        var applied = new List<string>();
+        var missing = new List<string>();
+        var rejected = new List<string>();
+
+        foreach (var edit in edits)
+        {
+            if (string.IsNullOrWhiteSpace(edit.KeyPath)) { missing.Add(edit.KeyPath ?? string.Empty); continue; }
+            var segments = edit.KeyPath.Split('/');
+            if (!TryResolveParent(root, segments, out var parent, out var last))
+            {
+                missing.Add(edit.KeyPath);
+                continue;
+            }
+
+            switch (parent)
+            {
+                case JsonObject obj:
+                    // 只改「文件里本来就有」的键：JsonObject 的索引器赋值会凭空造键，
+                    // 键名写错就会被当成「新增一条」静默生效——这不是按 key 改文本该有的行为。
+                    if (!obj.ContainsKey(last)) { missing.Add(edit.KeyPath); continue; }
+                    if (edit.Value is null)
+                    {
+                        obj.Remove(last);
+                    }
+                    else
+                    {
+                        obj[last] = JsonValue.Create(edit.Value);
+                    }
+                    applied.Add(edit.KeyPath);
+                    break;
+                case JsonArray array when int.TryParse(last, out var index) && index >= 0 && index < array.Count:
+                    if (edit.Value is null)
+                    {
+                        // 删数组元素会让后面所有下标前移，页面上「同一个 key」第二天就指到别的条目——宁可拒绝。
+                        rejected.Add(edit.KeyPath);
+                        continue;
+                    }
+                    array[index] = JsonValue.Create(edit.Value);
+                    applied.Add(edit.KeyPath);
+                    break;
+                default:
+                    missing.Add(edit.KeyPath);
+                    break;
+            }
+        }
+
+        return new LangPatchOutcome(root.ToJsonString(Indented), applied, missing, rejected);
+    }
+
+    /// <summary>沿键路径走到<b>倒数第二层</b>，返回直接父节点与最后一段（对象属性名 / 数组下标）。</summary>
+    private static bool TryResolveParent(JsonNode root, string[] segments, out JsonNode? parent, out string last)
+    {
+        parent = null;
+        last = segments[^1];
+        var current = root;
+        for (var i = 0; i < segments.Length - 1; i++)
+        {
+            var next = current switch
+            {
+                JsonObject obj when obj.TryGetPropertyValue(segments[i], out var value) => value,
+                JsonArray array when int.TryParse(segments[i], out var index)
+                                     && index >= 0 && index < array.Count => array[index],
+                _ => null,
+            };
+            if (next is null) return false;
+            current = next;
+        }
+        parent = current;
+        return true;
+    }
+
     private static IEnumerable<(string Path, JsonNode Node)> EnumerateLeaves(JsonNode node, string prefix)
     {
         switch (node)
@@ -481,6 +605,30 @@ public sealed class LangTextWorkbenchService
     }
 
     // ── 编辑集 ───────────────────────────────────────────────────────
+
+    /// <summary>
+    /// 只读地取一个条目的<b>当前文本</b>：编辑集里的修改文本 → 编辑集里的官方原文 → 磁盘原文。
+    ///
+    /// <para>为什么不能拿 <see cref="BeginEdit"/> 顶替：它会把文件登记进编辑集（影响
+    /// 「打开过哪些文件」），而浏览/定位只是读。读不到（未定位 lang 根 / 文件不存在 /
+    /// 非 UTF-8）一律返回 null，由调用方给中文原因。</para>
+    /// </summary>
+    public string? TryReadText(string relativePath)
+    {
+        if (TryGetModifiedText(relativePath) is { } modified) return modified;
+        if (TryGetVanillaText(relativePath) is { } vanilla) return vanilla;
+
+        var directory = _langDirectory ?? _langRoot;
+        if (directory is null) return null;
+        string normalized;
+        try { normalized = NormalizeRelativePath(relativePath); }
+        catch (Exception ex) when (ex is ArgumentException or InvalidDataException) { return null; }
+
+        var fullPath = Path.Combine(directory, normalized.Replace('/', Path.DirectorySeparatorChar));
+        if (!File.Exists(fullPath)) return null;
+        try { return ReadTextStrict(fullPath); }
+        catch (Exception ex) when (ex is InvalidDataException or IOException or UnauthorizedAccessException) { return null; }
+    }
 
     /// <summary>开始编辑一个文件：读取 lang 目录原文存为 vanilla 快照并进入编辑集，
     /// 返回当前应展示/编辑的文本（首次为原文；该文件已在编辑集中时返回当前修改文本，

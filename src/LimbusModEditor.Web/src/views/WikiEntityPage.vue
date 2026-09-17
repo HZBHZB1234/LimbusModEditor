@@ -262,8 +262,21 @@ function galleryOf(section: WikiSection): GalleryImage[] {
     .filter((b) => b.kind === 'Image')
     .flatMap<GalleryImage>((b) => {
       const url = resolveMediaUrl(b)
-      return url ? [{ url, caption: b.display }] : []
+      return url ? [{ url, caption: b.display, editTo: assetEditUrl(b.refKey) }] : []
     })
+}
+
+/**
+ * 资源绑定的「去编辑」目标：资源工作台按容器路径定位。
+ * refKey 为空时不给链接（不猜跳转目标）——按钮也不渲染。
+ */
+function assetEditUrl(refKey: string | undefined | null): string | undefined {
+  if (!refKey || refKey.trim() === '') return undefined
+  return `/assets?container=${encodeURIComponent(refKey)}`
+}
+
+function goEditAsset(target: string) {
+  router.push(target)
 }
 
 /** 其余绑定（StaticData / Text / Prefab / Video / Mesh / Animation …）走纯列表 */
@@ -558,6 +571,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
                     v-if="galleryOf(section).length > 0"
                     :images="galleryOf(section)"
                     title="图集"
+                    @edit="goEditAsset"
                   />
                   <WikiSpineViewer
                     v-if="spineMap[section.id]"
@@ -570,6 +584,14 @@ function formatFieldValue(field: { value: string; type: string }): string {
                       <li v-for="b in otherBindingsOf(section)" :key="b.refKey" class="binding-item">
                         <span class="binding-kind">{{ b.kind }}</span>
                         <span class="binding-display">{{ b.display }}</span>
+                        <button
+                          v-if="assetEditUrl(b.refKey)"
+                          class="binding-edit-btn"
+                          title="到资源工作台定位这条容器路径"
+                          @click="goEditAsset(assetEditUrl(b.refKey)!)"
+                        >
+                          去编辑
+                        </button>
                       </li>
                     </ul>
                   </div>
@@ -644,6 +666,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
                   v-if="galleryOf(section).length > 0"
                   :images="galleryOf(section)"
                   title="图集"
+                  @edit="goEditAsset"
                 />
                 <WikiSpineViewer
                   v-if="spineMap[section.id]"
@@ -656,6 +679,14 @@ function formatFieldValue(field: { value: string; type: string }): string {
                     <li v-for="b in otherBindingsOf(section)" :key="b.refKey" class="binding-item">
                       <span class="binding-kind">{{ b.kind }}</span>
                       <span class="binding-display">{{ b.display }}</span>
+                      <button
+                        v-if="assetEditUrl(b.refKey)"
+                        class="binding-edit-btn"
+                        title="到资源工作台定位这条容器路径"
+                        @click="goEditAsset(assetEditUrl(b.refKey)!)"
+                      >
+                        去编辑
+                      </button>
                     </li>
                   </ul>
                 </div>
@@ -1026,6 +1057,22 @@ function formatFieldValue(field: { value: string; type: string }): string {
 .binding-display {
   color: var(--lme-text-primary);
   word-break: break-all;
+}
+
+.binding-edit-btn {
+  flex-shrink: 0;
+  padding: 1px 8px;
+  background: var(--lme-bg-elevated);
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-sm);
+  color: var(--wiki-link);
+  font-size: var(--lme-font-size-xs);
+  cursor: pointer;
+}
+
+.binding-edit-btn:hover {
+  background: var(--lme-bg-hover);
+  border-color: var(--lme-accent);
 }
 
 /* ═══════════════ 相关页面 ═══════════════ */

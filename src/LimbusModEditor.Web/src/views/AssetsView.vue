@@ -3,7 +3,8 @@
 // 对应 WPF 旧界面 AssetsWorkbenchPage
 // 差异说明见文件底部注释
 
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { useCatalogStore } from '@/stores/catalog'
 import { useUiStateStore } from '@/stores/uiState'
 import SearchFilters from '@/components/SearchFilters.vue'
@@ -15,6 +16,7 @@ import type { AssetSearchQuery } from '@/ipc'
 
 const catalog = useCatalogStore()
 const uiState = useUiStateStore()
+const route = useRoute()
 
 // 性能测量状态
 const perfMeasurements = ref<
@@ -98,12 +100,44 @@ function stateLabel(state: string): string {
   return map[state] ?? state
 }
 
+// ═══════════ 按容器路径定位（维基「去编辑」深链）═══════════
+
+/** /assets?container=<游戏内资源路径> */
+const containerFromQuery = computed(() => {
+  const raw = route.query.container
+  return typeof raw === 'string' ? raw.trim() : ''
+})
+
+/**
+ * 用现有能力定位：后端没有「按容器路径取一条」的 IPC（catalog.locate 只收
+ * assetId），所以把路径填进搜索框查一次（文本匹配面含容器路径），再在当页
+ * 结果里按 metadata.containerEntry 精确选中同一条。
+ * 命中 → 行高亮 + 预览面板出图；未命中 → 只留搜索结果，路径在搜索框里可见。
+ */
+async function focusContainer(path: string) {
+  await catalog.search({ text: path })
+  const lower = path.toLowerCase()
+  const hit = catalog.items.find(
+    (a) =>
+      (a.metadata?.containerEntry ?? '').toLowerCase() === lower ||
+      a.logicalPath.toLowerCase() === lower,
+  )
+  if (hit) catalog.selectAsset(hit.assetId)
+}
+
 // 初始加载
 onMounted(() => {
   const t0 = performance.now()
-  catalog.search().then(() => {
-    recordPerf('初始加载', performance.now() - t0)
+  const target = containerFromQuery.value
+  const task = target ? focusContainer(target) : catalog.search()
+  task.then(() => {
+    recordPerf(target ? '按容器路径定位' : '初始加载', performance.now() - t0)
   })
+})
+
+// 已挂载时再从维基点一次「去编辑」：query 变了就重新定位
+watch(containerFromQuery, (path) => {
+  if (path) void focusContainer(path)
 })
 
 // 虚拟列表高度自适应

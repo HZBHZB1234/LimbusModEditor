@@ -263,6 +263,8 @@ export interface GalleryImage {
   url: string
   caption?: string
   credit?: string
+  /** 「去编辑」目标路由（形如 /assets?container=...）；无则不显示该链接 */
+  editTo?: string
 }
 
 export interface WikiRelatedPage {

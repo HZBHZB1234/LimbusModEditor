@@ -17,6 +17,9 @@ const props = withDefaults(
   { thumbMin: 'var(--wiki-gallery-thumb-min)' },
 )
 
+/** 点某张图的「去编辑」：把该图的 editTo 交给调用方跳转（组件自己不碰路由） */
+const emit = defineEmits<{ (e: 'edit', target: string): void }>()
+
 /** 当前放大索引；null 表示关闭 */
 const openIndex = ref<number | null>(null)
 /** 加载失败的图（按 url 记录），显示占位态 */
@@ -101,6 +104,15 @@ onUnmounted(() => {
         />
         <span v-else class="wiki-gallery-broken">图片不可用</span>
         <span v-if="img.caption" class="wiki-gallery-caption">{{ img.caption }}</span>
+        <!-- 只有拿到容器路径（editTo）才显示，不猜跳转目标 -->
+        <span
+          v-if="img.editTo"
+          class="wiki-gallery-edit"
+          title="到资源工作台定位这条容器路径"
+          @click.stop="emit('edit', img.editTo)"
+        >
+          去编辑
+        </span>
       </button>
     </div>
 
@@ -207,6 +219,17 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.wiki-gallery-edit {
+  padding: 0 var(--lme-gap-sm) var(--lme-gap-xs);
+  font-size: var(--lme-font-size-xs);
+  color: var(--wiki-link);
+  text-align: left;
+}
+
+.wiki-gallery-edit:hover {
+  text-decoration: underline;
 }
 
 /* ── 放大遮罩 ── */

@@ -719,8 +719,15 @@ public sealed partial class IpcGateway
         var plan = _exportPlan.Plan(project, targetDir, langEdits, staticEdits);
         var slots = plan.Items.Select(i => new ExportSlot(i.Descriptor.DisplayName, i.Directory, i.ArtifactCount)).ToList();
         var skipped = plan.Items.Where(i => !i.Planned).Select(i => i.SkipReason ?? "未知原因").ToList();
-        return IpcResponse.Success(request.Id, new ExportPlanResponse(slots, skipped));
+        return IpcResponse.Success(request.Id, new ExportPlanResponse(slots, skipped, ToValidationDto(plan.Validation)));
     }
+
+    /// <summary>写前校验 → IPC DTO（分级文本用 error / warning / info，前端直接按级分色）。</summary>
+    private static ExportValidationDto ToValidationDto(ModExportValidation validation) =>
+        new(validation.ChangedCount, validation.CheckedFileCount, validation.ErrorCount,
+            validation.WarningCount, validation.HasBlockingError,
+            validation.Checks.Select(x => new ExportCheckDto(x.LevelText, x.Target, x.Message)).ToArray(),
+            validation.Info);
 
     private async Task<IpcResponse> HandleExportRunAsync(IpcRequest request)
     {
@@ -767,7 +774,8 @@ public sealed partial class IpcGateway
             ? $"没有写出任何产物（{result.Slots.Count} 个槽位全部跳过）→ {result.RootDirectory}"
             : $"已写出 {result.WrittenSlotCount} 个槽位 / {result.WrittenFileCount} 个产物 → {result.RootDirectory}";
         return IpcResponse.Success(request.Id, new ExportRunResponse(true, result.RootDirectory, result.ModName,
-            items.Count, result.WrittenSlotCount, result.WrittenFileCount, items, skipped, info));
+            items.Count, result.WrittenSlotCount, result.WrittenFileCount, items, skipped, info,
+            ToValidationDto(plan.Validation)));
     }
 
     // ── 2.7 配置 / UI 状态 ──────────────────────────────────────────

@@ -287,10 +287,24 @@ public sealed record ProjectRecentResponse(
 /// <summary>export.plan 请求载荷。</summary>
 public sealed record ExportPlanRequest;
 
+/// <summary>写前校验的一条结论（分级 + 中文理由）。Level 取 error / warning / info。</summary>
+public sealed record ExportCheckDto(string Level, string Target, string Message);
+
+/// <summary>写前校验汇总（dry-run、只读）：随 export.plan / export.run 一起返回给「导出前校验」面板。</summary>
+public sealed record ExportValidationDto(
+    int ChangedCount,
+    int CheckedFileCount,
+    int ErrorCount,
+    int WarningCount,
+    bool HasBlockingError,
+    IReadOnlyList<ExportCheckDto> Checks,
+    string Info);
+
 /// <summary>export.plan 响应载荷。</summary>
 public sealed record ExportPlanResponse(
     IReadOnlyList<ExportSlot> Slots,
-    IReadOnlyList<string> SkippedReasons);
+    IReadOnlyList<string> SkippedReasons,
+    ExportValidationDto Validation);
 
 /// <summary>导出槽位。</summary>
 public sealed record ExportSlot(
@@ -329,7 +343,8 @@ public sealed record ExportRunResponse(
     int WrittenFileCount,
     IReadOnlyList<ExportRunItem> Items,
     IReadOnlyList<string> Skipped,
-    string Info);
+    string Info,
+    ExportValidationDto Validation);
 
 // ── 工具 ─────────────────────────────────────────────────────────
 

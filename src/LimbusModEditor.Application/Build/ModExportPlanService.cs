@@ -74,8 +74,14 @@ public sealed record ModExportPlan(
     IReadOnlyList<AssetRecord> UnityObjects,
     IReadOnlyList<LangEditEntry> LangEntries,
     IReadOnlyList<StaticEditEntry> StaticEntries,
-    IReadOnlyList<ModExportPlanItem> Items)
+    IReadOnlyList<ModExportPlanItem> Items,
+    ModExportValidation? Validation = null)
 {
+    /// <summary>
+    /// 写前校验结论（<see cref="ModExportValidator"/>）：dry-run、只读，随计划一起返回，
+    /// 让「导出前校验」面板在写盘前就能摆出 error / warning。
+    /// </summary>
+    public ModExportValidation Validation { get; init; } = Validation ?? new ModExportValidation(0, 0, []);
     /// <summary>计划写出的槽位数。</summary>
     public int PlannedSlotCount => Items.Count(x => x.Planned);
 
@@ -172,7 +178,9 @@ public sealed class ModExportPlanService
                 Log.Debug("槽位 {0}：不写出，跳过原因 {1}，目录 {2}",
                     item.Descriptor.DisplayName, item.SkipReason ?? "-", item.Directory);
         }
-        var plan = new ModExportPlan(root, modName, banks, unityObjects, langEntries, staticEntries, items);
+        var validation = new ModExportValidator().Validate(project);
+        Log.Info("写前校验：{0}", validation.Info);
+        var plan = new ModExportPlan(root, modName, banks, unityObjects, langEntries, staticEntries, items, validation);
         Log.Info("生成导出计划完成：槽位 {0} 个，其中写出 {1} 个，产物合计 {2} 个",
             items.Count, plan.PlannedSlotCount, plan.PlannedArtifactCount);
         return plan;

@@ -4,7 +4,7 @@
 // 数据来源：ipc.request('wiki.home', {})
 // 布局：WikiShell 包裹
 
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ipc } from '@/ipc'
 import WikiShell from '@/components/WikiShell.vue'
@@ -16,7 +16,9 @@ import type {
   ProgressPayload,
   WikiGenerateResponse,
   WikiGenerateStatusResponse,
+  WikiPageCategory,
 } from '@/ipc'
+import { WikiPageCategoryLabels } from '@/ipc/types'
 
 const router = useRouter()
 
@@ -118,39 +120,47 @@ async function generatePages() {
   }
 }
 
-function categoryLabel(category: string): string {
-  const map: Record<string, string> = {
-    persona: '人格',
-    enemy: '敌方单位',
-    abnormality: '异想体',
-    ego: 'E.G.O 装备',
-    ego_gift: 'E.G.O 饰品',
-    announcer: '播报员',
-    story: '剧情',
-    stage: '关卡',
-    item: '物品',
-    mechanism: '机制',
-    keyword: '关键词',
-  }
-  return map[category] ?? category
+// 11 个维基分类的固定顺序（与侧栏一致）；后端只回传有内容的分类，
+// 缺席的分类照常给入口卡片，但计数显示「本地无来源」而不是假数字。
+const ALL_CATEGORIES = Object.keys(WikiPageCategoryLabels) as WikiPageCategory[]
+
+const CATEGORY_ICONS: Record<WikiPageCategory, string> = {
+  persona: '🎭',
+  enemy: '👹',
+  abnormality: '🌀',
+  ego: '⚔️',
+  ego_gift: '💍',
+  announcer: '📢',
+  story: '📖',
+  stage: '🗺️',
+  item: '🎒',
+  mechanism: '⚙️',
+  keyword: '🔑',
 }
 
-function categoryIcon(category: string): string {
-  const map: Record<string, string> = {
-    persona: '🎭',
-    enemy: '👹',
-    abnormality: '🌀',
-    ego: '⚔️',
-    ego_gift: '💍',
-    announcer: '📢',
-    story: '📖',
-    stage: '🗺️',
-    item: '🎒',
-    mechanism: '⚙️',
-    keyword: '🔑',
-  }
-  return map[category] ?? '📄'
+function categoryLabel(category: WikiPageCategory): string {
+  return WikiPageCategoryLabels[category] ?? category
 }
+
+function categoryIcon(category: WikiPageCategory): string {
+  return CATEGORY_ICONS[category] ?? '📄'
+}
+
+/** 后端计数按分类索引；只信真实回传，不补零 */
+const countByCategory = computed(() => {
+  const map = new Map<string, HomeCategoryCard>()
+  for (const card of homeData.value?.categories ?? []) map.set(card.category, card)
+  return map
+})
+
+const categoryCards = computed(() =>
+  ALL_CATEGORIES.map((category) => ({
+    category,
+    label: categoryLabel(category),
+    icon: categoryIcon(category),
+    card: countByCategory.value.get(category) ?? null,
+  })),
+)
 
 // ── 进度事件订阅（只认自己那次生成）──
 let unsubscribeProgress: (() => void) | null = null
@@ -175,11 +185,13 @@ onUnmounted(() => {
   <WikiShell>
     <div class="wiki-home">
       <div class="wiki-home-container">
-        <!-- ── Hero 区域 ── -->
+        <!-- ── Hero 区域（对齐灰机首页：暗底横幅 + 金色大标题） ── -->
         <section class="hero-section">
           <div class="hero-content">
-            <h1 class="hero-title">Limbus Mod Wiki</h1>
-            <p class="hero-subtitle">Limbus Company 模组编辑知识库 · 人格、异想体、E.G.O 与机制百科</p>
+            <h1 class="hero-title">Limbus Company 中文维基</h1>
+            <p class="hero-subtitle">
+              边狱公司模组编辑知识库 · 人格、E.G.O、敌方单位与剧情百科 · 数据来自本地游戏文件
+            </p>
           </div>
           <div class="hero-search">
             <input
@@ -269,39 +281,31 @@ onUnmounted(() => {
           <h2 class="section-title">分类浏览</h2>
           <div class="category-grid">
             <div
-              v-for="card in (homeData?.categories ?? [])"
-              :key="card.category"
+              v-for="entry in categoryCards"
+              :key="entry.category"
               class="category-card"
-              @click="navigateToCategory(card.category)"
+              :class="{ 'no-source': !entry.card || entry.card.pageCount === 0 }"
+              @click="navigateToCategory(entry.category)"
             >
               <div class="card-header">
-                <span class="card-icon">{{ card.icon || categoryIcon(card.category) }}</span>
-                <span class="card-label">{{ card.label || categoryLabel(card.category) }}</span>
+                <span class="card-icon">{{ entry.card?.icon || entry.icon }}</span>
+                <span class="card-label">{{ entry.card?.label || entry.label }}</span>
               </div>
-              <div class="card-count">{{ card.pageCount }} 页</div>
-              <div class="card-featured" v-if="card.featuredPages?.length">
+              <div v-if="entry.card && entry.card.pageCount > 0" class="card-count">
+                {{ entry.card.pageCount.toLocaleString('zh-CN') }} 页
+              </div>
+              <div v-else class="card-count card-count-empty">本地无来源</div>
+              <div class="card-featured" v-if="entry.card?.featuredPages?.length">
                 <span
-                  v-for="fp in card.featuredPages.slice(0, 3)"
+                  v-for="fp in entry.card.featuredPages.slice(0, 3)"
                   :key="fp.id"
                   class="featured-item"
+                  :title="fp.title"
                   @click.stop="navigateToPage(fp.id)"
                 >
                   {{ fp.title }}
                 </span>
               </div>
-            </div>
-
-            <!-- 离线降级占位：至少展示 12 个分类占位 -->
-            <div
-              v-for="i in (homeData?.categories?.length ? 0 : 12)"
-              :key="`placeholder-${i}`"
-              class="category-card placeholder-card"
-            >
-              <div class="card-header">
-                <span class="card-icon">📄</span>
-                <span class="card-label">分类</span>
-              </div>
-              <div class="card-count">— 页</div>
             </div>
           </div>
         </section>
@@ -346,14 +350,14 @@ onUnmounted(() => {
   gap: var(--lme-gap-xl);
 }
 
-/* ── Hero 区域 ── */
+/* ── Hero 区域（对齐灰机首页横幅观感） ── */
 .hero-section {
   display: flex;
   flex-direction: column;
   gap: var(--lme-gap-lg);
-  padding: var(--lme-gap-xl);
-  background: var(--lme-bg-panel);
-  border: 1px solid var(--lme-border);
+  padding: var(--lme-gap-xl) var(--lme-gap-xl) var(--lme-gap-lg);
+  background: var(--wiki-hero-bg);
+  border: 1px solid var(--wiki-hero-border);
   border-radius: var(--lme-radius-lg);
   position: relative;
   overflow: hidden;
@@ -366,26 +370,29 @@ onUnmounted(() => {
   left: 0;
   right: 0;
   height: 3px;
-  background: linear-gradient(90deg, var(--lme-accent), var(--lme-accent-hover));
+  background: linear-gradient(90deg, transparent, var(--wiki-hero-accent-line), transparent);
 }
 
 .hero-content {
   display: flex;
   flex-direction: column;
   gap: var(--lme-gap-sm);
+  text-align: center;
+  padding: var(--lme-gap-md) 0 var(--lme-gap-xs);
 }
 
 .hero-title {
   margin: 0;
-  font-size: 28px;
+  font-size: 34px;
   font-weight: 700;
-  color: var(--lme-text-primary);
+  letter-spacing: 2px;
+  color: var(--wiki-hero-title);
 }
 
 .hero-subtitle {
   margin: 0;
   font-size: var(--lme-font-size-md);
-  color: var(--lme-text-muted);
+  color: var(--wiki-hero-subtitle);
 }
 
 .hero-search {
@@ -557,21 +564,23 @@ onUnmounted(() => {
 .stat-value {
   font-size: var(--lme-font-size-xl);
   font-weight: 700;
-  color: var(--lme-accent);
+  color: var(--wiki-stat-value);
+  font-variant-numeric: tabular-nums;
 }
 
 .stat-label {
   font-size: var(--lme-font-size-xs);
-  color: var(--lme-text-muted);
+  color: var(--wiki-stat-label);
 }
 
 /* ── 分区标题 ── */
 .section-title {
   margin: 0;
   font-size: var(--lme-font-size-lg);
-  color: var(--lme-text-primary);
+  font-weight: 700;
+  color: var(--wiki-section-title);
   padding-bottom: var(--lme-gap-sm);
-  border-bottom: 1px solid var(--lme-border);
+  border-bottom: 1px solid var(--wiki-section-head-border);
 }
 
 /* ── 分类卡片网格 ── */
@@ -592,26 +601,22 @@ onUnmounted(() => {
   flex-direction: column;
   gap: var(--lme-gap-sm);
   padding: var(--lme-gap-md);
-  background: var(--lme-bg-panel);
-  border: 1px solid var(--lme-border);
+  background: var(--wiki-card-bg);
+  border: 1px solid var(--wiki-card-border);
   border-radius: var(--lme-radius-md);
   cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
+  transition: border-color 0.15s, background 0.15s, transform 0.15s;
 }
 
 .category-card:hover {
-  border-color: var(--lme-accent);
-  background: var(--lme-bg-hover);
+  border-color: var(--wiki-card-hover-border);
+  background: var(--wiki-card-hover-bg);
+  transform: translateY(-1px);
 }
 
-.category-card.placeholder-card {
-  opacity: 0.4;
-  cursor: default;
-}
-
-.placeholder-card:hover {
-  border-color: var(--lme-border);
-  background: var(--lme-bg-panel);
+/* 无本地来源的分类：保留入口但视觉弱化，不显示假数字 */
+.category-card.no-source {
+  opacity: 0.55;
 }
 
 .card-header {
@@ -633,6 +638,11 @@ onUnmounted(() => {
 .card-count {
   font-size: var(--lme-font-size-sm);
   color: var(--lme-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.card-count-empty {
+  color: var(--wiki-cat-empty-text);
 }
 
 .card-featured {
@@ -644,7 +654,7 @@ onUnmounted(() => {
 
 .featured-item {
   font-size: var(--lme-font-size-xs);
-  color: var(--lme-text-secondary);
+  color: var(--wiki-link);
   padding: 2px 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -652,7 +662,8 @@ onUnmounted(() => {
 }
 
 .featured-item:hover {
-  color: var(--lme-accent);
+  color: var(--wiki-accent-strong);
+  text-decoration: underline;
 }
 
 /* ── 最近编辑 ── */
@@ -673,16 +684,16 @@ onUnmounted(() => {
   align-items: center;
   gap: var(--lme-gap-md);
   padding: var(--lme-gap-sm) var(--lme-gap-md);
-  background: var(--lme-bg-panel);
-  border: 1px solid var(--lme-border);
+  background: var(--wiki-card-bg);
+  border: 1px solid var(--wiki-card-border);
   border-radius: var(--lme-radius-sm);
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
 }
 
 .recent-item:hover {
-  border-color: var(--lme-accent);
-  background: var(--lme-bg-hover);
+  border-color: var(--wiki-card-hover-border);
+  background: var(--wiki-card-hover-bg);
 }
 
 .recent-title {
@@ -697,11 +708,11 @@ onUnmounted(() => {
 
 .recent-category {
   font-size: var(--lme-font-size-xs);
-  color: var(--lme-accent);
-  padding: 1px 6px;
-  background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
+  color: var(--wiki-chip-text);
+  padding: 1px 8px;
+  background: var(--wiki-chip-bg);
+  border: 1px solid var(--wiki-chip-border);
+  border-radius: var(--wiki-chip-radius);
   flex-shrink: 0;
 }
 

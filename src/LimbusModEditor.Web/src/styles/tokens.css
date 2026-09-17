@@ -175,6 +175,35 @@
   --wiki-content-max-width: 980px;
   --wiki-body-text: var(--lme-text-primary);
   --wiki-entry-title: var(--lme-text-primary);
+
+  /* ── 维基：首页（对齐灰机首页：暗横幅 + 金标题 + 分类卡网格） ── */
+  --wiki-hero-bg: rgba(24, 24, 36, 0.85);          /* 首页横幅底 */
+  --wiki-hero-border: var(--wiki-accent-dim);
+  --wiki-hero-title: var(--wiki-title);
+  --wiki-hero-subtitle: var(--lme-text-secondary);
+  --wiki-hero-accent-line: var(--wiki-accent);
+  --wiki-stat-value: var(--wiki-accent);            /* 统计卡数值 */
+  --wiki-stat-label: var(--lme-text-muted);
+  --wiki-card-bg: var(--lme-bg-panel);              /* 分类卡 */
+  --wiki-card-border: var(--lme-border);
+  --wiki-card-hover-border: var(--wiki-accent);
+  --wiki-card-hover-bg: var(--lme-bg-hover);
+  --wiki-cat-empty-text: var(--lme-text-disabled);  /* "本地无来源" */
+  --wiki-section-head-border: var(--wiki-accent-dim); /* 区块标题分隔线 */
+
+  /* ── 维基：外壳（侧栏导航 + 面包屑 + 侧栏搜索框） ── */
+  --wiki-nav-active-bg: rgba(230, 182, 70, 0.12);
+  --wiki-nav-active-text: var(--wiki-accent);
+  --wiki-nav-active-bar: var(--wiki-accent);        /* 激活项左缘金条 */
+  --wiki-shell-search-bg: var(--lme-bg-input);
+  --wiki-breadcrumb-text: var(--lme-text-muted);
+  --wiki-breadcrumb-link: var(--wiki-link);
+
+  /* ── 维基：搜索页 / 分类页结果卡 ── */
+  --wiki-result-title: var(--wiki-link);
+  --wiki-result-snippet: var(--lme-text-secondary);
+  --wiki-thumb-bg: var(--lme-bg-elevated);          /* 缩略图/封面中性占位底 */
+  --wiki-thumb-icon: var(--lme-text-disabled);
 }
 
 /* ── 全局基础 ── */

@@ -149,6 +149,26 @@
   --wiki-audio-row-hover: var(--lme-bg-hover);
   --wiki-audio-playing-bg: rgba(230, 182, 70, 0.15);
 
+  /* ── 维基：媒体占位（图裂/无 URL 时的中性占位，不伪造内容） ── */
+  --wiki-media-broken-bg: var(--lme-bg-input);
+  --wiki-media-broken-text: var(--lme-text-disabled);
+  --wiki-canvas-bg: #0a0a1a; /* Spine/动画画布底色 */
+
+  /* ── 维基：分节 Tab 分组 ── */
+  --wiki-tab-text: var(--lme-text-secondary);
+  --wiki-tab-text-hover: var(--lme-text-primary);
+  --wiki-tab-active-text: var(--wiki-accent);
+  --wiki-tab-active-bg: rgba(230, 182, 70, 0.12);
+  --wiki-tab-border: var(--lme-border);
+  --wiki-tab-active-border: var(--wiki-accent);
+
+  /* ── 维基：来源标注徽章 ── */
+  --wiki-badge-bg: var(--lme-bg-elevated);
+  --wiki-badge-border: var(--lme-border-strong);
+  --wiki-badge-text: var(--lme-text-secondary);
+  --wiki-badge-writable-bg: rgba(76, 175, 122, 0.12);
+  --wiki-badge-writable-text: var(--lme-success);
+
   /* ── 维基：正文区 ── */
   --wiki-content-max-width: 980px;
   --wiki-body-text: var(--lme-text-primary);

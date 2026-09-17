@@ -896,11 +896,28 @@ public sealed partial class IpcGateway
         var cover = await _wikiMedia.ResolveImageAsync(page.CoverRef).ConfigureAwait(false);
 
         // 信息框：只写本地确实拿得到的字段（类别名/标题/副标题/分节数/条目数），不编造。
+        // 人格页另外把「数据」分节的条目补成真实字段（静态表行级数据生成，
+        // 见 PersonaBaseDataSections）：条目标题当标签、正文首行当值；缺数据就不补。
         var infobox = new List<WikiInfoboxRowDto>();
         if (!string.IsNullOrWhiteSpace(page.CategoryLabel))
             infobox.Add(new WikiInfoboxRowDto("类别", page.CategoryLabel));
         if (!string.IsNullOrWhiteSpace(page.Subtitle))
             infobox.Add(new WikiInfoboxRowDto("副标题", page.Subtitle));
+        if (string.Equals(page.Category, RelationCategories.Persona, StringComparison.Ordinal))
+        {
+            var dataSection = sections.FirstOrDefault(s =>
+                string.Equals(s.Title, "数据", StringComparison.Ordinal));
+            if (dataSection is not null)
+            {
+                foreach (var entry in dataSection.Entries.Take(MaxInfoboxDataRows))
+                {
+                    if (string.IsNullOrWhiteSpace(entry.Title)) continue;
+                    var value = InfoboxValueOf(entry.Body);
+                    if (value is null) continue;
+                    infobox.Add(new WikiInfoboxRowDto(entry.Title, value));
+                }
+            }
+        }
         infobox.Add(new WikiInfoboxRowDto("分节", sections.Count.ToString(CultureInfo.InvariantCulture)));
         infobox.Add(new WikiInfoboxRowDto("条目",
             sections.Sum(s => s.Entries.Count).ToString(CultureInfo.InvariantCulture)));
@@ -916,6 +933,17 @@ public sealed partial class IpcGateway
 
     /// <summary>画廊最多给多少项（超出截断，避免整页塞满同名静态图）。</summary>
     private const int MaxGalleryItems = 24;
+
+    /// <summary>信息框最多从「数据」分节补多少条真实字段。</summary>
+    private const int MaxInfoboxDataRows = 12;
+
+    /// <summary>信息框字段值 = 正文首行（多行条目只取第一行，避免把整段塞进信息框）。</summary>
+    private static string? InfoboxValueOf(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return null;
+        var firstLine = body.Split('\n')[0].Trim();
+        return firstLine.Length == 0 ? null : firstLine;
+    }
 
     /// <summary>
     /// 资源的可展示地址。二进制走 <c>lme.data</c> 虚拟主机（禁止 base64）；

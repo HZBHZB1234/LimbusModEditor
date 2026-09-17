@@ -4,6 +4,7 @@ using LimbusModEditor.Application.AppConfig;
 using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Application.Caching;
 using LimbusModEditor.Application.Relations.Authority;
+using LimbusModEditor.Application.Relations.WikiBaseData;
 using LimbusModEditor.Application.Scanning;
 using LimbusModEditor.Application.StaticMods;
 using LimbusModEditor.Application.Texts;
@@ -156,6 +157,11 @@ public sealed class WikiAutoGenerationService
 
         var writeStats = new WriteStats();
 
+        // ── 基础数据三节（数据/技能/被动）的取数目录：静态表行级 + Lang 实体 ──
+        // 前提缺失（索引没建/游戏目录没有）→ null → 人格页退回原编排，不阻断。
+        using var staticRows = StaticRowCatalog.TryCreate(cacheDirectory, unityCacheDirectory);
+        var langCatalog = WikiLangCatalog.TryCreate(languageDirectory);
+
         // ── ② 逐对象生成实体页 ──
         var arranger = new WikiPageArranger(relations);
         var engine = new WikiPageAuthorityEngine();
@@ -173,6 +179,8 @@ public sealed class WikiAutoGenerationService
                 byRef.TryAdd(fact.RefKey, fact);
 
             var detail = Materialize(subject, arranged, byRef, writeStats);
+            // 人格页：按静态表行级数据补「数据/技能/被动」三节（缺数据就维持原样）。
+            detail = MergePersonaBaseData(subject.SubjectId, detail, staticRows, langCatalog);
             if (detail.SubPages.Count == 0) continue;
 
             var save = store.SaveGeneratedPage(detail);
@@ -429,6 +437,29 @@ public sealed class WikiAutoGenerationService
         }
 
         return new WikiPageDetail(arranged.Page, subPages);
+    }
+
+    /// <summary>
+    /// 人格页专属：按静态表行级数据构建「数据/技能/被动」三节并合并进页面树
+    /// （见 <see cref="WikiBaseData.PersonaBaseDataSections"/>）。非人格/前提缺失/本地无该行 → 原样返回。
+    /// </summary>
+    private static WikiPageDetail MergePersonaBaseData(
+        string subjectId, WikiPageDetail detail,
+        StaticRowCatalog? statics, WikiLangCatalog? lang)
+    {
+        if (statics is null || lang is null) return detail;
+        var separator = subjectId.IndexOf(':');
+        if (separator <= 0) return detail;
+        if (!string.Equals(subjectId[..separator], RelationCategories.Persona, StringComparison.Ordinal)) return detail;
+        if (!long.TryParse(subjectId[(separator + 1)..], out var personaId)) return detail;
+
+        var baseData = PersonaBaseDataSections.TryBuild(personaId, statics, lang);
+        if (baseData is null) return detail;
+
+        var merged = PersonaBaseDataMerge.MergeInto(detail, baseData);
+        Log.Debug("人格 {0} 基础数据三节：数据 {1} / 技能 {2} / 被动 {3} 条",
+            subjectId, baseData.BaseData.Count, baseData.Skills.Count, baseData.Passives.Count);
+        return merged;
     }
 
     /// <summary>

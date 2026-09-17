@@ -2,10 +2,12 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using LimbusModEditor.Application.AppConfig;
 using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Application.Build;
 using LimbusModEditor.Application.Catalog;
+using LimbusModEditor.Application.Debugging;
 using LimbusModEditor.Application.Projects;
 using LimbusModEditor.Application.Relations;
 using LimbusModEditor.Application.Scanning;
@@ -274,8 +276,8 @@ public sealed partial class IpcGateway
             "static.tableList" => HandleStaticTableList(request),
             "static.records" => await HandleStaticRecordsAsync(request),
             "static.locate" => HandleStaticLocate(request),
-            "static.readRecord" => HandleStaticReadRecord(request),
-            "static.editRecord" => HandleStaticEditRecord(request),
+            "static.readRecord" => await HandleStaticReadRecordAsync(request),
+            "static.editRecord" => await HandleStaticEditRecordAsync(request),
             "static.exportStaticmod" => HandleStaticExportStaticmod(request),
 
             // ── 维基页面数据 ────────────────────────────────────────────
@@ -1222,49 +1224,79 @@ public sealed partial class IpcGateway
     }
 
     /// <summary>
-    /// static.records：一张静态表的记录分页。
+    /// 静态表读取的缓存根候选：共享配置 / 项目字段（<see cref="AppEnvironment.EffectiveUnityCacheDirectory"/>）
+    /// → 本机规范缓存根（<see cref="UnityCacheLocator.CanonicalCacheRoot"/>，只在实际存在时才给）。
     ///
-    /// <para>链路全部复用既有能力：<see cref="StaticIndexService.LocateForReads"/> 定位 bundle →
-    /// 索引里按 <c>tableId</c>（容器路径或表名）取表元数据 →
-    /// <see cref="StaticIndexService.LoadDocumentAsync"/> 读正文（<c>documents</c> 缓存优先）→
-    /// <see cref="StaticTableRows.Parse"/> 解析行集合 → 按 offset/take 取一页。</para>
+    /// <para><b>为什么必须回退</b>：真实项目（如 MyMod）的 <c>UnityCacheDirectory</c> 是空的，
+    /// 而共享配置里明明配着缓存目录 —— 只看项目字段会一律「定位不到静态数据 bundle」，
+    /// 连一张表的记录都读不出来（补上缓存目录立刻能读到真实记录，已被端到端冒烟证明）。</para>
+    /// </summary>
+    private IReadOnlyList<string> StaticCacheRoots(ModProject project)
+    {
+        var roots = new List<string?>();
+        var configured = _environment.EffectiveUnityCacheDirectory(project);
+        if (!string.IsNullOrWhiteSpace(configured)) roots.Add(configured);
+        var canonical = UnityCacheLocator.CanonicalCacheRoot();
+        if (canonical is not null) roots.Add(canonical);
+        return StaticBundleLocator.WithMigratedCacheRoot(roots);
+    }
+
+    private sealed record StaticTableLoad(StaticTableEntry Entry, string Text);
+
+    /// <summary>
+    /// 静态表读取的三段式前置（<c>static.records</c> / <c>static.readRecord</c> /
+    /// <c>static.editRecord</c> 共用）：定位 bundle → 索引里按 <c>tableId</c>
+    /// （容器路径或表名）取表元数据 → <see cref="StaticIndexService.LoadDocumentAsync"/> 读正文。
     ///
-    /// <para>前提缺失一律中文错误、不返回空列表充数（未开项目 / 定位不到 bundle /
-    /// 索引里没这张表 / 正文读不到）。</para>
+    /// <para>前提缺失一律中文错误、不返回空结果充数（未开项目 / 定位不到 bundle /
+    /// 索引里没这张表 / 正文读不到）。成功时 <c>Failure</c> 为 null。</para>
+    /// </summary>
+    private async Task<(StaticTableLoad? Table, IpcResponse? Failure)> LoadStaticTableAsync(
+        IpcRequest request, string? tableId)
+    {
+        if (string.IsNullOrWhiteSpace(tableId))
+            return (null, IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "缺少表 id（tableId）"));
+
+        var project = _projectState.Project;
+        if (project is null)
+            return (null, IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "请先打开项目"));
+
+        var location = StaticIndexService.LocateForReads(_staticIndex.Store, project.GameDirectory,
+            StaticCacheRoots(project));
+        if (location is null || !location.IsCached)
+            return (null, IpcResponse.Failure(request.Id, IpcErrorCode.NotFound,
+                "无法定位静态数据 bundle（运行时 catalog 与 Unity 缓存均未命中）。请确认游戏目录与 Unity 缓存目录已配置。"));
+
+        var entries = _staticIndex.Store.ReadEntries();
+        var entry = entries.FirstOrDefault(e =>
+            string.Equals(e.ContainerEntry, tableId, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(e.Name, tableId, StringComparison.OrdinalIgnoreCase));
+        if (entry is null)
+            return (null, IpcResponse.Failure(request.Id, IpcErrorCode.NotFound,
+                $"静态表索引里没有这张表：{tableId}（索引共 {entries.Count} 张表）"));
+
+        var document = await _staticIndex.LoadDocumentAsync(location, entry).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(document.Text))
+            return (null, IpcResponse.Failure(request.Id, IpcErrorCode.NotFound,
+                $"表 {entry.Name} 的正文读不到（非 UTF-8，或该条目已不在当前 bundle 里）。"));
+
+        return (new StaticTableLoad(entry, document.Text!), null);
+    }
+
+    /// <summary>
+    /// static.records：一张静态表的记录分页（前置见 <see cref="LoadStaticTableAsync"/>，
+    /// 之后 <see cref="StaticTableRows.Parse"/> 解析行集合 → 按 offset/take 取一页）。
     /// </summary>
     private async Task<IpcResponse> HandleStaticRecordsAsync(IpcRequest request)
     {
         var req = DeserializePayload<StaticRecordsRequest>(request);
-        if (string.IsNullOrWhiteSpace(req.TableId))
-            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "缺少表 id（tableId）");
+        var (table, failure) = await LoadStaticTableAsync(request, req.TableId).ConfigureAwait(false);
+        if (failure is not null) return failure;
 
-        var project = _projectState.Project;
-        if (project is null)
-            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "请先打开项目");
-
-        var location = StaticIndexService.LocateForReads(_staticIndex.Store, project.GameDirectory,
-            StaticIndexService.CacheRoots(project.UnityCacheDirectory));
-        if (location is null || !location.IsCached)
-            return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound,
-                "无法定位静态数据 bundle（运行时 catalog 与 Unity 缓存均未命中）。请确认游戏目录与 Unity 缓存目录已配置。");
-
-        var entries = _staticIndex.Store.ReadEntries();
-        var entry = entries.FirstOrDefault(e =>
-            string.Equals(e.ContainerEntry, req.TableId, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(e.Name, req.TableId, StringComparison.OrdinalIgnoreCase));
-        if (entry is null)
-            return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound,
-                $"静态表索引里没有这张表：{req.TableId}（索引共 {entries.Count} 张表）");
-
-        var document = await _staticIndex.LoadDocumentAsync(location, entry).ConfigureAwait(false);
-        if (string.IsNullOrWhiteSpace(document.Text))
-            return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound,
-                $"表 {entry.Name} 的正文读不到（非 UTF-8，或该条目已不在当前 bundle 里）。");
-
-        var rows = StaticTableRecords.Rows(document.Text);
+        var rows = StaticTableRecords.Rows(table!.Text);
         if (rows.Count == 0)
             return IpcResponse.Success(request.Id, new StaticRecordsResponse(req.TableId, [], 0, 0, 0,
-                $"表 {entry.Name} 的正文没能解析出记录（正文 {entry.SizeLabel}，不是 list/数组/单对象形态）。"));
+                $"表 {table.Entry.Name} 的正文没能解析出记录（正文 {table.Entry.SizeLabel}，不是 list/数组/单对象形态）。"));
 
         var take = req.Take <= 0 ? IpcGatewayConstants.DefaultPageSize : req.Take;
         var offset = Math.Max(0, req.Offset);
@@ -1321,15 +1353,145 @@ public sealed partial class IpcGateway
         });
     }
 
-    private IpcResponse HandleStaticReadRecord(IpcRequest request)
+    /// <summary>
+    /// static.readRecord：按「表 + 记录 id」取一条记录的原始 JSON（编辑器直接吃它建树）。
+    /// 记录 id 的口径与 <c>static.records</c> 列表里的完全一致（<see cref="StaticTableRecords.IndexOf"/>）。
+    ///
+    /// <para>取<b>当前值</b>：这张表已在编辑集里就先读改后正文（与 <c>lang.readEntry</c>
+    /// 「有修改读修改、否则读原文」同一口径），改过之后立刻能读回改后的值。</para>
+    /// </summary>
+    private async Task<IpcResponse> HandleStaticReadRecordAsync(IpcRequest request)
     {
-        // 静态表读取需要 bundle 定位 + entry（W3 实现）
-        return IpcResponse.Failure(request.Id, IpcErrorCode.Unsupported, "静态表读取需要 bundle 定位（W3 实现）");
+        var req = DeserializePayload<StaticReadRecordRequest>(request);
+        var (table, failure) = await LoadStaticTableAsync(request, req.TableId).ConfigureAwait(false);
+        if (failure is not null) return failure;
+
+        var current = _projectState.StaticEdits?.TryGetModifiedText(table!.Entry.Key) ?? table!.Text;
+        foreach (var text in new[] { current, table.Text })
+        {
+            var rows = StaticTableRecords.Rows(text);
+            var index = StaticTableRecords.IndexOf(rows, req.RecordId);
+            if (index >= 0) return IpcResponse.Success(request.Id, new StaticReadRecordResponse(rows[index].GetRawText()));
+        }
+
+        var officialRows = StaticTableRecords.Rows(table.Text);
+        return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound,
+            $"表 {table.Entry.Name} 里没有记录 {req.RecordId}（共 {officialRows.Count} 条记录）");
     }
 
-    private IpcResponse HandleStaticEditRecord(IpcRequest request)
+    /// <summary>
+    /// static.editRecord：把一条记录的<b>改后 JSON</b> 写回<b>静态编辑集</b>
+    /// （<see cref="StaticEditSession"/>），与导出链路同源 ——
+    /// <c>export.plan</c> / <c>export.run</c> 读的就是 <see cref="StaticEditSession.Snapshot"/>，
+    /// 因此「改了静态表」立刻出现在导出计划里，并由 <c>.staticmod</c> 槽位写出 RFC6902 补丁。
+    ///
+    /// <para>只改内存编辑集与项目编辑清单：<b>游戏数据与 Unity 缓存全程只读</b>，
+    /// 官方基线就是刚读出来的那份正文。</para>
+    ///
+    /// <para>改后正文的重建：按行集合的三种形态（顶层数组 / <c>list|dataList|dataArray</c> 包一层 /
+    /// 单对象表）原位替换那一行，其余内容原样保留 —— 不重新序列化整个文档以外的东西。</para>
+    /// </summary>
+    private async Task<IpcResponse> HandleStaticEditRecordAsync(IpcRequest request)
     {
-        return IpcResponse.Failure(request.Id, IpcErrorCode.Unsupported, "静态数据编辑需要文档加载（W3 实现）");
+        var req = DeserializePayload<StaticEditRecordRequest>(request);
+        var project = _projectState.Project;
+        if (project is null)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "请先打开项目");
+
+        var (table, failure) = await LoadStaticTableAsync(request, req.TableId).ConfigureAwait(false);
+        if (failure is not null) return failure;
+
+        if (string.IsNullOrWhiteSpace(req.RecordId))
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "缺少记录 id（recordId）");
+        // 基线 = 已有修改就接着改（多次编辑可累加），否则是刚读出来的官方正文；
+        // 官方基线始终留作差分的一侧，导出 diff 才不会把前一次的改动算成「官方」。
+        var baseline = _projectState.StaticEdits?.TryGetModifiedText(table!.Entry.Key) ?? table!.Text;
+        var rows = StaticTableRecords.Rows(baseline);
+        var index = StaticTableRecords.IndexOf(rows, req.RecordId);
+        if (index < 0)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound,
+                $"表 {table.Entry.Name} 里没有记录 {req.RecordId}（共 {rows.Count} 条记录）");
+
+        JsonNode? modifiedRow;
+        try
+        {
+            modifiedRow = JsonNode.Parse(req.Json);
+        }
+        catch (JsonException ex)
+        {
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery,
+                $"改后内容不是合法 JSON：{ex.Message}");
+        }
+        if (modifiedRow is null)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "改后内容为空（json）");
+
+        string modifiedText;
+        try
+        {
+            modifiedText = ReplaceRow(baseline, index, modifiedRow);
+        }
+        catch (JsonException ex)
+        {
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery,
+                $"表 {table.Entry.Name} 的正文不是合法 JSON，无法写回：{ex.Message}");
+        }
+
+        var edits = _projectState.StaticEdits;
+        if (edits is null)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "请先打开项目（静态编辑集未就绪）");
+
+        edits.Set(table.Entry.Key, table.Entry, table.Text, modifiedText);
+        project.Edits.Add(new EditOperation
+        {
+            Kind = EditOperationKind.PatchJson,
+            TargetPath = string.IsNullOrWhiteSpace(table.Entry.ContainerEntry)
+                ? table.Entry.Name
+                : table.Entry.ContainerEntry,
+        });
+
+        return IpcResponse.Success(request.Id, new
+        {
+            ok = true,
+            tableId = req.TableId,
+            recordId = req.RecordId,
+            officialSize = table.Text.Length,
+            modifiedSize = modifiedText.Length,
+            editedTables = edits.EntryCount,
+            info = $"已登记 {table.Entry.Name} 的修改（记录 {req.RecordId}）；该改动会随导出写进 .staticmod 的 RFC6902 补丁"
+        });
+    }
+
+    /// <summary>
+    /// 把文档里第 <paramref name="index"/> 行换成 <paramref name="modifiedRow"/>，返回改后全文。
+    /// 形态判定与 <see cref="StaticTableRows.Parse"/> 一致（数组 / list|dataList|dataArray / 单对象）。
+    /// </summary>
+    private static string ReplaceRow(string officialText, int index, JsonNode modifiedRow)
+    {
+        var options = new JsonSerializerOptions
+        {
+            WriteIndented = true,
+            Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+        };
+        var text = officialText.TrimStart(StaticTableRecords.Bom);
+        var document = JsonNode.Parse(text);
+        if (document is JsonArray array)
+        {
+            if (index >= array.Count) throw new JsonException($"行下标 {index} 超出数组范围（{array.Count} 行）");
+            array[index] = modifiedRow;
+            return array.ToJsonString(options);
+        }
+        if (document is JsonObject table)
+        {
+            foreach (var name in new[] { "list", "dataList", "dataArray" })
+            {
+                if (table[name] is not JsonArray rows) continue;
+                if (index >= rows.Count) throw new JsonException($"行下标 {index} 超出 {name} 范围（{rows.Count} 行）");
+                rows[index] = modifiedRow;
+                return table.ToJsonString(options);
+            }
+        }
+        // 单对象表：整份正文就是这一行。
+        return modifiedRow.ToJsonString(options);
     }
 
     private IpcResponse HandleStaticExportStaticmod(IpcRequest request)

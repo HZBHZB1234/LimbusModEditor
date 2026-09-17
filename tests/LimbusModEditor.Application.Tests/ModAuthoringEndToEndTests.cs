@@ -229,13 +229,45 @@ public sealed class ModAuthoringEndToEndTests : IDisposable
         Step("5 static.records", records is null
             ? $"一张表的正文都没取到（首条失败原因：{firstFailure}）"
             : $"表={records.TableId} 记录总数={records.TotalCount} 首条={records.Items[0].RecordId} 摘要={Trim(records.Items[0].Summary)}");
+        // 修后判据：项目字段 unityCacheDirectory 为空也必须读到真实记录（缓存目录回退）。
+        Assert.NotNull(records);
+        Assert.True(records!.Items.Count > 0);
 
-        var staticTable = records?.TableId ?? (tableList.Items.Count > 0 ? tableList.Items[0].TableId : "personality-01");
+        var record = records.Items[0];
+        var read = await Call("static.readRecord", new StaticReadRecordRequest(records.TableId, record.RecordId));
+        Assert.True(read.Ok, read.Error?.Message);
+        var readPayload = Payload<StaticReadRecordResponse>(read);
+        Step("5 static.readRecord",
+            $"表={records.TableId} 记录={record.RecordId} 读到 {Trim(readPayload.Json)}");
+        Assert.Equal(record.RawJson, readPayload.Json);
+
+        // 改一个真实字段：挑这条记录里的第一个字符串字段，值后加标记（不猜字段名）。
+        var node = System.Text.Json.Nodes.JsonNode.Parse(readPayload.Json!)!.AsObject();
+        var field = string.Empty;
+        var oldValue = string.Empty;
+        foreach (var property in node)
+        {
+            if (property.Value is not System.Text.Json.Nodes.JsonValue value) continue;
+            if (!value.TryGetValue<string>(out var text)) continue;
+            field = property.Key;
+            oldValue = text;
+            break;
+        }
+        Assert.False(field.Length == 0, $"这条记录里没有字符串字段，改不了：{Trim(readPayload.Json)}");
+        var changedValue = oldValue + "【E2E冒烟】";
+        node[field] = System.Text.Json.Nodes.JsonValue.Create(changedValue);
+
         var staticEdit = await Call("static.editRecord",
-            new StaticEditRecordRequest(staticTable, records?.Items[0].RecordId ?? "0", "{}"));
+            new StaticEditRecordRequest(records.TableId, record.RecordId, node.ToJsonString()));
+        Assert.True(staticEdit.Ok, staticEdit.Error?.Message);
         Step("5 static.editRecord",
-            $"ok={staticEdit.Ok} {staticEdit.Error?.Code.ToString() ?? "-"} {staticEdit.Error?.Message ?? "-"}");
-        if (!staticEdit.Ok) Assert.False(string.IsNullOrWhiteSpace(staticEdit.Error!.Message));
+            $"ok={staticEdit.Ok} 表={records.TableId} 记录={record.RecordId} 字段 {field}：{Trim(oldValue)} → {Trim(changedValue)}");
+
+        var staticReread = await Call("static.readRecord", new StaticReadRecordRequest(records.TableId, record.RecordId));
+        Assert.True(staticReread.Ok, staticReread.Error?.Message);
+        var staticRereadPayload = Payload<StaticReadRecordResponse>(staticReread);
+        Step("5 static.readRecord（读回）", $"改后读回={Trim(staticRereadPayload.Json)}");
+        Assert.Contains(changedValue, staticRereadPayload.Json);
 
         // ── 步骤 6：导出（先计划 + 写前校验，再真写）─────────────────────
         var targetDirectory = Path.Combine(_root, "out");
@@ -268,6 +300,17 @@ public sealed class ModAuthoringEndToEndTests : IDisposable
                           string.Join("；", langSlots.Select(i => $"{i.Format}={(i.Written ? "已写出" : string.Join("/", i.SkippedReasons))}")));
         Assert.NotEmpty(langSlots);
         Assert.All(langSlots, slot => Assert.True(slot.Written, $"{slot.Format} 未写出：{string.Join("/", slot.SkippedReasons)}"));
+
+        // 静态对账：步骤 5 改的那条表记录必须出现在导出里（.staticmod 槽位）。
+        var staticSlots = runPayload.Items.Where(i => i.Format.Contains("静态")).ToList();
+        Step("6 静态对账", $"步骤 5 改了 {records.TableId} 的记录 {record.RecordId} → 静态槽位写出 {staticSlots.Count(i => i.Written)} 个：" +
+                          string.Join("；", staticSlots.Select(i => $"{i.Format}={(i.Written ? "已写出" : string.Join("/", i.SkippedReasons))}")));
+        Assert.NotEmpty(staticSlots);
+        Assert.All(staticSlots, slot => Assert.True(slot.Written, $"{slot.Format} 未写出：{string.Join("/", slot.SkippedReasons)}"));
+        var staticArtifacts = staticSlots.SelectMany(i => i.OutputPaths).Distinct().ToArray();
+        Assert.NotEmpty(staticArtifacts);
+        Assert.All(staticArtifacts, path => Assert.True(new FileInfo(path).Length > 0));
+        Step("6 静态产物", string.Join("；", staticArtifacts.Select(p => $"{p}（{new FileInfo(p).Length:N0} 字节）")));
 
         var langArtifacts = langSlots.SelectMany(i => i.OutputPaths).Distinct().ToArray();
         var carrying = langArtifacts.Where(p => File.ReadAllText(p).Contains(newValue, StringComparison.Ordinal)).ToArray();

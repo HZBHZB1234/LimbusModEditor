@@ -25,6 +25,22 @@ public static class UnityCacheLocator
 {
     private static readonly Logger Log = LogManager.GetCurrentClassLogger();
 
+    /// <summary>
+    /// 本机规范的 Unity 缓存根 <c>&lt;用户目录&gt;/AppData/LocalLow/Unity/ProjectMoon_LimbusCompany</c>；
+    /// 目录不存在返回 null（不推荐、不创建 —— 这条路径只在真实装机上存在）。
+    ///
+    /// <para>用途：项目字段与共享配置都没配缓存目录时的<b>最后一级回退</b>（静态表读取）。
+    /// 不做候选枚举（<see cref="SuggestCandidates"/> 会遍历整个缓存，太贵）。</para>
+    /// </summary>
+    public static string? CanonicalCacheRoot()
+    {
+        if (!OperatingSystem.IsWindows()) return null;
+        var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (string.IsNullOrWhiteSpace(profile)) return null;
+        var root = Path.Combine(profile, "AppData", "LocalLow", "Unity", "ProjectMoon_LimbusCompany");
+        return Directory.Exists(root) ? root : null;
+    }
+
     public static IReadOnlyList<UnityCacheCandidate> SuggestCandidates(string? gameDirectory)
     {
         using var scope = Log.Scope("推荐 Unity 缓存目录");

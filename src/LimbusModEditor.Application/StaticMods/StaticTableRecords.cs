@@ -24,7 +24,7 @@ public static class StaticTableRecords
     public const int MaxTake = 500;
 
     /// <summary>UTF-8 BOM：正文开头带它时 JSON 解析器会直接失败，必须先剥掉。</summary>
-    private const char Bom = '\uFEFF';
+    public const char Bom = '\uFEFF';
 
     /// <summary>解析正文得到全部行（解析失败 → 空集合，不抛）。</summary>
     /// <remarks>
@@ -44,6 +44,22 @@ public static class StaticTableRecords
         for (var i = start; i < rows.Count && page.Count < count; i++)
             page.Add(Describe(rows[i], i));
         return page;
+    }
+
+    /// <summary>
+    /// 按记录 id 定位行下标（找不到返回 -1）。口径与 <see cref="Describe"/> 完全一致：
+    /// 行里有 <c>id</c> 就比 id，没有就比行下标 —— 保证「列表里看到的那条」就是
+    /// 「read / edit 改到的那条」。
+    /// </summary>
+    public static int IndexOf(IReadOnlyList<JsonElement> rows, string? recordId)
+    {
+        if (string.IsNullOrWhiteSpace(recordId)) return -1;
+        for (var i = 0; i < rows.Count; i++)
+        {
+            var id = IdOf(rows[i]) ?? i.ToString(CultureInfo.InvariantCulture);
+            if (string.Equals(id, recordId, StringComparison.Ordinal)) return i;
+        }
+        return -1;
     }
 
     /// <summary>单行 → 记录。</summary>

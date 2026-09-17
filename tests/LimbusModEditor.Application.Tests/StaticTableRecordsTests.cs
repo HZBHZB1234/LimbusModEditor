@@ -132,18 +132,32 @@ public sealed class StaticTableRecordsTests : IDisposable
         Assert.Contains("请先打开项目", response.Error!.Message);
     }
 
+    /// <summary>
+    /// 前提缺失必须是中文 NotFound，<b>不能返回空列表充数</b>。
+    ///
+    /// <para>两条中文分支都算「前提缺失」，具体走哪条取决于<b>本机有没有真实 Unity 缓存</b>：
+    /// <c>static.records</c> 的缓存根在项目字段/共享配置都为空时会回退到本机规范缓存根
+    /// （<c>LocalLow/Unity/ProjectMoon_LimbusCompany</c>）——装了游戏的机器上这一步会命中，
+    /// 于是失败点后移到「索引库是空的，里面没有这张表」。</para>
+    ///
+    /// <para>「回退后能读到真实记录」由端到端冒烟
+    /// <c>ModAuthoringEndToEndTests</c> 步骤 5 覆盖（那个用例的项目字段是空的）。</para>
+    /// </summary>
     [Fact]
     public async Task Records_without_a_locatable_bundle_reports_the_missing_prerequisite()
     {
         var state = new ProjectState();
-        // 目录指向临时空目录：定位不到静态 bundle —— 也不该假装「这张表里没有数据」。
+        // 目录指向临时空目录：项目字段与共享配置都不提供缓存 —— 也不该假装「这张表里没有数据」。
         state.SetProject(new ModProject { GameDirectory = _root, UnityCacheDirectory = _root }, "x.lmeproj");
 
         var response = await Call(Gateway(state), "personality-01");
 
         Assert.False(response.Ok);
         Assert.Equal(IpcErrorCode.NotFound, response.Error!.Code);
-        Assert.Contains("无法定位静态数据 bundle", response.Error!.Message);
+        var message = response.Error!.Message;
+        Assert.True(
+            message.Contains("无法定位静态数据 bundle") || message.Contains("静态表索引里没有这张表"),
+            $"应当报出缺失的前提，实际：{message}");
     }
 
     [Fact]

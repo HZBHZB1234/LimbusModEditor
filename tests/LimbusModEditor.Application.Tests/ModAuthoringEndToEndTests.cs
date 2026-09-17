@@ -263,9 +263,18 @@ public sealed class ModAuthoringEndToEndTests : IDisposable
         Assert.All(artifacts, path => Assert.True(File.Exists(path)));
 
         // 对账：步骤 4 改的 lang 键到底有没有进导出（三个语言槽位的真实结论）。
+        // 这是 P0-1 的判据：「工作台改的」必须就是「导出读的」那份编辑集。
         var langSlots = runPayload.Items.Where(i => i.Format.Contains("语言")).ToList();
         Step("6 文本对账", $"步骤 4 改了 {langFile.RelativePath} 的 1 个键 → 语言槽位写出 {langSlots.Count(i => i.Written)} 个：" +
                           string.Join("；", langSlots.Select(i => $"{i.Format}={(i.Written ? "已写出" : string.Join("/", i.SkippedReasons))}")));
+        Assert.NotEmpty(langSlots);
+        Assert.All(langSlots, slot => Assert.True(slot.Written, $"{slot.Format} 未写出：{string.Join("/", slot.SkippedReasons)}"));
+
+        var langArtifacts = langSlots.SelectMany(i => i.OutputPaths).Distinct().ToArray();
+        var carrying = langArtifacts.Where(p => File.ReadAllText(p).Contains(newValue, StringComparison.Ordinal)).ToArray();
+        Step("6 文本产物对账", $"改后的值「{Trim(newValue)}」出现在 {carrying.Length}/{langArtifacts.Length} 个语言产物里：" +
+                             string.Join("；", carrying.Select(p => $"{Path.GetFileName(p)}")));
+        Assert.NotEmpty(carrying);
 
         // ── 步骤 7：撤销（清编辑标记 + 同步项目编辑清单）──────────────────
         var cleared = await Call("asset.edit.clearEdits", new AssetEditClearEditsRequest(target.AssetId.ToString()));

@@ -722,7 +722,8 @@ public sealed partial class IpcGateway
             return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound, $"项目文件不存在：{req.ProjectFile}");
 
         var project = await _projects.LoadAsync(req.ProjectFile);
-        _projectState.SetProject(project, req.ProjectFile);
+        // 传网关那份 lang 服务：打开后 lang.applyPatch 的改动要能被 export.plan/run 看见。
+        _projectState.SetProject(project, req.ProjectFile, _langText);
         return IpcResponse.Success(request.Id, new { ok = true, name = project.Name, assetCount = project.Assets.Count });
     }
 
@@ -743,7 +744,7 @@ public sealed partial class IpcGateway
                 $"同名项目已存在，未覆盖：{projectFile}（请换一个名称或目录）");
 
         var project = await _projects.CreateAsync(root, name);
-        _projectState.SetProject(project, projectFile);
+        _projectState.SetProject(project, projectFile, _langText);
         _environment.RegisterRecentProject(projectFile, project.Name);
         return IpcResponse.Success(request.Id, new ProjectCreateResponse(projectFile, project.Name, root));
     }

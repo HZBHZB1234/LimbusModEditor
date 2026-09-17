@@ -1,13 +1,28 @@
 <script setup lang="ts">
 /**
- * WikiEntityPage — 通用实体页面
- * 使用 WikiShell 布局外壳，渲染信息框、目录、分节、画廊、相关页面与标签
+ * WikiEntityPage — 通用实体页面（人格 / E.G.O / 饰品 / 敌人 / 异想体 / 播报员）
+ *
+ * 布局对照 docs/WIKI-PREVIEW-UPGRADE-SPEC.md §4.1 与 docs/img/wiki-personality-page.png：
+ *   左栏 WikiToc（编号 + 吸顶） | 主区（引言 → 分节 Tab → 媒体） | 右栏 WikiInfoboxCard
+ * 剧情类（category === 'story'）走 WikiStoryView 专用布局（见模板分派处说明）。
  */
 
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ipc } from '@/ipc'
 import WikiShell from '@/components/WikiShell.vue'
+import WikiToc from '@/components/wiki/WikiToc.vue'
+import WikiInfoboxCard from '@/components/wiki/WikiInfoboxCard.vue'
+import WikiQuoteBlock from '@/components/wiki/WikiQuoteBlock.vue'
+import WikiNoticeBox from '@/components/wiki/WikiNoticeBox.vue'
+import WikiChipList from '@/components/wiki/WikiChipList.vue'
+import WikiTabGroup from '@/components/wiki/WikiTabGroup.vue'
+import WikiAudioPlayer from '@/components/wiki/WikiAudioPlayer.vue'
+import WikiGallery from '@/components/wiki/WikiGallery.vue'
+import WikiSpineViewer from '@/components/wiki/WikiSpineViewer.vue'
+import WikiSourceBadge from '@/components/wiki/WikiSourceBadge.vue'
+import { resolveMediaUrl } from '@/components/wiki/mediaUrl'
+import WikiStoryView from '@/views/WikiStoryView.vue'
 import type {
   WikiPage,
   Infobox,
@@ -15,7 +30,7 @@ import type {
   TocItem,
   GalleryImage,
   WikiRelatedPage,
-  WikiPageCategory,
+  ResourceBinding,
   BreadcrumbItem,
 } from '@/ipc/types'
 import { WikiPageCategoryLabels } from '@/ipc/types'
@@ -49,7 +64,7 @@ async function loadPage() {
       return
     }
     page.value = unwrapped
-  } catch (e) {
+  } catch {
     error.value = '加载页面失败，请检查网络连接或稍后重试'
     page.value = null
   } finally {
@@ -60,21 +75,9 @@ async function loadPage() {
 onMounted(loadPage)
 watch(() => route.params.id, loadPage)
 
-// ═══════════════ 计算属性 ═══════════════
+// ═══════════════ 基础计算属性 ═══════════════
 
 const infobox = computed<Infobox | undefined>(() => page.value?.infobox)
-const sections = computed<WikiSection[]>(() => page.value?.sections ?? [])
-
-/** 自动从分节生成目录 */
-const toc = computed<TocItem[]>(() => {
-  if (page.value?.toc?.length) return page.value.toc
-  return sections.value.map((s) => ({
-    id: s.id,
-    title: s.title,
-    level: 1,
-  }))
-})
-
 const gallery = computed<GalleryImage[]>(() => page.value?.gallery ?? [])
 const relatedPages = computed<WikiRelatedPage[]>(() => page.value?.relatedPages ?? [])
 const tags = computed<string[]>(() => page.value?.tags ?? [])
@@ -84,22 +87,175 @@ const categoryLabel = computed(() => {
   return WikiPageCategoryLabels[page.value.category] ?? page.value.category
 })
 
-/** 面包屑 */
+const isStory = computed(() => page.value?.category === 'story')
+
 const breadcrumbs = computed<BreadcrumbItem[]>(() => {
-  const crumbs: BreadcrumbItem[] = [
-    { label: '维基首页', route: '/wiki' },
-  ]
+  const crumbs: BreadcrumbItem[] = [{ label: '维基首页', route: '/wiki' }]
   if (page.value) {
     crumbs.push({
       label: categoryLabel.value,
       route: `/wiki/category/${page.value.category}`,
     })
-    crumbs.push({
-      label: page.value.title,
-      route: `/wiki/page/${page.value.id}`,
-    })
+    crumbs.push({ label: page.value.title, route: `/wiki/page/${page.value.id}` })
   }
   return crumbs
+})
+
+// ═══════════════ 分节：引言 + 语义分组 ═══════════════
+
+/** 引言分节（维基页首引用块）：命中则作为页首引言展示，不再重复出现在分节流 */
+const LEAD_KEYWORDS = ['概览', '概述', '简介', '介绍', '摘要']
+
+const leadSection = computed<WikiSection | null>(() => {
+  const list = page.value?.sections ?? []
+  return list.find((s) => LEAD_KEYWORDS.some((k) => s.title.includes(k))) ?? null
+})
+
+/** 进入分节流（Tab / 平铺）的分节 = 全部分节 - 引言分节 */
+const bodySections = computed<WikiSection[]>(() => {
+  const list = page.value?.sections ?? []
+  const leadId = leadSection.value?.id
+  return leadId ? list.filter((s) => s.id !== leadId) : list
+})
+
+interface SectionGroup {
+  key: string
+  label: string
+  sections: WikiSection[]
+}
+
+/**
+ * 分组规则：仅按**分节标题关键词**推导，不硬编码与页面无关的分组。
+ * 推导不出（全部落入 other）时走原顺序平铺，不建 Tab。
+ */
+const GROUP_RULES: Array<{ key: string; label: string; keywords: string[] }> = [
+  { key: 'overview', label: '概览', keywords: ['概览', '概述', '简介', '介绍', '摘要', '基本信息'] },
+  { key: 'data', label: '数据', keywords: ['数据', '属性', '数值', '状态', '面板', '能力'] },
+  { key: 'skill', label: '技能与被动', keywords: ['技能', '被动', '战斗', '硬币', '抗性'] },
+  { key: 'voice', label: '语音', keywords: ['语音', '声音', '台词', '配音', 'voice', 'audio'] },
+  { key: 'story', label: '剧情', keywords: ['剧情', '故事', '章节', '对白'] },
+  { key: 'art', label: '立绘与图集', keywords: ['立绘', '图集', '画廊', '插画', '形象', 'cg'] },
+]
+
+function groupKeyFor(title: string): string {
+  const lower = title.toLowerCase()
+  const hit = GROUP_RULES.find((r) => r.keywords.some((k) => lower.includes(k.toLowerCase())))
+  return hit ? hit.key : 'other'
+}
+
+const sectionGroups = computed<SectionGroup[]>(() => {
+  const buckets = new Map<string, WikiSection[]>()
+  for (const s of bodySections.value) {
+    const key = groupKeyFor(s.title)
+    const list = buckets.get(key) ?? []
+    list.push(s)
+    buckets.set(key, list)
+  }
+  const groups: SectionGroup[] = GROUP_RULES.filter((r) => buckets.has(r.key)).map((r) => ({
+    key: r.key,
+    label: r.label,
+    sections: buckets.get(r.key) ?? [],
+  }))
+  const others = buckets.get('other') ?? []
+  if (others.length > 0) groups.push({ key: 'other', label: '其它资源', sections: others })
+  return groups
+})
+
+/** 只有推导出了语义分组才用 Tab；否则平铺 */
+const useTabs = computed(() => sectionGroups.value.some((g) => g.key !== 'other'))
+
+const tabs = computed(() =>
+  sectionGroups.value.map((g) => ({ key: g.key, label: g.label, badge: g.sections.length })),
+)
+
+const activeTab = ref('')
+
+watch(
+  sectionGroups,
+  (groups) => {
+    if (!groups.some((g) => g.key === activeTab.value)) {
+      activeTab.value = groups[0]?.key ?? ''
+    }
+  },
+  { immediate: true },
+)
+
+// ═══════════════ 目录 ═══════════════
+
+const toc = computed<TocItem[]>(() => {
+  if (page.value?.toc?.length) return page.value.toc
+  return (page.value?.sections ?? []).map((s) => ({ id: s.id, title: s.title, level: 1 }))
+})
+
+// ═══════════════ 媒体派发 ═══════════════
+
+function bindingsOf(section: WikiSection): ResourceBinding[] {
+  return section.bindings ?? []
+}
+
+function audioOf(section: WikiSection): ResourceBinding[] {
+  return bindingsOf(section).filter((b) => b.kind === 'Audio')
+}
+
+/** Image 绑定 → GalleryImage；拿不到地址的直接丢弃（不渲染空图） */
+function galleryOf(section: WikiSection): GalleryImage[] {
+  return bindingsOf(section)
+    .filter((b) => b.kind === 'Image')
+    .flatMap<GalleryImage>((b) => {
+      const url = resolveMediaUrl(b)
+      return url ? [{ url, caption: b.display }] : []
+    })
+}
+
+/** 其余绑定（StaticData / Text / Prefab / Video / Mesh / Animation …）走纯列表 */
+function otherBindingsOf(section: WikiSection): ResourceBinding[] {
+  return bindingsOf(section).filter(
+    (b) => b.kind !== 'Audio' && b.kind !== 'Image' && b.kind !== 'Spine',
+  )
+}
+
+/** Spine：需要 skeleton + atlas 两个地址齐备才渲染，缺一个就不显示 */
+const spineMap = computed<Record<string, { skeletonUrl: string; atlasUrl: string }>>(() => {
+  const map: Record<string, { skeletonUrl: string; atlasUrl: string }> = {}
+  for (const section of bodySections.value) {
+    const spine = bindingsOf(section).find((b) => b.kind === 'Spine')
+    if (!spine) continue
+    const skeletonUrl = resolveMediaUrl(spine)
+    if (!skeletonUrl) continue
+    const atlas = bindingsOf(section).find((b) =>
+      (b.display + b.refKey).toLowerCase().endsWith('.atlas'),
+    )
+    const atlasUrl = atlas ? resolveMediaUrl(atlas) : null
+    if (!atlasUrl) continue
+    map[section.id] = { skeletonUrl, atlasUrl }
+  }
+  return map
+})
+
+// ═══════════════ 来源标注 ═══════════════
+
+interface SectionSource {
+  authority?: string
+  confidence?: number | string
+  writableSource?: string
+  detail?: string
+}
+
+/**
+ * 后端补齐 authority / confidence / writableSource 后自动显示；当前缺失则不渲染。
+ * 与 mediaUrl 同一套路：字段在 DTO 里但前端 TS 尚未声明，读取后按「有才显示」处理。
+ */
+const sourceMap = computed<Record<string, SectionSource>>(() => {
+  const map: Record<string, SectionSource> = {}
+  for (const section of page.value?.sections ?? []) {
+    const raw = section as unknown as SectionSource
+    const has =
+      (raw.authority?.trim() ?? '') !== '' ||
+      raw.confidence !== undefined ||
+      (raw.writableSource?.trim() ?? '') !== ''
+    if (has) map[section.id] = raw
+  }
+  return map
 })
 
 // ═══════════════ 分节折叠 ═══════════════
@@ -107,13 +263,10 @@ const breadcrumbs = computed<BreadcrumbItem[]>(() => {
 const collapsedSections = ref<Set<string>>(new Set())
 
 function toggleSection(sectionId: string) {
-  if (collapsedSections.value.has(sectionId)) {
-    collapsedSections.value.delete(sectionId)
-  } else {
-    collapsedSections.value.add(sectionId)
-  }
-  // 触发响应式更新
-  collapsedSections.value = new Set(collapsedSections.value)
+  const next = new Set(collapsedSections.value)
+  if (next.has(sectionId)) next.delete(sectionId)
+  else next.add(sectionId)
+  collapsedSections.value = next
 }
 
 function isSectionCollapsed(section: WikiSection): boolean {
@@ -121,17 +274,25 @@ function isSectionCollapsed(section: WikiSection): boolean {
   return collapsedSections.value.has(section.id)
 }
 
+// ═══════════════ 目录跳转 ═══════════════
+
 function scrollToSection(id: string) {
-  const el = document.getElementById(id)
-  if (el) {
-    el.scrollIntoView({ behavior: 'smooth' })
-    // 确保目标分节处于展开状态
-    collapsedSections.value.delete(id)
-    collapsedSections.value = new Set(collapsedSections.value)
-  }
+  // 目标分节可能在未激活的 Tab 里，先切到它所属的分组
+  const group = sectionGroups.value.find((g) => g.sections.some((s) => s.id === id))
+  if (group) activeTab.value = group.key
+  const next = new Set(collapsedSections.value)
+  next.delete(id)
+  collapsedSections.value = next
+  requestAnimationFrame(() => {
+    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' })
+  })
 }
 
-// ═══════════════ 编辑模式 ═══════════════
+function scrollToTop() {
+  document.querySelector('.wiki-slot')?.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
+// ═══════════════ 内容编辑（只改内容、不改结构）═══════════════
 
 const editingSection = ref<string | null>(null)
 const editBuffer = ref('')
@@ -148,21 +309,31 @@ function cancelEdit() {
 
 function saveEdit(section: WikiSection) {
   if (!page.value) return
-  // 通过 IPC 提交内容编辑
-  ipc.request('wiki.saveContent', {
-    pageId: page.value.id,
-    sectionId: section.id,
-    content: editBuffer.value,
-  }).then(() => {
-    // 乐观更新本地数据
-    section.content = editBuffer.value
-    editingSection.value = null
-    editBuffer.value = ''
-  }).catch(() => {
-    // 失败时保持编辑状态
-    error.value = '保存失败，请重试'
-  })
+  ipc
+    .request('wiki.saveContent', {
+      pageId: page.value.id,
+      sectionId: section.id,
+      content: editBuffer.value,
+    })
+    .then(() => {
+      section.content = editBuffer.value
+      editingSection.value = null
+      editBuffer.value = ''
+    })
+    .catch(() => {
+      error.value = '保存失败，请重试'
+    })
 }
+
+// ═══════════════ 提示块（只提示能从数据推出的事实）═══════════════
+
+const noticeText = computed(() => {
+  if (!page.value) return ''
+  const list = page.value.sections ?? []
+  if (list.length === 0) return '该页面当前没有可展示的分节内容。'
+  if (list.every((s) => (s.content ?? '').trim() === '')) return '该页面的分节正文目前均为空。'
+  return ''
+})
 
 // ═══════════════ 导航 ═══════════════
 
@@ -181,9 +352,7 @@ function navigateToRelated(related: WikiRelatedPage) {
 // ═══════════════ 信息框字段渲染 ═══════════════
 
 function formatFieldValue(field: { value: string; type: string }): string {
-  if (field.type === 'boolean') {
-    return field.value === 'true' ? '是' : '否'
-  }
+  if (field.type === 'boolean') return field.value === 'true' ? '是' : '否'
   return field.value
 }
 </script>
@@ -209,70 +378,220 @@ function formatFieldValue(field: { value: string; type: string }): string {
         <button class="retry-btn" @click="loadPage">重试</button>
       </div>
 
-      <!-- 页面内容 -->
+      <!--
+        剧情类走专用视图（WikiStoryView）。
+        选择「同组件内条件渲染」而非新增路由分支的理由：
+        两者共用 /wiki/page/:id 同一路由、同一次 wiki.getPage 取数与同一套
+        加载/错误/面包屑逻辑；拆到路由层会引入二次取数与两个加载态，收益不成立。
+      -->
+      <WikiStoryView v-else-if="page && isStory" :page="page" />
+
+      <!-- 实体页内容 -->
       <template v-else-if="page">
         <!-- 标题区 -->
         <header class="page-header">
-          <div class="header-left">
-            <h1 class="page-title">{{ page.title }}</h1>
-            <p v-if="page.subtitle" class="page-subtitle">{{ page.subtitle }}</p>
-            <div class="page-meta">
-              <span v-if="categoryLabel" class="meta-category" :class="`cat-${page.category}`">
-                {{ categoryLabel }}
-              </span>
-              <span v-if="page.lastModified" class="meta-date">
-                最后修改：{{ page.lastModified }}
-              </span>
-            </div>
+          <h1 class="page-title">{{ page.title }}</h1>
+          <p v-if="page.subtitle" class="page-subtitle">{{ page.subtitle }}</p>
+          <div class="page-meta">
+            <span v-if="categoryLabel" class="meta-category">{{ categoryLabel }}</span>
+            <WikiChipList v-if="tags.length > 0" :items="tags" class="page-meta-tags" />
+            <span v-if="page.lastModified" class="meta-date">
+              最后修改：{{ page.lastModified }}
+            </span>
           </div>
         </header>
 
+        <WikiNoticeBox v-if="noticeText" :text="noticeText" icon="ℹ️" />
+
         <div class="page-body">
-          <!-- 左侧：信息框 + TOC -->
-          <aside class="page-sidebar">
-            <!-- 信息框 -->
-            <div v-if="infobox" class="infobox">
-              <div v-if="infobox.imageUrl" class="infobox-image">
-                <img :src="infobox.imageUrl" :alt="infobox.title" loading="lazy" />
-              </div>
-              <div v-if="infobox.title" class="infobox-caption">{{ infobox.title }}</div>
-              <table class="infobox-table">
-                <tbody>
-                  <tr
-                    v-for="field in infobox.fields"
-                    :key="field.label"
-                    class="infobox-row"
-                  >
-                    <th class="infobox-label">{{ field.label }}</th>
-                    <td class="infobox-value">
-                      <span v-if="field.type === 'tags'" class="infobox-tags">
-                        <span v-for="tag in field.value.split(',')" :key="tag.trim()" class="infobox-tag">
-                          {{ tag.trim() }}
-                        </span>
-                      </span>
-                      <span v-else>{{ formatFieldValue(field) }}</span>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
+          <!-- 左栏：编号目录（吸顶 + 回到顶部） -->
+          <WikiToc
+            v-if="toc.length > 0"
+            class="page-toc"
+            :items="toc"
+            show-back-to-top
+            @select="scrollToSection"
+            @back-top="scrollToTop"
+          />
 
-            <!-- 目录 -->
-            <nav v-if="toc.length > 0" class="toc">
-              <div class="toc-title">目录</div>
-              <ul class="toc-list">
-                <li
-                  v-for="item in toc"
-                  :key="item.id"
-                  class="toc-item"
-                  :style="{ paddingLeft: (item.level - 1) * 14 + 'px' }"
+          <!-- 主区 -->
+          <main class="page-main">
+            <!-- 页首引言（取自引言分节，不重复进入分节流） -->
+            <WikiQuoteBlock
+              v-if="leadSection"
+              :text="leadSection.content"
+              :attribution="leadSection.title"
+            />
+
+            <!-- 分节：可推导语义则用 Tab 分组，否则按原顺序平铺 -->
+            <WikiTabGroup v-if="useTabs" v-model:active="activeTab" :tabs="tabs">
+              <template v-for="group in sectionGroups" :key="group.key" #[group.key]>
+                <section
+                  v-for="section in group.sections"
+                  :key="section.id"
+                  :id="section.id"
+                  class="wiki-section"
+                  :class="{ collapsed: isSectionCollapsed(section) }"
                 >
-                  <a @click="scrollToSection(item.id)">{{ item.title }}</a>
-                </li>
-              </ul>
-            </nav>
+                  <h2 class="section-title">
+                    <span class="section-title-text">{{ section.title }}</span>
+                    <span class="section-actions">
+                    <WikiSourceBadge
+                      v-if="sourceMap[section.id]"
+                      v-bind="sourceMap[section.id]"
+                    />
+                      <button
+                        v-if="section.collapsible"
+                        class="action-btn"
+                        :title="isSectionCollapsed(section) ? '展开' : '折叠'"
+                        @click="toggleSection(section.id)"
+                      >
+                        {{ isSectionCollapsed(section) ? '展开' : '折叠' }}
+                      </button>
+                      <button
+                        v-if="section.editable"
+                        class="action-btn"
+                        title="编辑"
+                        @click="startEdit(section)"
+                      >
+                        编辑
+                      </button>
+                    </span>
+                  </h2>
 
-            <!-- 相关页面 -->
+                  <!-- 阅读模式：纯文本 + 换行（不解析 HTML，杜绝 XSS） -->
+                  <div v-if="editingSection !== section.id" class="section-content">
+                    {{ section.content }}
+                  </div>
+
+                  <!-- 编辑模式 -->
+                  <div v-else class="section-editor">
+                    <textarea v-model="editBuffer" class="editor-textarea" rows="12" />
+                    <div class="editor-actions">
+                      <button class="editor-save" @click="saveEdit(section)">保存</button>
+                      <button class="editor-cancel" @click="cancelEdit">取消</button>
+                    </div>
+                  </div>
+
+                  <!-- 媒体派发：按 binding.kind 分发，无绑定则不渲染 -->
+                  <WikiAudioPlayer
+                    v-if="audioOf(section).length > 0"
+                    :items="audioOf(section)"
+                    :url-for="resolveMediaUrl"
+                    title="语音"
+                  />
+                  <WikiGallery
+                    v-if="galleryOf(section).length > 0"
+                    :images="galleryOf(section)"
+                    title="图集"
+                  />
+                  <WikiSpineViewer
+                    v-if="spineMap[section.id]"
+                    v-bind="spineMap[section.id]"
+                    title="动画"
+                  />
+                  <div v-if="otherBindingsOf(section).length > 0" class="binding-list">
+                    <div class="binding-list-title">关联资源</div>
+                    <ul>
+                      <li v-for="b in otherBindingsOf(section)" :key="b.refKey" class="binding-item">
+                        <span class="binding-kind">{{ b.kind }}</span>
+                        <span class="binding-display">{{ b.display }}</span>
+                      </li>
+                    </ul>
+                  </div>
+                </section>
+              </template>
+            </WikiTabGroup>
+
+            <template v-else>
+              <section
+                v-for="section in bodySections"
+                :key="section.id"
+                :id="section.id"
+                class="wiki-section"
+                :class="{ collapsed: isSectionCollapsed(section) }"
+              >
+                <h2 class="section-title">
+                  <span class="section-title-text">{{ section.title }}</span>
+                  <span class="section-actions">
+                    <WikiSourceBadge
+                      v-if="sourceMap[section.id]"
+                      v-bind="sourceMap[section.id]"
+                    />
+                    <button
+                      v-if="section.collapsible"
+                      class="action-btn"
+                      :title="isSectionCollapsed(section) ? '展开' : '折叠'"
+                      @click="toggleSection(section.id)"
+                    >
+                      {{ isSectionCollapsed(section) ? '展开' : '折叠' }}
+                    </button>
+                    <button
+                      v-if="section.editable"
+                      class="action-btn"
+                      title="编辑"
+                      @click="startEdit(section)"
+                    >
+                      编辑
+                    </button>
+                  </span>
+                </h2>
+
+                <div v-if="editingSection !== section.id" class="section-content">
+                  {{ section.content }}
+                </div>
+
+                <div v-else class="section-editor">
+                  <textarea v-model="editBuffer" class="editor-textarea" rows="12" />
+                  <div class="editor-actions">
+                    <button class="editor-save" @click="saveEdit(section)">保存</button>
+                    <button class="editor-cancel" @click="cancelEdit">取消</button>
+                  </div>
+                </div>
+
+                <WikiAudioPlayer
+                  v-if="audioOf(section).length > 0"
+                  :items="audioOf(section)"
+                  :url-for="resolveMediaUrl"
+                  title="语音"
+                />
+                <WikiGallery
+                  v-if="galleryOf(section).length > 0"
+                  :images="galleryOf(section)"
+                  title="图集"
+                />
+                <WikiSpineViewer
+                  v-if="spineMap[section.id]"
+                  v-bind="spineMap[section.id]"
+                  title="动画"
+                />
+                <div v-if="otherBindingsOf(section).length > 0" class="binding-list">
+                  <div class="binding-list-title">关联资源</div>
+                  <ul>
+                    <li v-for="b in otherBindingsOf(section)" :key="b.refKey" class="binding-item">
+                      <span class="binding-kind">{{ b.kind }}</span>
+                      <span class="binding-display">{{ b.display }}</span>
+                    </li>
+                  </ul>
+                </div>
+              </section>
+            </template>
+
+            <!-- 页面级画廊（page.gallery，地址由后端下发） -->
+            <WikiGallery v-if="gallery.length > 0" :images="gallery" title="画廊" />
+          </main>
+
+          <!-- 右栏：信息框 -->
+          <aside class="page-aside">
+            <WikiInfoboxCard
+              v-if="infobox"
+              :title="infobox.title"
+              :subtitle="page.title !== infobox.title ? page.title : undefined"
+              :image-url="infobox.imageUrl"
+              :fields="infobox.fields"
+              :tags="tags"
+            />
+
             <div v-if="relatedPages.length > 0" class="related-pages">
               <div class="related-title">相关页面</div>
               <ul class="related-list">
@@ -283,97 +602,13 @@ function formatFieldValue(field: { value: string; type: string }): string {
                   @click="navigateToRelated(related)"
                 >
                   <span class="related-item-title">{{ related.title }}</span>
-                  <span class="related-item-cat">{{ WikiPageCategoryLabels[related.category] }}</span>
+                  <span class="related-item-cat">
+                    {{ WikiPageCategoryLabels[related.category] ?? related.category }}
+                  </span>
                 </li>
               </ul>
             </div>
           </aside>
-
-          <!-- 右侧：分节内容 -->
-          <main class="page-main">
-            <!-- 分节 -->
-            <section
-              v-for="section in sections"
-              :key="section.id"
-              :id="section.id"
-              class="wiki-section"
-              :class="{ collapsed: isSectionCollapsed(section) }"
-            >
-              <h2 class="section-title">
-                <span class="section-title-text">{{ section.title }}</span>
-                <span class="section-actions">
-                  <button
-                    v-if="section.collapsible"
-                    class="action-btn"
-                    :title="isSectionCollapsed(section) ? '展开' : '折叠'"
-                    @click="toggleSection(section.id)"
-                  >
-                    {{ isSectionCollapsed(section) ? '展开' : '折叠' }}
-                  </button>
-                  <button
-                    v-if="section.editable"
-                    class="action-btn"
-                    title="编辑"
-                    @click="startEdit(section)"
-                  >
-                    编辑
-                  </button>
-                </span>
-              </h2>
-
-              <!-- 阅读模式 -->
-              <div
-                v-if="editingSection !== section.id"
-                class="section-content"
-                v-html="section.content"
-              />
-
-              <!-- 编辑模式 -->
-              <div v-else class="section-editor">
-                <textarea
-                  v-model="editBuffer"
-                  class="editor-textarea"
-                  rows="12"
-                />
-                <div class="editor-actions">
-                  <button class="editor-save" @click="saveEdit(section)">保存</button>
-                  <button class="editor-cancel" @click="cancelEdit">取消</button>
-                </div>
-              </div>
-            </section>
-
-            <!-- 画廊 -->
-            <section v-if="gallery.length > 0" class="wiki-section">
-              <h2 class="section-title">
-                <span class="section-title-text">画廊</span>
-              </h2>
-              <div class="gallery-grid">
-                <figure
-                  v-for="(img, i) in gallery"
-                  :key="i"
-                  class="gallery-item"
-                >
-                  <img :src="img.url" :alt="img.caption || ''" loading="lazy" />
-                  <figcaption v-if="img.caption" class="gallery-caption">
-                    {{ img.caption }}
-                    <span v-if="img.credit" class="gallery-credit">— {{ img.credit }}</span>
-                  </figcaption>
-                </figure>
-              </div>
-            </section>
-
-            <!-- 分类标签 -->
-            <div v-if="tags.length > 0" class="page-tags">
-              <span class="tags-label">标签：</span>
-              <span
-                v-for="tag in tags"
-                :key="tag"
-                class="tag"
-              >
-                {{ tag }}
-              </span>
-            </div>
-          </main>
         </div>
       </template>
     </div>
@@ -383,8 +618,8 @@ function formatFieldValue(field: { value: string; type: string }): string {
 <style scoped>
 /* ═══════════════ 根容器 ═══════════════ */
 .wiki-entity-page {
-  padding: var(--lme-gap-lg);
-  max-width: 1200px;
+  padding: var(--lme-gap-lg) var(--lme-gap-xl);
+  max-width: 1440px;
 }
 
 /* ═══════════════ 状态 ═══════════════ */
@@ -416,7 +651,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
   background: var(--lme-accent);
   border: none;
   border-radius: var(--lme-radius-md);
-  color: #fff;
+  color: var(--wiki-infobox-header-text);
   font-size: var(--lme-font-size-sm);
   cursor: pointer;
   transition: background 0.15s;
@@ -434,23 +669,20 @@ function formatFieldValue(field: { value: string; type: string }): string {
 /* ═══════════════ 标题区 ═══════════════ */
 .page-header {
   margin-bottom: var(--lme-gap-lg);
-  border-bottom: 1px solid var(--lme-border);
-  padding-bottom: var(--lme-gap-md);
 }
 
 .page-title {
-  font-size: var(--lme-font-size-xl);
-  font-weight: 600;
-  color: var(--lme-text-primary);
   margin: 0;
-  line-height: 1.3;
+  font-size: var(--wiki-title-size);
+  line-height: var(--wiki-title-line);
+  font-weight: 700;
+  color: var(--wiki-title);
 }
 
 .page-subtitle {
-  font-size: var(--lme-font-size-sm);
-  color: var(--lme-text-muted);
-  margin-top: var(--lme-gap-xs);
-  margin-bottom: 0;
+  margin: var(--lme-gap-xs) 0 0;
+  font-size: var(--lme-font-size-lg);
+  color: var(--lme-text-secondary);
 }
 
 .page-meta {
@@ -463,12 +695,16 @@ function formatFieldValue(field: { value: string; type: string }): string {
 
 .meta-category {
   padding: 2px 10px;
-  border-radius: 10px;
+  border-radius: var(--wiki-chip-radius);
   font-size: var(--lme-font-size-xs);
-  font-weight: 500;
-  background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
-  color: var(--lme-text-secondary);
+  font-weight: 600;
+  background: var(--wiki-chip-bg);
+  border: 1px solid var(--wiki-chip-border);
+  color: var(--wiki-chip-text);
+}
+
+.page-meta-tags {
+  display: inline-flex;
 }
 
 .meta-date {
@@ -476,138 +712,199 @@ function formatFieldValue(field: { value: string; type: string }): string {
   color: var(--lme-text-muted);
 }
 
-/* ═══════════════ 主体布局 ═══════════════ */
+/* ═══════════════ 主体栅格：目录 | 主区 | 信息框（主区:信息框 ≈ 7:3） ═══════════════ */
 .page-body {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 7fr) minmax(0, 3fr);
   gap: var(--lme-gap-xl);
-  align-items: flex-start;
+  align-items: start;
 }
 
-.page-sidebar {
-  width: 280px;
-  flex-shrink: 0;
-  position: sticky;
-  top: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--lme-gap-md);
+.page-toc {
+  grid-column: 1;
 }
 
 .page-main {
-  flex: 1;
+  grid-column: 2;
   min-width: 0;
 }
 
-/* ═══════════════ 信息框 ═══════════════ */
-.infobox {
+.page-aside {
+  grid-column: 3;
+  display: flex;
+  flex-direction: column;
+  gap: var(--lme-gap-lg);
+}
+
+/* 窄屏：右栏下沉到主区下方，目录移到主区上方 */
+@media (max-width: 1024px) {
+  .page-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .page-toc,
+  .page-main,
+  .page-aside {
+    grid-column: 1;
+  }
+}
+
+/* ═══════════════ 分节 ═══════════════ */
+.wiki-section {
+  margin-bottom: var(--lme-gap-lg);
   background: var(--lme-bg-panel);
   border: 1px solid var(--lme-border);
   border-radius: var(--lme-radius-md);
   overflow: hidden;
 }
 
-.infobox-image {
-  width: 100%;
-  aspect-ratio: 1;
-  background: var(--lme-bg-input);
-}
-
-.infobox-image img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.infobox-caption {
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  font-size: var(--lme-font-size-sm);
-  font-weight: 600;
-  color: var(--lme-text-primary);
-  text-align: center;
-  border-bottom: 1px solid var(--lme-border);
-}
-
-.infobox-table {
-  width: 100%;
-  border-collapse: collapse;
-}
-
-.infobox-row {
-  border-bottom: 1px solid var(--lme-border);
-}
-
-.infobox-row:last-child {
-  border-bottom: none;
-}
-
-.infobox-label {
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  font-size: var(--lme-font-size-xs);
-  color: var(--lme-text-muted);
-  text-align: left;
-  width: 35%;
-  vertical-align: top;
-  font-weight: 500;
-}
-
-.infobox-value {
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  font-size: var(--lme-font-size-sm);
-  color: var(--lme-text-primary);
-  vertical-align: top;
-}
-
-.infobox-tags {
+.section-title {
   display: flex;
-  flex-wrap: wrap;
-  gap: var(--lme-gap-xs);
-}
-
-.infobox-tag {
-  padding: 1px 6px;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--lme-gap-md);
+  margin: 0;
+  padding: var(--lme-gap-md) var(--lme-gap-lg);
+  font-size: var(--lme-font-size-lg);
+  font-weight: 600;
+  color: var(--wiki-section-title);
+  border-bottom: 1px solid var(--lme-border);
   background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
-  border-radius: 8px;
-  font-size: var(--lme-font-size-xs);
-  color: var(--lme-text-secondary);
 }
 
-/* ═══════════════ 目录 ═══════════════ */
-.toc {
+.section-title-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.section-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-sm);
+}
+
+.action-btn {
+  padding: 2px 10px;
   background: var(--lme-bg-panel);
   border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-md);
+  border-radius: var(--lme-radius-sm);
+  color: var(--lme-text-muted);
+  cursor: pointer;
+  font-size: var(--lme-font-size-xs);
+  transition: all 0.15s;
+}
+
+.action-btn:hover {
+  background: var(--lme-bg-hover);
+  color: var(--lme-text-primary);
+  border-color: var(--lme-border-strong);
+}
+
+.wiki-section.collapsed .section-content {
+  display: none;
+}
+
+.section-content {
+  padding: var(--lme-gap-lg);
+  font-size: var(--lme-font-size-md);
+  color: var(--wiki-body-text);
+  line-height: 1.8;
+  white-space: pre-wrap;
+}
+
+/* 编辑器 */
+.section-editor {
   padding: var(--lme-gap-md);
 }
 
-.toc-title {
+.editor-textarea {
+  width: 100%;
+  min-height: 200px;
+  padding: var(--lme-gap-md);
+  background: var(--lme-bg-input);
+  border: 1px solid var(--lme-accent);
+  border-radius: var(--lme-radius-md);
+  color: var(--lme-text-primary);
+  font-family: var(--lme-font-mono);
+  font-size: var(--lme-font-size-sm);
+  line-height: 1.6;
+  resize: vertical;
+  outline: none;
+}
+
+.editor-actions {
+  display: flex;
+  gap: var(--lme-gap-sm);
+  margin-top: var(--lme-gap-md);
+}
+
+.editor-save {
+  padding: var(--lme-gap-sm) var(--lme-gap-lg);
+  background: var(--lme-success);
+  border: none;
+  border-radius: var(--lme-radius-md);
+  color: var(--wiki-infobox-header-text);
+  font-size: var(--lme-font-size-sm);
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.editor-save:hover {
+  opacity: 0.85;
+}
+
+.editor-cancel {
+  padding: var(--lme-gap-sm) var(--lme-gap-lg);
+  background: var(--lme-bg-elevated);
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-md);
+  color: var(--lme-text-secondary);
+  font-size: var(--lme-font-size-sm);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.editor-cancel:hover {
+  background: var(--lme-bg-hover);
+  color: var(--lme-text-primary);
+}
+
+/* ═══════════════ 关联资源列表 ═══════════════ */
+.binding-list {
+  padding: 0 var(--lme-gap-lg) var(--lme-gap-lg);
+}
+
+.binding-list-title {
   font-size: var(--lme-font-size-sm);
   font-weight: 600;
   color: var(--lme-text-secondary);
-  margin-bottom: var(--lme-gap-sm);
+  margin-bottom: var(--lme-gap-xs);
 }
 
-.toc-list {
+.binding-list ul {
   list-style: none;
   margin: 0;
   padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--lme-gap-xs);
 }
 
-.toc-item {
-  padding: 2px 0;
-}
-
-.toc-item a {
+.binding-item {
+  display: flex;
+  gap: var(--lme-gap-sm);
+  align-items: baseline;
   font-size: var(--lme-font-size-sm);
-  color: var(--lme-accent);
-  cursor: pointer;
-  text-decoration: none;
-  transition: color 0.12s;
 }
 
-.toc-item a:hover {
-  color: var(--lme-accent-hover);
-  text-decoration: underline;
+.binding-kind {
+  flex-shrink: 0;
+  min-width: 88px;
+  color: var(--lme-text-muted);
+}
+
+.binding-display {
+  color: var(--lme-text-primary);
+  word-break: break-all;
 }
 
 /* ═══════════════ 相关页面 ═══════════════ */
@@ -650,244 +947,11 @@ function formatFieldValue(field: { value: string; type: string }): string {
 
 .related-item-title {
   font-size: var(--lme-font-size-sm);
-  color: var(--lme-accent);
+  color: var(--wiki-link);
 }
 
 .related-item-cat {
   font-size: var(--lme-font-size-xs);
   color: var(--lme-text-muted);
-}
-
-/* ═══════════════ 分节 ═══════════════ */
-.wiki-section {
-  margin-bottom: var(--lme-gap-lg);
-  background: var(--lme-bg-panel);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-md);
-  overflow: hidden;
-}
-
-.section-title {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin: 0;
-  padding: var(--lme-gap-md) var(--lme-gap-lg);
-  font-size: var(--lme-font-size-lg);
-  font-weight: 600;
-  color: var(--lme-text-primary);
-  border-bottom: 1px solid var(--lme-border);
-  background: var(--lme-bg-elevated);
-}
-
-.section-title-text {
-  flex: 1;
-}
-
-.section-actions {
-  display: flex;
-  gap: var(--lme-gap-xs);
-}
-
-.action-btn {
-  padding: 2px 10px;
-  background: var(--lme-bg-panel);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
-  color: var(--lme-text-muted);
-  cursor: pointer;
-  font-size: var(--lme-font-size-xs);
-  transition: all 0.15s;
-}
-
-.action-btn:hover {
-  background: var(--lme-bg-hover);
-  color: var(--lme-text-primary);
-  border-color: var(--lme-border-strong);
-}
-
-/* 折叠状态 */
-.wiki-section.collapsed .section-content {
-  display: none;
-}
-
-/* 分节内容 */
-.section-content {
-  padding: var(--lme-gap-lg);
-  font-size: var(--lme-font-size-md);
-  color: var(--lme-text-primary);
-  line-height: 1.75;
-}
-
-.section-content :deep(h3) {
-  font-size: var(--lme-font-size-lg);
-  margin-top: var(--lme-gap-lg);
-  margin-bottom: var(--lme-gap-sm);
-}
-
-.section-content :deep(p) {
-  margin: 0 0 var(--lme-gap-md);
-}
-
-.section-content :deep(ul),
-.section-content :deep(ol) {
-  padding-left: var(--lme-gap-lg);
-  margin-bottom: var(--lme-gap-md);
-}
-
-.section-content :deep(a) {
-  color: var(--lme-accent);
-  text-decoration: none;
-}
-
-.section-content :deep(a:hover) {
-  text-decoration: underline;
-}
-
-.section-content :deep(table) {
-  width: 100%;
-  border-collapse: collapse;
-  margin-bottom: var(--lme-gap-md);
-}
-
-.section-content :deep(th),
-.section-content :deep(td) {
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  border: 1px solid var(--lme-border);
-  text-align: left;
-}
-
-.section-content :deep(th) {
-  background: var(--lme-bg-elevated);
-  font-weight: 600;
-}
-
-/* 编辑器 */
-.section-editor {
-  padding: var(--lme-gap-md);
-}
-
-.editor-textarea {
-  width: 100%;
-  min-height: 200px;
-  padding: var(--lme-gap-md);
-  background: var(--lme-bg-input);
-  border: 1px solid var(--lme-accent);
-  border-radius: var(--lme-radius-md);
-  color: var(--lme-text-primary);
-  font-family: var(--lme-font-mono);
-  font-size: var(--lme-font-size-sm);
-  line-height: 1.6;
-  resize: vertical;
-  outline: none;
-}
-
-.editor-actions {
-  display: flex;
-  gap: var(--lme-gap-sm);
-  margin-top: var(--lme-gap-md);
-}
-
-.editor-save {
-  padding: var(--lme-gap-sm) var(--lme-gap-lg);
-  background: var(--lme-success);
-  border: none;
-  border-radius: var(--lme-radius-md);
-  color: #fff;
-  font-size: var(--lme-font-size-sm);
-  cursor: pointer;
-  transition: opacity 0.15s;
-}
-
-.editor-save:hover {
-  opacity: 0.85;
-}
-
-.editor-cancel {
-  padding: var(--lme-gap-sm) var(--lme-gap-lg);
-  background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-md);
-  color: var(--lme-text-secondary);
-  font-size: var(--lme-font-size-sm);
-  cursor: pointer;
-  transition: all 0.15s;
-}
-
-.editor-cancel:hover {
-  background: var(--lme-bg-hover);
-  color: var(--lme-text-primary);
-}
-
-/* ═══════════════ 画廊 ═══════════════ */
-.gallery-grid {
-  padding: var(--lme-gap-lg);
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: var(--lme-gap-md);
-}
-
-.gallery-item {
-  margin: 0;
-  border-radius: var(--lme-radius-md);
-  overflow: hidden;
-  background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
-  transition: transform 0.15s, border-color 0.15s;
-}
-
-.gallery-item:hover {
-  transform: translateY(-2px);
-  border-color: var(--lme-accent);
-}
-
-.gallery-item img {
-  width: 100%;
-  aspect-ratio: 1;
-  object-fit: cover;
-  display: block;
-}
-
-.gallery-caption {
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  font-size: var(--lme-font-size-xs);
-  color: var(--lme-text-muted);
-  text-align: center;
-}
-
-.gallery-credit {
-  color: var(--lme-text-disabled);
-}
-
-/* ═══════════════ 标签 ═══════════════ */
-.page-tags {
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-xs);
-  flex-wrap: wrap;
-  margin-top: var(--lme-gap-xl);
-  padding-top: var(--lme-gap-lg);
-  border-top: 1px solid var(--lme-border);
-}
-
-.tags-label {
-  font-size: var(--lme-font-size-sm);
-  color: var(--lme-text-muted);
-  margin-right: var(--lme-gap-xs);
-}
-
-.tag {
-  padding: 3px 10px;
-  background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
-  border-radius: 10px;
-  font-size: var(--lme-font-size-xs);
-  color: var(--lme-text-secondary);
-  transition: all 0.12s;
-}
-
-.tag:hover {
-  border-color: var(--lme-accent);
-  color: var(--lme-accent);
 }
 </style>

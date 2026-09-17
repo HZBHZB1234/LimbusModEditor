@@ -102,6 +102,8 @@
   --wiki-accent-strong: #f0c75e;     /* hover 提亮 */
   --wiki-accent-dim: #b08c30;        /* 弱化描边/分割 */
   --wiki-title: #eec95e;             /* 超大页面标题色 */
+  --wiki-title-size: 30px;           /* 页面大标题字号（对齐目标维基观感） */
+  --wiki-title-line: 1.3;
   --wiki-section-title: #edc55f;     /* 分节标题色 */
   --wiki-link: #f2d478;              /* 正文内链色 */
 

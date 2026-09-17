@@ -4,7 +4,11 @@
 // 三栏布局：浏览 | 分隔条 | 编辑
 
 import { ref, computed, onMounted, defineComponent, h, type DefineComponent } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ipc } from '@/ipc'
+
+const route = useRoute()
+const router = useRouter()
 import VirtualList from '@/components/VirtualList.vue'
 import PageBar from '@/components/PageBar.vue'
 
@@ -461,6 +465,16 @@ function toggleClassGroup(dataClass: string) {
 // ── 初始加载 ──────────────────────────────────────────────
 
 onMounted(() => {
+  // 维基「去编辑」深链：/static?table=<表名> → 填进搜索框（页内筛选按表名/数据类名匹配）
+  const raw = route.query.table
+  if (typeof raw === 'string' && raw.trim() !== '') {
+    searchText.value = raw.trim()
+    performSearch()
+    const next = { ...route.query }
+    delete next.table
+    void router.replace({ path: route.path, query: next })
+    return
+  }
   performSearch()
 })
 

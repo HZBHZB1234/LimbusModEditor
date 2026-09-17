@@ -279,6 +279,53 @@ function goEditAsset(target: string) {
   router.push(target)
 }
 
+// ═══════════ 文本 / 静态两条「去编辑」深链 ═══════════
+
+/** 深链目标：path + query（拿不到依据就返回 undefined，不猜、不渲染链接）。 */
+type EditTarget = { path: string; query: Record<string, string> }
+
+/**
+ * 文本工作台深链：Text 绑定且 refKey 是 .json → 当成语言文件相对路径。
+ * 依据：这类条目后端标的 sourceDetail 是「Lang 文件名约定 …」，refKey 形如
+ * `EGOVoiceDig/Voice_EGO_YiSang_1.json`，与文本库 files.rel_path 同口径。
+ */
+function textEditTargetOf(binding: ResourceBinding): EditTarget | undefined {
+  if (binding.kind !== 'Text') return undefined
+  const file = binding.refKey.trim()
+  if (!file.toLowerCase().endsWith('.json')) return undefined
+  return { path: '/text', query: { file } }
+}
+
+/**
+ * 静态数据工作台深链：StaticData 绑定且容器路径在 static-data 下 → 表名取文件名（去 .json）。
+ * 依据：refKey 形如 `…/static-data/personality/personality-01.json`，
+ * 与静态库 tables.name 一致（personality-01 / skin-data 实测可匹配）。
+ */
+function staticEditTargetOf(binding: ResourceBinding): EditTarget | undefined {
+  if (binding.kind !== 'StaticData') return undefined
+  const path = binding.refKey.replace(/\\/g, '/')
+  if (!path.toLowerCase().includes('/static-data/')) return undefined
+  const name = path.split('/').pop() ?? ''
+  const table = name.toLowerCase().endsWith('.json') ? name.slice(0, -5) : ''
+  return table ? { path: '/static', query: { table } } : undefined
+}
+
+/** 绑定的「去编辑」目标：文本 → 静态 → 资源工作台（都没有就不渲染链接）。 */
+function editTargetOf(binding: ResourceBinding): EditTarget | undefined {
+  return (
+    textEditTargetOf(binding) ??
+    staticEditTargetOf(binding) ??
+    (binding.refKey.trim() ? { path: '/assets', query: { container: binding.refKey } } : undefined)
+  )
+}
+
+/** 按钮悬浮提示：说清楚这条链接到底去哪个工作台。 */
+function editTargetTitle(binding: ResourceBinding): string {
+  if (textEditTargetOf(binding)) return '到文本工作台按文件定位：' + binding.refKey
+  if (staticEditTargetOf(binding)) return '到静态数据工作台按表名定位：' + (staticEditTargetOf(binding)!.query.table)
+  return '到资源工作台定位这条容器路径'
+}
+
 /** 其余绑定（StaticData / Text / Prefab / Video / Mesh / Animation …）走纯列表 */
 function otherBindingsOf(section: WikiSection): ResourceBinding[] {
   return bindingsOf(section).filter(
@@ -585,10 +632,10 @@ function formatFieldValue(field: { value: string; type: string }): string {
                         <span class="binding-kind">{{ b.kind }}</span>
                         <span class="binding-display">{{ b.display }}</span>
                         <RouterLink
-                          v-if="b.refKey"
+                          v-if="editTargetOf(b)"
                           class="binding-edit-btn"
-                          title="到资源工作台定位这条容器路径"
-                          :to="{ path: '/assets', query: { container: b.refKey } }"
+                          :title="editTargetTitle(b)"
+                          :to="editTargetOf(b)!"
                         >
                           去编辑
                         </RouterLink>
@@ -680,10 +727,10 @@ function formatFieldValue(field: { value: string; type: string }): string {
                       <span class="binding-kind">{{ b.kind }}</span>
                       <span class="binding-display">{{ b.display }}</span>
                       <RouterLink
-                        v-if="b.refKey"
+                        v-if="editTargetOf(b)"
                         class="binding-edit-btn"
-                        title="到资源工作台定位这条容器路径"
-                        :to="{ path: '/assets', query: { container: b.refKey } }"
+                        :title="editTargetTitle(b)"
+                        :to="editTargetOf(b)!"
                       >
                         去编辑
                       </RouterLink>

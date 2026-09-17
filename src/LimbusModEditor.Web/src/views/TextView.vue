@@ -6,8 +6,12 @@
 // 未实现的 IPC 方法降级为「暂未实现」提示
 
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ipc } from '@/ipc'
 import VirtualList from '@/components/VirtualList.vue'
+
+const route = useRoute()
+const router = useRouter()
 
 // ── 本地模型 ──────────────────────────────────────────────
 
@@ -366,7 +370,30 @@ function onEntriesRangeChange(_start: number, end: number) {
 
 // ── 生命周期 ─────────────────────────────────────────────
 
+// ═══════════ 按文件定位（维基「去编辑」深链）═══════════
+
+/** /text?file=<语言文件相对路径> */
+const fileFromQuery = computed(() => {
+  const raw = route.query.file
+  return typeof raw === 'string' ? raw.trim() : ''
+})
+
+/** 定位完就摘掉 file 参数：刷新（或后退重进）不会再重复触发一次定位 */
+function clearFileParam() {
+  if (route.query.file === undefined) return
+  const next = { ...route.query }
+  delete next.file
+  void router.replace({ path: route.path, query: next })
+}
+
 onMounted(() => {
+  // 深链带了文件：填进搜索框查一次（后端 lang.search 按关键字匹配路径）
+  if (fileFromQuery.value) {
+    searchText.value = fileFromQuery.value
+    performFileSearch()
+    clearFileParam()
+    return
+  }
   loadFileTreeRoots()
 })
 

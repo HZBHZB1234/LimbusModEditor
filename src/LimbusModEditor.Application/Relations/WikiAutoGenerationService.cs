@@ -147,7 +147,7 @@ public sealed class WikiAutoGenerationService
         // ── ① 四源事实（只在真的要生成时读一次）──
         progress?.Report(new WikiGenerationProgress("inputs", 0, subjects.Count, "正在读取本地事实源…"));
         var facts = BuildContext(
-            relations, subjects, cacheDirectory, unityCacheDirectory, languageDirectory, cancellationToken);
+            relations, subjects, cacheDirectory, gameDirectory, unityCacheDirectory, languageDirectory, cancellationToken);
         var context = facts.Context;
         cancellationToken.ThrowIfCancellationRequested();
         Log.Info("维基生成开始：对象 {0} · 资源行 {1:N0}（命中关联键 {2:N0}）· 音频样本 {3:N0} · 静态表 {4:N0} · lang 文件 {5:N0} · 锚点 {6:N0}",
@@ -158,7 +158,7 @@ public sealed class WikiAutoGenerationService
 
         // ── 基础数据三节（数据/技能/被动）的取数目录：静态表行级 + Lang 实体 ──
         // 前提缺失（索引没建/游戏目录没有）→ null → 人格页退回原编排，不阻断。
-        using var staticRows = StaticRowCatalog.TryCreate(cacheDirectory, unityCacheDirectory);
+        using var staticRows = StaticRowCatalog.TryCreate(cacheDirectory, unityCacheDirectory, gameDirectory);
         var langCatalog = WikiLangCatalog.TryCreate(languageDirectory);
 
         // ── ② 逐对象生成实体页 ──
@@ -260,6 +260,7 @@ public sealed class WikiAutoGenerationService
         RelationQueryService relations,
         IReadOnlyList<RelationSubject> subjects,
         string cacheDirectory,
+        string? gameDirectory,
         string? unityCacheDirectory,
         string? languageDirectory,
         CancellationToken cancellationToken)
@@ -297,7 +298,7 @@ public sealed class WikiAutoGenerationService
         }
         cancellationToken.ThrowIfCancellationRequested();
 
-        var statics = ReadStaticFacts(cacheDirectory, unityCacheDirectory, cancellationToken);
+        var statics = ReadStaticFacts(cacheDirectory, gameDirectory, unityCacheDirectory, cancellationToken);
 
         var langFiles = new List<RelationLangFact>();
         foreach (var file in new TextIndexStore(cacheDirectory).ReadFiles(languageDirectory))
@@ -308,32 +309,16 @@ public sealed class WikiAutoGenerationService
         return new LoadedFacts(context, PresetWorkbenchService.IndexByContainerEntry(assets), scanned);
     }
 
-    /// <summary>静态表正文（缓存未命中时返回空：静态表只是少一路输入，不阻断生成）。</summary>
+    /// <summary>静态表正文（快路径探针不命中时回落 catalog 重定位；都不成立返回空：
+    /// 静态表只是少一路输入，不阻断生成）。</summary>
     private static IReadOnlyList<RelationStaticFact> ReadStaticFacts(
-        string cacheDirectory, string? unityCacheDirectory, CancellationToken cancellationToken)
+        string cacheDirectory, string? gameDirectory, string? unityCacheDirectory, CancellationToken cancellationToken)
     {
-        string? sourceKey;
-        try
+        var resolved = StaticIndexService.LocateForReads(
+            new StaticTableIndexStore(cacheDirectory), gameDirectory, StaticIndexService.CacheRoots(unityCacheDirectory));
+        if (resolved is null || !resolved.IsCached)
         {
-            sourceKey = new StaticTableIndexStore(cacheDirectory).ReadSourceKey();
-        }
-        catch (Exception ex) when (ex is SqliteException or IOException or UnauthorizedAccessException or InvalidDataException)
-        {
-            Log.Warn(ex, "读静态表索引源键失败：本次生成不含静态表事实");
-            return [];
-        }
-        if (string.IsNullOrWhiteSpace(sourceKey))
-        {
-            Log.Debug("静态表索引还没有源键：本次生成不含静态表事实");
-            return [];
-        }
-
-        var probe = new StaticBundleLocation(
-            $"{StaticBundleLocator.BundleNamePrefix}{sourceKey}.bundle", sourceKey, OuterKey: null, Record: null);
-        var resolved = StaticBundleLocator.LocateInCache(probe, StaticIndexService.CacheRoots(unityCacheDirectory));
-        if (!resolved.IsCached)
-        {
-            Log.Debug("静态数据 bundle 未在缓存根下命中（sourceKey={0}）：本次生成不含静态表事实", sourceKey);
+            Log.Debug("静态数据 bundle 未定位或缓存里没有该条目：本次生成不含静态表事实");
             return [];
         }
 

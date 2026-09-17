@@ -97,28 +97,31 @@ public sealed class StaticRowCatalog : IDisposable
 
     /// <summary>
     /// 建目录：定位静态 bundle（与 <c>WikiAutoGenerationService.ReadStaticFacts</c> 同一口径——
-    /// 索引里存的源键 → 缓存根命中）。前提缺失返回 null（静态表只是少一路输入，不阻断生成）。
+    /// 索引里的源键在缓存根下命中；热点热修换过 bundle 时回落 catalog 重定位）。
+    /// 前提缺失返回 null（静态表只是少一路输入，不阻断生成）。
     /// </summary>
-    public static StaticRowCatalog? TryCreate(string cacheDirectory, string? unityCacheDirectory)
+    public static StaticRowCatalog? TryCreate(
+        string cacheDirectory, string? unityCacheDirectory, string? gameDirectory)
     {
         try
         {
             var store = new StaticTableIndexStore(cacheDirectory);
             var sourceKey = store.ReadSourceKey();
-            if (string.IsNullOrWhiteSpace(sourceKey))
+            var resolved = StaticIndexService.LocateForReads(
+                store, gameDirectory, StaticIndexService.CacheRoots(unityCacheDirectory));
+            if (resolved is null || !resolved.IsCached)
             {
-                Log.Debug("静态表索引还没有源键：基础数据分节跳过");
+                Log.Debug("静态数据 bundle 未定位或缓存里没有该条目：基础数据分节跳过");
                 return null;
             }
 
-            var probe = new StaticBundleLocation(
-                $"{StaticBundleLocator.BundleNamePrefix}{sourceKey}.bundle", sourceKey,
-                OuterKey: null, Record: null);
-            var resolved = StaticBundleLocator.LocateInCache(probe, StaticIndexService.CacheRoots(unityCacheDirectory));
-            if (!resolved.IsCached)
+            // 定位到的 bundle 换过内容哈希（游戏热修）→ 索引里的 PathId/偏移还是旧 bundle 的，
+            // 先按新 bundle 重建元数据索引，再建目录（此后后续生成直接走快路径探针）。
+            if (!string.Equals(sourceKey, resolved.InnerHash, StringComparison.OrdinalIgnoreCase))
             {
-                Log.Debug("静态数据 bundle 未在缓存根下命中（sourceKey={0}）：基础数据分节跳过", sourceKey);
-                return null;
+                Log.Info("静态表源键 {0} → {1}：重建静态表元数据索引", sourceKey ?? "(无)", resolved.InnerHash);
+                var service = new StaticIndexService(store);
+                service.RebuildAsync(resolved, StaticIndexSource.From(resolved)).GetAwaiter().GetResult();
             }
 
             var catalog = new StaticRowCatalog(new StaticIndexService(store), resolved);

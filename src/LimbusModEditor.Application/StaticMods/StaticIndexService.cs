@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using LimbusModEditor.Application.Caching;
 using LimbusModEditor.Formats.Unity;
+using NLog;
 
 namespace LimbusModEditor.Application.StaticMods;
 
@@ -18,6 +19,8 @@ namespace LimbusModEditor.Application.StaticMods;
 /// </summary>
 public sealed class StaticIndexService
 {
+    private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
     private readonly StaticTableIndexStore _store;
 
     /// <param name="store">索引库（页面传 <c>new StaticTableIndexStore(host.Env.CacheDirectory)</c>）。</param>
@@ -37,6 +40,33 @@ public sealed class StaticIndexService
     /// <summary>缓存根候选（共享配置里的 Unity 缓存目录 + LCTA 事实中的迁移盘缓存）。</summary>
     public static IReadOnlyList<string> CacheRoots(string? unityCacheDirectory)
         => StaticBundleLocator.WithMigratedCacheRoot([unityCacheDirectory]);
+
+    /// <summary>
+    /// 给「只读派生链路」（维基生成 / 基础数据分节）定位静态 bundle 的两级定位：
+    /// 先按索引里存的源键在缓存根下探 <c>&lt;外层键&gt;/&lt;源键&gt;/__data</c>（快路径，不解析 catalog）；
+    /// 探不到 → 回落 catalog 全路径重新定位。
+    ///
+    /// <para><b>为什么要回落</b>：官方热修会更换静态 bundle 的内层内容哈希，并把旧条目从 Unity 缓存里
+    /// 清掉 —— 此时索引里的 <c>source_key</c> 还指着旧哈希，只走探针会「静默丢掉静态表这路输入」
+    /// （实测 2026-09-17：<c>fa6984a9…</c> 已从缓存消失，catalog 已换成 <c>fadb2926…</c>，
+    /// 于是人格页的「数据/技能/被动」三节全部不生成）。语义与
+    /// <see cref="Scanning.StartupScanService"/> 步骤④「探针不成立 → catalog 全路径」一致。</para>
+    /// </summary>
+    public static StaticBundleLocation? LocateForReads(
+        StaticTableIndexStore store, string? gameDirectory, IReadOnlyList<string> cacheRoots)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        var sourceKey = store.ReadSourceKey();
+        if (!string.IsNullOrWhiteSpace(sourceKey))
+        {
+            var probe = new StaticBundleLocation(
+                $"{StaticBundleLocator.BundleNamePrefix}{sourceKey}.bundle", sourceKey, OuterKey: null, Record: null);
+            var cached = StaticBundleLocator.LocateInCache(probe, cacheRoots);
+            if (cached.IsCached) return cached;
+            Log.Info("静态表索引的源键 {0} 已不在缓存根下（游戏热修换了静态 bundle）：回落 catalog 重新定位", sourceKey);
+        }
+        return Locate(gameDirectory, cacheRoots);
+    }
 
     /// <summary>
     /// 读索引（不碰 bundle）。<see cref="StaticIndexLoad.IsUsable"/> 为 false 时

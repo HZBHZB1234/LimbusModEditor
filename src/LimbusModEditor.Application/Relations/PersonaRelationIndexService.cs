@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using LimbusModEditor.Application.AppConfig;
 using LimbusModEditor.Application.Assets;
-using LimbusModEditor.Application.Caching;
 using LimbusModEditor.Application.Scanning;
 using LimbusModEditor.Application.StaticMods;
 using LimbusModEditor.Application.Texts;
@@ -87,8 +86,7 @@ public sealed class PersonaRelationIndexService
         var unityCacheDirectory = _env.EffectiveUnityCacheDirectory(project);
 
         // ── ① 四个上游源的签名（只做「变没变」的判定，不重算各自的解析）──
-        var unityStore = new UnityCacheSqliteIndexStore(
-            Path.Combine(cacheDirectory, WorkbenchCachePaths.UnityCacheIndexFileName));
+        var unityStore = UnityCacheSqliteIndexStore.ForCacheDirectory(cacheDirectory);
         var unitySignature = DescribeUnityIndex(unityStore);
 
         var bankDirectory = new BankDirectoryService().ResolveBankDirectory(gameDirectory);
@@ -170,8 +168,7 @@ public sealed class PersonaRelationIndexService
         CancellationToken cancellationToken)
     {
         var assets = new List<RelationAssetFact>();
-        foreach (var row in new UnityCacheSqliteIndexStore(
-                     Path.Combine(cacheDirectory, WorkbenchCachePaths.UnityCacheIndexFileName)).ReadContainerRows())
+        foreach (var row in UnityCacheSqliteIndexStore.ForCacheDirectory(cacheDirectory).ReadContainerRows())
             assets.Add(new RelationAssetFact(row.ContainerEntry, row.Type, row.Size));
 
         var audio = new List<RelationAudioFact>();

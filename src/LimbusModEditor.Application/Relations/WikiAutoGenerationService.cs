@@ -2,7 +2,6 @@ using System.Diagnostics;
 using System.Globalization;
 using LimbusModEditor.Application.AppConfig;
 using LimbusModEditor.Application.Assets;
-using LimbusModEditor.Application.Caching;
 using LimbusModEditor.Application.Relations.Authority;
 using LimbusModEditor.Application.Relations.WikiBaseData;
 using LimbusModEditor.Application.Scanning;
@@ -272,8 +271,7 @@ public sealed class WikiAutoGenerationService
 
         var assets = new List<AssetRecord>();
         long scanned = 0;
-        foreach (var row in new UnityCacheSqliteIndexStore(
-                     Path.Combine(cacheDirectory, WorkbenchCachePaths.UnityCacheIndexFileName))
+        foreach (var row in UnityCacheSqliteIndexStore.ForCacheDirectory(cacheDirectory)
                      .ReadNonStaticContainerRows())
         {
             scanned++;

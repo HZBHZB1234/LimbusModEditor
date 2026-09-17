@@ -52,8 +52,8 @@ internal static class WikiExportIpcCommand
         }
 
         // 与 WebView2MainWindow 相同的组合根（无 DI，就地拼装）。
-        var store = new UnityCacheSqliteIndexStore(
-            Path.Combine(environment.CacheDirectory, "unity-cache-index.json"));
+        // 同 WebView2MainWindow：必须是 .db（详见那里的说明），传 .json 会建出 0 行空库。
+        var store = UnityCacheSqliteIndexStore.ForCacheDirectory(environment.CacheDirectory);
         var catalog = new AssetCatalog(store, EmptyAssetStateSource.Instance);
         var spineData = SpineDataGatewayFactory.Create(
             Path.Combine(environment.CacheDirectory, "spine-data.db"));

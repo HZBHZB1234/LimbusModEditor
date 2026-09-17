@@ -225,9 +225,11 @@ public partial class WebView2MainWindow : Wpf.Ui.Controls.FluentWindow, IDisposa
 
     private UnityCacheSqliteIndexStore InitializeIndexStore()
     {
-        var dbPath = Path.Combine(AppEnvironment.Current.CacheDirectory, "unity-cache-index.json");
-        Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
-        return new UnityCacheSqliteIndexStore(dbPath);
+        // 必须是 .db 扩展名（WorkbenchCachePaths.UnityCacheIndexFileName）：
+        // UnityCacheSqliteIndexStore 原样使用传入路径、不做 ChangeExtension，
+        // 传 "unity-cache-index.json" 会被 ReadWriteCreate 建成 0 行的空库，
+        // 于是资源索引恒查不到、立绘/图片解析全为空。
+        return UnityCacheSqliteIndexStore.ForCacheDirectory(AppEnvironment.Current.CacheDirectory);
     }
 
     private string? GetFixedVersionPath()

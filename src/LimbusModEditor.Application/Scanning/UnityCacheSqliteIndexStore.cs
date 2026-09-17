@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using LimbusModEditor.Application.Assets;
+using LimbusModEditor.Application.Caching;
 using LimbusModEditor.Application.StaticMods;
 using LimbusModEditor.Domain.Assets;
 using LimbusModEditor.Domain.Diagnostics;
@@ -90,6 +91,16 @@ public sealed class UnityCacheSqliteIndexStore
             DataSource = _dbFile, Mode = SqliteOpenMode.ReadWriteCreate, ForeignKeys = true
         }.ToString();
     }
+
+    /// <summary>
+    /// 打开缓存目录里的资源索引库。**各处组合根都必须走这里**：本类原样使用传入路径、
+    /// 不做 <c>ChangeExtension</c>，若调用方写成习惯名 <c>unity-cache-index.json</c>，
+    /// <c>ReadWriteCreate</c> 会把它建成一个 0 行的空库 —— 资源索引从此恒查不到，
+    /// 表现为「立绘/图片地址全空」这种**不报错、只是没数据**的静默故障
+    /// （宿主与 wiki-export-ipc 曾同时踩这个坑）。
+    /// </summary>
+    public static UnityCacheSqliteIndexStore ForCacheDirectory(string cacheDirectory) =>
+        new(Path.Combine(cacheDirectory, WorkbenchCachePaths.UnityCacheIndexFileName));
 
     public bool Exists => File.Exists(_dbFile);
 

@@ -1,4 +1,5 @@
 ﻿using LimbusModEditor.Application.Assets;
+using LimbusModEditor.Application.Caching;
 using LimbusModEditor.Application.Scanning;
 using LimbusModEditor.Application.StaticMods;
 using LimbusModEditor.Domain.Assets;
@@ -15,6 +16,24 @@ public sealed class UnityCacheSqliteIndexStoreTests : IDisposable
     private static UnityCacheScanEntry Entry(string name) => new("outer", name, name);
     private static UnityCacheIndexRow Row(int index, string? baseline = "基线") =>
         new(index, "共享容器", long.MaxValue - index, 49, AssetType.Text, 9876543210, baseline, index == 0 ? "assets/中文.json" : null);
+
+    /// <summary>
+    /// 组合根回归：宿主与 wiki-export-ipc 曾把索引库写成习惯名 <c>unity-cache-index.json</c>，
+    /// 而本类原样使用传入路径 → <c>ReadWriteCreate</c> 建成 0 行空库，资源索引恒查不到，
+    /// 表现为「立绘/图片地址全空」的静默故障（不报错、只是没数据）。
+    /// 各处组合根必须走 <see cref="UnityCacheSqliteIndexStore.ForCacheDirectory"/>。
+    /// </summary>
+    [Fact]
+    public void ForCacheDirectory_opens_db_file_not_the_legacy_json_name()
+    {
+        Assert.EndsWith(".db", WorkbenchCachePaths.UnityCacheIndexFileName, StringComparison.Ordinal);
+
+        var store = UnityCacheSqliteIndexStore.ForCacheDirectory(_root);
+        store.EnsureSchema();
+
+        Assert.True(File.Exists(Path.Combine(_root, WorkbenchCachePaths.UnityCacheIndexFileName)));
+        Assert.False(File.Exists(Path.Combine(_root, "unity-cache-index.json")));
+    }
 
     [Fact]
     public void Roundtrip_preserves_empty_bundles_nulls_large_ids_and_shared_strings()

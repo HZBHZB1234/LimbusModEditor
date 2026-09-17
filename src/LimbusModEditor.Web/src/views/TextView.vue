@@ -105,10 +105,19 @@ async function loadFileTreeRoots() {
   const gen = ++fileTreeGeneration
   fileTreeLoading.value = true
   try {
-    const result = await ipc.request<{ nodes: FileNode[] }>('text.fileTreeRoots', {})
+    // 契约方法 lang.files：载荷 { language, offset, take }，响应 { items: LangFileInfoItem[], totalCount }
+    const result = await ipc.request<{
+      items: { relativePath: string; sizeBytes: number; keyCount: number; isUtf8: boolean }[]
+      totalCount: number
+    }>('lang.files', { language: languageFilter.value, offset: 0, take: 200 })
     if (gen !== fileTreeGeneration) return
-    fileTreeRoots.value = result.nodes.map((n) => ({
-      ...n,
+    // lang.files 是扁平文件列表（后端暂无目录层级接口），节点一律为叶子
+    fileTreeRoots.value = result.items.map((f) => ({
+      name: f.relativePath,
+      path: f.relativePath,
+      isLeaf: true,
+      entryCount: f.keyCount,
+      language: languageFilter.value,
       expanded: false,
       loading: false,
       children: null,
@@ -254,12 +263,27 @@ async function performFileSearch() {
 
   searchLoading.value = true
   try {
-    const result = await ipc.request<{ nodes: FileNode[] }>('text.fileSearch', {
-      text: query,
-      language: languageFilter.value || undefined,
-      fileType: fileTypeFilter.value || undefined,
+    // 契约方法 lang.search：载荷 { language, keyword, offset, take }，响应 { items: LangSearchHitItem[] }
+    const result = await ipc.request<{
+      items: { relativePath: string; kind: string; keyPath?: string; snippet?: string }[]
+      totalCount: number
+    }>('lang.search', {
+      language: languageFilter.value,
+      keyword: query,
+      offset: 0,
+      take: 200,
     })
-    searchResults.value = result.nodes || []
+    searchResults.value = result.items.map((h) => ({
+      name: h.keyPath ?? h.relativePath,
+      path: h.relativePath,
+      isLeaf: true,
+      entryCount: 0,
+      language: languageFilter.value,
+      expanded: false,
+      loading: false,
+      children: null,
+      depth: 0,
+    }))
   } catch {
     // 搜索方法未实现时，降级为提示
     searchResults.value = []
@@ -408,7 +432,7 @@ onUnmounted(() => {
             <div class="result-path lme-mono">{{ node.path }}</div>
             <div class="result-meta">
               <span class="meta-tag language-tag">{{ node.language }}</span>
-              <span class="meta-tag count-tag">{{ node.entryCount }} 条</span>
+              <span v-if="node.entryCount > 0" class="meta-tag count-tag">{{ node.entryCount }} 条</span>
             </div>
           </div>
           <div v-if="searchResults.length === 0 && searchText.trim()" class="tree-empty">

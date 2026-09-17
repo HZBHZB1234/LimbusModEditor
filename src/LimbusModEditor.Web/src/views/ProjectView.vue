@@ -62,9 +62,10 @@ async function newProject() {
 
 async function openProject() {
   try {
-    const result = await ipc.request<{ path: string }>('dialog.filePick', {
+    // 契约方法 dialog.openFile：filters 是 Win32 过滤串（不是数组）
+    const result = await ipc.request<{ path: string }>('dialog.openFile', {
       title: '打开项目',
-      filters: [{ name: 'Limbus 模组项目', extensions: ['lme'] }],
+      filters: 'Limbus 模组项目 (*.lme)|*.lme|所有文件 (*.*)|*.*',
     })
     if (result.path) {
       await loadProject(result.path)
@@ -77,7 +78,7 @@ async function openProject() {
 async function saveProject() {
   if (!currentProject.value) return
   try {
-    await ipc.request('project.save', { path: currentProject.value.path })
+    await ipc.request('project.save', { projectFile: currentProject.value.path })
   } catch {
     // 暂未实现：保存项目失败
   }
@@ -87,14 +88,18 @@ async function loadProject(path: string) {
   isLoading.value = true
   errorMessage.value = ''
   try {
-    const result = await ipc.request<{
-      project: CurrentProject
-      sources: ProjectSource[]
-      history: EditHistoryItem[]
-    }>('project.open', { path })
-    currentProject.value = result.project
-    projectSources.value = result.sources
-    editHistory.value = result.history
+    // 契约方法 project.open：载荷 { projectFile }，响应 { ok, name, assetCount }
+    // 后端不返回 sources / history，保持为空（不编造）
+    const result = await ipc.request<{ ok: boolean; name: string; assetCount: number }>(
+      'project.open',
+      { projectFile: path },
+    )
+    currentProject.value = {
+      name: result.name,
+      path,
+      assetCount: result.assetCount,
+      lastModified: '',
+    }
     await loadRecentProjects()
   } catch (e: unknown) {
     errorMessage.value = e instanceof Error ? e.message : String(e)

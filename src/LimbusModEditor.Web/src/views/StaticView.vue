@@ -12,7 +12,10 @@ import PageBar from '@/components/PageBar.vue'
 
 /** 静态数据表元信息 */
 interface StaticTableInfo {
+  /** 后端表 id（static.tableList 的 tableId = 容器路径，查记录时用它） */
+  tableId: string
   tableName: string
+  /** static.tableList 不提供分类，归到"未分类" */
   dataClass: string
   recordCount: number
   bundleSource: string
@@ -295,16 +298,23 @@ async function performSearch() {
   const t0 = performance.now()
 
   try {
-    const result = await ipc.request<StaticTableInfo[]>('static.listTables', {
-      text: searchText.value || undefined,
-      dataClass: dataClassFilter.value || undefined,
-      sort: sortKind.value,
-    })
-    allTables.value = result
+    // 契约方法 static.tableList：载荷 { offset, take }（后端无过滤参数，筛选在前端页内做）
+    const result = await ipc.request<{
+      items: { tableId: string; name: string; recordCount: number }[]
+      totalCount: number
+    }>('static.tableList', { offset: 0, take: 200 })
+
+    // static.tableList 不提供 dataClass / bundleSource，不编造
+    allTables.value = result.items.map((i) => ({
+      tableId: i.tableId,
+      tableName: i.name,
+      dataClass: '未分类',
+      recordCount: i.recordCount,
+      bundleSource: '',
+    }))
   } catch {
-    // 后端暂未实现：显示空列表（保留搜索体验）
     allTables.value = []
-    error.value = '暂未实现：静态数据表列表接口尚未就绪'
+    error.value = '静态数据表列表加载失败'
   } finally {
     lastQueryMs.value = performance.now() - t0
     loading.value = false
@@ -331,15 +341,27 @@ async function fetchRecords(table: StaticTableInfo, offset: number) {
   const t0 = performance.now()
 
   try {
-    const result = await ipc.request<StaticPageResult>('static.queryRecords', {
-      tableName: table.tableName,
+    // 契约方法 static.records：载荷 { tableId, offset, take }，响应 { tableId, items, totalCount, offset, take }
+    const result = await ipc.request<{
+      items: { recordId: string; summary: string; rawJson?: string }[]
+      totalCount: number
+      offset: number
+      take: number
+    }>('static.records', {
+      tableId: table.tableId,
       offset,
       take: pageSize.value,
     })
 
     if (gen !== generation.value) return
 
-    records.value = result.records
+    records.value = result.items.map((i) => ({
+      key: i.recordId,
+      dataClass: table.dataClass,
+      tableName: table.tableName,
+      jsonContent: i.rawJson ?? '',
+      editState: 'Unchanged' as const,
+    }))
     totalRecordCount.value = result.totalCount
     recordOffset.value = result.offset
     lastQueryMs.value = performance.now() - t0
@@ -408,19 +430,22 @@ function onToggleDiff() {
 
 // ── 导出 ──────────────────────────────────────────────────
 
-function onExport() {
-  if (!selectedTable.value) return
-  ipc
-    .request<{ success: boolean; path: string }>('static.export', {
-      tableName: selectedTable.value.tableName,
-      format: 'staticmod',
+async function onExport() {
+  // 契约方法 static.exportStaticmod：载荷 { targetDirectory }（导出当前静态编辑集，不按单表）
+  try {
+    const picked = await ipc.request<{ path: string }>('dialog.folderPick', {
+      title: '选择 .staticmod 导出目录',
     })
-    .then((result) => {
-      alert(`已导出至: ${result.path}`)
-    })
-    .catch(() => {
-      alert('暂未实现：导出功能开发中')
-    })
+    if (!picked.path) return
+
+    const result = await ipc.request<{ ok: boolean; outputPath: string; written: number }>(
+      'static.exportStaticmod',
+      { targetDirectory: picked.path },
+    )
+    alert(`已导出 ${result.written} 条补丁至: ${result.outputPath}`)
+  } catch {
+    alert('导出失败：请确认已打开项目并有静态数据改动')
+  }
 }
 
 // ── 分组展开 ──────────────────────────────────────────────

@@ -173,15 +173,18 @@ async function startExport() {
   progress.value = null
 
   try {
-    const result = await ipc.request<{ outputDir: string; items: ExportReportItem[] }>(
-      'export.start',
-      {
-        slots: enabledSlots.value.map((s) => s.id),
-        groups: enabledGroups.value.map((g) => g.id),
-      },
-    )
-    outputDir.value = result.outputDir
-    exportReport.value = result.items
+    // 契约方法 export.run：载荷只有 { targetDirectory }（契约 §2.6），目录走宿主原生对话框
+    const picked = await ipc.request<{ path: string }>('dialog.folderPick', {
+      title: '选择导出目标目录',
+    })
+    if (!picked.path) return
+
+    const result = await ipc.request<{ ok: boolean; root: string; slots: number }>('export.run', {
+      targetDirectory: picked.path,
+    })
+    outputDir.value = result.root
+    // 后端只回 root + 槽位数量，没有逐条清单：报告列表留空，不编造
+    exportReport.value = []
     exportComplete.value = true
   } catch (e: unknown) {
     exportError.value = e instanceof Error ? e.message : String(e)

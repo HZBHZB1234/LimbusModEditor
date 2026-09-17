@@ -17,20 +17,20 @@ type BankType = 'All' | 'EventBank' | 'AudioBank'
 /** 排序方式 */
 type BankSortKind = 'Name' | 'SampleCount' | 'Size' | 'Type'
 
-/** 银行记录 */
+/** 银行记录（字段对齐 bank.list 的 BankListItem：bankId/name/sampleCount/sizeBytes） */
 interface BankInfo {
-  /** 银行唯一 ID */
+  /** 银行唯一 ID（bank.list 给的是容器路径） */
   bankId: string
   /** 显示名称 */
   name: string
   /** 资源路径 */
   path: string
-  /** 银行类型 */
-  bankType: 'EventBank' | 'AudioBank'
+  /** 银行类型（bank.list 不提供，缺失时显示"未知"） */
+  bankType?: 'EventBank' | 'AudioBank'
   /** 采样数 */
   sampleCount: number
-  /** FSB 信息（文件名 / 版本 / 大小） */
-  fsbInfo: string
+  /** FSB 信息（bank.list 不提供，缺失时不显示） */
+  fsbInfo?: string
   /** 总字节数 */
   totalSize: number
 }
@@ -45,8 +45,8 @@ interface SampleInfo {
   codec: string
   /** 时长（秒） */
   duration: number
-  /** 字节数 */
-  size: number
+  /** 字节数（bank.samples 不提供，缺失时显示"—"） */
+  size?: number
   /** 声道数 */
   channels: number
   /** 采样率（Hz） */
@@ -116,7 +116,8 @@ const selectedSample = computed<SampleInfo | null>(() =>
 // ── 工具函数 ──────────────────────────────────────────────────
 
 /** 格式化文件大小 */
-function formatSize(bytes: number): string {
+function formatSize(bytes?: number): string {
+  if (bytes == null) return '—'
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
@@ -130,13 +131,15 @@ function formatDuration(seconds: number): string {
 }
 
 /** 银行类型颜色 */
-function bankTypeColor(type: string): string {
+function bankTypeColor(type?: string): string {
   return type === 'EventBank' ? 'var(--lme-type-audio)' : 'var(--lme-type-shader)'
 }
 
-/** 银行类型中文标签 */
-function bankTypeLabel(type: string): string {
-  return type === 'EventBank' ? '事件银行' : '音频银行'
+/** 银行类型中文标签（bank.list 不提供类型，缺失时显示"未知"，不猜） */
+function bankTypeLabel(type?: string): string {
+  if (type === 'EventBank') return '事件银行'
+  if (type === 'AudioBank') return '音频银行'
+  return '未知'
 }
 
 // ── 选项数据 ──────────────────────────────────────────────────
@@ -192,22 +195,32 @@ async function fetchBankPage(offset: number) {
   const t0 = performance.now()
 
   try {
-    const result = await ipc.request<{ banks: BankInfo[]; totalCount: number }>('bank.query', {
-      query,
+    // 契约方法 bank.list：载荷 { offset, take }（后端无过滤参数），响应 BankListResponse { items, totalCount }
+    const result = await ipc.request<{
+      items: { bankId: string; name: string; sampleCount: number; sizeBytes: number }[]
+      totalCount: number
+    }>('bank.list', {
       offset,
       take: bankPageSize.value,
     })
 
     if (gen !== bankGeneration.value) return
 
-    bankList.value = result.banks
+    // bankType / fsbInfo 后端不提供，留空（不编造）
+    bankList.value = result.items.map((i) => ({
+      bankId: i.bankId,
+      name: i.name,
+      path: i.bankId,
+      sampleCount: i.sampleCount,
+      totalSize: i.sizeBytes,
+    }))
     bankTotalCount.value = result.totalCount
     bankOffset.value = offset
     lastBankQueryMs.value = performance.now() - t0
 
     // 自动选中第一条
-    if (result.banks.length > 0 && !selectedBankId.value) {
-      selectBank(result.banks[0].bankId)
+    if (bankList.value.length > 0 && !selectedBankId.value) {
+      selectBank(bankList.value[0].bankId)
     }
   } catch (e: unknown) {
     if (gen !== bankGeneration.value) return
@@ -243,15 +256,34 @@ async function loadSamples(bankId: string) {
   sampleError.value = null
 
   try {
-    const result = await ipc.request<{ samples: SampleInfo[] }>('bank.sampleList', { bankId })
+    // 契约方法 bank.samples：载荷 { bankId }，响应 BankSamplesResponse { bankId, samples }
+    const result = await ipc.request<{
+      bankId: string
+      samples: {
+        name: string
+        durationSec: number
+        codecName: string
+        channels: number
+        sampleRate: number
+      }[]
+    }>('bank.samples', { bankId })
 
     if (gen !== sampleGeneration.value) return
 
-    sampleList.value = result.samples
+    // SampleListItem 无字节数字段，size 留空（不编造）；sampleId 用采样名（后端无独立 id）
+    sampleList.value = result.samples.map((s) => ({
+      sampleId: s.name,
+      name: s.name,
+      codec: s.codecName,
+      duration: s.durationSec,
+      channels: s.channels,
+      sampleRate: s.sampleRate,
+      bankId: result.bankId,
+    }))
 
     // 自动选中第一条采样
-    if (result.samples.length > 0) {
-      selectSample(result.samples[0])
+    if (sampleList.value.length > 0) {
+      selectSample(sampleList.value[0])
     }
   } catch (e: unknown) {
     if (gen !== sampleGeneration.value) return
@@ -270,8 +302,10 @@ async function selectSample(sample: SampleInfo) {
   audioPreviewUrl.value = null
 
   try {
-    const result = await ipc.request<{ url: string }>('bank.samplePreview', {
-      sampleId: sample.sampleId,
+    // 契约方法 bank.preview：载荷 { bankId, sampleName }（宿主侧 FMOD 解码未实现，会回 unsupported）
+    const result = await ipc.request<{ url: string }>('bank.preview', {
+      bankId: sample.bankId,
+      sampleName: sample.name,
     })
     audioPreviewUrl.value = result.url
   } catch {
@@ -287,8 +321,15 @@ async function exportRebank() {
   if (!selectedBank.value) return
 
   try {
+    // BankExportRebankRequest 需要 targetDirectory：走宿主原生目录对话框（不用 Web 文件输入）
+    const picked = await ipc.request<{ path: string }>('dialog.folderPick', {
+      title: '选择 .rebank 导出目录',
+    })
+    if (!picked.path) return
+
     await ipc.request('bank.exportRebank', {
       bankId: selectedBank.value.bankId,
+      targetDirectory: picked.path,
     })
   } catch {
     // 导出 IPC 未实现
@@ -579,7 +620,7 @@ const sampleListHeight = ref(400)
           <span class="empty-icon">🔇</span>
           <span>音频预览暂未实现</span>
           <span class="unimplemented-hint">
-            对应的 IPC 方法 bank.samplePreview 尚未在后端实现
+            对应的 IPC 方法 bank.preview 尚未在宿主实现（需 FMOD 解码）
           </span>
         </div>
 

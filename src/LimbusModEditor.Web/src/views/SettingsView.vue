@@ -38,6 +38,18 @@ const columnWidth = ref(uiState.previewColumnWidth)
 const saveStatus = ref<'idle' | 'saving' | 'saved' | 'error'>('idle')
 const errorMessage = ref('')
 
+/**
+ * 前端目录键 → 共享配置键。
+ * config.read / config.write 只认 gameDirectory / unityCacheDirectory / modDirectory /
+ * fmodLibraryDirectory / lastProjectFile 这五个键（SharedConfigKeyValue）。
+ */
+const CONFIG_KEYS: Record<string, string> = {
+  gameDir: 'gameDirectory',
+  cacheDir: 'unityCacheDirectory',
+  modDir: 'modDirectory',
+  fmodDir: 'fmodLibraryDirectory',
+}
+
 // ── 方法 ──
 async function browseDirectory(key: string) {
   const dir = directories.value.find((d) => d.key === key)
@@ -45,7 +57,7 @@ async function browseDirectory(key: string) {
   try {
     const result = await ipc.request<{ path: string }>('dialog.folderPick', {
       title: dir.label,
-      defaultPath: dir.path || undefined,
+      startPath: dir.path || undefined,
     })
     if (result.path) {
       dir.path = result.path
@@ -77,13 +89,14 @@ async function saveSettings() {
   saveStatus.value = 'saving'
   errorMessage.value = ''
   try {
-    await ipc.request('config.save', {
-      directories: Object.fromEntries(directories.value.map((d) => [d.key, d.path])),
-      projectMeta: projectMeta.value,
-      uiState: {
-        previewColumnWidth: columnWidth.value,
-      },
-    })
+    // 契约方法 config.write：一次一个 { key, value }，逐个目录写回
+    for (const dir of directories.value) {
+      const key = CONFIG_KEYS[dir.key]
+      if (!key) continue
+      await ipc.request('config.write', { key, value: dir.path })
+    }
+    // 列宽走 uiState.write（契约 §2.7）
+    await ipc.request('uiState.write', { pageKey: 'settings', columnWidth: columnWidth.value })
     saveStatus.value = 'saved'
   } catch (e: unknown) {
     saveStatus.value = 'error'
@@ -100,23 +113,23 @@ function cancelSettings() {
 // ── 初始化 ──
 onMounted(async () => {
   try {
-    const config = await ipc.request<{
-      directories: Record<string, string>
-      projectMeta: typeof projectMeta.value
-      uiState: { previewColumnWidth: number }
-    }>('config.load', {})
-
+    // 契约方法 config.read：一次一个 { key }，逐个目录读取
     for (const dir of directories.value) {
-      if (config.directories[dir.key]) {
-        dir.path = config.directories[dir.key]
+      const key = CONFIG_KEYS[dir.key]
+      if (!key) continue
+      const result = await ipc.request<{ value?: string }>('config.read', { key })
+      if (result.value) {
+        dir.path = result.value
       }
     }
-    if (config.projectMeta) {
-      projectMeta.value = { ...projectMeta.value, ...config.projectMeta }
+    // 列宽走 uiState.read（契约 §2.7）
+    const state = await ipc.request<{ pageKey: string; columnWidth: number }>('uiState.read', {
+      pageKey: 'settings',
+    })
+    if (state.columnWidth) {
+      columnWidth.value = state.columnWidth
     }
-    if (config.uiState?.previewColumnWidth) {
-      columnWidth.value = config.uiState.previewColumnWidth
-    }
+    // projectMeta（模组名/作者/说明）后端暂无 config 键，不读取、不编造
   } catch {
     // 暂未实现：配置加载失败时使用默认值
   }

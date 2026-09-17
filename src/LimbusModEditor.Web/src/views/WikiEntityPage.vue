@@ -26,7 +26,9 @@ import WikiStoryView from '@/views/WikiStoryView.vue'
 import type {
   WikiPage,
   Infobox,
+  InfoboxField,
   WikiSection,
+  WikiEntry,
   TocItem,
   GalleryImage,
   WikiRelatedPage,
@@ -78,6 +80,32 @@ watch(() => route.params.id, loadPage)
 // ═══════════════ 基础计算属性 ═══════════════
 
 const infobox = computed<Infobox | undefined>(() => page.value?.infobox)
+/** 封面：后端解析不出真实地址时为 null —— 一律不显示占位图 */
+const coverUrl = computed<string | null>(() => page.value?.cover ?? null)
+
+/**
+ * 信息框卡片：有 infobox 或只要解析出了封面才渲染。
+ * 立绘位优先取 infobox.imageUrl，回落到 page.cover；两者皆无则不传 imageUrl，
+ * 由卡片内部按「无图不渲染」处理（不出现占位立绘）。
+ */
+const infoboxCard = computed<{
+  title: string
+  subtitle?: string
+  imageUrl?: string
+  fields: InfoboxField[]
+} | null>(() => {
+  const box = infobox.value
+  const cover = coverUrl.value
+  if (!box && !cover) return null
+  const title = box?.title?.trim() ? box.title : (page.value?.title ?? '')
+  if (!title) return null
+  return {
+    title,
+    subtitle: box && page.value && page.value.title !== box.title ? page.value.title : undefined,
+    imageUrl: (box?.imageUrl ?? cover) || undefined,
+    fields: box?.fields ?? [],
+  }
+})
 const gallery = computed<GalleryImage[]>(() => page.value?.gallery ?? [])
 const relatedPages = computed<WikiRelatedPage[]>(() => page.value?.relatedPages ?? [])
 const tags = computed<string[]>(() => page.value?.tags ?? [])
@@ -186,6 +214,30 @@ const toc = computed<TocItem[]>(() => {
   if (page.value?.toc?.length) return page.value.toc
   return (page.value?.sections ?? []).map((s) => ({ id: s.id, title: s.title, level: 1 }))
 })
+
+// ═══════════════ 分节条目（后端 section.entries[]）═══════════════
+
+/** 标题与正文皆空则不渲染（不占位、不编造） */
+function entriesOf(section: WikiSection): WikiEntry[] {
+  return (section.entries ?? []).filter(
+    (e) => (e.title ?? '').trim() !== '' || (e.body ?? '').trim() !== '',
+  )
+}
+
+/** 条目来源标注：authority / confidence / sourceDetail 全缺则不渲染 */
+function entrySourceOf(entry: WikiEntry) {
+  const has =
+    (entry.authority?.trim() ?? '') !== '' ||
+    entry.confidence !== undefined ||
+    (entry.sourceDetail?.trim() ?? '') !== ''
+  return has
+    ? {
+        authority: entry.authority,
+        confidence: entry.confidence,
+        detail: entry.sourceDetail,
+      }
+    : null
+}
 
 // ═══════════════ 媒体派发 ═══════════════
 
@@ -473,6 +525,17 @@ function formatFieldValue(field: { value: string; type: string }): string {
                     </div>
                   </div>
 
+                  <!-- 分节条目（后端 section.entries[]）：标题 + 正文 + 来源标注 -->
+                  <div v-if="entriesOf(section).length > 0" class="entry-list">
+                    <div v-for="entry in entriesOf(section)" :key="entry.id" class="entry-item">
+                      <div class="entry-head">
+                        <h3 v-if="entry.title?.trim()" class="entry-title">{{ entry.title }}</h3>
+                        <WikiSourceBadge v-if="entrySourceOf(entry)" v-bind="entrySourceOf(entry)" />
+                      </div>
+                      <div v-if="entry.body?.trim()" class="entry-body">{{ entry.body }}</div>
+                    </div>
+                  </div>
+
                   <!-- 媒体派发：按 binding.kind 分发，无绑定则不渲染 -->
                   <WikiAudioPlayer
                     v-if="audioOf(section).length > 0"
@@ -549,6 +612,17 @@ function formatFieldValue(field: { value: string; type: string }): string {
                   </div>
                 </div>
 
+                <!-- 分节条目（后端 section.entries[]）：标题 + 正文 + 来源标注 -->
+                <div v-if="entriesOf(section).length > 0" class="entry-list">
+                  <div v-for="entry in entriesOf(section)" :key="entry.id" class="entry-item">
+                    <div class="entry-head">
+                      <h3 v-if="entry.title?.trim()" class="entry-title">{{ entry.title }}</h3>
+                      <WikiSourceBadge v-if="entrySourceOf(entry)" v-bind="entrySourceOf(entry)" />
+                    </div>
+                    <div v-if="entry.body?.trim()" class="entry-body">{{ entry.body }}</div>
+                  </div>
+                </div>
+
                 <WikiAudioPlayer
                   v-if="audioOf(section).length > 0"
                   :items="audioOf(section)"
@@ -584,11 +658,11 @@ function formatFieldValue(field: { value: string; type: string }): string {
           <!-- 右栏：信息框 -->
           <aside class="page-aside">
             <WikiInfoboxCard
-              v-if="infobox"
-              :title="infobox.title"
-              :subtitle="page.title !== infobox.title ? page.title : undefined"
-              :image-url="infobox.imageUrl"
-              :fields="infobox.fields"
+              v-if="infoboxCard"
+              :title="infoboxCard.title"
+              :subtitle="infoboxCard.subtitle"
+              :image-url="infoboxCard.imageUrl"
+              :fields="infoboxCard.fields"
               :tags="tags"
             />
 
@@ -866,6 +940,42 @@ function formatFieldValue(field: { value: string; type: string }): string {
 .editor-cancel:hover {
   background: var(--lme-bg-hover);
   color: var(--lme-text-primary);
+}
+
+/* ═══════════════ 分节条目 ═══════════════ */
+.entry-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lme-gap-md);
+  padding: 0 var(--lme-gap-lg) var(--lme-gap-md);
+}
+
+.entry-item {
+  padding-left: var(--lme-gap-md);
+  border-left: 2px solid var(--lme-border);
+}
+
+.entry-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--lme-gap-sm);
+  flex-wrap: wrap;
+}
+
+.entry-title {
+  margin: 0;
+  font-size: var(--lme-font-size-md);
+  font-weight: 600;
+  color: var(--wiki-entry-title);
+}
+
+.entry-body {
+  margin-top: var(--lme-gap-xs);
+  font-size: var(--lme-font-size-md);
+  color: var(--wiki-body-text);
+  line-height: 1.8;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* ═══════════════ 关联资源列表 ═══════════════ */

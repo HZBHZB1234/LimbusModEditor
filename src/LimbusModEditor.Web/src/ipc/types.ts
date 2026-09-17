@@ -286,6 +286,12 @@ export interface WikiEntry {
   bindings: ResourceBinding[]
   source: 'user' | 'auto' | 'candidate'
   lastModified?: string
+  /** 来源标注：权威（后端 WikiEntryDto 下发，缺失则不渲染） */
+  authority?: string
+  /** 来源标注：置信度（原样展示，不做换算） */
+  confidence?: number | string
+  /** 来源标注：详细说明，作为悬浮提示 */
+  sourceDetail?: string
 }
 
 export interface ResourceBinding {

@@ -3,7 +3,7 @@
     <canvas ref="canvasRef" class="spine-canvas" :width="width" :height="height"></canvas>
     <div v-if="loading" class="spine-loading">加载中…</div>
     <div v-if="error" class="spine-error">{{ error }}</div>
-    <div v-if="!loading !error && animations.length > 0" class="spine-controls">
+    <div v-if="!loading && !error && animations.length > 0" class="spine-controls">
       <select v-model="selectedAnimation" class="spine-select" @change="changeAnimation">
         <option v-for="anim in animations" :key="anim" :value="anim">{{ anim }}</option>
       </select>
@@ -35,6 +35,11 @@ const playing = ref(true)
 let disposed = false
 let animFrame = 0
 
+// 跨函数持有的运行时句柄（切换动画/重置/重载时复用，切换 URL 时释放）
+let skeletonRef: InstanceType<typeof spine.Skeleton> | null = null
+let animStateRef: InstanceType<typeof spine.AnimationState> | null = null
+let sceneRendererRef: InstanceType<typeof spine.SceneRenderer> | null = null
+
 onMounted(async () => {
   if (!canvasRef.value || !props.skeletonUrl || !props.atlasUrl) return
   await loadSpine()
@@ -43,13 +48,22 @@ onMounted(async () => {
 onUnmounted(() => {
   disposed = true
   if (animFrame) cancelAnimationFrame(animFrame)
+  ;(sceneRendererRef as any)?.dispose?.()
+  sceneRendererRef = null
+  skeletonRef = null
+  animStateRef = null
 })
 
-watch(() => [props.skeletonUrl, props.atlasUrl], async () => {
-  if (animFrame) cancelAnimationFrame(animFrame)
-  disposed = false
-  await loadSpine()
-})
+watch(
+  () => [props.skeletonUrl, props.atlasUrl],
+  async () => {
+    if (animFrame) cancelAnimationFrame(animFrame)
+    ;(sceneRendererRef as any)?.dispose?.()
+    sceneRendererRef = null
+    disposed = false
+    await loadSpine()
+  },
+)
 
 async function loadImage(url: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -80,10 +94,9 @@ async function loadSpine() {
     if (!atlasTextRes.ok) throw new Error(`Failed to load atlas: ${atlasTextRes.status}`)
     const atlasText = await atlasTextRes.text()
 
-    // Load skeleton
+    // Load skeleton（仅取响应，正文按 JSON / 二进制 .skel 分别解析）
     const skeletonRes = await fetch(props.skeletonUrl)
     if (!skeletonRes.ok) throw new Error(`Failed to load skeleton: ${skeletonRes.status}`)
-    const skeletonText = await skeletonRes.text()
 
     // Load textures
     const textureMap = new Map<string, HTMLImageElement>()
@@ -116,12 +129,16 @@ async function loadSpine() {
     // Create attachment loader
     const attachmentLoader = new spine.AtlasAttachmentLoader(atlas)
 
-    // Create skeleton (JSON)
-    const skeletonJson = new spine.SkeletonJson(attachmentLoader)
-    const skeletonData = skeletonJson.readSkeletonData(skeletonText)
+    // Create skeleton（JSON 或二进制 .skel）
+    const isBinarySkeleton = props.skeletonUrl.toLowerCase().endsWith('.skel')
+    const skeletonData = isBinarySkeleton
+      ? new spine.SkeletonBinary(attachmentLoader).readSkeletonData(
+          new Uint8Array(await skeletonRes.arrayBuffer()),
+        )
+      : new spine.SkeletonJson(attachmentLoader).readSkeletonData(await skeletonRes.text())
 
-    // Create skeleton
     const skeleton = new spine.Skeleton(skeletonData)
+    skeletonRef = skeleton
     spine.skeletonSetToSetupPose(skeleton)
     if (skeletonData.defaultSkin) {
       skeleton.setSkin(skeletonData.defaultSkin)
@@ -132,6 +149,7 @@ async function loadSpine() {
     // Create animation state
     const animStateData = new spine.AnimationStateData(skeletonData)
     const animState = new spine.AnimationState(animStateData)
+    animStateRef = animState
 
     animations.value = skeletonData.animations.map((a: any) => a.name)
     if (animations.value.length > 0) {
@@ -141,6 +159,7 @@ async function loadSpine() {
 
     // Setup renderer
     const sceneRenderer = new spine.SceneRenderer(canvas, gl)
+    sceneRendererRef = sceneRenderer
 
     // Render loop
     let lastTime = Date.now()
@@ -178,8 +197,9 @@ async function loadSpine() {
 }
 
 function changeAnimation() {
-  if (!selectedAnimation.value) return
-  // Animation change handled by spine directly
+  if (!selectedAnimation.value || !animStateRef) return
+  // 切换动画：重新设置轨道 0 并循环播放
+  animStateRef.setAnimation(0, selectedAnimation.value, true)
 }
 
 function togglePlay() {
@@ -187,10 +207,11 @@ function togglePlay() {
 }
 
 function resetAnimation() {
-  if (!selectedAnimation.value) return
-  playing.value = false
-  // Reset handled by re-render
-  setTimeout(() => { playing.value = true }, 50)
+  if (!skeletonRef || !animStateRef) return
+  // 回到 setup pose 并重播当前动画
+  spine.skeletonSetToSetupPose(skeletonRef)
+  if (selectedAnimation.value) animStateRef.setAnimation(0, selectedAnimation.value, true)
+  playing.value = true
 }
 </script>
 
@@ -206,7 +227,7 @@ function resetAnimation() {
 .spine-canvas {
   border: 1px solid var(--lme-border);
   border-radius: var(--lme-radius-sm);
-  background: #0a0a1a;
+  background: var(--wiki-canvas-bg);
 }
 
 .spine-loading {
@@ -248,6 +269,6 @@ function resetAnimation() {
 
 .spine-btn:hover {
   background: var(--lme-accent);
-  color: white;
+  color: var(--wiki-infobox-header-text);
 }
 </style>

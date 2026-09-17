@@ -215,7 +215,7 @@ public sealed partial class IpcGateway
             "catalog.containerChildren" => HandleContainerChildren(request),
 
             // ── 2.2 资产预览/读取 ────────────────────────────────────────
-            "asset.preview" => HandleAssetPreview(request),
+            "asset.preview" => await HandleAssetPreviewAsync(request),
             "asset.readText" => await HandleAssetReadTextAsync(request),
 
             // ── 2.3 资产编辑 ──────────────────────────────────────────────
@@ -243,6 +243,7 @@ public sealed partial class IpcGateway
             // ── 2.7 配置 / UI 状态 ────────────────────────────────────────
             "config.read" => HandleConfigRead(request),
             "config.write" => HandleConfigWrite(request),
+            "config.autoDetect" => HandleConfigAutoDetect(request),
             "uiState.read" => HandleUiStateRead(request),
             "uiState.write" => HandleUiStateWrite(request),
 
@@ -262,6 +263,8 @@ public sealed partial class IpcGateway
             "lang.fileEntries" => HandleLangFileEntries(request),
             // 前端历史名（text.*）与 lang.* 是同一处理器的别名，收敛到一处实现。
             "text.fileEntries" => HandleLangFileEntries(request),
+            "text.fileTreeChildren" => HandleLangFileTreeChildren(request),
+            "lang.fileTreeChildren" => HandleLangFileTreeChildren(request),
             "lang.applyPatch" => HandleLangApplyPatch(request),
             "text.applyPatch" => HandleLangApplyPatch(request),
 
@@ -357,13 +360,62 @@ public sealed partial class IpcGateway
 
     // ── 2.2 资产预览/读取 ────────────────────────────────────────
 
-    private IpcResponse HandleAssetPreview(IpcRequest request)
+    /// <summary>
+    /// asset.preview：<b>属性行 + 预览形态 + 可展示地址</b>。
+    ///
+    /// <para>属性行走既有 <see cref="AssetPropertyService"/>（与旧界面属性面板同一口径：
+    /// 纹理尺寸/格式、Sprite 九宫格、AudioClip 采样率、文本编码……），单项读不出来
+    /// 只降级为「（不可读：原因）」，不整块失败。</para>
+    ///
+    /// <para>图像地址复用维基那条「容器路径 → 纹理/精灵 → PNG → <c>lme.data</c>」链路
+    /// （<see cref="WikiMediaResolver.ResolveImageAsync"/>），解不出来给 null（前端降级，不占位）。</para>
+    /// </summary>
+    private async Task<IpcResponse> HandleAssetPreviewAsync(IpcRequest request)
     {
         var req = DeserializePayload<AssetPreviewRequest>(request);
-        // TODO W2: 从索引定位资源 → 取容器路径 → 拼 Virtual Host URL
-        return IpcResponse.Success(request.Id, new AssetPreviewResponse(
-            "unknown", Array.Empty<PropertyRow>(), null));
+        if (string.IsNullOrWhiteSpace(req.AssetId))
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "缺少资源标识（assetId）");
+
+        var asset = ResolveAsset(req.AssetId);
+        if (asset is null)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound, $"未找到资源：{req.AssetId}");
+
+        var rows = new AssetPropertyService().Describe(asset)
+            .Select(r => new PropertyRow(r.Label, r.Value))
+            .ToList();
+        var kind = PreviewKindOf(asset.Type);
+        string? binaryUrl = null;
+        if (kind is "Image" or "SpriteComposite")
+        {
+            var resolution = await _wikiMedia.ResolveImageAsync(ImageRefOf(asset));
+            binaryUrl = resolution.MediaUrl;
+        }
+        return IpcResponse.Success(request.Id, new AssetPreviewResponse(kind, rows, binaryUrl));
     }
+
+    /// <summary>图像解析用的容器路径：优先 <c>containerEntry</c>（Unity 容器内路径），
+    /// 没有就用 <c>LogicalPath</c>（资源列表行的稳定键）。</summary>
+    private static string ImageRefOf(AssetRecord asset)
+        => asset.Metadata.TryGetValue("containerEntry", out var entry) && !string.IsNullOrWhiteSpace(entry)
+            ? entry
+            : asset.LogicalPath;
+
+    /// <summary>资源类型 → 预览形态（与前端 AssetPreviewKind 的取值一致）。</summary>
+    private static string PreviewKindOf(AssetType type) => type switch
+    {
+        AssetType.Texture => "Image",
+        AssetType.Sprite => "SpriteComposite",
+        AssetType.SpriteAtlas => "Atlas",
+        AssetType.Audio => "Audio",
+        AssetType.Text => "Text",
+        AssetType.Json => "JsonFields",
+        AssetType.Material => "Material",
+        AssetType.Shader => "Shader",
+        AssetType.Video => "Video",
+        AssetType.Binary => "Hex",
+        AssetType.Unknown => "None",
+        _ => "Summary",
+    };
 
     private async Task<IpcResponse> HandleAssetReadTextAsync(IpcRequest request)
     {
@@ -679,12 +731,43 @@ public sealed partial class IpcGateway
         var langEdits = _projectState.LangEdits ?? new LangEditSession();
         var staticEdits = _projectState.StaticEdits ?? new StaticEditSession();
 
-        var plan = _exportPlan.Plan(project, req.TargetDirectory, langEdits, staticEdits);
+        var context = new ModExportPlanContext(
+            _environment.EffectiveUnityCacheDirectory(project),
+            _environment.EffectiveFmodLibraryDirectory(project));
+        var plan = _exportPlan.Plan(project, req.TargetDirectory, langEdits, staticEdits, context);
         var projectRoot = _projectState.ProjectFile != null ? Path.GetDirectoryName(_projectState.ProjectFile)! : string.Empty;
-        var result = await _exportService.ExportAsync(project, projectRoot, plan, new ModExportPlanContext(),
+        var result = await _exportService.ExportAsync(project, projectRoot, plan, context,
             new Progress<string>(msg => Log.Info("导出进度: {0}", msg)), CancellationToken.None);
 
-        return IpcResponse.Success(request.Id, new { ok = true, root = result.RootDirectory, slots = result.Slots.Count });
+        // 计划与结果按槽位顺序一一对应（写出阶段就是按 plan.Items 逐条走的），
+        // 直接同位拼接，不重新算跳过原因。
+        var items = new List<ExportRunItem>();
+        var skipped = new List<string>();
+        for (var i = 0; i < result.Slots.Count; i++)
+        {
+            var slot = result.Slots[i];
+            var planned = i < plan.Items.Count ? plan.Items[i] : null;
+            var warnings = planned?.Warnings ?? [];
+            if (slot.Written)
+            {
+                // 写出成功时 slot.Diagnostics 是「产物怎么用」的提示，不是错误：并进 warnings 展示。
+                items.Add(new ExportRunItem(slot.Descriptor.DisplayName, true, slot.Directory,
+                    slot.ArtifactCount, slot.OutputPaths, [], warnings.Concat(slot.Diagnostics).ToArray()));
+                continue;
+            }
+            var reasons = slot.Diagnostics.Count > 0 ? slot.Diagnostics
+                : planned?.SkipReason is { } reason ? [reason]
+                : ["没有可导出的修改"];
+            items.Add(new ExportRunItem(slot.Descriptor.DisplayName, false, slot.Directory,
+                0, [], reasons, warnings));
+            skipped.Add($"{slot.Descriptor.DisplayName}：{reasons[0]}");
+        }
+
+        var info = result.WrittenSlotCount == 0
+            ? $"没有写出任何产物（{result.Slots.Count} 个槽位全部跳过）→ {result.RootDirectory}"
+            : $"已写出 {result.WrittenSlotCount} 个槽位 / {result.WrittenFileCount} 个产物 → {result.RootDirectory}";
+        return IpcResponse.Success(request.Id, new ExportRunResponse(true, result.RootDirectory, result.ModName,
+            items.Count, result.WrittenSlotCount, result.WrittenFileCount, items, skipped, info));
     }
 
     // ── 2.7 配置 / UI 状态 ──────────────────────────────────────────
@@ -701,6 +784,31 @@ public sealed partial class IpcGateway
         var req = DeserializePayload<ConfigWriteRequest>(request);
         SharedConfigKeyValue.Write(req.Key, req.Value);
         return IpcResponse.Success(request.Id, new { ok = true });
+    }
+
+    /// <summary>
+    /// 目录自动探测：共享配置 → 当前项目（旧字段）→ 自动发现。
+    /// 走的是 AppEnvironment 既有那一套（<see cref="AppEnvironment.ApplyAutoConfigure"/>），
+    /// 不新写一份探测；探不到的项给 null，<b>不猜路径</b>。
+    /// </summary>
+    private IpcResponse HandleConfigAutoDetect(IpcRequest request)
+    {
+        var project = _projectState.Project;
+        var report = _environment.ApplyAutoConfigure(project);
+        var game = _environment.EffectiveGameDirectory(project);
+        var cache = _environment.EffectiveUnityCacheDirectory(project);
+        var mod = _environment.EffectiveModDirectory(project);
+        var fmod = _environment.EffectiveFmodLibraryDirectory(project);
+
+        var missing = new List<string>();
+        if (game is null) missing.Add("游戏目录");
+        if (cache is null) missing.Add("Unity 缓存目录");
+        if (mod is null) missing.Add("模组目录");
+        if (fmod is null) missing.Add("FMOD DLL 目录");
+        var info = missing.Count == 0
+            ? $"四个目录都已就绪（本次自动配置：{report.Describe()}）"
+            : $"本次自动配置：{report.Describe()}；仍未找到：{string.Join("、", missing)}（可用 config.write 手动指定）";
+        return IpcResponse.Success(request.Id, new ConfigAutoDetectResponse(game, cache, mod, fmod, info));
     }
 
     private IpcResponse HandleUiStateRead(IpcRequest request)
@@ -895,6 +1003,27 @@ public sealed partial class IpcGateway
             .Select(e => new LangFileEntryItem(e.KeyPath, e.Value)).ToList();
         return IpcResponse.Success(request.Id,
             new LangFileEntriesResponse(req.RelativePath, items, entries.Count, offset, take));
+    }
+
+    /// <summary>
+    /// text.fileTreeChildren：目录树懒加载（一次一层）。
+    /// 数据源是 <see cref="LangTextWorkbenchService.EnumerateFiles"/> 同一套相对路径
+    /// （相对活动语言目录），不另走一遍磁盘、不另造枚举口径。
+    /// </summary>
+    private IpcResponse HandleLangFileTreeChildren(IpcRequest request)
+    {
+        var req = DeserializePayload<LangFileTreeRequest>(request);
+        var langRoot = LangRoot();
+        if (langRoot is null)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "未配置游戏目录，列不出文本目录树");
+
+        var files = _langText.EnumerateFiles(langRoot);
+        var nodes = LangFileTree.ChildrenOf(files.Select(f => f.RelativePath), req.ParentPath);
+        var where = string.IsNullOrWhiteSpace(req.ParentPath) ? "根目录" : req.ParentPath;
+        var info = nodes.Count == 0
+            ? $"{where}下没有子节点（lang 根：{langRoot}）"
+            : $"{where}：{nodes.Count(x => !x.IsLeaf)} 个子目录 / {nodes.Count(x => x.IsLeaf)} 个文件（共 {files.Count} 个 lang 文件）";
+        return IpcResponse.Success(request.Id, new LangFileTreeResponse(nodes, info));
     }
 
     /// <summary>

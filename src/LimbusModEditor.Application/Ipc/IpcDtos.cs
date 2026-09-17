@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Application.Catalog;
 using LimbusModEditor.Application.Relations;
+using LimbusModEditor.Application.Texts;
 using LimbusModEditor.Domain.Assets;
 
 namespace LimbusModEditor.Application.Ipc;
@@ -142,6 +143,18 @@ public sealed record RelationLinksResponse(IReadOnlyList<RelationLinkDto> Links,
 /// <summary>config.read / config.write 载荷。</summary>
 public sealed record ConfigReadRequest(string Key);
 public sealed record ConfigWriteRequest(string Key, string Value);
+
+/// <summary>
+/// config.autoDetect 响应载荷：四个目录的探测结果。
+/// <b>探不到就给 null</b>（不猜路径、不拿占位值充数）；<paramref name="Info"/>
+/// 说明这次补上了什么、还缺什么。
+/// </summary>
+public sealed record ConfigAutoDetectResponse(
+    string? GameDirectory,
+    string? UnityCacheDirectory,
+    string? ModDirectory,
+    string? FmodLibraryDirectory,
+    string Info);
 public sealed record ConfigReadResponse(string? Value);
 
 /// <summary>uiState.read / uiState.write 载荷。</summary>
@@ -288,6 +301,36 @@ public sealed record ExportSlot(
 /// <summary>export.run 请求载荷。</summary>
 public sealed record ExportRunRequest(string TargetDirectory);
 
+/// <summary>
+/// export.run 响应里的一行：<b>计划与结果合一条</b>——写出的槽位给产物清单，
+/// 没写出的给中文原因（计划阶段的跳过原因 / 写出阶段的诊断，谁有理由就用谁的）。
+/// </summary>
+public sealed record ExportRunItem(
+    string Format,
+    bool Written,
+    string Directory,
+    int ArtifactCount,
+    IReadOnlyList<string> OutputPaths,
+    IReadOnlyList<string> SkippedReasons,
+    IReadOnlyList<string> Warnings);
+
+/// <summary>
+/// export.run 响应载荷。<paramref name="Items"/> 是逐槽位明细（顺序与计划一致），
+/// <paramref name="Skipped"/> 是「槽位：原因」的一行式清单（页面直接列）。
+/// 计划只算一次（<see cref="Build.ModExportPlanService"/>），结果直接取
+/// <see cref="Build.ModPackExportResult"/>，不二次计算。
+/// </summary>
+public sealed record ExportRunResponse(
+    bool Ok,
+    string Root,
+    string ModName,
+    int Slots,
+    int WrittenSlots,
+    int WrittenFileCount,
+    IReadOnlyList<ExportRunItem> Items,
+    IReadOnlyList<string> Skipped,
+    string Info);
+
 // ── 工具 ─────────────────────────────────────────────────────────
 
 internal static class IpcDtoJson
@@ -362,6 +405,16 @@ public sealed record LangApplyPatchResponse(
     IReadOnlyList<string> Applied,
     IReadOnlyList<string> Missing,
     IReadOnlyList<string> Rejected,
+    string Info);
+
+// ── 文本目录树（懒加载）──────────────────────────────────────────
+
+/// <summary>text.fileTreeChildren 请求载荷：<paramref name="ParentPath"/> 为空表示根。</summary>
+public sealed record LangFileTreeRequest(string? ParentPath);
+
+/// <summary>text.fileTreeChildren 响应载荷：该目录下的一层子节点 + 中文说明。</summary>
+public sealed record LangFileTreeResponse(
+    IReadOnlyList<LangFileTreeNode> Nodes,
     string Info);
 
 // ── 静态数据工作台 ────────────────────────────────────────────────

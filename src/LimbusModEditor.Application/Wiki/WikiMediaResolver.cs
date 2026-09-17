@@ -191,9 +191,11 @@ public sealed class WikiMediaResolver
         if (string.IsNullOrWhiteSpace(refKey)) return WikiMediaResolution.None;
         try
         {
-            // Audio：<c>bank 路径 + '\0' + 样本名 → 索引行 → FSB → FMOD 解 WAV</c>。
             if (string.Equals(kind, AudioKind, StringComparison.OrdinalIgnoreCase))
                 return await ResolveAudioAsync(deepLink, refKey!, cancellationToken).ConfigureAwait(false);
+            // Spine：<c>Prefab 容器路径 → ISpineDataGateway 三件套</c>（同目录才有意义）。
+            if (string.Equals(kind, SpineKind, StringComparison.OrdinalIgnoreCase))
+                return await ResolveSpineAsync(refKey!, cancellationToken).ConfigureAwait(false);
             if (!string.Equals(kind, ImageKind, StringComparison.OrdinalIgnoreCase))
                 return WikiMediaResolution.None;
             // 解码是 CPU/IO 密集的同步活，丢到线程池：IPC 跑在 WebView2 的消息线程上，
@@ -273,6 +275,63 @@ public sealed class WikiMediaResolver
         var url = WriteWikiFile(fileName, wave);
         return url is null ? WikiMediaResolution.None : new WikiMediaResolution(null, AudioUrl: url);
     }
+
+    // ── Spine：Prefab 容器路径 → 骨架 / 图集 / 纹理 ──────────────────
+
+    /// <summary>
+    /// 把一条 Spine 绑定解成三件套地址。
+    ///
+    /// <para><b>全部走 <see cref="ISpineDataGateway"/></b>（不自己读 bundle）：网关按
+    /// 容器路径找同目录的骨架 JSON / 图集文本 / 纹理三件套并预解码成 PNG。
+    /// <b>缺哪样就给 null</b> —— 尤其是 <c>SpineIllustPrefab/*.prefab</c> 这类绑定，本地
+    /// 索引里同目录常常只有 .prefab（骨架在某个没被缓存的 bundle 里），
+    /// 这时三件套全 null，前端显示「无可用地址」是<b>正确结果</b>，不能编造。</para>
+    /// </summary>
+    private async Task<WikiMediaResolution> ResolveSpineAsync(string refKey, CancellationToken cancellationToken)
+    {
+        if (SpineData is null) return WikiMediaResolution.None;
+        var (data, error) = await SpineData.GetSpineDataByPathAsync(refKey, cancellationToken)
+            .ConfigureAwait(false);
+        if (data is null)
+        {
+            Log.Debug("维基 Spine 解析失败（降级为无地址）：{0} —— {1}", refKey, error ?? "网关未返回数据");
+            return WikiMediaResolution.None;
+        }
+
+        // 同一 ref_key 的三件套共用一个哈希前缀派生文件名（稳定可复用）。
+        var prefix = Hash($"{SpineKind}|{refKey}");
+        var skeletonUrl = data.HasSkeleton
+            ? WriteWikiFile($"{prefix}.{SkeletonExtension(data.SkeletonFormat)}", data.SkeletonBytes)
+            : null;
+        var atlasUrl = string.IsNullOrWhiteSpace(data.AtlasText)
+            ? null
+            : WriteWikiFile($"{prefix}.atlas.txt", Encoding.UTF8.GetBytes(data.AtlasText));
+
+        IReadOnlyDictionary<string, string>? textureUrls = null;
+        if (data.HasTextures)
+        {
+            var textures = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var (page, bytes) in data.PageBytes)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (bytes is not { Length: > 0 }) continue;
+                var url = WriteWikiFile($"{Hash($"{SpineKind}|{refKey}|{page}")}.png", bytes);
+                if (url is null) continue;
+                textures[page] = url;
+                // 图集里引用的是不带扩展名的页名，两种键都给，前端不必再猜一次口径。
+                var stem = Path.GetFileNameWithoutExtension(page);
+                if (!string.IsNullOrEmpty(stem)) textures[stem] = url;
+            }
+            if (textures.Count > 0) textureUrls = textures;
+        }
+
+        if (skeletonUrl is null && atlasUrl is null && textureUrls is null) return WikiMediaResolution.None;
+        return new WikiMediaResolution(null, null, skeletonUrl, atlasUrl, textureUrls);
+    }
+
+    /// <summary>骨架字节的落盘扩展名（<c>binary</c> 是 .skel，其余按 .json）。</summary>
+    private static string SkeletonExtension(string skeletonFormat)
+        => string.Equals(skeletonFormat, "binary", StringComparison.OrdinalIgnoreCase) ? "skel" : "json";
 
     /// <summary>
     /// 拆开音频绑定：<c>deep_link</c> 与 <c>ref_key</c> 都是
@@ -381,10 +440,14 @@ public sealed class WikiMediaResolver
         return info is { Exists: true, Length: > 0 } ? DataHost + "wiki/" + fileName : null;
     }
 
-    /// <summary>把字节写进 <c>wwwroot/data/wiki</c> 并给出它的对外地址。</summary>
+    /// <summary>
+    /// 写字节到 <c>wwwroot/data/wiki</c> 并给出它的对外地址。
+    /// 文件已存在（且非空）直接复用 —— 第二次打开同一页不再付写盘钱。
+    /// </summary>
     private static string? WriteWikiFile(string fileName, byte[] bytes)
     {
         if (bytes is not { Length: > 0 }) return null;
+        if (ExistingWikiUrl(fileName) is { } existing) return existing;
         var file = WikiFilePath(fileName);
         try
         {

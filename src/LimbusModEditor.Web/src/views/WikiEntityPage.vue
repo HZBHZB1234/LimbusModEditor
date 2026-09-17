@@ -310,9 +310,33 @@ function staticEditTargetOf(binding: ResourceBinding): EditTarget | undefined {
   return table ? { path: '/static', query: { table } } : undefined
 }
 
-/** 绑定的「去编辑」目标：文本 → 静态 → 资源工作台（都没有就不渲染链接）。 */
+/**
+ * 音频工作台深链：Audio 绑定的 refKey 形如
+ * `…\Voice_Battle_Announcer_S7.assets.bank\0announcer_911404_90001_1`
+ * （实测：银行绝对路径 + NUL 分隔 + 样本名，与 bank.list 的 bankId、`bank.samples`
+ * 的 name 同口径）。拆不出这两段就不给链接（不猜 bank / 样本名）。
+ */
+function audioEditTargetOf(binding: ResourceBinding): EditTarget | undefined {
+  if (binding.kind !== 'Audio') return undefined
+  const parts = binding.refKey.split('\u0000')
+  if (parts.length !== 2) return undefined
+  const bank = parts[0].trim()
+  const sample = parts[1].trim()
+  if (!bank || !sample) return undefined
+  return { path: '/bank', query: { bank, sample } }
+}
+
+/** Spine 深链：走已打通的资源工作台容器定位（/assets?container=）。 */
+function spineEditTargetOf(binding: ResourceBinding): EditTarget | undefined {
+  if (binding.kind !== 'Spine') return undefined
+  return binding.refKey.trim() ? { path: '/assets', query: { container: binding.refKey } } : undefined
+}
+
+/** 绑定的「去编辑」目标：音频 → Spine → 文本 → 静态 → 资源工作台（都没有就不渲染链接）。 */
 function editTargetOf(binding: ResourceBinding): EditTarget | undefined {
   return (
+    audioEditTargetOf(binding) ??
+    spineEditTargetOf(binding) ??
     textEditTargetOf(binding) ??
     staticEditTargetOf(binding) ??
     (binding.refKey.trim() ? { path: '/assets', query: { container: binding.refKey } } : undefined)

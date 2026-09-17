@@ -4,6 +4,7 @@
 // 布局：三列（浏览 | 分隔条 | 预览），与 AssetsView 一致
 
 import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ipc, IpcClientError } from '@/ipc'
 import VirtualList from '@/components/VirtualList.vue'
 import PageBar from '@/components/PageBar.vue'
@@ -58,6 +59,16 @@ interface SampleInfo {
 // ── UI 状态 store ─────────────────────────────────────────────
 
 const uiState = useUiStateStore()
+const route = useRoute()
+const router = useRouter()
+
+/**
+ * 维基页「去编辑」带过来的深链目标：bank = 银行路径（bank.list 的 bankId 口径）、
+ * sample = 采样名。取到就在列表加载/采样加载后定位一次，用完即清；
+ * 定位不到（例如该银行不在当前页）就什么都不做——不猜、不伪造选中项。
+ */
+const deepLinkBankId = ref<string | null>(null)
+const deepLinkSampleName = ref<string | null>(null)
 
 // ── 搜索判据 ──────────────────────────────────────────────────
 
@@ -220,8 +231,13 @@ async function fetchBankPage(offset: number) {
     bankOffset.value = offset
     lastBankQueryMs.value = performance.now() - t0
 
-    // 自动选中第一条
-    if (bankList.value.length > 0 && !selectedBankId.value) {
+    // 有深链目标就先定位它（bankId 直接可用，不依赖它是否落在当前分页里）
+    if (deepLinkBankId.value) {
+      const target = deepLinkBankId.value
+      deepLinkBankId.value = null
+      await selectBank(target)
+    } else if (bankList.value.length > 0 && !selectedBankId.value) {
+      // 自动选中第一条
       selectBank(bankList.value[0].bankId)
     }
   } catch (e: unknown) {
@@ -284,8 +300,16 @@ async function loadSamples(bankId: string) {
       bankId: result.bankId,
     }))
 
+    // 深链指定了采样名：命中就选中它（顺带触发一次预览），否则按原逻辑选第一条
+    var deepLinked: SampleInfo | undefined
+    if (deepLinkSampleName.value) {
+      const name = deepLinkSampleName.value
+      deepLinkSampleName.value = null
+      deepLinked = sampleList.value.find((s) => s.name === name)
+    }
+    if (deepLinked) await selectSample(deepLinked)
     // 自动选中第一条采样
-    if (sampleList.value.length > 0) {
+    else if (sampleList.value.length > 0) {
       selectSample(sampleList.value[0])
     }
   } catch (e: unknown) {
@@ -381,6 +405,15 @@ function onSplitterMouseUp() {
 // ── 生命周期 ──────────────────────────────────────────────────
 
 onMounted(() => {
+  // 维基页「去编辑」的深链参数（/bank?bank=…&sample=…）：取到就定位，用完立刻清掉
+  const bank = typeof route.query.bank === 'string' && route.query.bank ? route.query.bank : null
+  const sample =
+    typeof route.query.sample === 'string' && route.query.sample ? route.query.sample : null
+  if (bank || sample) {
+    deepLinkBankId.value = bank
+    deepLinkSampleName.value = sample
+    router.replace({ path: route.path, query: {} })
+  }
   performSearch()
 })
 

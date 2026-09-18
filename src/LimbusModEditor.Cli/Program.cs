@@ -33,6 +33,13 @@ if (args.Length == 0 || args[0] is "help" or "--help" or "-h")
     Console.WriteLine("                                           + spine.resolve（按需解三件套），并核对 lme.data 地址在磁盘上真有文件");
     Console.WriteLine("                                           只列未被维基页面绑定的；keyword 传 \"\" 表示不过滤");
     Console.WriteLine("                                           例：spine-browse-ipc \"SD/Enemy\" 8 out.json");
+    Console.WriteLine("  spine-attach [pageIds] [out.json]");
+    Console.WriteLine("                                           「未绑定 Spine 接入维基」的真实证据：接入 → 再跑一遍 → 计数比对");
+    Console.WriteLine("                                           环境变量 LME_BASE=<程序目录> 指定共享配置/缓存目录");
+    Console.WriteLine("  spine-export-ipc \"<refKey1>,<refKey2>,…\" <targetDir> [out.json]");
+    Console.WriteLine("                                           spine.export 的真实 IPC 证据：把 refKey 的三件套导出到目标目录，");
+    Console.WriteLine("                                           再回磁盘逐个核对字节数与头字节（JSON 以 { 开头、PNG 以 \\x89PNG 开头）");
+    Console.WriteLine("                                           例：spine-export-ipc \"Assets/.../10103_gacksung.prefab\" %TEMP%\\spine-out out.json");
     Console.WriteLine("  logs                                      Print the log directory");
     NLogBootstrap.Shutdown();
     return;
@@ -79,6 +86,13 @@ try
                 Environment.GetEnvironmentVariable("LME_BASE"),
                 args.Length >= 2 ? args[1] : null,
                 args.Length >= 3 ? args[2] : null);
+            break;
+        case "spine-export-ipc" when args.Length >= 3:
+            Environment.ExitCode = await SpineExportIpcCommand.RunAsync(
+                Environment.GetEnvironmentVariable("LME_BASE"),
+                args[1],
+                args[2],
+                args.Length >= 4 ? args[3] : null);
             break;
         case "logs":
             Console.WriteLine(logging.CurrentFile ?? logging.Describe());

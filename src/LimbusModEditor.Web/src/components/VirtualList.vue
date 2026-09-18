@@ -11,11 +11,14 @@ const props = withDefaults(
     /** 可视区域上下各多渲染的行数（预取窗口） */
     overscan?: number
     height?: number
+    /** true = 撑满父容器的剩余高度（用在有界的 flex 列里）；false = 用 height 固定像素 */
+    grow?: boolean
   }>(),
   {
     itemHeight: 28,
     overscan: 5,
     height: 600,
+    grow: false,
   },
 )
 
@@ -74,7 +77,8 @@ onMounted(() => {
   <div
     ref="containerRef"
     class="virtual-list-container"
-    :style="{ height: height + 'px' }"
+    :class="{ grow: grow }"
+    :style="grow ? undefined : { height: height + 'px' }"
     @scroll="onScroll"
   >
     <div class="virtual-list-spacer" :style="{ height: totalHeight + 'px' }">
@@ -98,6 +102,11 @@ onMounted(() => {
   overflow-x: hidden;
   position: relative;
   flex: 1;
+}
+
+.virtual-list-container.grow {
+  height: 100%;
+  min-height: 0;
 }
 
 .virtual-list-spacer {

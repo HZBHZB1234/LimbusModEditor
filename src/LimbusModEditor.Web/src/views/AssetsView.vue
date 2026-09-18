@@ -2,9 +2,19 @@
 // 资源工作台竖切片（W1 前端一半）—— v2 样板重做（ui-redesign r1）
 // 对应 WPF 旧界面 AssetsWorkbenchPage
 // 能力清单与差异说明见文件底部注释；本重做只动模板与样式，数据链路（catalog/preview/编辑 IPC）一行未改
+// v3（ui-redesign r3）：手写按钮/面板/空态/标签换成 Naive UI 组件，IPC 调用与深链时序不变
 
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import {
+  NAlert,
+  NButton,
+  NCard,
+  NEmpty,
+  NSpin,
+  NTag,
+  NTooltip,
+} from 'naive-ui'
 import { useCatalogStore } from '@/stores/catalog'
 import { usePreviewStore } from '@/stores/preview'
 import { useUiStateStore } from '@/stores/uiState'
@@ -102,6 +112,19 @@ function stateLabel(state: string): string {
     Invalid: '无效',
   }
   return map[state] ?? state
+}
+
+/** 编辑状态 → NTag 的 type（色由 tokens 派生的主题给：warning/success/error；未修改走 default） */
+function stateTagType(state: string): 'default' | 'warning' | 'success' | 'error' {
+  const map: Record<string, 'default' | 'warning' | 'success' | 'error'> = {
+    Unchanged: 'default',
+    Modified: 'warning',
+    Added: 'success',
+    Deleted: 'error',
+    Conflict: 'error',
+    Invalid: 'error',
+  }
+  return map[state] ?? 'default'
 }
 
 // ── 空态 / 初次加载（v2 新增展示态，不发请求） ──
@@ -352,34 +375,40 @@ const listHeight = ref(600)
 
       <!-- 视图切换 + 计数 + 性能 -->
       <div class="view-toggle-row">
-        <div class="segmented" role="tablist">
-          <button
+        <div class="segmented">
+          <NButton
             class="segmented-btn"
             :class="{ active: viewMode === 'list' }"
+            size="tiny"
+            :secondary="viewMode === 'list'"
             @click="viewMode = 'list'"
           >
             ☰ 列表
-          </button>
-          <button
+          </NButton>
+          <NButton
             class="segmented-btn"
             :class="{ active: viewMode === 'tree' }"
+            size="tiny"
+            :secondary="viewMode === 'tree'"
             @click="viewMode = 'tree'"
           >
             🗂 目录树
-          </button>
+          </NButton>
         </div>
 
-        <span class="result-count" v-if="!catalog.loading">
+        <NTag class="result-count" size="small" :bordered="false" v-if="!catalog.loading">
           共 <strong>{{ catalog.totalCount.toLocaleString('zh-CN') }}</strong> 条命中
-        </span>
+        </NTag>
 
-        <button
+        <NButton
           class="perf-toggle"
-          @click="showPerfPanel = !showPerfPanel"
+          size="tiny"
+          tertiary
           :class="{ active: showPerfPanel }"
+          @click="showPerfPanel = !showPerfPanel"
         >
           📊 性能
-        </button>
+        </NButton>
       </div>
 
       <!-- 列表视图 -->
@@ -414,12 +443,16 @@ const listHeight = ref(600)
                 {{ item.logicalPath.split('/').pop() || item.logicalPath }}
               </span>
               <span class="row-size lme-mono">{{ formatSize(item.size) }}</span>
-              <span
+              <NTag
                 class="row-state"
                 :class="'state-' + item.editState"
+                size="small"
+                round
+                :bordered="false"
+                :type="stateTagType(item.editState)"
               >
                 {{ stateLabel(item.editState) }}
-              </span>
+              </NTag>
             </div>
           </template>
         </VirtualList>
@@ -444,22 +477,34 @@ const listHeight = ref(600)
 
       <!-- 初次加载态 -->
       <div v-if="isInitialLoading" class="state-block">
-        <span class="state-icon spinner">⏳</span>
+        <NSpin size="small" />
         <span class="state-text">正在查询资源目录…</span>
       </div>
 
       <!-- 空态 -->
-      <div v-else-if="isEmpty && viewMode === 'list'" class="state-block">
-        <span class="state-icon">🗄</span>
-        <span class="state-text">没有命中的资源</span>
-        <span class="state-hint">换个关键词，或在上方「清除筛选」恢复默认视图</span>
-      </div>
+      <NEmpty
+        v-else-if="isEmpty && viewMode === 'list'"
+        class="state-block"
+        description="没有命中的资源"
+      >
+        <template #icon>
+          <span class="state-icon">🗄</span>
+        </template>
+        <template #extra>
+          <span class="state-hint">换个关键词，或在上方「清除筛选」恢复默认视图</span>
+        </template>
+      </NEmpty>
 
       <!-- 错误态 -->
-      <div v-if="catalog.error" class="error-banner">
-        <span class="error-banner-icon">⚠️</span>
-        <span>{{ catalog.error }}</span>
-      </div>
+      <NAlert
+        v-if="catalog.error"
+        class="error-banner"
+        type="error"
+        :show-icon="false"
+        :bordered="true"
+      >
+        {{ catalog.error }}
+      </NAlert>
     </div>
 
     <!-- 分隔条 -->
@@ -469,30 +514,49 @@ const listHeight = ref(600)
     <div class="preview-column" :style="{ width: uiState.previewColumnWidth + 'px' }">
       <!-- 编辑操作组：选中一条资源后可用 -->
       <div class="edit-actions">
-        <button
-          class="action-btn primary"
-          :disabled="!catalog.selectedAsset || replaceBusy"
-          :title="catalog.selectedAsset ? catalog.selectedAsset.logicalPath : '先选中一条资源'"
-          @click="onReplaceAsset"
-        >
-          {{ replaceBusy ? '替换中…' : '替换…' }}
-        </button>
-        <button
-          class="action-btn"
-          :disabled="batchBusy || replaceBusy"
-          title="选一个目录，按文件名批量登记替换（已有替换标记的资源默认不覆盖）"
-          @click="onBatchReplace"
-        >
-          {{ batchBusy ? '批量替换中…' : '批量替换…' }}
-        </button>
-        <button
-          class="action-btn"
-          :disabled="!catalog.selectedAsset || clearBusy || replaceBusy"
-          :title="catalog.selectedAsset ? `撤销「${catalog.selectedAsset.logicalPath}」的编辑` : '先选中一条资源'"
-          @click="onClearEdits"
-        >
-          {{ clearBusy ? '撤销中…' : '撤销编辑' }}
-        </button>
+        <NTooltip :disabled="!catalog.selectedAsset" placement="bottom" :show-arrow="false">
+          <template #trigger>
+            <NButton
+              class="action-btn primary"
+              size="small"
+              type="primary"
+              :secondary="true"
+              :disabled="!catalog.selectedAsset || replaceBusy"
+              @click="onReplaceAsset"
+            >
+              {{ replaceBusy ? '替换中…' : '替换…' }}
+            </NButton>
+          </template>
+          {{ catalog.selectedAsset ? catalog.selectedAsset.logicalPath : '先选中一条资源' }}
+        </NTooltip>
+
+        <NTooltip placement="bottom" :show-arrow="false">
+          <template #trigger>
+            <NButton
+              class="action-btn"
+              size="small"
+              :disabled="batchBusy || replaceBusy"
+              @click="onBatchReplace"
+            >
+              {{ batchBusy ? '批量替换中…' : '批量替换…' }}
+            </NButton>
+          </template>
+          选一个目录，按文件名批量登记替换（已有替换标记的资源默认不覆盖）
+        </NTooltip>
+
+        <NTooltip :disabled="!catalog.selectedAsset" placement="bottom" :show-arrow="false">
+          <template #trigger>
+            <NButton
+              class="action-btn"
+              size="small"
+              :disabled="!catalog.selectedAsset || clearBusy || replaceBusy"
+              @click="onClearEdits"
+            >
+              {{ clearBusy ? '撤销中…' : '撤销编辑' }}
+            </NButton>
+          </template>
+          {{ catalog.selectedAsset ? `撤销「${catalog.selectedAsset.logicalPath}」的编辑` : '先选中一条资源' }}
+        </NTooltip>
       </div>
 
       <!-- 操作结果（成功中性 / 失败红） -->
@@ -509,11 +573,18 @@ const listHeight = ref(600)
         <li v-for="(w, i) in batchWarnings" :key="i">{{ w }}</li>
       </ul>
 
-      <PreviewPane :asset="catalog.selectedAsset" />
+      <!-- 详情/预览区（库组件 NCard 外壳，内容仍是 PreviewPane） -->
+      <NCard size="small" class="preview-card">
+        <PreviewPane :asset="catalog.selectedAsset" />
+      </NCard>
 
       <!-- 关联对象：只读列表，数据来自 relation.describe -->
-      <div v-if="catalog.selectedAsset" class="related-card">
-        <div class="related-title">关联对象</div>
+      <NCard
+        v-if="catalog.selectedAsset"
+        size="small"
+        class="related-card"
+        title="关联对象"
+      >
         <ul class="related-list">
           <li v-for="s in relatedSubjects" :key="s.subjectId" class="related-item">
             <div class="related-item-main">
@@ -529,14 +600,14 @@ const listHeight = ref(600)
           <li v-if="relatedSubjects.length === 0" class="related-empty">未找到关联对象</li>
         </ul>
         <div v-if="relatedInfo" class="related-info">{{ relatedInfo }}</div>
-      </div>
+      </NCard>
     </div>
 
     <!-- 性能面板 -->
     <div v-if="showPerfPanel" class="perf-panel">
       <div class="perf-panel-header">
         <span>性能实测</span>
-        <button @click="perfMeasurements = []">清除</button>
+        <NButton size="tiny" text @click="perfMeasurements = []">清除</NButton>
       </div>
       <table class="perf-table">
         <thead>
@@ -623,44 +694,30 @@ const listHeight = ref(600)
   border-bottom: 1px solid var(--lme-border);
 }
 
+/* 分段控件外壳；两枚按钮是库组件 NButton（激活态用 secondary 变体） */
 .segmented {
   display: inline-flex;
+  gap: 1px;
+  background: var(--lme-border);
   border: 1px solid var(--lme-border);
   border-radius: var(--lme-radius-md);
   overflow: hidden;
 }
 
-.segmented-btn {
-  padding: 4px 14px;
-  background: var(--lme-bg-panel);
-  border: none;
-  color: var(--lme-text-secondary);
-  cursor: pointer;
+.segmented :deep(.segmented-btn) {
   font-size: var(--lme-font-size-sm);
-  font-family: var(--lme-font-family);
-  transition: background var(--lme-dur-fast) var(--lme-ease-standard),
-    color var(--lme-dur-fast) var(--lme-ease-standard);
+  border-radius: 0;
 }
 
-.segmented-btn + .segmented-btn {
-  border-left: 1px solid var(--lme-border);
-}
-
-.segmented-btn:hover {
-  background: var(--lme-bg-hover);
-  color: var(--lme-text-primary);
-}
-
-.segmented-btn.active {
-  background: var(--lme-accent-muted);
-  color: var(--lme-text-primary);
+.segmented :deep(.segmented-btn.active) {
   font-weight: var(--lme-font-weight-medium);
 }
 
+/* 计数胶囊（库组件 NTag） */
 .result-count {
+  margin-right: auto;
   font-size: var(--lme-font-size-sm);
   color: var(--lme-text-muted);
-  margin-right: auto;
 }
 
 .result-count strong {
@@ -668,21 +725,12 @@ const listHeight = ref(600)
   font-weight: var(--lme-font-weight-semibold);
 }
 
+/* 性能开关（库组件 NButton） */
 .perf-toggle {
-  padding: 3px 10px;
-  background: none;
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-md);
-  color: var(--lme-text-muted);
-  cursor: pointer;
   font-size: var(--lme-font-size-xs);
-  font-family: var(--lme-font-family);
-  transition: color var(--lme-dur-fast) var(--lme-ease-standard),
-    border-color var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
 .perf-toggle.active {
-  border-color: var(--lme-warning);
   color: var(--lme-warning);
 }
 
@@ -788,29 +836,12 @@ const listHeight = ref(600)
   flex-shrink: 0;
 }
 
+/* 状态胶囊（库组件 NTag）：固定宽度、文字居中；色由主题从 tokens 派生 */
 .row-state {
   width: 64px;
-  font-size: var(--lme-font-size-xs);
-  text-align: center;
-  padding: 1px 6px;
-  border-radius: var(--lme-radius-full);
   flex-shrink: 0;
-}
-
-.state-Unchanged {
-  color: var(--lme-text-muted);
-}
-.state-Modified {
-  color: var(--lme-state-modified);
-  background: var(--lme-state-modified-bg);
-}
-.state-Added {
-  color: var(--lme-state-added);
-  background: var(--lme-state-added-bg);
-}
-.state-Deleted {
-  color: var(--lme-state-deleted);
-  background: var(--lme-state-deleted-bg);
+  font-size: var(--lme-font-size-xs);
+  justify-content: center;
 }
 
 /* ── 空态 / 初次加载 ── */
@@ -831,17 +862,6 @@ const listHeight = ref(600)
   opacity: 0.7;
 }
 
-.state-icon.spinner {
-  animation: state-spin 1.4s linear infinite;
-  display: inline-block;
-}
-
-@keyframes state-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 .state-text {
   font-size: var(--lme-font-size-md);
   color: var(--lme-text-secondary);
@@ -852,17 +872,9 @@ const listHeight = ref(600)
   color: var(--lme-text-muted);
 }
 
-/* ── 错误态 ── */
+/* ── 错误态（库组件 NAlert，仅补外边距） ── */
 .error-banner {
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-sm);
   margin: var(--lme-gap-md);
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  background: var(--lme-error-banner-bg);
-  border: 1px solid var(--lme-error);
-  border-radius: var(--lme-radius-md);
-  color: var(--lme-error);
   font-size: var(--lme-font-size-sm);
 }
 
@@ -893,39 +905,8 @@ const listHeight = ref(600)
 }
 
 .action-btn {
-  padding: 5px 14px;
-  background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-md);
-  color: var(--lme-text-secondary);
-  cursor: pointer;
   font-size: var(--lme-font-size-sm);
-  font-family: var(--lme-font-family);
   flex-shrink: 0;
-  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard),
-    color var(--lme-dur-fast) var(--lme-ease-standard),
-    background var(--lme-dur-fast) var(--lme-ease-standard);
-}
-
-.action-btn:hover:not(:disabled) {
-  border-color: var(--lme-accent);
-  color: var(--lme-text-primary);
-}
-
-.action-btn.primary {
-  background: var(--lme-accent-muted);
-  border-color: var(--lme-accent);
-  color: var(--lme-text-primary);
-  font-weight: var(--lme-font-weight-medium);
-}
-
-.action-btn.primary:hover:not(:disabled) {
-  background: var(--lme-accent);
-}
-
-.action-btn:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
 }
 
 .action-message {
@@ -954,23 +935,38 @@ const listHeight = ref(600)
   overflow-y: auto;
 }
 
+/* ── 预览 / 详情卡（库组件 NCard 外壳：底色/边框/圆角由 naiveTheme.ts 从 tokens 派生） ── */
+.preview-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  margin: var(--lme-gap-md);
+  margin-bottom: 0;
+}
+
+/* 卡体撑满卡高：供 PreviewPane(height:100%) 取到有界高度 */
+.preview-card :deep(.n-card__content) {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+
 /* ── 关联对象卡 ── */
 .related-card {
+  flex-shrink: 0;
+  max-height: 40%;
   margin: var(--lme-gap-md);
-  padding: var(--lme-gap-md);
-  background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-lg);
   overflow-y: auto;
 }
 
-.related-title {
+.related-card :deep(.n-card-header__main) {
   font-size: var(--lme-font-size-sm);
   font-weight: var(--lme-font-weight-semibold);
   color: var(--lme-text-primary);
-  margin-bottom: var(--lme-gap-sm);
-  padding-bottom: var(--lme-gap-xs);
-  border-bottom: 1px solid var(--lme-border);
 }
 
 .related-list {
@@ -1067,11 +1063,9 @@ const listHeight = ref(600)
   font-weight: var(--lme-font-weight-semibold);
 }
 
-.perf-panel-header button {
-  background: none;
-  border: none;
+/* 卡头里的「清除」按钮（库组件 NButton） */
+.perf-panel-header :deep(button) {
   color: var(--lme-text-muted);
-  cursor: pointer;
   font-size: var(--lme-font-size-xs);
 }
 

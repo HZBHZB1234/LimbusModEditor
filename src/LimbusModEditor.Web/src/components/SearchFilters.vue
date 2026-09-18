@@ -1,9 +1,13 @@
 <script setup lang="ts">
 // 搜索与筛选栏（对应 WPF 旧界面的筛选栏）
 // v2：紧凑单行工具栏（窄容器自动换行）；props/emits 接口不变（TextView/BankView/StaticView 共用）
+// v4（资产工作台库组件化）：手写 input/select/checkbox/button 换成
+//   Naive UI 的 NInput / NSelect / NCheckbox / NButton；
+//   防抖（250ms）、筛选即发、清空即发、清除筛选回默认值的判据与时序一字未改
 
 import { ref, watch } from 'vue'
-import type { AssetSearchQuery, AssetSortKind } from '@/ipc'
+import { NButton, NCheckbox, NInput, NSelect } from 'naive-ui'
+import type { AssetSearchQuery, AssetSortKind, AssetType } from '@/ipc'
 
 const props = defineProps<{
   modelValue: AssetSearchQuery
@@ -17,9 +21,24 @@ const emit = defineEmits<{
 const localQuery = ref<AssetSearchQuery>({ ...props.modelValue })
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
 
+/**
+ * 外部判据指纹：只取本栏参与编辑的字段。
+ * 用途是区分「外部改的判据（catalog.query 被 store 整体替换）」与「本栏用户刚改的」，
+ * 避免在选中资源/翻页导致 store 换新对象时再发一次同样的搜索（时序与手写版一致）。
+ */
+function filterFingerprint(q: AssetSearchQuery): string {
+  return JSON.stringify([q.text ?? '', q.type ?? '', q.sort ?? '', q.hasContainerEntry, q.showStaticTables])
+}
+
+/** 已同步出去的本栏状态；外部判据与它不同才回灌，防止表单把用户的下一次输入顶掉 */
+let syncedFingerprint = filterFingerprint(localQuery.value)
+
 watch(
   () => props.modelValue,
   (v) => {
+    const incoming = filterFingerprint(v)
+    if (incoming === syncedFingerprint) return
+    syncedFingerprint = incoming
     localQuery.value = { ...v }
   },
   { deep: true },
@@ -33,6 +52,7 @@ function onSearchInput() {
 }
 
 function onFilterChange() {
+  syncedFingerprint = filterFingerprint(localQuery.value)
   emit('search', { ...localQuery.value })
 }
 
@@ -42,7 +62,7 @@ function clearFilters() {
     hasContainerEntry: true,
     showStaticTables: false,
   }
-  emit('search', { ...localQuery.value })
+  onFilterChange()
 }
 
 const sortOptions: { value: AssetSortKind; label: string }[] = [
@@ -68,63 +88,81 @@ const assetTypeOptions: { value: string; label: string }[] = [
   { value: 'Shader', label: 'Shader' },
   { value: 'Video', label: 'VideoClip' },
 ]
+
+/**
+ * 库下拉的回灌值可能是 null（清空）或 undefined（未匹配到选项），
+ * 统一归一成手写版的口径：空值 = 不按类型筛（原 select 的空 option 给的是 undefined）。
+ */
+function onTypeChange(): void {
+  if (!localQuery.value.type) localQuery.value.type = undefined
+  onFilterChange()
+}
+
+function onContainerEntryChange(value: boolean): void {
+  localQuery.value.hasContainerEntry = value
+  onFilterChange()
+}
+
+function onShowStaticTablesChange(value: boolean): void {
+  localQuery.value.showStaticTables = value
+  onFilterChange()
+}
 </script>
 
 <template>
   <div class="search-filters">
     <!-- 搜索框 -->
-    <div class="search-box">
-      <span class="search-box-icon">🔍</span>
-      <input
-        v-model="localQuery.text"
-        class="search-input"
-        type="text"
-        placeholder="搜索资源名称或路径（支持中文）"
-        @input="onSearchInput"
-      />
-      <button
-        v-if="localQuery.text"
-        class="search-box-clear"
-        title="清空关键词"
-        @click="localQuery.text = ''; onFilterChange()"
-      >
-        ✕
-      </button>
-    </div>
+    <NInput
+      v-model:value="localQuery.text"
+      class="search-input"
+      size="small"
+      clearable
+      placeholder="搜索资源名称或路径（支持中文）"
+      @input="onSearchInput"
+      @clear="onFilterChange"
+    >
+      <template #prefix>
+        <span class="search-input-icon">🔍</span>
+      </template>
+    </NInput>
 
     <!-- 筛选下拉 -->
     <div class="filter-row">
-      <select v-model="localQuery.type" class="filter-select" title="按类型筛选" @change="onFilterChange">
-        <option v-for="opt in assetTypeOptions" :key="opt.value" :value="opt.value || undefined">
-          {{ opt.label }}
-        </option>
-      </select>
+      <NSelect
+        v-model:value="localQuery.type"
+        class="filter-select"
+        size="small"
+        :options="assetTypeOptions"
+        title="按类型筛选"
+        @update:value="onTypeChange"
+      />
 
-      <select v-model="localQuery.sort" class="filter-select" title="排序方式" @change="onFilterChange">
-        <option v-for="opt in sortOptions" :key="opt.value" :value="opt.value">
-          {{ opt.label }}
-        </option>
-      </select>
+      <NSelect
+        v-model:value="localQuery.sort"
+        class="filter-select"
+        size="small"
+        :options="sortOptions"
+        title="排序方式"
+        @update:value="onFilterChange"
+      />
 
-      <label class="filter-checkbox">
-        <input
-          type="checkbox"
-          :checked="localQuery.hasContainerEntry !== false"
-          @change="localQuery.hasContainerEntry = ($event.target as HTMLInputElement).checked; onFilterChange()"
-        />
+      <NCheckbox
+        class="filter-checkbox"
+        :checked="localQuery.hasContainerEntry !== false"
+        @update:checked="onContainerEntryChange"
+      >
         仅容器内
-      </label>
+      </NCheckbox>
 
-      <label class="filter-checkbox">
-        <input
-          type="checkbox"
-          :checked="localQuery.showStaticTables === true"
-          @change="localQuery.showStaticTables = ($event.target as HTMLInputElement).checked; onFilterChange()"
-        />
+      <NCheckbox
+        class="filter-checkbox"
+        :checked="localQuery.showStaticTables === true"
+        @update:checked="onShowStaticTablesChange"
+      >
         显示静态表
-      </label>
+      </NCheckbox>
 
-      <button class="filter-clear-btn" @click="clearFilters">清除筛选</button>
+      <NButton class="filter-clear-btn" size="tiny" tertiary @click="clearFilters">清除筛选</NButton>
     </div>
   </div>
 </template>
@@ -140,65 +178,15 @@ const assetTypeOptions: { value: string; label: string }[] = [
   background: var(--lme-bg-panel);
 }
 
-/* ── 搜索框（带内嵌图标与清空钮） ── */
-.search-box {
-  position: relative;
+/* ── 搜索框（库组件 NInput：底色/边框/聚焦环见 theme/naiveTheme.ts 的 Input 覆盖） ── */
+.search-input {
   flex: 1;
   min-width: 220px;
-  display: flex;
-  align-items: center;
 }
 
-.search-box-icon {
-  position: absolute;
-  left: var(--lme-gap-sm);
+.search-input-icon {
   font-size: var(--lme-font-size-xs);
   opacity: 0.6;
-  pointer-events: none;
-}
-
-.search-input {
-  width: 100%;
-  padding: 6px var(--lme-gap-2xl);
-  background: var(--lme-bg-input);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-full);
-  color: var(--lme-text-primary);
-  font-size: var(--lme-font-size-sm);
-  font-family: var(--lme-font-family);
-  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard),
-    box-shadow var(--lme-dur-fast) var(--lme-ease-standard);
-}
-
-.search-input::placeholder {
-  color: var(--lme-text-muted);
-}
-
-.search-input:focus {
-  outline: none;
-  border-color: var(--lme-accent);
-  box-shadow: var(--lme-shadow-focus);
-}
-
-.search-box-clear {
-  position: absolute;
-  right: var(--lme-gap-xs);
-  width: 20px;
-  height: 20px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: none;
-  border: none;
-  border-radius: var(--lme-radius-full);
-  color: var(--lme-text-muted);
-  font-size: var(--lme-font-size-xs);
-  cursor: pointer;
-}
-
-.search-box-clear:hover {
-  background: var(--lme-bg-hover);
-  color: var(--lme-text-primary);
 }
 
 /* ── 筛选行 ── */
@@ -210,55 +198,15 @@ const assetTypeOptions: { value: string; label: string }[] = [
 }
 
 .filter-select {
-  padding: 5px var(--lme-gap-sm);
-  background: var(--lme-bg-input);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-md);
-  color: var(--lme-text-primary);
-  font-size: var(--lme-font-size-sm);
-  font-family: var(--lme-font-family);
-  cursor: pointer;
-  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard);
-}
-
-.filter-select:hover {
-  border-color: var(--lme-border-strong);
-}
-
-.filter-select:focus {
-  outline: none;
-  border-color: var(--lme-accent);
+  min-width: 132px;
 }
 
 .filter-checkbox {
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-xs);
   font-size: var(--lme-font-size-sm);
   color: var(--lme-text-secondary);
-  cursor: pointer;
-  user-select: none;
-}
-
-.filter-checkbox input[type='checkbox'] {
-  accent-color: var(--lme-accent);
 }
 
 .filter-clear-btn {
-  padding: 5px var(--lme-gap-md);
-  background: none;
-  border: none;
-  border-radius: var(--lme-radius-md);
   color: var(--lme-text-muted);
-  cursor: pointer;
-  font-size: var(--lme-font-size-sm);
-  font-family: var(--lme-font-family);
-  transition: color var(--lme-dur-fast) var(--lme-ease-standard),
-    background var(--lme-dur-fast) var(--lme-ease-standard);
-}
-
-.filter-clear-btn:hover {
-  background: var(--lme-bg-hover);
-  color: var(--lme-text-primary);
 }
 </style>

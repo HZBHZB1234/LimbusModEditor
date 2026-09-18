@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 文本/本地化工作台页面（TextView）
-// 三栏布局：浏览 | 分隔条 | 编辑
+// 三栏主从栅格：语言文件 | 键值条目 | 差异预览（v2 设计语言重做，只动模板与样式）
 // 对应 WPF 旧界面 TextWorkbenchPage
 // IPC 方法：text.fileTreeRoots / text.fileTreeChildren / text.fileEntries / text.applyPatch / text.fileSearch
 // 未实现的 IPC 方法降级为「暂未实现」提示
@@ -404,87 +404,156 @@ onUnmounted(() => {
 
 <template>
   <div class="text-view">
-    <!-- 左栏：浏览 -->
-    <div class="browse-column">
-      <!-- 搜索框 -->
-      <div class="search-box-row">
-        <input
-          v-model="searchText"
-          class="search-input"
-          type="text"
-          placeholder="搜索文件路径或键/值文本…"
-          @input="onSearchInput"
-        />
+    <!-- 顶部细进度条（替代整屏遮罩） -->
+    <div
+      v-if="fileTreeLoading || searchLoading || entriesLoading"
+      class="loading-bar"
+      aria-hidden="true"
+    />
+
+    <!-- 页头工具栏 -->
+    <header class="page-toolbar">
+      <div class="toolbar-leading">
+        <span class="toolbar-icon">📝</span>
+        <div class="toolbar-titles">
+          <h1 class="toolbar-name">文本 / 本地化</h1>
+          <span class="toolbar-sub" v-if="selectedFilePath">
+            <span class="toolbar-file lme-mono">{{ selectedFilePath }}</span>
+            <span class="toolbar-dot">·</span>
+            <span class="toolbar-language" v-if="selectedFileLanguage">
+              {{ selectedFileLanguage }}
+            </span>
+          </span>
+          <span class="toolbar-sub" v-else>
+            从左侧选择一个语言文件，逐条改键名对应的文本
+          </span>
+        </div>
       </div>
 
-      <!-- 筛选行 -->
-      <div class="filter-row">
-        <label class="filter-label">语言</label>
-        <select v-model="languageFilter" class="filter-select">
-          <option value="">全部语言</option>
-          <option value="zh-CN">简体中文 (zh-CN)</option>
-          <option value="en-US">English (en-US)</option>
-          <option value="ja-JP">日本語 (ja-JP)</option>
-          <option value="ko-KR">한국어 (ko-KR)</option>
-        </select>
-
-        <label class="filter-label">类型</label>
-        <select v-model="fileTypeFilter" class="filter-select">
-          <option value="">全部类型</option>
-          <option value="json">JSON</option>
-          <option value="yaml">YAML</option>
-          <option value="csv">CSV</option>
-          <option value="po">PO (gettext)</option>
-        </select>
+      <div class="toolbar-actions">
+        <span class="result-count" v-if="!fileTreeLoading && !searchLoading">
+          共
+          <strong>
+            {{ (searchResults.length || fileTreeRoots.length).toLocaleString('zh-CN') }}
+          </strong>
+          个文件
+        </span>
+        <span v-if="modifiedCount > 0" class="toolbar-chip modified">
+          已修改 {{ modifiedCount }}
+        </span>
+        <span v-if="addedCount > 0" class="toolbar-chip added">
+          已添加 {{ addedCount }}
+        </span>
+        <span v-if="deletedCount > 0" class="toolbar-chip deleted">
+          已删除 {{ deletedCount }}
+        </span>
       </div>
+    </header>
 
-      <!-- 文件树 / 搜索结果 -->
-      <div class="file-tree-container">
-        <div v-if="fileTreeLoading || searchLoading" class="tree-loading">
-          <span class="loading-spinner">⏳</span>
-          <span>加载中…</span>
+    <!-- 三栏主从：语言文件 | 键值条目 | 差异预览 -->
+    <div class="workbench-body">
+      <!-- ── 左：语言文件（搜索结果 / 文件树） ── -->
+      <section class="panel panel-files">
+        <div class="panel-head">
+          <div class="panel-search">
+            <span class="panel-search-icon">🔍</span>
+            <input
+              v-model="searchText"
+              class="search-input"
+              type="text"
+              placeholder="搜索文件路径或键/值文本…"
+              @input="onSearchInput"
+            />
+            <button
+              v-if="searchText"
+              class="search-clear"
+              title="清空搜索"
+              @click="searchText = ''"
+            >
+              ✕
+            </button>
+          </div>
+
+          <div class="filter-row">
+            <label class="filter-label">语言</label>
+            <select v-model="languageFilter" class="filter-select">
+              <option value="">全部语言</option>
+              <option value="zh-CN">简体中文 (zh-CN)</option>
+              <option value="en-US">English (en-US)</option>
+              <option value="ja-JP">日本語 (ja-JP)</option>
+              <option value="ko-KR">한국어 (ko-KR)</option>
+            </select>
+
+            <label class="filter-label">类型</label>
+            <select v-model="fileTypeFilter" class="filter-select">
+              <option value="">全部类型</option>
+              <option value="json">JSON</option>
+              <option value="yaml">YAML</option>
+              <option value="csv">CSV</option>
+              <option value="po">PO (gettext)</option>
+            </select>
+          </div>
         </div>
 
-        <!-- 搜索结果列表 -->
-        <template v-else-if="searchResults.length > 0">
-          <div class="results-header">
-            搜索命中 {{ searchResults.length }} 个文件
+        <div class="panel-body scroll">
+          <!-- 加载态 -->
+          <div v-if="fileTreeLoading || searchLoading" class="state-block">
+            <span class="state-icon spinner">⏳</span>
+            <span class="state-text">正在读取语言文件…</span>
           </div>
-          <div
-            v-for="node in searchResults"
-            :key="node.path"
-            class="file-result-item"
-            @click="node.isLeaf && selectFileNode(node)"
-          >
-            <div class="result-path lme-mono">{{ node.path }}</div>
-            <div class="result-meta">
-              <span class="meta-tag language-tag">{{ node.language }}</span>
-              <span v-if="node.entryCount > 0" class="meta-tag count-tag">{{ node.entryCount }} 条</span>
-            </div>
-          </div>
-          <div v-if="searchResults.length === 0 && searchText.trim()" class="tree-empty">
-            <div class="empty-icon">🔍</div>
-            <div class="empty-title">未找到匹配文件</div>
-            <div class="empty-desc">尝试调整搜索关键词或清除筛选条件</div>
-          </div>
-        </template>
 
-        <!-- 目录树 -->
-        <template v-else>
-          <template v-for="node in fileTreeRoots" :key="node.path">
-            <div class="tree-node-entry">
+          <!-- 搜索结果 -->
+          <template v-else-if="searchResults.length > 0">
+            <div class="results-header">搜索命中 {{ searchResults.length }} 个文件</div>
+            <div
+              v-for="node in searchResults"
+              :key="node.path"
+              class="file-row"
+              :class="{ selected: selectedFilePath === node.path }"
+              :title="node.path"
+              @click="node.isLeaf && selectFileNode(node)"
+            >
+              <span class="file-name lme-mono lme-ellipsis">{{ node.path }}</span>
+              <span v-if="node.language" class="file-tag language-tag">
+                {{ node.language }}
+              </span>
+              <span v-if="node.entryCount > 0" class="file-count lme-mono">
+                {{ node.entryCount }} 条
+              </span>
+            </div>
+
+            <!-- 原文此处条件与外层互斥（恒不可达），保持原样未改 -->
+            <div
+              v-if="searchResults.length === 0 && searchText.trim()"
+              class="state-block"
+            >
+              <span class="state-icon">🔍</span>
+              <span class="state-text">未找到匹配文件</span>
+              <span class="state-hint">尝试调整搜索关键词或清除筛选条件</span>
+            </div>
+          </template>
+
+          <!-- 目录树 -->
+          <template v-else>
+            <div v-for="node in fileTreeRoots" :key="node.path" class="tree-group">
               <div
-                class="tree-node-row"
-                :class="{ leaf: node.isLeaf, expanded: node.expanded }"
-                :style="{ paddingLeft: node.depth * 16 + 8 + 'px' }"
+                class="tree-row"
+                :class="{ selected: selectedFilePath === node.path }"
+                :style="{ paddingLeft: 'calc(var(--lme-gap-lg) * ' + node.depth + ' + var(--lme-gap-sm))' }"
                 @click="toggleFileNode(node)"
               >
                 <span class="tree-arrow">
                   {{ node.isLeaf ? '•' : node.loading ? '⏳' : node.expanded ? '▼' : '▶' }}
                 </span>
-                <span class="tree-node-name">{{ node.name }}</span>
-                <span v-if="node.isLeaf" class="tree-count">{{ node.entryCount }}</span>
-                <span v-else class="tree-count">{{ node.children?.length ?? 0 }}</span>
+                <span class="tree-node-name lme-ellipsis" :title="node.name">
+                  {{ node.name }}
+                </span>
+                <span v-if="node.isLeaf" class="tree-count lme-mono">
+                  {{ node.entryCount }}
+                </span>
+                <span v-else class="tree-count lme-mono">
+                  {{ node.children?.length ?? 0 }}
+                </span>
               </div>
 
               <!-- 子节点（展开时渲染） -->
@@ -492,609 +561,854 @@ onUnmounted(() => {
                 <div
                   v-for="child in node.children"
                   :key="child.path"
-                  class="tree-node-row"
-                  :class="{ leaf: child.isLeaf, expanded: child.expanded }"
-                  :style="{ paddingLeft: (child.depth) * 16 + 8 + 'px' }"
+                  class="tree-row"
+                  :class="{ selected: selectedFilePath === child.path }"
+                  :style="{ paddingLeft: 'calc(var(--lme-gap-lg) * ' + child.depth + ' + var(--lme-gap-sm))' }"
                   @click="toggleFileNode(child)"
                 >
                   <span class="tree-arrow">
                     {{ child.isLeaf ? '•' : child.loading ? '⏳' : child.expanded ? '▼' : '▶' }}
                   </span>
-                  <span class="tree-node-name">{{ child.name }}</span>
-                  <span v-if="child.isLeaf" class="tree-count">{{ child.entryCount }}</span>
-                  <span v-else class="tree-count">{{ child.children?.length ?? 0 }}</span>
+                  <span class="tree-node-name lme-ellipsis" :title="child.name">
+                    {{ child.name }}
+                  </span>
+                  <span v-if="child.isLeaf" class="tree-count lme-mono">
+                    {{ child.entryCount }}
+                  </span>
+                  <span v-else class="tree-count lme-mono">
+                    {{ child.children?.length ?? 0 }}
+                  </span>
                 </div>
               </template>
             </div>
+
+            <!-- 空态 -->
+            <div v-if="fileTreeRoots.length === 0" class="state-block">
+              <span class="state-icon">📝</span>
+              <span class="state-text">暂无语言文件</span>
+              <span class="state-hint">
+                未找到可用的本地化语言文件。请确认项目已包含 .json / .yaml 等文本资源。
+              </span>
+            </div>
           </template>
+        </div>
+      </section>
 
-          <!-- 空状态 -->
-          <div v-if="fileTreeRoots.length === 0" class="tree-empty">
-            <div class="empty-icon">📝</div>
-            <div class="empty-title">暂无语言文件</div>
-            <div class="empty-desc">
-              未找到可用的本地化语言文件。请确认项目已包含 .json / .yaml 等文本资源。
-            </div>
+      <!-- ── 中：键值条目（内联编辑） ── -->
+      <section class="panel panel-entries">
+        <div class="panel-head compact">
+          <div class="panel-title">
+            <span class="panel-title-text">键值条目</span>
+            <span class="panel-badge lme-mono">
+              {{ entries.length.toLocaleString('zh-CN') }}
+            </span>
           </div>
-        </template>
-      </div>
-    </div>
 
-    <!-- 分隔条 -->
-    <div class="column-splitter" />
-
-    <!-- 右栏：编辑 -->
-    <div v-if="selectedFilePath" class="edit-column">
-      <!-- 文件头 -->
-      <div class="edit-header">
-        <div class="header-title">
-          编辑语言文件
-        </div>
-        <div class="header-path lme-mono" :title="selectedFilePath">
-          {{ selectedFilePath }}
-        </div>
-        <div class="header-meta">
-          <span class="meta-tag language-tag">{{ selectedFileLanguage }}</span>
-          <span class="meta-tag count-tag">{{ entries.length }} 条</span>
-          <span v-if="modifiedCount > 0" class="meta-tag modified-tag">
-            已修改 {{ modifiedCount }}
-          </span>
-          <span v-if="addedCount > 0" class="meta-tag added-tag">
-            已添加 {{ addedCount }}
-          </span>
-          <span v-if="deletedCount > 0" class="meta-tag deleted-tag">
-            已删除 {{ deletedCount }}
-          </span>
-        </div>
-      </div>
-
-      <!-- 编辑工具栏 -->
-      <div class="edit-toolbar">
-        <input
-          v-model="inlineSearchText"
-          class="inline-search-input"
-          type="text"
-          placeholder="搜索键名或值内容…"
-        />
-        <label class="diff-toggle">
-          <input type="checkbox" v-model="showDiffView" />
-          差异视图
-        </label>
-        <button
-          class="tool-btn save-btn"
-          :disabled="saving || changedEntries.length === 0"
-          @click="saveAsPatch"
-        >
-          {{ saving ? '保存中…' : '保存补丁' }}
-        </button>
-      </div>
-
-      <!-- 键值编辑表 -->
-      <div class="kv-list-wrapper">
-        <!-- 表头 -->
-        <div class="kv-list-header">
-          <span class="kv-key-col">键名 ({{ entries.length }})</span>
-          <span class="kv-value-col">值</span>
-          <span class="kv-actions-col">操作</span>
-        </div>
-
-        <!-- 虚拟列表 -->
-        <div class="kv-list-container">
-          <div v-if="entriesLoading && entries.length === 0" class="entries-loading">
-            <span class="loading-spinner">⏳</span>
-            <span>加载条目…</span>
-          </div>
-          <div v-else-if="entries.length === 0" class="entries-empty">
-            该文件无键值条目
-          </div>
-          <VirtualList
-            v-else
-            :items="entries"
-            :item-height="32"
-            :height="600"
-            :overscan="8"
-            @range-change="onEntriesRangeChange"
-          >
-            <template #default="{ item }">
-              <div
-                class="kv-row"
-                :class="{
-                  'match-row': matchedEntryIds.has(item.id),
-                  'modified-row': item.editState === 'Modified',
-                  'added-row': item.editState === 'Added',
-                  'deleted-row': item.editState === 'Deleted',
-                }"
+          <div class="panel-head-actions">
+            <div class="panel-search inline">
+              <span class="panel-search-icon">🔍</span>
+              <input
+                v-model="inlineSearchText"
+                class="search-input"
+                type="text"
+                placeholder="搜索键名或值内容…"
+              />
+              <button
+                v-if="inlineSearchText"
+                class="search-clear"
+                title="清空文件内搜索"
+                @click="inlineSearchText = ''"
               >
-                <div class="kv-key-cell lme-mono" :title="item.key">
-                  {{ item.key }}
-                </div>
-                <div class="kv-value-cell">
-                  <input
-                    v-if="item.editState !== 'Deleted'"
-                    type="text"
-                    :value="item.value"
-                    class="value-input"
-                    @input="
-                      onValueEdit(item, ($event.target as HTMLInputElement).value)
-                    "
-                  />
-                  <del v-else class="deleted-text">{{ item.originalValue }}</del>
-                </div>
-                <div class="kv-actions-cell">
-                  <button
-                    v-if="item.editState !== 'Unchanged'"
-                    class="action-btn restore-btn"
-                    title="恢复原值"
-                    @click="restoreEntry(item)"
-                  >
-                    恢复
-                  </button>
-                  <button
-                    v-if="item.editState !== 'Unchanged'"
-                    class="action-btn delete-btn"
-                    title="删除条目"
-                    @click="deleteEntry(item)"
-                  >
-                    删除
-                  </button>
-                </div>
-              </div>
-            </template>
-          </VirtualList>
+                ✕
+              </button>
+            </div>
 
-          <!-- 分页加载提示 -->
-          <div
-            v-if="
-              entriesOffset + entriesPageSize < entriesTotalCount
-            "
-            class="load-more-hint lme-mono"
-          >
-            向下滚动加载更多（{{ entries.length }} / {{ entriesTotalCount }}）
+            <label class="diff-toggle">
+              <input type="checkbox" v-model="showDiffView" />
+              差异视图
+            </label>
+
+            <button
+              class="action-btn primary"
+              :disabled="saving || changedEntries.length === 0"
+              title="把本文件的改动存成替换补丁（text.applyPatch）"
+              @click="saveAsPatch"
+            >
+              {{ saving ? '保存中…' : '💾 保存补丁' }}
+            </button>
           </div>
         </div>
-      </div>
 
-      <!-- 差异视图 -->
-      <div v-if="showDiffView" class="diff-view">
-        <div class="diff-header">
-          <span>差异预览</span>
-          <span class="diff-count">{{ changedEntries.length }} 处变更</span>
+        <div class="panel-body fill">
+          <!-- 列标题 -->
+          <div class="kv-columns">
+            <span class="kv-col-key">键名</span>
+            <span class="kv-col-value">值</span>
+            <span class="kv-col-actions">操作</span>
+          </div>
+
+          <div class="kv-list-container">
+            <!-- 加载态 -->
+            <div v-if="entriesLoading && entries.length === 0" class="state-block">
+              <span class="state-icon spinner">⏳</span>
+              <span class="state-text">正在读取键值条目…</span>
+            </div>
+
+            <!-- 空态：未选文件 -->
+            <div v-else-if="!selectedFilePath" class="state-block">
+              <span class="state-icon">📝</span>
+              <span class="state-text">未选择语言文件</span>
+              <span class="state-hint">
+                请从左侧文件树中选择一个语言文件进行编辑，或通过搜索框快速定位键值文本。支持
+                JSON、YAML、CSV、PO 等格式。
+              </span>
+            </div>
+
+            <!-- 空态：文件无条目 -->
+            <div v-else-if="entries.length === 0" class="state-block">
+              <span class="state-icon">🔤</span>
+              <span class="state-text">该文件无键值条目</span>
+            </div>
+
+            <!-- 键值行（虚拟滚动，滚动到底自动取下一页） -->
+            <VirtualList
+              v-else
+              :items="entries"
+              :item-height="30"
+              :height="600"
+              :overscan="8"
+              grow
+              @range-change="onEntriesRangeChange"
+            >
+              <template #default="{ item }">
+                <div
+                  class="kv-row"
+                  :class="{
+                    'match-row': matchedEntryIds.has(item.id),
+                    'modified-row': item.editState === 'Modified',
+                    'added-row': item.editState === 'Added',
+                    'deleted-row': item.editState === 'Deleted',
+                  }"
+                >
+                  <span class="kv-key lme-mono lme-ellipsis" :title="item.key">
+                    {{ item.key }}
+                  </span>
+                  <span class="kv-value">
+                    <input
+                      v-if="item.editState !== 'Deleted'"
+                      type="text"
+                      :value="item.value"
+                      class="value-input"
+                      :title="item.value"
+                      @input="
+                        onValueEdit(item, ($event.target as HTMLInputElement).value)
+                      "
+                    />
+                    <del v-else class="deleted-text">{{ item.originalValue }}</del>
+                  </span>
+                  <span class="kv-actions">
+                    <button
+                      v-if="item.editState !== 'Unchanged'"
+                      class="row-btn restore-btn"
+                      title="恢复原值"
+                      @click="restoreEntry(item)"
+                    >
+                      恢复
+                    </button>
+                    <button
+                      v-if="item.editState !== 'Unchanged'"
+                      class="row-btn delete-btn"
+                      title="删除条目"
+                      @click="deleteEntry(item)"
+                    >
+                      删除
+                    </button>
+                  </span>
+                </div>
+              </template>
+            </VirtualList>
+          </div>
         </div>
 
-        <div v-if="changedEntries.length === 0" class="diff-empty">
-          暂无修改——在编辑表格中修改值后，此处将显示差异
+        <!-- 还有下一页时的提示（滚动即自动加载） -->
+        <div
+          v-if="entriesOffset + entriesPageSize < entriesTotalCount"
+          class="panel-foot"
+        >
+          <span class="load-more-hint lme-mono">
+            向下滚动加载更多（{{ entries.length }} / {{ entriesTotalCount }}）
+          </span>
+        </div>
+      </section>
+
+      <!-- ── 右：差异预览 ── -->
+      <section class="panel panel-diff">
+        <div class="panel-head compact">
+          <div class="panel-title">
+            <span class="panel-title-text">差异预览</span>
+            <span class="panel-badge lme-mono">
+              {{ changedEntries.length }} 处变更
+            </span>
+          </div>
         </div>
 
-        <div v-else class="diff-list">
-          <div
-            v-for="entry in changedEntries"
-            :key="entry.id"
-            class="diff-entry"
-            :class="'diff-' + entry.editState.toLowerCase()"
-          >
-            <div class="diff-key lme-mono">{{ entry.key }}</div>
-            <div class="diff-body">
-              <div v-if="entry.editState === 'Deleted'" class="diff-old">
-                {{ entry.originalValue || '(空)' }}
-              </div>
-              <div v-else class="diff-old">
-                <del>{{ entry.originalValue || '(空)' }}</del>
-              </div>
-              <div class="diff-arrow">→</div>
-              <div v-if="entry.editState === 'Deleted'" class="diff-new diff-deleted">
-                (已删除)
-              </div>
-              <div v-else class="diff-new">
-                {{ entry.value || '(空)' }}
+        <div class="panel-body scroll">
+          <!-- 未开启 -->
+          <div v-if="!showDiffView" class="state-block">
+            <span class="state-icon">⚖️</span>
+            <span class="state-text">差异视图已关闭</span>
+            <span class="state-hint">勾选中间栏的「差异视图」在此查看原值 → 新值</span>
+          </div>
+
+          <!-- 无改动 -->
+          <div v-else-if="changedEntries.length === 0" class="state-block">
+            <span class="state-icon">🔍</span>
+            <span class="state-text">暂无修改</span>
+            <span class="state-hint">在键值列表里改值后，此处将显示差异</span>
+          </div>
+
+          <!-- 变更列表 -->
+          <div v-else class="diff-list">
+            <div
+              v-for="entry in changedEntries"
+              :key="entry.id"
+              class="diff-entry"
+              :class="'diff-' + entry.editState.toLowerCase()"
+            >
+              <div class="diff-key lme-mono">{{ entry.key }}</div>
+              <div class="diff-body">
+                <div v-if="entry.editState === 'Deleted'" class="diff-old">
+                  {{ entry.originalValue || '(空)' }}
+                </div>
+                <div v-else class="diff-old">
+                  <del>{{ entry.originalValue || '(空)' }}</del>
+                </div>
+                <div class="diff-arrow">→</div>
+                <div v-if="entry.editState === 'Deleted'" class="diff-new diff-deleted">
+                  (已删除)
+                </div>
+                <div v-else class="diff-new">{{ entry.value || '(空)' }}</div>
               </div>
             </div>
           </div>
         </div>
-      </div>
-    </div>
-
-    <!-- 空状态：未选择文件 -->
-    <div v-else class="edit-column empty-edit">
-      <div class="empty-state">
-        <div class="empty-icon">📝</div>
-        <div class="empty-title">未选择语言文件</div>
-        <div class="empty-desc">
-          请从左侧文件树中选择一个语言文件进行编辑，或通过搜索框快速定位键值文本。支持 JSON、YAML、CSV、PO 等格式。
-        </div>
-      </div>
+      </section>
     </div>
   </div>
 </template>
 
 <style scoped>
-/* ── 三栏布局 ── */
 .text-view {
   display: flex;
+  flex-direction: column;
   height: 100%;
   overflow: hidden;
+  position: relative;
+  background: var(--lme-bg-base);
 }
 
-/* ── 浏览列 ── */
-.browse-column {
-  flex: 1;
+/* ── 加载进度条（顶部细条） ── */
+.loading-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  overflow: hidden;
+  z-index: var(--lme-z-raised);
+  background: var(--lme-progressbar-bg);
+}
+
+.loading-bar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  border-radius: var(--lme-radius-full);
+  background: var(--lme-progressbar-fill);
+  animation: loading-slide 1s var(--lme-ease-standard) infinite;
+}
+
+@keyframes loading-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(350%);
+  }
+}
+
+/* ── 页头工具栏 ── */
+.page-toolbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-lg);
+  padding: var(--lme-gap-sm) var(--lme-gap-lg);
+  background: var(--lme-bg-panel);
+  border-bottom: 1px solid var(--lme-border);
+}
+
+.toolbar-leading {
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-sm);
+  min-width: 0;
+}
+
+.toolbar-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--lme-radius-md);
+  background: var(--lme-bg-elevated);
+  border: 1px solid var(--lme-border);
+  font-size: var(--lme-font-size-md);
+  flex-shrink: 0;
+}
+
+.toolbar-titles {
   display: flex;
   flex-direction: column;
   min-width: 0;
+}
+
+.toolbar-name {
+  margin: 0;
+  font-size: var(--lme-font-size-lg);
+  font-weight: var(--lme-font-weight-semibold);
+  line-height: var(--lme-line-height-tight);
+  color: var(--lme-text-primary);
+}
+
+.toolbar-sub {
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-xs);
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toolbar-file {
+  color: var(--lme-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toolbar-language {
+  color: var(--lme-accent);
+  flex-shrink: 0;
+}
+
+.toolbar-dot {
+  color: var(--lme-text-disabled);
+}
+
+.toolbar-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-md);
+  flex-shrink: 0;
+}
+
+.result-count {
+  font-size: var(--lme-font-size-sm);
+  color: var(--lme-text-muted);
+  white-space: nowrap;
+}
+
+.result-count strong {
+  color: var(--lme-text-primary);
+  font-weight: var(--lme-font-weight-semibold);
+}
+
+.toolbar-chip {
+  padding: 1px var(--lme-gap-sm);
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-full);
+  font-size: var(--lme-font-size-xs);
+  font-weight: var(--lme-font-weight-medium);
+  white-space: nowrap;
+}
+
+.toolbar-chip.modified {
+  color: var(--lme-state-modified);
+  border-color: var(--lme-state-modified);
+  background: var(--lme-state-modified-bg);
+}
+
+.toolbar-chip.added {
+  color: var(--lme-state-added);
+  border-color: var(--lme-state-added);
+  background: var(--lme-state-added-bg);
+}
+
+.toolbar-chip.deleted {
+  color: var(--lme-state-deleted);
+  border-color: var(--lme-state-deleted);
+  background: var(--lme-state-deleted-bg);
+}
+
+/* ── 三栏主从栅格 ── */
+.workbench-body {
+  flex: 1;
+  display: flex;
+  gap: var(--lme-gap-md);
+  padding: var(--lme-gap-md) var(--lme-gap-lg) var(--lme-gap-lg);
+  min-height: 0;
   overflow: hidden;
 }
 
-.search-box-row {
-  padding: var(--lme-gap-md);
-  padding-bottom: var(--lme-gap-sm);
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--lme-bg-panel);
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-lg);
+  overflow: hidden;
+}
+
+.panel-files {
+  flex: 0 0 320px;
+}
+
+.panel-entries {
+  flex: 1 1 auto;
+}
+
+.panel-diff {
+  flex: 0 0 320px;
+}
+
+@media (max-width: 1180px) {
+  .panel-files,
+  .panel-diff {
+    flex-basis: 260px;
+  }
+}
+
+.panel-head {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--lme-gap-sm);
+  padding: var(--lme-gap-sm) var(--lme-gap-md);
+  border-bottom: 1px solid var(--lme-border);
+  background: var(--lme-bg-elevated);
+}
+
+.panel-head.compact {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--lme-gap-sm);
+  height: 38px;
+  padding: 0 var(--lme-gap-sm) 0 var(--lme-gap-md);
+}
+
+.panel-title {
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-sm);
+  min-width: 0;
+}
+
+.panel-title-text {
+  font-size: var(--lme-font-size-sm);
+  font-weight: var(--lme-font-weight-semibold);
+  color: var(--lme-text-secondary);
+  white-space: nowrap;
+}
+
+.panel-badge {
+  padding: 1px var(--lme-gap-sm);
+  background: var(--lme-bg-base);
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-full);
+  color: var(--lme-text-muted);
+  font-size: var(--lme-font-size-xs);
+  flex-shrink: 0;
+}
+
+.panel-head-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-sm);
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.panel-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+
+.panel-body.scroll {
+  overflow-y: auto;
+}
+
+.panel-body.fill {
+  overflow: hidden;
+}
+
+.panel-foot {
+  flex-shrink: 0;
+  border-top: 1px solid var(--lme-border);
+  background: var(--lme-bg-elevated);
+}
+
+/* ── 搜索框 / 筛选 ── */
+.panel-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.panel-search.inline {
+  flex: 1 1 180px;
+  min-width: 96px;
+  max-width: 260px;
+}
+
+.panel-search-icon {
+  position: absolute;
+  left: var(--lme-gap-sm);
+  font-size: var(--lme-font-size-sm);
+  opacity: 0.6;
+  pointer-events: none;
 }
 
 .search-input {
   width: 100%;
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
+  padding: 5px 26px;
   background: var(--lme-bg-input);
   border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
+  border-radius: var(--lme-radius-md);
   color: var(--lme-text-primary);
-  font-size: var(--lme-font-size-md);
+  font-size: var(--lme-font-size-sm);
   font-family: var(--lme-font-family);
+  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard),
+    box-shadow var(--lme-dur-fast) var(--lme-ease-standard);
+}
+
+.search-input::placeholder {
+  color: var(--lme-text-disabled);
 }
 
 .search-input:focus {
   outline: none;
   border-color: var(--lme-accent);
+  box-shadow: var(--lme-shadow-focus);
+}
+
+.search-clear {
+  position: absolute;
+  right: var(--lme-gap-xs);
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--lme-bg-elevated);
+  border: none;
+  border-radius: var(--lme-radius-full);
+  color: var(--lme-text-muted);
+  font-size: 9px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.search-clear:hover {
+  color: var(--lme-text-primary);
+  background: var(--lme-bg-hover);
 }
 
 .filter-row {
   display: flex;
   align-items: center;
   gap: var(--lme-gap-sm);
-  padding: 0 var(--lme-gap-md) var(--lme-gap-md);
   flex-wrap: wrap;
 }
 
 .filter-label {
-  font-size: var(--lme-font-size-sm);
+  font-size: var(--lme-font-size-xs);
   color: var(--lme-text-muted);
+  flex-shrink: 0;
 }
 
 .filter-select {
-  padding: var(--lme-gap-xs) var(--lme-gap-sm);
+  flex: 1;
+  min-width: 88px;
+  padding: 3px var(--lme-gap-sm);
   background: var(--lme-bg-input);
   border: 1px solid var(--lme-border);
   border-radius: var(--lme-radius-sm);
   color: var(--lme-text-primary);
-  font-size: var(--lme-font-size-sm);
-}
-
-/* ── 文件树 ── */
-.file-tree-container {
-  flex: 1;
-  overflow: auto;
-  padding: var(--lme-gap-sm);
-}
-
-.tree-loading {
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-sm);
-  color: var(--lme-text-muted);
-  font-size: var(--lme-font-size-sm);
-}
-
-.results-header {
   font-size: var(--lme-font-size-xs);
-  color: var(--lme-text-muted);
-  padding: var(--lme-gap-xs) 0;
-  border-bottom: 1px solid var(--lme-border);
-  margin-bottom: var(--lme-gap-sm);
-}
-
-.file-result-item {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
+  font-family: var(--lme-font-family);
   cursor: pointer;
-  border-radius: var(--lme-radius-sm);
+  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
-.file-result-item:hover {
-  background: var(--lme-bg-hover);
+.filter-select:hover {
+  border-color: var(--lme-border-strong);
 }
 
-.result-path {
-  font-size: var(--lme-font-size-sm);
-  color: var(--lme-text-primary);
-  word-break: break-all;
-}
-
-.result-meta {
-  display: flex;
-  gap: var(--lme-gap-xs);
-}
-
-.tree-empty {
-  padding: var(--lme-gap-xl);
-  text-align: center;
-  color: var(--lme-text-muted);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--lme-gap-sm);
-}
-
-.empty-icon {
-  font-size: 32px;
-  margin-bottom: var(--lme-gap-sm);
-}
-
-.empty-title {
-  font-size: var(--lme-font-size-md);
-  font-weight: 600;
-  color: var(--lme-text-secondary);
-}
-
-.empty-desc {
-  font-size: var(--lme-font-size-sm);
-  color: var(--lme-text-muted);
-  max-width: 280px;
-  line-height: 1.5;
-}
-
-/* ── 树节点 ── */
-.tree-node-entry {
-  /* 递归树节点容器 */
-}
-
-.tree-node-row {
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-xs);
-  padding: 2px var(--lme-gap-sm);
-  cursor: pointer;
-  border-radius: var(--lme-radius-sm);
-  font-size: var(--lme-font-size-sm);
-  color: var(--lme-text-secondary);
-}
-
-.tree-node-row:hover {
-  background: var(--lme-bg-hover);
-  color: var(--lme-text-primary);
-}
-
-.tree-node-row.leaf {
-  color: var(--lme-text-muted);
-}
-
-.tree-arrow {
-  width: 14px;
-  text-align: center;
-  font-size: 10px;
-  flex-shrink: 0;
-}
-
-.tree-node-name {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tree-count {
-  font-size: var(--lme-font-size-xs);
-  color: var(--lme-text-muted);
-  background: var(--lme-bg-elevated);
-  padding: 1px 6px;
-  border-radius: 8px;
-}
-
-/* ── 分隔条 ── */
-.column-splitter {
-  width: 6px;
-  flex-shrink: 0;
-  background: var(--lme-border);
-  cursor: col-resize;
-}
-
-/* ── 编辑列 ── */
-.edit-column {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  overflow: hidden;
-  background: var(--lme-bg-panel);
-  min-width: 320px;
-}
-
-.edit-header {
-  padding: var(--lme-gap-md);
-  border-bottom: 1px solid var(--lme-border);
-  display: flex;
-  flex-direction: column;
-  gap: var(--lme-gap-sm);
-}
-
-.header-title {
-  font-size: var(--lme-font-size-lg);
-  font-weight: 600;
-  color: var(--lme-text-primary);
-}
-
-.header-path {
-  font-size: var(--lme-font-size-sm);
-  color: var(--lme-text-secondary);
-  word-break: break-all;
-}
-
-.header-meta {
-  display: flex;
-  gap: var(--lme-gap-xs);
-  flex-wrap: wrap;
-}
-
-.meta-tag {
-  padding: 2px 8px;
-  border-radius: var(--lme-radius-sm);
-  font-size: var(--lme-font-size-xs);
-  background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
-}
-
-.language-tag {
-  color: var(--lme-accent);
-}
-
-.count-tag {
-  color: var(--lme-text-muted);
-}
-
-.modified-tag {
-  color: var(--lme-state-modified);
-  border-color: var(--lme-state-modified);
-}
-
-.added-tag {
-  color: var(--lme-state-added);
-  border-color: var(--lme-state-added);
-}
-
-.deleted-tag {
-  color: var(--lme-state-deleted);
-  border-color: var(--lme-state-deleted);
-}
-
-/* ── 编辑工具栏 ── */
-.edit-toolbar {
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-sm);
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  border-bottom: 1px solid var(--lme-border);
-  flex-wrap: wrap;
-}
-
-.inline-search-input {
-  flex: 1;
-  min-width: 140px;
-  padding: var(--lme-gap-xs) var(--lme-gap-sm);
-  background: var(--lme-bg-input);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
-  color: var(--lme-text-primary);
-  font-size: var(--lme-font-size-sm);
-}
-
-.inline-search-input:focus {
+.filter-select:focus {
   outline: none;
   border-color: var(--lme-accent);
+  box-shadow: var(--lme-shadow-focus);
+}
+
+/* ── 按钮 ── */
+.action-btn {
+  padding: 5px 14px;
+  background: var(--lme-bg-elevated);
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-md);
+  color: var(--lme-text-secondary);
+  cursor: pointer;
+  font-size: var(--lme-font-size-sm);
+  font-family: var(--lme-font-family);
+  flex-shrink: 0;
+  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard),
+    color var(--lme-dur-fast) var(--lme-ease-standard),
+    background var(--lme-dur-fast) var(--lme-ease-standard);
+}
+
+.action-btn:hover:not(:disabled) {
+  border-color: var(--lme-accent);
+  color: var(--lme-text-primary);
+}
+
+.action-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--lme-shadow-focus);
+}
+
+.action-btn.primary {
+  background: var(--lme-accent-muted);
+  border-color: var(--lme-accent);
+  color: var(--lme-text-primary);
+  font-weight: var(--lme-font-weight-medium);
+}
+
+.action-btn.primary:hover:not(:disabled) {
+  background: var(--lme-accent);
+}
+
+.action-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .diff-toggle {
   display: flex;
   align-items: center;
   gap: var(--lme-gap-xs);
-  font-size: var(--lme-font-size-sm);
+  font-size: var(--lme-font-size-xs);
   color: var(--lme-text-secondary);
   cursor: pointer;
+  user-select: none;
   white-space: nowrap;
+}
+
+.diff-toggle:hover {
+  color: var(--lme-text-primary);
 }
 
 .diff-toggle input[type='checkbox'] {
   accent-color: var(--lme-accent);
-}
-
-.tool-btn {
-  padding: 3px 12px;
-  background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
-  color: var(--lme-text-secondary);
   cursor: pointer;
-  font-size: var(--lme-font-size-sm);
-  transition: all 0.15s;
 }
 
-.tool-btn:hover:not(:disabled) {
+.diff-toggle input[type='checkbox']:focus-visible {
+  outline: none;
+  box-shadow: var(--lme-shadow-focus);
+}
+
+/* ── 左栏：搜索结果与文件树行 ── */
+.results-header {
+  flex-shrink: 0;
+  padding: var(--lme-gap-xs) var(--lme-gap-md);
+  border-bottom: 1px solid var(--lme-border);
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-muted);
+}
+
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-sm);
+  height: 30px;
+  flex-shrink: 0;
+  padding: 0 var(--lme-gap-md);
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  border-bottom: 1px solid var(--lme-row-divider);
+  transition: background var(--lme-dur-fast) var(--lme-ease-standard);
+}
+
+.file-row:hover {
+  background: var(--lme-bg-hover);
+}
+
+.file-row.selected {
+  background: var(--lme-bg-selected);
+  border-left-color: var(--lme-accent);
+}
+
+.file-row:focus-visible {
+  outline: none;
+  box-shadow: var(--lme-shadow-focus);
+}
+
+.file-name {
+  flex: 1;
+  font-size: var(--lme-font-size-sm);
+  color: var(--lme-text-primary);
+  min-width: 0;
+}
+
+.file-tag {
+  flex-shrink: 0;
+  padding: 0 var(--lme-gap-xs);
+  border-radius: var(--lme-radius-full);
+  font-size: var(--lme-font-size-xs);
+}
+
+.language-tag {
+  color: var(--lme-accent);
+}
+
+.file-count {
+  flex-shrink: 0;
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-muted);
+}
+
+.tree-group {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-xs);
+  height: 30px;
+  flex-shrink: 0;
+  padding-right: var(--lme-gap-md);
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  border-bottom: 1px solid var(--lme-row-divider);
+  font-size: var(--lme-font-size-sm);
+  color: var(--lme-text-secondary);
+  user-select: none;
+  transition: background var(--lme-dur-fast) var(--lme-ease-standard),
+    color var(--lme-dur-fast) var(--lme-ease-standard);
+}
+
+.tree-row:hover {
   background: var(--lme-bg-hover);
   color: var(--lme-text-primary);
 }
 
-.tool-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
+.tree-row.selected {
+  background: var(--lme-bg-selected);
+  border-left-color: var(--lme-accent);
 }
 
-.save-btn {
-  background: var(--lme-accent-muted);
-  border-color: var(--lme-accent);
-  color: var(--lme-text-primary);
+.tree-row:focus-visible {
+  outline: none;
+  box-shadow: var(--lme-shadow-focus);
 }
 
-.save-btn:hover:not(:disabled) {
-  background: var(--lme-accent);
-  border-color: var(--lme-accent-hover);
-  color: var(--lme-text-primary);
-}
-
-/* ── 键值列表 ── */
-.kv-list-wrapper {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
-}
-
-.kv-list-header {
-  display: flex;
-  align-items: center;
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  background: var(--lme-bg-elevated);
-  border-bottom: 1px solid var(--lme-border);
-  font-size: var(--lme-font-size-sm);
-  font-weight: 600;
+.tree-arrow {
+  width: 14px;
+  text-align: center;
+  font-size: 9px;
+  flex-shrink: 0;
   color: var(--lme-text-muted);
 }
 
-.kv-key-col {
+.tree-node-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.tree-count {
+  flex-shrink: 0;
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-muted);
+  background: var(--lme-bg-base);
+  padding: 0 var(--lme-gap-sm);
+  border-radius: var(--lme-radius-full);
+}
+
+/* ── 中栏：键值表 ── */
+.kv-columns {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 var(--lme-gap-md);
+  border-bottom: 1px solid var(--lme-border);
+  background: var(--lme-bg-panel);
+  font-size: var(--lme-font-size-xs);
+  font-weight: var(--lme-font-weight-semibold);
+  color: var(--lme-text-muted);
+  user-select: none;
+}
+
+.kv-col-key {
   flex: 2;
+  min-width: 0;
 }
 
-.kv-value-col {
+.kv-col-value {
   flex: 3;
+  min-width: 0;
 }
 
-.kv-actions-col {
+.kv-col-actions {
   flex: 0 0 90px;
   text-align: center;
 }
 
 .kv-list-container {
   flex: 1;
-  position: relative;
   min-height: 0;
-}
-
-.entries-loading,
-.entries-empty {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--lme-gap-sm);
-  height: 120px;
-  color: var(--lme-text-muted);
-  font-size: var(--lme-font-size-sm);
+  flex-direction: column;
+  position: relative;
 }
 
-/* ── 键值行 ── */
 .kv-row {
   display: flex;
   align-items: center;
+  gap: var(--lme-gap-sm);
+  height: 100%;
   padding: 0 var(--lme-gap-md);
-  border-bottom: 1px solid var(--lme-border);
-  border-left: 3px solid transparent;
-  transition: background 0.1s;
+  border-left: 2px solid transparent;
+  border-bottom: 1px solid var(--lme-row-divider);
+  transition: background var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
 .kv-row:hover {
@@ -1119,16 +1433,14 @@ onUnmounted(() => {
   opacity: 0.6;
 }
 
-.kv-key-cell {
+.kv-key {
   flex: 2;
+  min-width: 0;
   font-size: var(--lme-font-size-sm);
   color: var(--lme-text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.kv-value-cell {
+.kv-value {
   flex: 3;
   min-width: 0;
 }
@@ -1142,6 +1454,8 @@ onUnmounted(() => {
   color: var(--lme-text-primary);
   font-size: var(--lme-font-size-sm);
   font-family: var(--lme-font-family);
+  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard),
+    background var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
 .value-input:hover {
@@ -1152,6 +1466,7 @@ onUnmounted(() => {
   outline: none;
   border-color: var(--lme-accent);
   background: var(--lme-bg-input);
+  box-shadow: var(--lme-shadow-focus);
 }
 
 .deleted-text {
@@ -1159,22 +1474,30 @@ onUnmounted(() => {
   font-size: var(--lme-font-size-sm);
 }
 
-.kv-actions-cell {
+.kv-actions {
   flex: 0 0 90px;
   display: flex;
+  align-items: center;
   justify-content: center;
   gap: var(--lme-gap-xs);
 }
 
-.action-btn {
-  padding: 1px 6px;
+.row-btn {
+  padding: 1px var(--lme-gap-sm);
   background: transparent;
   border: 1px solid var(--lme-border);
   border-radius: var(--lme-radius-sm);
   color: var(--lme-text-muted);
   cursor: pointer;
   font-size: var(--lme-font-size-xs);
-  transition: all 0.1s;
+  font-family: var(--lme-font-family);
+  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard),
+    color var(--lme-dur-fast) var(--lme-ease-standard);
+}
+
+.row-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--lme-shadow-focus);
 }
 
 .restore-btn:hover {
@@ -1188,54 +1511,30 @@ onUnmounted(() => {
 }
 
 .load-more-hint {
-  padding: var(--lme-gap-sm);
+  display: block;
+  padding: var(--lme-gap-sm) var(--lme-gap-md);
   text-align: center;
   font-size: var(--lme-font-size-xs);
   color: var(--lme-text-muted);
 }
 
-/* ── 差异视图 ── */
-.diff-view {
-  border-top: 1px solid var(--lme-border);
-  max-height: 280px;
+/* ── 右栏：差异预览 ── */
+.diff-list {
   display: flex;
   flex-direction: column;
-  overflow: hidden;
-}
-
-.diff-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  background: var(--lme-bg-elevated);
-  font-size: var(--lme-font-size-sm);
-  font-weight: 600;
-  color: var(--lme-text-secondary);
-}
-
-.diff-count {
-  font-weight: normal;
-  font-size: var(--lme-font-size-xs);
-  color: var(--lme-text-muted);
-}
-
-.diff-empty {
-  padding: var(--lme-gap-xl);
-  text-align: center;
-  color: var(--lme-text-muted);
-  font-size: var(--lme-font-size-sm);
-}
-
-.diff-list {
-  flex: 1;
-  overflow: auto;
+  flex-shrink: 0;
 }
 
 .diff-entry {
+  flex-shrink: 0;
   padding: var(--lme-gap-sm) var(--lme-gap-md);
-  border-bottom: 1px solid var(--lme-border);
-  border-left: 3px solid transparent;
+  border-bottom: 1px solid var(--lme-row-divider);
+  border-left: 2px solid transparent;
+  transition: background var(--lme-dur-fast) var(--lme-ease-standard);
+}
+
+.diff-entry:hover {
+  background: var(--lme-bg-hover);
 }
 
 .diff-entry.diff-modified {
@@ -1253,34 +1552,33 @@ onUnmounted(() => {
 .diff-key {
   font-size: var(--lme-font-size-xs);
   color: var(--lme-text-muted);
-  margin-bottom: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .diff-body {
   display: flex;
   align-items: center;
   gap: var(--lme-gap-sm);
-  font-size: var(--lme-font-size-sm);
+}
+
+.diff-old,
+.diff-new {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--lme-font-mono);
+  font-size: var(--lme-font-size-xs);
 }
 
 .diff-old {
-  flex: 1;
   color: var(--lme-text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--lme-font-mono);
-  font-size: var(--lme-font-size-xs);
 }
 
 .diff-new {
-  flex: 1;
   color: var(--lme-text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--lme-font-mono);
-  font-size: var(--lme-font-size-xs);
 }
 
 .diff-arrow {
@@ -1294,19 +1592,45 @@ onUnmounted(() => {
   font-style: italic;
 }
 
-/* ── 空状态 ── */
-.empty-edit {
-  justify-content: center;
-  align-items: center;
-}
-
-.empty-state {
+/* ── 空态 / 加载态（与资源/静态工作台同一套） ── */
+.state-block {
+  flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: var(--lme-gap-md);
-  padding: var(--lme-gap-xl);
+  justify-content: center;
+  gap: var(--lme-gap-sm);
+  padding: var(--lme-gap-xl) var(--lme-gap-md);
+  color: var(--lme-text-muted);
   text-align: center;
+}
+
+.state-icon {
+  font-size: 28px;
+  opacity: 0.7;
+}
+
+.state-icon.spinner {
+  animation: state-spin 1.4s linear infinite;
+  display: inline-block;
+}
+
+@keyframes state-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.state-text {
+  font-size: var(--lme-font-size-sm);
+  color: var(--lme-text-secondary);
+}
+
+.state-hint {
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-disabled);
+  line-height: var(--lme-line-height-relaxed);
+  max-width: 280px;
 }
 </style>
 

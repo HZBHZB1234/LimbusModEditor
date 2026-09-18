@@ -45,4 +45,9 @@ export type {
   SpineCatalogItem,
   SpineCatalogResponse,
   SpineResolveResult,
+  // Spine 导出
+  SpineExportRequest,
+  SpineExportedFile,
+  SpineExportItem,
+  SpineExportResponse,
 } from './types'

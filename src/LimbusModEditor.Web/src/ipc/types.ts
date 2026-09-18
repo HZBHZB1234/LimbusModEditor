@@ -498,3 +498,64 @@ export interface SpineResolveResult {
   /** 解析状态的中文说明。 */
   parseStatusLabel: string
 }
+
+// ── Spine 导出（spine.export）──────────────────────────────
+// 语义：请求给一个 targetDirectory 与若干 refKey，**每条在目标目录下落一个以骨架名命名的子目录**
+// （<骨架名>.json / <骨架名>.atlas.txt / <页名>.png），这正是 Spine 运行时期望的磁盘形态。
+// 默认**不覆盖**（已存在的文件跳过并如实列在 skippedFiles 里）；覆盖与否由用户显式决定。
+// 字段与后端 IpcDtos.cs 的 SpineExportRequest / SpineExportResponse 一一对应（不改名、不造字段）。
+
+/** spine.export 请求载荷。`operationId` 供 `cancel` 中断与 `progress` 事件关联。 */
+export interface SpineExportRequest {
+  /** refKey（容器路径），与 spine.catalog 的 refKey 同口径。 */
+  assetIds: string[]
+  /** 导出根目录（由 dialog.folderPick 给定）。 */
+  targetDirectory: string
+  /** 是否覆盖同名文件；默认 false = 跳过已存在并如实列出。 */
+  overwrite?: boolean
+  /** 操作 id；不传则本次导出不可单独取消，也收不到进度事件。 */
+  operationId?: string
+}
+
+/** 导出到磁盘的一个文件（相对导出目录的路径 + 字节数）。 */
+export interface SpineExportedFile {
+  /** 相对导出根目录的路径（`/` 分隔）。 */
+  path: string
+  /** 角色：skeleton / atlas / texture。 */
+  role: string
+  bytes: number
+}
+
+/** 一条挂点的导出明细（成功与失败都在里面；批量时单条失败不中断整批）。 */
+export interface SpineExportItem {
+  /** 容器路径。 */
+  refKey: string
+  /** 骨架名（子目录名）。 */
+  name: string
+  ok: boolean
+  outputDirectory: string | null
+  files: SpineExportedFile[]
+  /** 被「不覆盖」策略跳过的相对路径。 */
+  skippedFiles: string[]
+  /** 失败时的中文原因。 */
+  reason: string | null
+}
+
+/** spine.export 响应载荷。 */
+export interface SpineExportResponse {
+  /** 成功导出的 refKey（顺序与请求一致）。 */
+  written: string[]
+  /** 失败/未导出的「refKey：中文原因」清单。 */
+  skipped: string[]
+  outputDirectory: string | null
+  /** 逐文件清单（仅成功的，含相对路径 + 字节数 + 角色）。 */
+  files: SpineExportedFile[] | null
+  /** 逐条明细（成功与失败都在里面）。 */
+  items: SpineExportItem[] | null
+  /** 本次采用的覆盖策略（中文回显）。 */
+  overwrite: string | null
+  /** 一句话中文汇总。 */
+  info: string | null
+  /** 是否被取消。 */
+  cancelled: boolean
+}

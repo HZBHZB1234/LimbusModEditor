@@ -13,14 +13,38 @@
 //
 // 诚实边界：bundle 被 Unity 清掉、或该 prefab 的引用链里确实没有骨架与图集的，
 // 如实显示中文原因，不给半个地址、不拿别的素材凑。
-import { computed, onMounted, ref } from 'vue'
-import { NAlert, NButton, NEmpty, NInput, NSpin, NSwitch, NTag } from 'naive-ui'
+//
+// ③ spine.export —— 把某条（或勾选的若干条）的三件套**真正写到磁盘**（此前后端已实现，
+//    但前端没有调用点，用户在界面上点不到导出）。流程：dialog.folderPick 选目录 →
+//    二次确认覆盖策略 → spine.export（带 operationId）→ 进度条 + 可取消 → 中文结果反馈。
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import {
+  NAlert,
+  NButton,
+  NEmpty,
+  NInput,
+  NProgress,
+  NSpin,
+  NSwitch,
+  NTag,
+  useDialog,
+  useMessage,
+} from 'naive-ui'
 import { ipc } from '@/ipc'
-import type { SpineCatalogItem, SpineCatalogResponse, SpineResolveResult } from '@/ipc'
+import type {
+  ProgressPayload,
+  SpineCatalogItem,
+  SpineCatalogResponse,
+  SpineExportResponse,
+  SpineResolveResult,
+} from '@/ipc'
 import WikiShell from '@/components/WikiShell.vue'
 import WikiSpineViewer from '@/components/wiki/WikiSpineViewer.vue'
 
 const PAGE_SIZE = 60
+
+const message = useMessage()
+const dialog = useDialog()
 
 const loading = ref(false)
 const error = ref<string | null>(null)
@@ -134,7 +158,152 @@ async function openItem(item: SpineCatalogItem) {
   }
 }
 
+// ── 导出（spine.export）───────────────────────────────────
+
+/** 勾选的 refKey（批量导出用）。 */
+const selectedKeys = ref<string[]>([])
+const exporting = ref(false)
+const exportProgress = ref<ProgressPayload | null>(null)
+/** 最近一次导出的逐条中文结果（失败不静默，留在页面上）。 */
+const exportReport = ref<string[]>([])
+const exportFailed = ref<string[]>([])
+const exportSummary = ref('')
+
+/** 本次导出的 operationId：既给 spine.export，也给 cancel 与 progress 事件关联。 */
+let exportOperationId: string | null = null
+let unsubscribeProgress: (() => void) | null = null
+
+function toggleSelect(refKey: string) {
+  const index = selectedKeys.value.indexOf(refKey)
+  if (index >= 0) selectedKeys.value.splice(index, 1)
+  else selectedKeys.value.push(refKey)
+}
+
+function clearSelection() {
+  selectedKeys.value = []
+}
+
+/**
+ * 导出若干条 Spine 三件套到用户选的目录。
+ *
+ * 覆盖策略交给用户**显式决定**（不默认 overwrite:true）：目录选完后先问一次，
+ * 选「跳过已存在」走默认（overwrite:false），选「覆盖同名文件」才传 overwrite:true。
+ */
+async function exportItems(targets: SpineCatalogItem[]) {
+  if (exporting.value || targets.length === 0) return
+
+  const refKeys = targets.map((t) => t.refKey)
+  const label = refKeys.length === 1 ? targets[0].name : `${refKeys.length} 条 Spine`
+
+  try {
+    // 宿主原生目录对话框（载荷按 IpcGateway/NativeBridgeService 的 DialogFolderPickRequest：title / startPath）
+    const picked = await ipc.request<{ ok: boolean; path: string | null }>('dialog.folderPick', {
+      title: `选择 ${label} 的导出目录（每条会写一个以骨架名命名的子目录）`,
+    })
+    if (!picked?.path) return // 用户取消，不算失败
+
+    const overwrite = await askOverwrite(picked.path, refKeys.length)
+    if (overwrite === null) return // 用户在确认框取消
+
+    exporting.value = true
+    exportProgress.value = null
+    exportReport.value = []
+    exportFailed.value = []
+    exportSummary.value = ''
+    exportOperationId = `spine-export-${Date.now()}`
+
+    // 解一套要整读一个大 bundle（实测 2～5s），批量线性叠加；给足超时余量。
+    const timeoutMs = Math.max(120000, refKeys.length * 60000)
+    const result = await ipc.request<SpineExportResponse>(
+      'spine.export',
+      { assetIds: refKeys, targetDirectory: picked.path, overwrite, operationId: exportOperationId },
+      timeoutMs,
+    )
+    reportExport(result)
+  } catch (e: unknown) {
+    const reason = e instanceof Error ? e.message : String(e)
+    message.error(`导出失败：${reason}`)
+    exportFailed.value = [reason]
+  } finally {
+    exporting.value = false
+    exportProgress.value = null
+    exportOperationId = null
+  }
+}
+
+/** 二次确认覆盖策略：返回 true=覆盖 / false=跳过已存在 / null=用户放弃。 */
+function askOverwrite(targetDirectory: string, count: number): Promise<boolean | null> {
+  return new Promise((resolve) => {
+    dialog.warning({
+      title: '导出前确认覆盖策略',
+      content:
+        `将 ${count} 条 Spine 的三件套导出到：${targetDirectory}\n\n` +
+        '默认**不覆盖**已存在的文件（会跳过并如实列出）；' +
+        '若该目录里已有同名产物且你想让它们被替换，请选「覆盖同名文件」。',
+      positiveText: '覆盖同名文件',
+      negativeText: '跳过已存在（推荐）',
+      onPositiveClick: () => resolve(true),
+      onNegativeClick: () => resolve(false),
+      onClose: () => resolve(null),
+      onMaskClick: () => resolve(null),
+    })
+  })
+}
+
+/** 取消本次导出（走既有 cancel 通道；已写出的文件保留，不谎报成功也不谎报失败）。 */
+function cancelExport() {
+  if (!exportOperationId) return
+  ipc.cancel(exportOperationId)
+  message.info('已请求取消导出，正在收尾…')
+}
+
+/** 把响应里的逐条明细摊成中文结果；失败逐条显示，不静默。 */
+function reportExport(result: SpineExportResponse) {
+  const items = result.items ?? []
+  const written = result.files ?? []
+  const bytes = written.reduce((sum, f) => sum + f.bytes, 0)
+  const skippedFiles = items.reduce((sum, i) => sum + i.skippedFiles.length, 0)
+
+  exportReport.value = items
+    .filter((i) => i.ok)
+    .map(
+      (i) =>
+        `${i.name}：写出 ${i.files.length} 个文件` +
+        (i.skippedFiles.length > 0 ? `，跳过 ${i.skippedFiles.length} 个已存在` : ''),
+    )
+  exportFailed.value = items
+    .filter((i) => !i.ok)
+    .map((i) => `${i.refKey}：${i.reason ?? '原因未知'}`)
+  // 后端已回 skipped 一行式清单，作为兜底补上（两条路径同源，不会重复计数）
+  if (exportFailed.value.length === 0 && (result.skipped?.length ?? 0) > 0) {
+    exportFailed.value = [...result.skipped]
+  }
+  exportSummary.value =
+    result.info ??
+    `成功 ${result.written?.length ?? 0} 条 · 写出 ${written.length} 个文件 · 合计 ${bytes.toLocaleString()} 字节`
+
+  const cancelledNote = result.cancelled ? '（本次导出被取消，已写出的文件保留）' : ''
+  if (exportFailed.value.length > 0) {
+    message.error(`${exportSummary.value} · 失败 ${exportFailed.value.length} 条${cancelledNote}`)
+  } else if (skippedFiles > 0) {
+    message.warning(`${exportSummary.value} · 跳过 ${skippedFiles} 个已存在文件${cancelledNote}`)
+  } else {
+    message.success(`${exportSummary.value}${cancelledNote}`)
+  }
+}
+
 onMounted(loadCatalog)
+
+onUnmounted(() => {
+  unsubscribeProgress?.()
+})
+
+// 进度事件（契约 §4）：只认本次导出的 operationId，别的后台任务不串进度。
+unsubscribeProgress = ipc.on('progress', (payload) => {
+  const p = payload as ProgressPayload
+  if (!exportOperationId || p.operationId !== exportOperationId) return
+  exportProgress.value = p
+})
 </script>
 
 <template>
@@ -179,7 +348,50 @@ onMounted(loadCatalog)
           <NSwitch v-model:value="showMissing" size="small" />
           <span>显示 bundle 不在本机的</span>
         </label>
+        <NButton
+          size="small"
+          secondary
+          :disabled="exporting || selectedKeys.length === 0"
+          @click="exportItems(items.filter((i) => selectedKeys.includes(i.refKey)))"
+        >
+          导出勾选{{ selectedKeys.length > 0 ? `（${selectedKeys.length}）` : '' }}
+        </NButton>
+        <NButton v-if="selectedKeys.length > 0" size="small" text @click="clearSelection">
+          清空勾选
+        </NButton>
       </div>
+
+      <!-- 导出进度与取消（progress 事件带 operationId，见契约 §4） -->
+      <div v-if="exporting" class="spine-export-progress">
+        <NProgress
+          type="line"
+          :percentage="
+            exportProgress && exportProgress.total > 0
+              ? Math.round((exportProgress.current / exportProgress.total) * 100)
+              : 0
+          "
+          :indeterminate="!exportProgress || exportProgress.total === 0"
+          :show-indicator="false"
+          size="small"
+        />
+        <span class="spine-export-progress-text">
+          {{ exportProgress?.message ?? '正在解三件套并写盘（解一套要整读它所在的 bundle，可能要几秒）…' }}
+        </span>
+        <NButton size="tiny" secondary type="warning" @click="cancelExport">取消导出</NButton>
+      </div>
+
+      <!-- 结果反馈：成功汇总 + 逐条失败中文原因（失败不静默） -->
+      <NAlert v-if="exportSummary" type="default" :bordered="false" class="spine-alert">
+        <div class="spine-export-title">{{ exportSummary }}</div>
+        <div v-if="exportReport.length > 0" class="spine-export-lines">
+          <div v-for="line in exportReport" :key="line" class="spine-export-line">✓ {{ line }}</div>
+        </div>
+        <div v-if="exportFailed.length > 0" class="spine-export-lines">
+          <div v-for="line in exportFailed" :key="line" class="spine-export-line spine-export-line-fail">
+            ✗ {{ line }}
+          </div>
+        </div>
+      </NAlert>
 
       <NAlert v-if="error" type="error" :bordered="false" class="spine-alert">
         取 Spine 名册失败：{{ error }}
@@ -200,6 +412,14 @@ onMounted(loadCatalog)
               @click="openItem(item)"
             >
               <div class="spine-item-main">
+                <input
+                  type="checkbox"
+                  class="spine-item-check"
+                  :checked="selectedKeys.includes(item.refKey)"
+                  :title="'勾选后可批量导出'"
+                  @click.stop
+                  @change.stop="toggleSelect(item.refKey)"
+                />
                 <span class="spine-item-name">{{ item.name }}</span>
                 <NTag size="tiny" :bordered="false">{{ item.group }}</NTag>
                 <NTag v-if="item.boundPageCount > 0" size="tiny" type="info" :bordered="false">
@@ -212,6 +432,16 @@ onMounted(loadCatalog)
                 >
                   {{ item.parseStatusLabel }}
                 </NTag>
+                <NButton
+                  size="tiny"
+                  secondary
+                  :disabled="exporting"
+                  class="spine-item-export"
+                  title="把这条的三件套（骨架 / 图集 / 纹理）导出到磁盘"
+                  @click.stop="exportItems([item])"
+                >
+                  导出
+                </NButton>
               </div>
               <div class="spine-item-path lme-mono">{{ item.refKey }}</div>
               <div class="spine-item-source">
@@ -251,6 +481,16 @@ onMounted(loadCatalog)
               >
                 {{ resolved?.parseStatusLabel ?? selected.parseStatusLabel }}
               </NTag>
+              <NButton
+                size="tiny"
+                type="primary"
+                secondary
+                :disabled="exporting"
+                title="把这条的三件套（骨架 / 图集 / 纹理）导出到磁盘"
+                @click="exportItems([selected])"
+              >
+                导出三件套
+              </NButton>
             </div>
             <div class="spine-preview-path lme-mono">{{ selected.refKey }}</div>
 
@@ -424,6 +664,68 @@ onMounted(loadCatalog)
   align-items: center;
   gap: var(--lme-gap-xs);
   flex-wrap: wrap;
+}
+
+/* 勾选框：批量导出的选择入口（原生控件，配色只用 tokens） */
+.spine-item-check {
+  flex-shrink: 0;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--lme-info);
+}
+
+/* 「导出」按钮推到行尾，不挤压名字与标签 */
+.spine-item-export {
+  margin-left: auto;
+}
+
+/* ── 导出进度（progress 事件）与结果反馈 ── */
+
+.spine-export-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-sm);
+  flex-shrink: 0;
+  padding: var(--lme-gap-xs) var(--lme-gap-sm);
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-sm);
+  background: var(--lme-bg-panel);
+}
+
+.spine-export-progress :deep(.n-progress) {
+  flex: 1;
+  min-width: 120px;
+}
+
+.spine-export-progress-text {
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 520px;
+}
+
+.spine-export-title {
+  font-weight: 600;
+  margin-bottom: var(--lme-gap-xs);
+}
+
+.spine-export-lines {
+  margin-top: var(--lme-gap-xs);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.spine-export-line {
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-secondary);
+  word-break: break-all;
+}
+
+.spine-export-line-fail {
+  color: var(--lme-error);
 }
 
 .spine-item-name {

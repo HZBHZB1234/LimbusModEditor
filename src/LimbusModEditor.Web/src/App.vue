@@ -1,10 +1,25 @@
 <script setup lang="ts">
-// v2 外壳：顶部命令栏（品牌 + Ctrl+K 命令面板 + 常驻入口）
-//        + 工作区 tab 条（横向 tab，维基工作区激活时金色下划线）
-// 替代 v1 的左侧窄活动栏；全部路由保持原路径，功能无损
-import { ref, onMounted, onUnmounted } from 'vue'
+// v3 外壳（组件库版 Naive UI）：
+//   顶部命令栏（品牌 + 全局命令面板入口 + 常驻入口）+ 工作区 tab 条
+//   命令面板由 NModal + NInput 实现；主题从 tokens.css 派生（见 src/theme/naiveTheme.ts）
+// 路由与 v1/v2 完全一致，功能无损
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
+import {
+  NConfigProvider,
+  NDialogProvider,
+  NMessageProvider,
+  NNotificationProvider,
+  NTabs,
+  NTab,
+  NTooltip,
+  NButton,
+  NInput,
+  zhCN,
+  dateZhCN,
+} from 'naive-ui'
 import CommandPalette from '@/components/CommandPalette.vue'
+import { buildThemeOverrides, lmeDarkTheme } from '@/theme/naiveTheme'
 
 const router = useRouter()
 const route = useRoute()
@@ -23,22 +38,27 @@ const navItems = [
 
 const paletteOpen = ref(false)
 
+const isWikiZone = computed(() => route.path.startsWith('/wiki'))
+
+/** 库主题：维基区主色用金色，其余用紫色（两者都来自 tokens.css） */
+const themeOverrides = computed(() =>
+  buildThemeOverrides(isWikiZone.value ? '--wiki-accent' : '--lme-accent'),
+)
+
+const activeKey = computed(() => {
+  const path = route.path
+  if (path.startsWith('/wiki')) return 'wiki'
+  const hit = navItems.find((i) => path === i.route || path.startsWith(i.route + '/'))
+  return hit?.key ?? 'assets'
+})
+
+function onTabChange(key: string) {
+  const item = navItems.find((i) => i.key === key)
+  if (item) void router.push(item.route)
+}
+
 function navigate(routePath: string) {
-  router.push(routePath)
-}
-
-function isActive(routePath: string): boolean {
-  if (routePath === '/assets') {
-    return route.path.startsWith('/assets')
-  }
-  return route.path === routePath || route.path.startsWith(routePath + '/')
-}
-
-/** 维基工作区激活时 tab 下划线换维基金（视觉上区分「资料区」与「工作区」） */
-function tabAccent(routePath: string): string {
-  return routePath.startsWith('/wiki') && isActive(routePath)
-    ? 'var(--lme-tab-active-underline-wiki)'
-    : 'var(--lme-tab-active-underline)'
+  void router.push(routePath)
 }
 
 function onGlobalKeydown(e: KeyboardEvent) {
@@ -53,65 +73,83 @@ onUnmounted(() => window.removeEventListener('keydown', onGlobalKeydown, true))
 </script>
 
 <template>
-  <div class="app-shell">
-    <!-- 顶部命令栏 -->
-    <header class="topbar">
-      <div class="brand" @click="navigate('/assets')" title="回到资源工作台">
-        <span class="brand-mark">LME</span>
-        <span class="brand-name">Limbus Mod Editor</span>
-      </div>
+  <NConfigProvider
+    :theme="lmeDarkTheme"
+    :theme-overrides="themeOverrides"
+    :locale="zhCN"
+    :date-locale="dateZhCN"
+  >
+    <NMessageProvider>
+      <NDialogProvider>
+        <NNotificationProvider>
+          <div class="app-shell">
+            <!-- 顶部命令栏 -->
+            <header class="topbar">
+              <div class="brand" title="回到资源工作台" @click="navigate('/assets')">
+                <span class="brand-mark">LME</span>
+                <span class="brand-name">Limbus Mod Editor</span>
+              </div>
 
-      <button
-        class="command-trigger"
-        title="全局搜索与跳转（Ctrl+K）"
-        @click="paletteOpen = true"
-      >
-        <span class="command-trigger-icon">🔍</span>
-        <span class="command-trigger-text">搜索或跳转：工作台、维基分类…</span>
-        <kbd class="command-trigger-kbd">Ctrl+K</kbd>
-      </button>
+              <!-- 命令面板入口（Naive UI Input，只读 + 点击唤起） -->
+              <div class="command-trigger" @click="paletteOpen = true">
+                <NInput
+                  readonly
+                  class="command-input"
+                  placeholder="搜索或跳转：工作台、维基分类…"
+                >
+                  <template #prefix>
+                    <span class="command-trigger-icon">🔍</span>
+                  </template>
+                  <template #suffix>
+                    <kbd class="command-trigger-kbd">Ctrl+K</kbd>
+                  </template>
+                </NInput>
+              </div>
 
-      <div class="topbar-actions">
-        <button
-          class="topbar-icon-btn"
-          title="帮助"
-          @click="navigate('/help')"
-        >
-          ❓
-        </button>
-        <button
-          class="topbar-icon-btn"
-          title="设置"
-          @click="navigate('/settings')"
-        >
-          ⚙️
-        </button>
-      </div>
-    </header>
+              <div class="topbar-actions">
+                <NTooltip placement="bottom" :show-arrow="false">
+                  <template #trigger>
+                    <NButton quaternary circle @click="navigate('/help')">❓</NButton>
+                  </template>
+                  帮助
+                </NTooltip>
+                <NTooltip placement="bottom" :show-arrow="false">
+                  <template #trigger>
+                    <NButton quaternary circle @click="navigate('/settings')">⚙️</NButton>
+                  </template>
+                  设置
+                </NTooltip>
+              </div>
+            </header>
 
-    <!-- 工作区 tab 条 -->
-    <nav class="workspace-tabs">
-      <button
-        v-for="item in navItems"
-        :key="item.key"
-        class="workspace-tab"
-        :class="{ active: isActive(item.route), 'wiki-tab': item.route.startsWith('/wiki') }"
-        :style="{ '--tab-accent': tabAccent(item.route) }"
-        @click="navigate(item.route)"
-      >
-        <span class="workspace-tab-icon">{{ item.icon }}</span>
-        <span class="workspace-tab-label">{{ item.label }}</span>
-      </button>
-    </nav>
+            <!-- 工作区 tab 条 -->
+            <nav class="workspace-tabs">
+              <NTabs
+                type="line"
+                size="small"
+                :value="activeKey"
+                class="workspace-tabs-inner"
+                @update:value="onTabChange"
+              >
+                <NTab v-for="item in navItems" :key="item.key" :name="item.key">
+                  <span class="workspace-tab-icon">{{ item.icon }}</span>
+                  <span class="workspace-tab-label">{{ item.label }}</span>
+                </NTab>
+              </NTabs>
+            </nav>
 
-    <!-- 页面宿主 -->
-    <main class="page-host">
-      <router-view />
-    </main>
+            <!-- 页面宿主 -->
+            <main class="page-host">
+              <router-view />
+            </main>
 
-    <!-- 全局命令面板 -->
-    <CommandPalette :open="paletteOpen" @close="paletteOpen = false" />
-  </div>
+            <!-- 全局命令面板 -->
+            <CommandPalette v-model:open="paletteOpen" />
+          </div>
+        </NNotificationProvider>
+      </NDialogProvider>
+    </NMessageProvider>
+  </NConfigProvider>
 </template>
 
 <style scoped>
@@ -167,37 +205,23 @@ onUnmounted(() => window.removeEventListener('keydown', onGlobalKeydown, true))
 .command-trigger {
   flex: 1;
   max-width: 520px;
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-sm);
   margin: 0 auto;
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  background: var(--lme-cmdbar-bg);
-  border: 1px solid var(--lme-cmdbar-border);
-  border-radius: var(--lme-radius-full);
-  color: var(--lme-cmdbar-placeholder);
-  font-size: var(--lme-font-size-sm);
-  font-family: var(--lme-font-family);
   cursor: pointer;
-  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard),
-    background var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
-.command-trigger:hover {
+.command-trigger :deep(.n-input) {
+  background: var(--lme-cmdbar-bg);
+  border-radius: var(--lme-radius-full);
+  cursor: pointer;
+}
+
+.command-trigger :deep(.n-input:hover) {
   border-color: var(--lme-accent);
 }
 
 .command-trigger-icon {
   font-size: var(--lme-font-size-sm);
   opacity: 0.8;
-}
-
-.command-trigger-text {
-  flex: 1;
-  text-align: left;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .command-trigger-kbd {
@@ -218,77 +242,29 @@ onUnmounted(() => window.removeEventListener('keydown', onGlobalKeydown, true))
   flex-shrink: 0;
 }
 
-.topbar-icon-btn {
-  width: 30px;
-  height: 30px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: none;
-  border: none;
-  border-radius: var(--lme-radius-md);
-  font-size: var(--lme-font-size-md);
-  cursor: pointer;
-  transition: background var(--lme-dur-fast) var(--lme-ease-standard);
-}
-
-.topbar-icon-btn:hover {
-  background: var(--lme-topbar-icon-hover-bg);
-}
-
 /* ── 工作区 tab 条 ── */
 .workspace-tabs {
   height: var(--lme-tabbar-height);
   flex-shrink: 0;
   display: flex;
   align-items: stretch;
-  gap: var(--lme-gap-xs);
-  padding: 0 var(--lme-gap-md);
+  padding: 0 var(--lme-gap-sm);
   background: var(--lme-tabbar-bg);
   border-bottom: 1px solid var(--lme-tabbar-border);
-  overflow-x: auto;
+  overflow: hidden;
 }
 
-.workspace-tab {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: var(--lme-gap-xs);
-  padding: 0 var(--lme-gap-md);
-  background: none;
-  border: none;
-  color: var(--lme-tab-text);
-  font-size: var(--lme-font-size-sm);
-  font-family: var(--lme-font-family);
-  cursor: pointer;
-  white-space: nowrap;
-  transition: color var(--lme-dur-fast) var(--lme-ease-standard),
-    background var(--lme-dur-fast) var(--lme-ease-standard);
+.workspace-tabs-inner {
+  width: 100%;
 }
 
-.workspace-tab:hover {
-  color: var(--lme-tab-text-hover);
-  background: var(--lme-tab-hover-bg);
-}
-
-.workspace-tab.active {
-  color: var(--lme-tab-active-text);
-  font-weight: var(--lme-font-weight-medium);
-}
-
-.workspace-tab.active::after {
-  content: '';
-  position: absolute;
-  left: var(--lme-gap-sm);
-  right: var(--lme-gap-sm);
-  bottom: 0;
-  height: 2px;
-  border-radius: 2px 2px 0 0;
-  background: var(--tab-accent);
+.workspace-tabs :deep(.n-tabs-nav) {
+  height: var(--lme-tabbar-height);
 }
 
 .workspace-tab-icon {
   font-size: var(--lme-font-size-md);
+  margin-right: var(--lme-gap-xs);
 }
 
 /* ── 页面宿主 ── */

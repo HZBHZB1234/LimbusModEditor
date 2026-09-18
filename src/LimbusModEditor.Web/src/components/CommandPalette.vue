@@ -1,10 +1,10 @@
 <script setup lang="ts">
 // 全局命令面板（Ctrl+K）：跨工作台/维基的导航入口
-// 手写轻实现（<200 行），不引入组件库——WebView2 桌面宿主对体积/启动敏感
-// 只做「导航」这一件事：过滤 → 上下选择 → Enter 跳转；不发任何 IPC
-
-import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+// v3：改由 Naive UI 的 NModal + NInput 实现（焦点/Esc/遮罩由库接管），
+//     键盘导航（↑↓ / Enter）与条目清单沿用原实现；不发任何 IPC
+import { computed, nextTick, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { NModal, NInput, type InputInst } from 'naive-ui'
 
 interface CommandItem {
   key: string
@@ -20,7 +20,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  (e: 'close'): void
+  (e: 'update:open', value: boolean): void
 }>()
 
 const router = useRouter()
@@ -50,7 +50,12 @@ const items: CommandItem[] = [
 
 const query = ref('')
 const activeIndex = ref(0)
-const inputRef = ref<HTMLInputElement | null>(null)
+const inputRef = ref<InputInst | null>(null)
+
+const visible = computed({
+  get: () => props.open,
+  set: (value: boolean) => emit('update:open', value),
+})
 
 const filtered = computed<CommandItem[]>(() => {
   const q = query.value.trim().toLowerCase()
@@ -67,19 +72,20 @@ const flatResults = computed(() => filtered.value)
 
 watch(
   () => props.open,
-  async (open) => {
-    if (open) {
-      query.value = ''
-      activeIndex.value = 0
-      await nextTick()
-      inputRef.value?.focus()
-    }
+  (open) => {
+    if (!open) return
+    query.value = ''
+    activeIndex.value = 0
   },
 )
 
 watch(query, () => {
   activeIndex.value = 0
 })
+
+function onAfterEnter() {
+  void nextTick(() => inputRef.value?.focus())
+}
 
 function move(delta: number) {
   const n = flatResults.value.length
@@ -93,7 +99,7 @@ function move(delta: number) {
 }
 
 function run(item: CommandItem) {
-  emit('close')
+  visible.value = false
   void router.push(item.route)
 }
 
@@ -113,9 +119,6 @@ function onKeydown(e: KeyboardEvent) {
   } else if (e.key === 'Enter') {
     e.preventDefault()
     onEnter()
-  } else if (e.key === 'Escape') {
-    e.preventDefault()
-    emit('close')
   }
 }
 
@@ -132,136 +135,83 @@ const groups = computed(() => {
 const emptyResults = computed(
   () => query.value.trim() !== '' && flatResults.value.length === 0,
 )
-
-defineExpose({ onKeydown })
-
-onMounted(() => window.addEventListener('keydown', onKeydown, true))
-onUnmounted(() => window.removeEventListener('keydown', onKeydown, true))
 </script>
 
 <template>
-  <Teleport to="body">
-    <div v-if="open" class="palette-scrim" @mousedown.self="emit('close')">
-      <div class="palette" role="dialog" aria-label="命令面板">
-        <div class="palette-input-row">
-          <span class="palette-search-icon">🔍</span>
-          <input
-            ref="inputRef"
-            v-model="query"
-            class="palette-input"
-            type="text"
-            placeholder="搜索或跳转：工作台、维基分类…"
-            @keydown.stop="onKeydown"
-          />
-          <kbd class="palette-kbd">Esc</kbd>
+  <NModal
+    v-model:show="visible"
+    :closable="false"
+    :auto-focus="false"
+    style="width: min(560px, 92vw)"
+    @after-enter="onAfterEnter"
+  >
+    <div class="palette" role="dialog" aria-label="命令面板">
+      <div class="palette-input-row">
+        <NInput
+          ref="inputRef"
+          v-model:value="query"
+          size="large"
+          placeholder="搜索或跳转：工作台、维基分类…"
+          @keydown="onKeydown"
+        >
+          <template #prefix>
+            <span class="palette-search-icon">🔍</span>
+          </template>
+        </NInput>
+      </div>
+
+      <div class="palette-list">
+        <div v-for="g in groups" :key="g.name" class="palette-group">
+          <div class="palette-group-title">{{ g.name }}</div>
+          <button
+            v-for="item in g.list"
+            :key="item.key"
+            class="palette-option"
+            :class="{ active: flatResults[activeIndex]?.key === item.key }"
+            :data-key="item.key"
+            @click="run(item)"
+            @mousemove="activeIndex = flatResults.findIndex((f) => f.key === item.key)"
+          >
+            <span class="palette-option-icon">{{ item.icon }}</span>
+            <span class="palette-option-label">{{ item.label }}</span>
+            <span class="palette-option-hint">跳转 ↵</span>
+          </button>
         </div>
 
-        <div class="palette-list">
-          <div v-for="g in groups" :key="g.name" class="palette-group">
-            <div class="palette-group-title">{{ g.name }}</div>
-            <button
-              v-for="item in g.list"
-              :key="item.key"
-              class="palette-option"
-              :class="{ active: flatResults[activeIndex]?.key === item.key }"
-              :data-key="item.key"
-              @click="run(item)"
-              @mousemove="activeIndex = flatResults.findIndex((f) => f.key === item.key)"
-            >
-              <span class="palette-option-icon">{{ item.icon }}</span>
-              <span class="palette-option-label">{{ item.label }}</span>
-              <span class="palette-option-hint">跳转 ↵</span>
-            </button>
-          </div>
-
-          <div v-if="emptyResults" class="palette-empty">
-            <span class="palette-empty-icon">🗂</span>
-            <span>没有匹配的条目，换个关键词试试</span>
-          </div>
-        </div>
-
-        <div class="palette-footer">
-          <span><kbd class="palette-kbd">↑</kbd><kbd class="palette-kbd">↓</kbd> 选择</span>
-          <span><kbd class="palette-kbd">↵</kbd> 打开</span>
-          <span><kbd class="palette-kbd">Esc</kbd> 关闭</span>
+        <div v-if="emptyResults" class="palette-empty">
+          <span class="palette-empty-icon">🗂</span>
+          <span>没有匹配的条目，换个关键词试试</span>
         </div>
       </div>
+
+      <div class="palette-footer">
+        <span><kbd class="palette-kbd">↑</kbd><kbd class="palette-kbd">↓</kbd> 选择</span>
+        <span><kbd class="palette-kbd">↵</kbd> 打开</span>
+        <span><kbd class="palette-kbd">Esc</kbd> 关闭</span>
+      </div>
     </div>
-  </Teleport>
+  </NModal>
 </template>
 
 <style scoped>
-.palette-scrim {
-  position: fixed;
-  inset: 0;
-  background: var(--lme-palette-scrim);
-  z-index: var(--lme-z-modal);
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  padding: 10vh var(--lme-gap-lg) 0;
-}
-
 .palette {
-  width: min(560px, 92vw);
-  max-height: 60vh;
   display: flex;
   flex-direction: column;
+  max-height: 60vh;
   background: var(--lme-palette-bg);
   border: 1px solid var(--lme-palette-border);
   border-radius: var(--lme-radius-lg);
-  box-shadow: var(--lme-shadow-xl);
   overflow: hidden;
-  animation: palette-in var(--lme-dur-fast) var(--lme-ease-standard);
-}
-
-@keyframes palette-in {
-  from {
-    opacity: 0;
-    transform: translateY(-6px) scale(0.99);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
 }
 
 .palette-input-row {
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-sm);
-  padding: 0 var(--lme-gap-md);
+  padding: var(--lme-gap-md) var(--lme-gap-md) var(--lme-gap-sm);
   border-bottom: 1px solid var(--lme-border);
 }
 
 .palette-search-icon {
   font-size: var(--lme-font-size-md);
   opacity: 0.7;
-}
-
-.palette-input {
-  flex: 1;
-  padding: var(--lme-gap-md) 0;
-  background: none;
-  border: none;
-  outline: none;
-  color: var(--lme-text-primary);
-  font-size: var(--lme-font-size-lg);
-  font-family: var(--lme-font-family);
-}
-
-.palette-input::placeholder {
-  color: var(--lme-cmdbar-placeholder);
-}
-
-.palette-kbd {
-  padding: 1px 6px;
-  background: var(--lme-cmdbar-kbd-bg);
-  border: 1px solid var(--lme-cmdbar-kbd-border);
-  border-radius: var(--lme-radius-sm);
-  color: var(--lme-cmdbar-kbd-text);
-  font-size: var(--lme-font-size-xs);
-  font-family: var(--lme-font-mono);
 }
 
 .palette-list {
@@ -280,7 +230,6 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown, true))
   font-weight: var(--lme-font-weight-semibold);
   letter-spacing: var(--lme-tracking-caps);
   color: var(--lme-palette-group-text);
-  text-transform: uppercase;
 }
 
 .palette-option {
@@ -351,5 +300,15 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown, true))
   border-top: 1px solid var(--lme-border);
   color: var(--lme-text-muted);
   font-size: var(--lme-font-size-xs);
+}
+
+.palette-kbd {
+  padding: 1px 6px;
+  background: var(--lme-cmdbar-kbd-bg);
+  border: 1px solid var(--lme-cmdbar-kbd-border);
+  border-radius: var(--lme-radius-sm);
+  color: var(--lme-cmdbar-kbd-text);
+  font-size: var(--lme-font-size-xs);
+  font-family: var(--lme-font-mono);
 }
 </style>

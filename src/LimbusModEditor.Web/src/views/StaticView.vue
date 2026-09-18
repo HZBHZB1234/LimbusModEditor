@@ -2,15 +2,35 @@
 // 静态数据工作台
 // 对应 WPF 旧界面 StaticWorkbenchPage
 // 三栏布局：浏览 | 分隔条 | 编辑
+// v3（ui-redesign r3）：手写版式替换为 Naive UI 组件（面板/按钮/输入/下拉/标签/空态/提示），功能不变
 
 import { ref, computed, onMounted, defineComponent, h, type DefineComponent } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ipc } from '@/ipc'
+import {
+  NAlert,
+  NButton,
+  NCard,
+  NEmpty,
+  NInput,
+  NSelect,
+  NSpin,
+  NTab,
+  NTabs,
+  NTag,
+  NTooltip,
+  useDialog,
+  useMessage,
+} from 'naive-ui'
 
 const route = useRoute()
 const router = useRouter()
 import VirtualList from '@/components/VirtualList.vue'
 import PageBar from '@/components/PageBar.vue'
+
+// 呈现层提示（App.vue 已提供 NMessageProvider / NDialogProvider），不参与 IPC 时序
+const message = useMessage()
+const dialog = useDialog()
 
 // ── 类型定义 ──────────────────────────────────────────────
 
@@ -43,6 +63,17 @@ interface StaticPageResult {
 }
 
 type StaticSortKind = 'Name' | 'RecordCount' | 'DataClass' | 'ModifiedFirst'
+
+/** 记录编辑状态 → NTag 的 type + 中文标签 */
+const recordStateTag: Record<
+  StaticRecord['editState'],
+  { type: 'default' | 'warning' | 'success' | 'error'; label: string }
+> = {
+  Unchanged: { type: 'default', label: '未修改' },
+  Modified: { type: 'warning', label: '已修改' },
+  Added: { type: 'success', label: '已添加' },
+  Deleted: { type: 'error', label: '已删除' },
+}
 
 // ── 树视图节点 ────────────────────────────────────────────
 
@@ -227,6 +258,12 @@ const dataClasses = computed<string[]>(() => {
   return Array.from(set).sort()
 })
 
+/** 数据类下拉选项（NSelect）：首项「全部」= 空值 */
+const dataClassOptions = computed(() => [
+  { label: '全部', value: '' },
+  ...dataClasses.value.map((cls) => ({ label: cls, value: cls })),
+])
+
 const filteredTables = computed<StaticTableInfo[]>(() => {
   let list = allTables.value
 
@@ -283,9 +320,35 @@ const currentPage = computed(() =>
   Math.floor(recordOffset.value / pageSize.value) + 1,
 )
 
+/** 编辑器三态 ↔ NTabs 的 value（差异对比是独立开关，故单独映射） */
+const editorTab = computed<'tree' | 'raw' | 'diff'>(() =>
+  showDiff.value ? 'diff' : editorMode.value,
+)
+
+function onEditorTabChange(value: string | number) {
+  // 与旧版「差异对比」按钮一致：再点一次收起，回到之前的编辑态
+  if (value === 'diff') {
+    onToggleDiff()
+    return
+  }
+  showDiff.value = false
+  editorMode.value = value === 'raw' ? 'raw' : 'tree'
+}
+
 // ── 搜索处理 ──────────────────────────────────────────────
 
+// NInput 的 clearable 会先触发 clear 再触发 update:value；旧版清空只清文本、不重查，这里保持一致
+let skipSearchOnce = false
+
+function onSearchClear() {
+  skipSearchOnce = true
+}
+
 function onSearchInput() {
+  if (skipSearchOnce) {
+    skipSearchOnce = false
+    return
+  }
   if (debounceTimer) clearTimeout(debounceTimer)
   debounceTimer = setTimeout(() => {
     performSearch()
@@ -427,8 +490,6 @@ function onRawJsonInput() {
 // ── 保存记录（static.editRecord + static.readRecord 读回）──────────
 
 const saving = ref(false)
-const saveMessage = ref('')
-const saveFailed = ref(false)
 
 /**
  * 保存当前记录的改动。
@@ -455,8 +516,6 @@ async function onSaveRecord() {
   parseError.value = null
 
   saving.value = true
-  saveMessage.value = ''
-  saveFailed.value = false
   try {
     await ipc.request('static.editRecord', {
       tableId: table.tableId,
@@ -477,13 +536,27 @@ async function onSaveRecord() {
     } catch {
       rootNode.value = null // 读回的不是合法 JSON：树视图留空，原始文本里照实显示
     }
-    saveMessage.value = '已保存（该改动会随导出写进 .staticmod）'
+    message.success('已保存（该改动会随导出写进 .staticmod）')
   } catch (e: unknown) {
-    saveFailed.value = true
-    saveMessage.value = e instanceof Error ? e.message : String(e)
+    message.error(`保存失败：${e instanceof Error ? e.message : String(e)}`)
   } finally {
     saving.value = false
   }
+}
+
+/** 保存会整条替换该行，先确认一次 */
+function requestSaveRecord() {
+  const record = selectedRecord.value
+  if (!record) return
+  dialog.warning({
+    title: '保存修改',
+    content: `将用编辑器里的 JSON 整条替换记录 ${record.key}。`,
+    positiveText: '确认保存',
+    negativeText: '取消',
+    onPositiveClick: () => {
+      void onSaveRecord()
+    },
+  })
 }
 
 // ── Diff 视图 ─────────────────────────────────────────────
@@ -510,9 +583,9 @@ async function onExport() {
       'static.exportStaticmod',
       { targetDirectory: picked.path },
     )
-    alert(`已导出 ${result.written} 条补丁至: ${result.outputPath}`)
+    message.success(`已导出 ${result.written} 条补丁至: ${result.outputPath}`)
   } catch {
-    alert('导出失败：请确认已打开项目并有静态数据改动')
+    message.error('导出失败：请确认已打开项目并有静态数据改动')
   }
 }
 
@@ -550,6 +623,7 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
   { value: 'DataClass', label: '按数据类' },
   { value: 'ModifiedFirst', label: '修改在前' },
 ]
+
 </script>
 
 <template>
@@ -573,66 +647,67 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
       </div>
 
       <div class="toolbar-actions">
-        <span class="result-count" v-if="!loading">
+        <NTag v-if="!loading" class="result-count" size="small" :bordered="false">
           共 <strong>{{ filteredTables.length.toLocaleString('zh-CN') }}</strong> 张表
-        </span>
-        <button
-          class="action-btn"
-          title="导出当前静态编辑集为 .staticmod（不按单表）"
-          @click="onExport"
-        >
-          📦 导出 .staticmod
-        </button>
+        </NTag>
+        <NTooltip placement="bottom" :show-arrow="false">
+          <template #trigger>
+            <NButton size="small" tertiary @click="onExport">📦 导出 .staticmod</NButton>
+          </template>
+          导出当前静态编辑集为 .staticmod（不按单表）
+        </NTooltip>
       </div>
     </header>
 
     <!-- 错误态 -->
-    <div v-if="error" class="error-banner">
-      <span class="error-banner-icon">⚠️</span>
-      <span>{{ error }}</span>
-    </div>
+    <NAlert v-if="error" class="error-banner" type="error" :closable="false">
+      {{ error }}
+    </NAlert>
 
     <!-- 三栏主从：表 / 记录 / 编辑器 -->
     <div class="workbench-body">
       <!-- ── 左：表列表 ── -->
-      <section class="panel panel-tables">
-        <div class="panel-head">
-          <div class="panel-search">
-            <span class="panel-search-icon">🔍</span>
-            <input
-              v-model="searchText"
-              class="search-input"
-              type="text"
-              placeholder="搜索表名或数据类（支持中文）"
-              @input="onSearchInput"
-            />
-            <button
-              v-if="searchText"
-              class="search-clear"
-              title="清空搜索"
-              @click="searchText = ''"
-            >
-              ✕
-            </button>
-          </div>
+      <NCard class="panel panel-tables" size="small" bordered :content-style="{ padding: '0px' }">
+        <template #header>
+          <div class="panel-head">
+            <div class="panel-search">
+              <NInput
+                v-model:value="searchText"
+                class="search-input"
+                size="small"
+                clearable
+                placeholder="搜索表名或数据类（支持中文）"
+                @update:value="onSearchInput"
+                @clear="onSearchClear"
+              >
+                <template #prefix>
+                  <span class="panel-search-icon">🔍</span>
+                </template>
+              </NInput>
+            </div>
 
-          <div class="filter-row">
-            <label class="filter-label">数据类</label>
-            <select v-model="dataClassFilter" class="filter-select" @change="onFilterChange">
-              <option value="">全部</option>
-              <option v-for="cls in dataClasses" :key="cls" :value="cls">
-                {{ cls }}
-              </option>
-            </select>
+            <div class="filter-row">
+              <span class="filter-label">数据类</span>
+              <NSelect
+                v-model:value="dataClassFilter"
+                class="filter-select"
+                size="small"
+                placeholder="全部"
+                :options="dataClassOptions"
+                @update:value="onFilterChange"
+              />
 
-            <label class="filter-label">排序</label>
-            <select v-model="sortKind" class="filter-select" @change="onFilterChange">
-              <option v-for="opt in sortOptions" :key="opt.value" :value="opt.value">
-                {{ opt.label }}
-              </option>
-            </select>
+              <span class="filter-label">排序</span>
+              <NSelect
+                v-model:value="sortKind"
+                class="filter-select"
+                size="small"
+                :options="sortOptions"
+                @update:value="onFilterChange"
+              />
+            </div>
           </div>
-        </div>
+        </template>
 
         <div class="panel-body">
           <!-- 表最多取 200 张，直接渲染；分组头 + 表行（虚拟列表按固定行高切，展开后会溢出，故不套 VirtualList） -->
@@ -646,7 +721,9 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
                 {{ expandedClasses.has(group.dataClass) ? '▼' : '▶' }}
               </span>
               <span class="group-name">{{ group.dataClass }}</span>
-              <span class="group-count">{{ group.tables.length }} 表</span>
+              <NTag class="group-count" size="small" round :bordered="false">
+                {{ group.tables.length }} 表
+              </NTag>
             </div>
 
             <div v-if="expandedClasses.has(group.dataClass)" class="class-group-tables">
@@ -671,29 +748,33 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
 
           <!-- 空态 -->
           <div v-if="!loading && groupedTables.length === 0" class="state-block">
-            <span class="state-icon">🗂</span>
-            <span class="state-text">没有命中的静态数据表</span>
-            <span class="state-hint">换个关键词，或把「数据类」切回「全部」</span>
+            <NEmpty size="small" description="没有命中的静态数据表">
+              <template #extra>
+                <span class="state-hint">换个关键词，或把「数据类」切回「全部」</span>
+              </template>
+            </NEmpty>
           </div>
 
           <!-- 初次加载态 -->
           <div v-if="loading && allTables.length === 0" class="state-block">
-            <span class="state-icon spinner">⏳</span>
+            <NSpin size="small" />
             <span class="state-text">正在读取静态数据表列表…</span>
           </div>
         </div>
-      </section>
+      </NCard>
 
       <!-- ── 中：记录列表 ── -->
-      <section class="panel panel-records">
-        <div class="panel-head compact">
-          <div class="panel-title">
-            <span class="panel-title-text">记录列表</span>
-            <span class="panel-badge lme-mono">
-              {{ totalRecordCount.toLocaleString('zh-CN') }}
-            </span>
+      <NCard class="panel panel-records" size="small" bordered :content-style="{ padding: '0px' }">
+        <template #header>
+          <div class="panel-head compact">
+            <div class="panel-title">
+              <span class="panel-title-text">记录列表</span>
+              <NTag class="panel-badge" size="small" round :bordered="false">
+                {{ totalRecordCount.toLocaleString('zh-CN') }}
+              </NTag>
+            </div>
           </div>
-        </div>
+        </template>
 
         <div class="panel-body">
           <VirtualList
@@ -711,112 +792,128 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
                 @click="onSelectRecord(item)"
               >
                 <span class="record-key lme-ellipsis">{{ item.key }}</span>
-                <span class="record-state" :class="'state-' + item.editState">
-                  {{ item.editState === 'Unchanged' ? '未修改' : item.editState === 'Modified' ? '已修改' : item.editState === 'Added' ? '已添加' : '已删除' }}
-                </span>
+                <NTag
+                  class="record-state"
+                  size="small"
+                  :bordered="false"
+                  :type="recordStateTag[item.editState].type"
+                >
+                  {{ recordStateTag[item.editState].label }}
+                </NTag>
               </div>
             </template>
           </VirtualList>
 
           <div v-else-if="loading" class="state-block">
-            <span class="state-icon spinner">⏳</span>
+            <NSpin size="small" />
             <span class="state-text">正在读取记录…</span>
           </div>
 
           <div v-else class="state-block">
-            <span class="state-icon">📄</span>
-            <span class="state-text">{{ selectedTable ? '本页没有记录' : '未选择表' }}</span>
-            <span class="state-hint" v-if="!selectedTable">先在左侧选一张静态数据表</span>
+            <NEmpty
+              size="small"
+              :description="selectedTable ? '本页没有记录' : '未选择表'"
+            >
+              <template #extra>
+                <span v-if="!selectedTable" class="state-hint">先在左侧选一张静态数据表</span>
+              </template>
+            </NEmpty>
           </div>
         </div>
 
-        <div class="panel-foot">
-          <PageBar
-            :current-page="currentPage"
-            :page-count="pageCount"
-            :total-count="totalRecordCount"
-            :query-ms="lastQueryMs"
-            :loading="loading"
-            @go-to="onGoToPage"
-          />
-        </div>
-      </section>
+        <template #footer>
+          <div class="panel-foot">
+            <PageBar
+              :current-page="currentPage"
+              :page-count="pageCount"
+              :total-count="totalRecordCount"
+              :query-ms="lastQueryMs"
+              :loading="loading"
+              @go-to="onGoToPage"
+            />
+          </div>
+        </template>
+      </NCard>
 
       <!-- ── 右：JSON 编辑器 ── -->
-      <section class="panel panel-editor">
-        <div class="panel-head compact">
-          <div class="segmented" role="tablist">
-            <button
-              class="segmented-btn"
-              :class="{ active: editorMode === 'tree' && !showDiff }"
-              @click="editorMode = 'tree'; showDiff = false"
+      <NCard class="panel panel-editor" size="small" bordered :content-style="{ padding: '0px' }">
+        <template #header>
+          <div class="panel-head compact">
+            <NTabs
+              class="editor-tabs"
+              type="bar"
+              size="small"
+              :value="editorTab"
+              @update:value="onEditorTabChange"
             >
-              🌳 树视图
-            </button>
-            <button
-              class="segmented-btn"
-              :class="{ active: editorMode === 'raw' && !showDiff }"
-              @click="editorMode = 'raw'; showDiff = false"
-            >
-              {} 原始文本
-            </button>
-            <button
-              class="segmented-btn"
-              :class="{ active: showDiff }"
-              @click="onToggleDiff"
-            >
-              ⚖️ 差异对比
-            </button>
-          </div>
+              <NTab class="segmented-btn" name="tree">🌳 树视图</NTab>
+              <NTab class="segmented-btn" name="raw">{} 原始文本</NTab>
+              <NTab class="segmented-btn" name="diff">⚖️ 差异对比</NTab>
+            </NTabs>
 
-          <span class="record-key-badge lme-mono" v-if="selectedRecord">
-            {{ selectedRecord.key }}
-          </span>
-        </div>
+            <NTag v-if="selectedRecord" class="record-key-badge" size="small" :bordered="false">
+              {{ selectedRecord.key }}
+            </NTag>
+          </div>
+        </template>
 
         <div class="panel-body">
           <!-- 树视图 -->
           <div v-if="editorMode === 'tree' && !showDiff" class="tree-view">
-            <div v-if="parseError" class="parse-error">
-              ⚠️ JSON 解析错误: {{ parseError }}
-            </div>
+            <NAlert
+              v-if="parseError"
+              class="parse-error"
+              type="error"
+              :closable="false"
+            >
+              JSON 解析错误: {{ parseError }}
+            </NAlert>
             <div v-else-if="rootNode" class="tree-content">
               <JsonTreeNode :node="rootNode" :depth="0" />
             </div>
             <div v-else class="state-block">
-              <span class="state-icon">🌳</span>
-              <span class="state-text">选择一条记录以查看 JSON</span>
-              <span class="state-hint">点击中间列表里的任意一行</span>
+              <NEmpty size="small" description="选择一条记录以查看 JSON">
+                <template #extra>
+                  <span class="state-hint">点击中间列表里的任意一行</span>
+                </template>
+              </NEmpty>
             </div>
           </div>
 
           <!-- 原始文本 -->
           <div v-else-if="editorMode === 'raw' && !showDiff" class="raw-view">
-            <textarea
-              v-model="rawJsonText"
+            <NInput
+              v-model:value="rawJsonText"
               class="raw-textarea"
-              spellcheck="false"
-              @input="onRawJsonInput"
+              type="textarea"
+              size="small"
+              :resizable="false"
+              :input-props="{ spellcheck: false }"
+              @update:value="onRawJsonInput"
             />
-            <div v-if="parseError" class="parse-error">
-              ⚠️ {{ parseError }}
-            </div>
+            <NAlert
+              v-if="parseError"
+              class="parse-error"
+              type="error"
+              :closable="false"
+            >
+              {{ parseError }}
+            </NAlert>
             <!-- 记录编辑入口：改完直接保存，保存后用 static.readRecord 读回覆盖上面 -->
             <div class="save-bar">
-              <button
-                class="action-btn primary"
-                :disabled="!selectedRecord || saving"
-                @click="onSaveRecord"
-              >
-                {{ saving ? '保存中…' : '💾 保存修改' }}
-              </button>
-              <span
-                v-if="saveMessage"
-                class="save-message"
-                :class="{ failed: saveFailed }"
-              >
-                {{ saveMessage }}
-              </span>
+              <NTooltip placement="top" :show-arrow="false">
+                <template #trigger>
+                  <NButton
+                    size="small"
+                    type="primary"
+                    :disabled="!selectedRecord || saving"
+                    @click="requestSaveRecord"
+                  >
+                    {{ saving ? '保存中…' : '💾 保存修改' }}
+                  </NButton>
+                </template>
+                用编辑器里的 JSON 整条替换该记录（会写进静态编辑集）
+              </NTooltip>
             </div>
           </div>
 
@@ -825,7 +922,7 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
             <pre class="diff-content">{{ diffContent }}</pre>
           </div>
         </div>
-      </section>
+      </NCard>
     </div>
   </div>
 </template>
@@ -949,65 +1046,16 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
   color: var(--lme-text-muted);
 }
 
-.result-count strong {
+.result-count :deep(strong) {
   color: var(--lme-text-primary);
   font-weight: var(--lme-font-weight-semibold);
-}
-
-/* ── 按钮 ── */
-.action-btn {
-  padding: 5px 14px;
-  background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-md);
-  color: var(--lme-text-secondary);
-  cursor: pointer;
-  font-size: var(--lme-font-size-sm);
-  font-family: var(--lme-font-family);
-  flex-shrink: 0;
-  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard),
-    color var(--lme-dur-fast) var(--lme-ease-standard),
-    background var(--lme-dur-fast) var(--lme-ease-standard);
-}
-
-.action-btn:hover:not(:disabled) {
-  border-color: var(--lme-accent);
-  color: var(--lme-text-primary);
-}
-
-.action-btn:focus-visible {
-  outline: none;
-  box-shadow: var(--lme-shadow-focus);
-}
-
-.action-btn.primary {
-  background: var(--lme-accent-muted);
-  border-color: var(--lme-accent);
-  color: var(--lme-text-primary);
-  font-weight: var(--lme-font-weight-medium);
-}
-
-.action-btn.primary:hover:not(:disabled) {
-  background: var(--lme-accent);
-}
-
-.action-btn:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
 }
 
 /* ── 错误态 ── */
 .error-banner {
   flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-sm);
   margin: var(--lme-gap-md) var(--lme-gap-lg) 0;
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  background: var(--lme-error-banner-bg);
-  border: 1px solid var(--lme-error);
   border-radius: var(--lme-radius-md);
-  color: var(--lme-error);
   font-size: var(--lme-font-size-sm);
 }
 
@@ -1027,9 +1075,37 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
   min-width: 0;
   min-height: 0;
   background: var(--lme-bg-panel);
-  border: 1px solid var(--lme-border);
   border-radius: var(--lme-radius-lg);
   overflow: hidden;
+}
+
+/* NCard 内部：头部 / 内容 / 底部都交给 .panel-head / .panel-body / .panel-foot 排版 */
+.panel :deep(.n-card-header) {
+  display: block;
+  padding: 0;
+  min-height: 0;
+  background: var(--lme-bg-elevated);
+  border-bottom: 1px solid var(--lme-border);
+}
+
+.panel :deep(.n-card-header__main) {
+  padding: 0;
+  width: 100%;
+  font-size: var(--lme-font-size-sm);
+}
+
+.panel :deep(.n-card-content) {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.panel :deep(.n-card__footer) {
+  padding: 0;
+  background: var(--lme-bg-elevated);
+  border-top: 1px solid var(--lme-border);
 }
 
 .panel-tables {
@@ -1057,8 +1133,6 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
   flex-direction: column;
   gap: var(--lme-gap-sm);
   padding: var(--lme-gap-sm) var(--lme-gap-md);
-  border-bottom: 1px solid var(--lme-border);
-  background: var(--lme-bg-elevated);
 }
 
 .panel-head.compact {
@@ -1084,14 +1158,17 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
   white-space: nowrap;
 }
 
-.panel-badge {
-  padding: 1px 8px;
-  background: var(--lme-bg-base);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-full);
-  color: var(--lme-text-muted);
+.panel-badge,
+.group-count,
+.record-key-badge {
+  font-family: var(--lme-font-mono);
   font-size: var(--lme-font-size-xs);
-  flex-shrink: 0;
+}
+
+.panel-badge :deep(.n-tag__text),
+.group-count :deep(.n-tag__text),
+.record-key-badge :deep(.n-tag__text) {
+  font-family: var(--lme-font-mono);
 }
 
 .panel-body {
@@ -1105,67 +1182,21 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
 
 .panel-foot {
   flex-shrink: 0;
-  border-top: 1px solid var(--lme-border);
-  background: var(--lme-bg-elevated);
 }
 
 /* ── 搜索框 / 筛选 ── */
 .panel-search {
-  position: relative;
   display: flex;
   align-items: center;
 }
 
 .panel-search-icon {
-  position: absolute;
-  left: 8px;
   font-size: var(--lme-font-size-sm);
   opacity: 0.6;
-  pointer-events: none;
 }
 
 .search-input {
   width: 100%;
-  padding: 5px 26px 5px 26px;
-  background: var(--lme-bg-input);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-md);
-  color: var(--lme-text-primary);
-  font-size: var(--lme-font-size-sm);
-  font-family: var(--lme-font-family);
-  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard);
-}
-
-.search-input::placeholder {
-  color: var(--lme-text-disabled);
-}
-
-.search-input:focus {
-  outline: none;
-  border-color: var(--lme-accent);
-  box-shadow: var(--lme-shadow-focus);
-}
-
-.search-clear {
-  position: absolute;
-  right: 6px;
-  width: 16px;
-  height: 16px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--lme-bg-elevated);
-  border: none;
-  border-radius: var(--lme-radius-full);
-  color: var(--lme-text-muted);
-  font-size: 9px;
-  cursor: pointer;
-  padding: 0;
-}
-
-.search-clear:hover {
-  color: var(--lme-text-primary);
-  background: var(--lme-bg-hover);
 }
 
 .filter-row {
@@ -1184,19 +1215,6 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
 .filter-select {
   flex: 1;
   min-width: 88px;
-  padding: 3px var(--lme-gap-sm);
-  background: var(--lme-bg-input);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
-  color: var(--lme-text-primary);
-  font-size: var(--lme-font-size-xs);
-  font-family: var(--lme-font-family);
-  cursor: pointer;
-}
-
-.filter-select:focus {
-  outline: none;
-  border-color: var(--lme-accent);
 }
 
 /* ── 分组头 ── */
@@ -1209,7 +1227,7 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
   display: flex;
   align-items: center;
   gap: var(--lme-gap-xs);
-  padding: 6px var(--lme-gap-md);
+  padding: var(--lme-gap-sm) var(--lme-gap-md);
   cursor: pointer;
   background: var(--lme-bg-elevated);
   border-bottom: 1px solid var(--lme-border);
@@ -1222,6 +1240,11 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
 
 .class-group-header:hover {
   background: var(--lme-bg-hover);
+}
+
+.class-group-header:focus-visible {
+  outline: none;
+  box-shadow: var(--lme-shadow-focus);
 }
 
 .group-arrow {
@@ -1237,16 +1260,6 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.group-count {
-  font-size: var(--lme-font-size-xs);
-  color: var(--lme-text-muted);
-  background: var(--lme-bg-base);
-  padding: 0 6px;
-  border-radius: var(--lme-radius-full);
-  font-weight: var(--lme-font-weight-regular);
-  flex-shrink: 0;
 }
 
 /* ── 表行 ── */
@@ -1269,6 +1282,11 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
 
 .table-row:hover {
   background: var(--lme-bg-hover);
+}
+
+.table-row:focus-visible {
+  outline: none;
+  box-shadow: var(--lme-shadow-focus);
 }
 
 .table-row.selected {
@@ -1317,6 +1335,11 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
   background: var(--lme-bg-hover);
 }
 
+.record-row:focus-visible {
+  outline: none;
+  box-shadow: var(--lme-shadow-focus);
+}
+
 .record-row.selected {
   background: var(--lme-bg-selected);
   border-left-color: var(--lme-accent);
@@ -1333,29 +1356,6 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
   color: var(--lme-text-primary);
 }
 
-.record-state {
-  font-size: var(--lme-font-size-xs);
-  padding: 1px 6px;
-  border-radius: var(--lme-radius-full);
-  flex-shrink: 0;
-}
-
-.state-Unchanged {
-  color: var(--lme-text-muted);
-}
-.state-Modified {
-  color: var(--lme-state-modified);
-  background: var(--lme-state-modified-bg);
-}
-.state-Added {
-  color: var(--lme-state-added);
-  background: var(--lme-state-added-bg);
-}
-.state-Deleted {
-  color: var(--lme-state-deleted);
-  background: var(--lme-state-deleted-bg);
-}
-
 /* ── 空态 / 加载态（与资源工作台同一套） ── */
 .state-block {
   flex: 1;
@@ -1369,22 +1369,6 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
   text-align: center;
 }
 
-.state-icon {
-  font-size: 28px;
-  opacity: 0.7;
-}
-
-.state-icon.spinner {
-  animation: state-spin 1.4s linear infinite;
-  display: inline-block;
-}
-
-@keyframes state-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 .state-text {
   font-size: var(--lme-font-size-sm);
   color: var(--lme-text-secondary);
@@ -1395,52 +1379,44 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
   color: var(--lme-text-disabled);
 }
 
-/* ── 分段控件（编辑器模式切换） ── */
-.segmented {
-  display: inline-flex;
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-md);
-  overflow: hidden;
+/* ── 编辑器分段 Tab（树视图 / 原始文本 / 差异对比） ── */
+.editor-tabs {
+  flex: 1;
+  min-width: 0;
 }
 
-.segmented-btn {
-  padding: 4px 12px;
-  background: var(--lme-bg-panel);
-  border: none;
-  color: var(--lme-text-secondary);
-  cursor: pointer;
+.editor-tabs :deep(.n-tabs-nav) {
+  height: 30px;
+}
+
+.editor-tabs :deep(.n-tabs-wrapper) {
+  height: 30px;
+}
+
+.editor-tabs :deep(.segmented-btn) {
+  padding: 0 var(--lme-gap-md);
   font-size: var(--lme-font-size-xs);
-  font-family: var(--lme-font-family);
+  color: var(--lme-text-secondary);
   transition: background var(--lme-dur-fast) var(--lme-ease-standard),
     color var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
-.segmented-btn + .segmented-btn {
-  border-left: 1px solid var(--lme-border);
-}
-
-.segmented-btn:hover {
+.editor-tabs :deep(.segmented-btn:hover) {
   background: var(--lme-bg-hover);
   color: var(--lme-text-primary);
 }
 
-.segmented-btn.active {
-  background: var(--lme-accent-muted);
-  color: var(--lme-text-primary);
+.editor-tabs :deep(.segmented-btn.n-tabs-tab--active) {
   font-weight: var(--lme-font-weight-medium);
+  color: var(--lme-text-primary);
 }
 
 .record-key-badge {
-  font-size: var(--lme-font-size-xs);
-  color: var(--lme-text-muted);
-  padding: 1px 8px;
-  background: var(--lme-bg-base);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-full);
   max-width: 40%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 /* ── 树视图 ── */
@@ -1466,7 +1442,7 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
   display: flex;
   align-items: center;
   gap: var(--lme-gap-xs);
-  padding: 2px var(--lme-gap-sm);
+  padding: var(--lme-gap-xs) var(--lme-gap-sm);
   border-radius: var(--lme-radius-sm);
   color: var(--lme-text-secondary);
   cursor: pointer;
@@ -1477,6 +1453,11 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
 :deep(.json-tree-row:hover) {
   background: var(--lme-bg-hover);
   color: var(--lme-text-primary);
+}
+
+:deep(.json-tree-row:focus-visible) {
+  outline: none;
+  box-shadow: var(--lme-shadow-focus);
 }
 
 :deep(.json-tree-row.leaf) {
@@ -1523,25 +1504,23 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
 
 .raw-textarea {
   flex: 1;
-  width: 100%;
   min-height: 0;
-  background: var(--lme-bg-input);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-md);
-  color: var(--lme-text-primary);
+}
+
+.raw-textarea :deep(.n-input-wrapper),
+.raw-textarea :deep(.n-input__textarea),
+.raw-textarea :deep(.n-scrollbar-container),
+.raw-textarea :deep(.n-input__textarea-el) {
+  height: 100%;
+}
+
+.raw-textarea :deep(.n-input__textarea-el) {
   font-family: var(--lme-font-mono);
   font-size: var(--lme-font-size-sm);
   line-height: var(--lme-line-height-normal);
-  resize: none;
   padding: var(--lme-gap-md);
   tab-size: 2;
-  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard);
-}
-
-.raw-textarea:focus {
-  outline: none;
-  border-color: var(--lme-accent);
-  box-shadow: var(--lme-shadow-focus);
+  resize: none;
 }
 
 /* ── 保存条 ── */
@@ -1550,18 +1529,6 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
   align-items: center;
   gap: var(--lme-gap-sm);
   flex-shrink: 0;
-}
-
-.save-message {
-  font-size: var(--lme-font-size-xs);
-  color: var(--lme-success);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.save-message.failed {
-  color: var(--lme-error);
 }
 
 /* ── Diff 视图 ── */
@@ -1581,13 +1548,16 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
 
 /* ── 解析错误 ── */
 .parse-error {
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  background: var(--lme-error-banner-bg);
-  border: 1px solid var(--lme-error);
   border-radius: var(--lme-radius-md);
-  color: var(--lme-error);
   font-size: var(--lme-font-size-xs);
   font-family: var(--lme-font-mono);
   flex-shrink: 0;
+}
+
+/* ── 库组件焦点环（tokens 统一） ── */
+:deep(.n-button:focus-visible),
+:deep(.n-input:focus-visible),
+:deep(.n-base-selection:focus-visible) {
+  box-shadow: var(--lme-shadow-focus);
 }
 </style>

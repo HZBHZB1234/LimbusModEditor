@@ -2,10 +2,11 @@
 // 维基首页（WikiHomeView）
 // Hero 区域 + 分类卡片网格 + 最近编辑 + 统计概览
 // 数据来源：ipc.request('wiki.home', {})
-// 布局：WikiShell 包裹
+// 布局：WikiShell 包裹；呈现层使用 Naive UI（ui-redesign r3，维基区主色为金）
 
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
+import { NAlert, NButton, NCard, NEmpty, NInput, NProgress, NSpin, NTag } from 'naive-ui'
 import { ipc } from '@/ipc'
 import WikiShell from '@/components/WikiShell.vue'
 import type {
@@ -165,6 +166,13 @@ const categoryCards = computed(() =>
 // ── 进度事件订阅（只认自己那次生成）──
 let unsubscribeProgress: (() => void) | null = null
 
+/** 生成进度百分比；未知总量时返回 0 并交给 processing 态做循环动画 */
+const progressPercentage = computed(() => {
+  const progress = generateProgress.value
+  if (!progress?.total) return 0
+  return Math.round((progress.current / progress.total) * 100)
+})
+
 // ── 初始化 ──
 onMounted(() => {
   unsubscribeProgress = ipc.on('progress', (payload) => {
@@ -197,22 +205,22 @@ onUnmounted(() => {
             </p>
           </div>
           <div class="hero-search">
-            <input
-              v-model="searchKeyword"
+            <NInput
+              v-model:value="searchKeyword"
               class="search-input"
-              type="text"
               placeholder="搜索维基页面、人格、异想体、关键词…"
+              clearable
               @keyup.enter="performSearch"
             />
-            <button class="search-btn" :disabled="!searchKeyword.trim()" @click="performSearch">
+            <NButton type="primary" :disabled="!searchKeyword.trim()" @click="performSearch">
               搜索
-            </button>
+            </NButton>
           </div>
           <!-- 生成入口：维基页是派生内容，按需生成（说明见脚本区注释） -->
           <div class="hero-generate">
-            <button class="generate-btn" :disabled="isGenerating" @click="generatePages">
+            <NButton type="primary" ghost :disabled="isGenerating" @click="generatePages">
               {{ isGenerating ? '正在生成…' : '生成页面' }}
-            </button>
+            </NButton>
             <span v-if="generateStatus" class="generate-hint">
               {{
                 generateStatus.ready
@@ -231,34 +239,26 @@ onUnmounted(() => {
               {{ generateProgress.current }}/{{ generateProgress.total }}
             </span>
           </div>
-          <div class="progress-track">
-            <div
-              class="progress-bar"
-              :style="{
-                width: generateProgress?.total
-                  ? `${Math.round((generateProgress.current / generateProgress.total) * 100)}%`
-                  : '0%',
-              }"
-            />
-          </div>
+          <NProgress
+            type="line"
+            :percentage="progressPercentage"
+            :processing="!generateProgress?.total"
+            :show-indicator="false"
+          />
         </div>
 
         <!-- ── 生成结果 / 失败 ── -->
-        <div v-if="generateMessage" class="generate-result">✅ {{ generateMessage }}</div>
-        <div v-if="generateError" class="error-banner page-error">
-          <span class="error-banner-icon">⚠️</span>
-          <span>{{ generateError }}</span>
-        </div>
+        <NAlert v-if="generateMessage" type="success" :bordered="false" class="generate-result">
+          {{ generateMessage }}
+        </NAlert>
+        <NAlert v-if="generateError" type="error" class="page-error">{{ generateError }}</NAlert>
 
         <!-- ── 错误提示 ── -->
-        <div v-if="errorMessage" class="error-banner page-error">
-          <span class="error-banner-icon">⚠️</span>
-          <span>{{ errorMessage }}</span>
-        </div>
+        <NAlert v-if="errorMessage" type="error" class="page-error">{{ errorMessage }}</NAlert>
 
         <!-- ── 加载中 ── -->
         <div v-if="isLoading" class="loading-state state-block">
-          <span class="state-icon spinner">⏳</span>
+          <NSpin size="small" />
           <span class="state-text">加载中…</span>
         </div>
 
@@ -288,9 +288,11 @@ onUnmounted(() => {
         <section class="categories-section wiki-section">
           <h2 class="section-title">分类浏览</h2>
           <div class="category-grid">
-            <div
+            <NCard
               v-for="entry in categoryCards"
               :key="entry.category"
+              size="small"
+              hoverable
               class="category-card"
               :class="{ 'no-source': !entry.card || entry.card.pageCount === 0 }"
               @click="navigateToCategory(entry.category)"
@@ -302,7 +304,9 @@ onUnmounted(() => {
               <div v-if="entry.card && entry.card.pageCount > 0" class="card-count">
                 {{ entry.card.pageCount.toLocaleString('zh-CN') }} 页
               </div>
-              <div v-else class="card-count card-count-empty">本地无来源</div>
+              <NTag v-else size="small" :bordered="false" class="card-count-empty">
+                本地无来源
+              </NTag>
               <div class="card-featured" v-if="entry.card?.featuredPages?.length">
                 <span
                   v-for="fp in entry.card.featuredPages.slice(0, 3)"
@@ -314,7 +318,7 @@ onUnmounted(() => {
                   {{ fp.title }}
                 </span>
               </div>
-            </div>
+            </NCard>
           </div>
         </section>
 
@@ -329,14 +333,18 @@ onUnmounted(() => {
               @click="navigateToPage(page.id)"
             >
               <span class="recent-title">{{ page.title }}</span>
-              <span class="recent-category wiki-chip">{{ categoryLabel(page.category) }}</span>
+              <NTag size="small" :bordered="false" class="recent-category wiki-chip">
+                {{ categoryLabel(page.category) }}
+              </NTag>
               <span class="recent-time">{{ formatTime(page.lastModified) }}</span>
             </div>
           </div>
           <div v-else class="empty-state state-block">
-            <span class="state-icon">📄</span>
-            <span class="state-text">暂无最近编辑</span>
-            <span class="state-hint">点上方「生成页面」后这里会列出最近的变更</span>
+            <NEmpty description="暂无最近编辑">
+              <template #extra>
+                <span class="state-hint">点上方「生成页面」后这里会列出最近的变更</span>
+              </template>
+            </NEmpty>
           </div>
         </section>
       </div>
@@ -358,7 +366,7 @@ onUnmounted(() => {
   top: 0;
   left: 0;
   right: 0;
-  height: 2px;
+  height: var(--wiki-loadingbar-height);
   overflow: hidden;
   z-index: var(--lme-z-raised);
   background: var(--lme-progressbar-bg);
@@ -371,7 +379,7 @@ onUnmounted(() => {
   width: 40%;
   border-radius: var(--lme-radius-full);
   background: var(--wiki-accent);
-  animation: loading-slide 1s var(--lme-ease-standard) infinite;
+  animation: loading-slide var(--wiki-loadingbar-cycle) var(--lme-ease-standard) infinite;
 }
 
 @keyframes loading-slide {
@@ -412,7 +420,7 @@ onUnmounted(() => {
   top: 0;
   left: 0;
   right: 0;
-  height: 3px;
+  height: var(--wiki-hero-accent-line-height);
   background: linear-gradient(90deg, transparent, var(--wiki-hero-accent-line), transparent);
 }
 
@@ -448,48 +456,6 @@ onUnmounted(() => {
 
 .search-input {
   flex: 1;
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  background: var(--lme-bg-input);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
-  color: var(--lme-text-primary);
-  font-size: var(--lme-font-size-md);
-  font-family: var(--lme-font-family);
-  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard);
-}
-
-.search-input::placeholder {
-  color: var(--lme-text-disabled);
-}
-
-.search-input:focus {
-  outline: none;
-  border-color: var(--wiki-accent);
-}
-
-.search-btn {
-  padding: var(--lme-gap-sm) var(--lme-gap-lg);
-  background: var(--wiki-accent);
-  border: 1px solid var(--wiki-accent);
-  border-radius: var(--lme-radius-sm);
-  color: var(--wiki-chip-active-text);
-  font-size: var(--lme-font-size-md);
-  font-weight: var(--lme-font-weight-semibold);
-  font-family: var(--lme-font-family);
-  cursor: pointer;
-  transition: background var(--lme-dur-fast) var(--lme-ease-standard),
-    border-color var(--lme-dur-fast) var(--lme-ease-standard);
-  white-space: nowrap;
-}
-
-.search-btn:hover:not(:disabled) {
-  background: var(--wiki-accent-strong);
-  border-color: var(--wiki-accent-strong);
-}
-
-.search-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
 }
 
 /* ── 生成入口 ── */
@@ -499,31 +465,6 @@ onUnmounted(() => {
   justify-content: center;
   gap: var(--lme-gap-sm);
   margin-top: var(--lme-gap-xs);
-}
-
-.generate-btn {
-  padding: var(--lme-gap-sm) var(--lme-gap-lg);
-  background: transparent;
-  border: 1px solid var(--wiki-accent-dim);
-  border-radius: var(--lme-radius-sm);
-  color: var(--wiki-link);
-  font-size: var(--lme-font-size-sm);
-  font-family: var(--lme-font-family);
-  cursor: pointer;
-  transition:
-    border-color var(--lme-dur-fast) var(--lme-ease-standard),
-    color var(--lme-dur-fast) var(--lme-ease-standard);
-  white-space: nowrap;
-}
-
-.generate-btn:hover:not(:disabled) {
-  border-color: var(--wiki-accent);
-  color: var(--wiki-accent-strong);
-}
-
-.generate-btn:disabled {
-  opacity: 0.5;
-  cursor: progress;
 }
 
 .generate-hint {
@@ -553,38 +494,8 @@ onUnmounted(() => {
   font-variant-numeric: tabular-nums;
 }
 
-.progress-track {
-  height: 4px;
-  background: var(--lme-progressbar-bg);
-  border-radius: var(--lme-radius-full);
-  overflow: hidden;
-}
-
-.progress-bar {
-  height: 100%;
-  background: var(--wiki-accent);
-  transition: width var(--lme-dur-base) var(--lme-ease-standard);
-}
-
 .generate-result {
-  padding: var(--lme-gap-md);
-  background: var(--lme-bg-elevated);
-  border: 1px solid var(--wiki-card-border);
-  border-radius: var(--lme-radius-md);
   color: var(--lme-text-secondary);
-  font-size: var(--lme-font-size-sm);
-}
-
-/* ── 错误提示 ── */
-.error-banner {
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-sm);
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  background: var(--lme-error-banner-bg);
-  border: 1px solid var(--lme-error);
-  border-radius: var(--lme-radius-md);
-  color: var(--lme-error);
   font-size: var(--lme-font-size-sm);
 }
 
@@ -597,22 +508,6 @@ onUnmounted(() => {
   gap: var(--lme-gap-sm);
   padding: var(--lme-gap-xl) var(--lme-gap-md);
   text-align: center;
-}
-
-.state-icon {
-  font-size: var(--lme-font-size-3xl);
-  opacity: 0.7;
-}
-
-.state-icon.spinner {
-  display: inline-block;
-  animation: state-spin 1.4s linear infinite;
-}
-
-@keyframes state-spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 
 .state-text {
@@ -638,7 +533,7 @@ onUnmounted(() => {
 
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(var(--wiki-stat-col-min), 1fr));
   gap: var(--lme-gap-md);
 }
 
@@ -659,7 +554,7 @@ onUnmounted(() => {
 
 .stat-card:hover {
   border-color: var(--wiki-card-hover-border);
-  transform: translateY(-1px);
+  transform: translateY(var(--wiki-card-lift));
   box-shadow: var(--lme-shadow-md);
 }
 
@@ -695,18 +590,11 @@ onUnmounted(() => {
 
 .category-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(var(--wiki-category-col-min), 1fr));
   gap: var(--lme-gap-md);
 }
 
 .category-card {
-  display: flex;
-  flex-direction: column;
-  gap: var(--lme-gap-sm);
-  padding: var(--lme-gap-md);
-  background: var(--wiki-card-bg);
-  border: 1px solid var(--wiki-card-border);
-  border-radius: var(--lme-radius-md);
   cursor: pointer;
   transition:
     border-color var(--lme-dur-fast) var(--lme-ease-standard),
@@ -715,10 +603,10 @@ onUnmounted(() => {
     box-shadow var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
-.category-card:hover {
+.category-card.n-card:hover {
   border-color: var(--wiki-card-hover-border);
   background: var(--wiki-card-hover-bg);
-  transform: translateY(-2px);
+  transform: translateY(var(--wiki-card-lift));
   box-shadow: var(--lme-shadow-md);
 }
 
@@ -817,14 +705,12 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-.recent-category {
-  font-size: var(--lme-font-size-xs);
-  color: var(--wiki-chip-text);
-  padding: 0 var(--lme-gap-sm);
+/* 分类胶囊：NTag 套 wiki-chip 皮肤（金色系，禁紫） */
+.recent-category.wiki-chip {
   background: var(--wiki-chip-bg);
-  border: 1px solid var(--wiki-chip-border);
+  color: var(--wiki-chip-text);
   border-radius: var(--wiki-chip-radius);
-  line-height: var(--lme-line-height-normal);
+  font-size: var(--lme-font-size-xs);
   flex-shrink: 0;
 }
 
@@ -832,7 +718,7 @@ onUnmounted(() => {
   font-size: var(--lme-font-size-xs);
   color: var(--lme-text-muted);
   flex-shrink: 0;
-  min-width: 140px;
+  min-width: var(--wiki-recent-time-min);
   font-variant-numeric: tabular-nums;
 }
 
@@ -842,10 +728,7 @@ onUnmounted(() => {
 }
 
 /* ── 可达性：键盘焦点 ── */
-.search-input:focus-visible,
-.search-btn:focus-visible,
-.generate-btn:focus-visible,
-.category-card:focus-visible,
+.category-card.n-card:focus-visible,
 .recent-item:focus-visible,
 .featured-item:focus-visible {
   outline: none;

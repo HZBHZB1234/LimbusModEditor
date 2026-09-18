@@ -316,6 +316,8 @@ async function performSearch() {
       recordCount: i.recordCount,
       bundleSource: '',
     }))
+    // 首屏默认展开分组（否则只看到一个折叠头、看不到任何表）；仍可手动折叠
+    for (const t of allTables.value) expandedClasses.value.add(t.dataClass)
   } catch {
     allTables.value = []
     error.value = '静态数据表列表加载失败'
@@ -552,145 +554,183 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
 
 <template>
   <div class="static-view">
-    <!-- 左栏：浏览 -->
-    <div class="browser-column">
-      <!-- 搜索框 -->
-      <div class="search-section">
-        <input
-          v-model="searchText"
-          class="search-input"
-          type="text"
-          placeholder="搜索表名或数据类（支持中文）"
-          @input="onSearchInput"
-        />
+    <!-- 加载进度条（顶部细条，替代整屏遮罩） -->
+    <div v-if="loading" class="loading-bar" aria-hidden="true" />
+
+    <!-- 页头工具栏 -->
+    <header class="page-toolbar">
+      <div class="toolbar-leading">
+        <span class="toolbar-icon">📊</span>
+        <div class="toolbar-titles">
+          <h1 class="toolbar-name">静态数据</h1>
+          <span class="toolbar-sub" v-if="selectedTable">
+            <span class="toolbar-table lme-mono">{{ selectedTable.tableName }}</span>
+            <span class="toolbar-dot">·</span>
+            {{ selectedTable.recordCount.toLocaleString('zh-CN') }} 条记录
+          </span>
+          <span class="toolbar-sub" v-else>从左侧选择一张表开始浏览与编辑</span>
+        </div>
       </div>
 
-      <!-- 筛选行 -->
-      <div class="filter-row">
-        <label class="filter-label">数据类</label>
-        <select v-model="dataClassFilter" class="filter-select" @change="onFilterChange">
-          <option value="">全部</option>
-          <option v-for="cls in dataClasses" :key="cls" :value="cls">
-            {{ cls }}
-          </option>
-        </select>
-
-        <label class="filter-label">排序</label>
-        <select v-model="sortKind" class="filter-select" @change="onFilterChange">
-          <option v-for="opt in sortOptions" :key="opt.value" :value="opt.value">
-            {{ opt.label }}
-          </option>
-        </select>
-      </div>
-
-      <!-- 表列表（按 dataClass 分组，懒展开） -->
-      <div class="table-list-container">
-        <VirtualList
-          :items="groupedTables"
-          :item-height="32"
-          :overscan="6"
+      <div class="toolbar-actions">
+        <span class="result-count" v-if="!loading">
+          共 <strong>{{ filteredTables.length.toLocaleString('zh-CN') }}</strong> 张表
+        </span>
+        <button
+          class="action-btn"
+          title="导出当前静态编辑集为 .staticmod（不按单表）"
+          @click="onExport"
         >
-          <template #default="{ item }">
-            <!-- 分组头 -->
-            <div
-              class="class-group-header"
-              @click="toggleClassGroup(item.dataClass)"
+          📦 导出 .staticmod
+        </button>
+      </div>
+    </header>
+
+    <!-- 错误态 -->
+    <div v-if="error" class="error-banner">
+      <span class="error-banner-icon">⚠️</span>
+      <span>{{ error }}</span>
+    </div>
+
+    <!-- 三栏主从：表 / 记录 / 编辑器 -->
+    <div class="workbench-body">
+      <!-- ── 左：表列表 ── -->
+      <section class="panel panel-tables">
+        <div class="panel-head">
+          <div class="panel-search">
+            <span class="panel-search-icon">🔍</span>
+            <input
+              v-model="searchText"
+              class="search-input"
+              type="text"
+              placeholder="搜索表名或数据类（支持中文）"
+              @input="onSearchInput"
+            />
+            <button
+              v-if="searchText"
+              class="search-clear"
+              title="清空搜索"
+              @click="searchText = ''"
             >
+              ✕
+            </button>
+          </div>
+
+          <div class="filter-row">
+            <label class="filter-label">数据类</label>
+            <select v-model="dataClassFilter" class="filter-select" @change="onFilterChange">
+              <option value="">全部</option>
+              <option v-for="cls in dataClasses" :key="cls" :value="cls">
+                {{ cls }}
+              </option>
+            </select>
+
+            <label class="filter-label">排序</label>
+            <select v-model="sortKind" class="filter-select" @change="onFilterChange">
+              <option v-for="opt in sortOptions" :key="opt.value" :value="opt.value">
+                {{ opt.label }}
+              </option>
+            </select>
+          </div>
+        </div>
+
+        <div class="panel-body">
+          <!-- 表最多取 200 张，直接渲染；分组头 + 表行（虚拟列表按固定行高切，展开后会溢出，故不套 VirtualList） -->
+          <div
+            v-for="group in groupedTables"
+            :key="group.dataClass"
+            class="class-group"
+          >
+            <div class="class-group-header" @click="toggleClassGroup(group.dataClass)">
               <span class="group-arrow">
-                {{ expandedClasses.has(item.dataClass) ? '▼' : '▶' }}
+                {{ expandedClasses.has(group.dataClass) ? '▼' : '▶' }}
               </span>
-              <span class="group-name">{{ item.dataClass }}</span>
-              <span class="group-count">{{ item.tables.length }} 表</span>
+              <span class="group-name">{{ group.dataClass }}</span>
+              <span class="group-count">{{ group.tables.length }} 表</span>
             </div>
 
-            <!-- 展开的表列表 -->
-            <div v-if="expandedClasses.has(item.dataClass)" class="class-group-tables">
+            <div v-if="expandedClasses.has(group.dataClass)" class="class-group-tables">
               <div
-                v-for="table in item.tables"
+                v-for="table in group.tables"
                 :key="table.tableName"
                 class="table-row"
                 :class="{ selected: selectedTable?.tableName === table.tableName }"
+                :title="table.bundleSource ? `${table.tableName}（来源：${table.bundleSource}）` : table.tableName"
                 @click="onSelectTable(table)"
               >
-                <span class="table-name lme-ellipsis" :title="table.tableName">
-                  {{ table.tableName }}
-                </span>
+                <span class="table-name lme-ellipsis">{{ table.tableName }}</span>
                 <span class="table-record-count lme-mono">
                   {{ table.recordCount.toLocaleString('zh-CN') }}
                 </span>
-                <span class="table-bundle lme-ellipsis" :title="table.bundleSource">
+                <span v-if="table.bundleSource" class="table-bundle lme-ellipsis">
                   {{ table.bundleSource }}
                 </span>
               </div>
             </div>
-          </template>
-        </VirtualList>
-      </div>
+          </div>
 
-      <!-- 加载态 -->
-      <div v-if="loading" class="loading-overlay">
-        <span class="loading-spinner">⏳</span>
-        <span>查询中…</span>
-      </div>
+          <!-- 空态 -->
+          <div v-if="!loading && groupedTables.length === 0" class="state-block">
+            <span class="state-icon">🗂</span>
+            <span class="state-text">没有命中的静态数据表</span>
+            <span class="state-hint">换个关键词，或把「数据类」切回「全部」</span>
+          </div>
 
-      <!-- 错误态 -->
-      <div v-if="error" class="error-banner">
-        ⚠️ {{ error }}
-      </div>
-    </div>
-
-    <!-- 分隔条 -->
-    <div class="column-splitter" />
-
-    <!-- 右栏：编辑 -->
-    <div class="edit-column">
-      <!-- 已选中表头 -->
-      <div v-if="selectedTable" class="edit-header">
-        <div class="header-info">
-          <span class="header-table-name">{{ selectedTable.tableName }}</span>
-          <span class="header-meta lme-mono">
-            {{ selectedTable.recordCount.toLocaleString('zh-CN') }} 条记录
-          </span>
-          <span class="header-meta lme-mono">
-            来源: {{ selectedTable.bundleSource }}
-          </span>
+          <!-- 初次加载态 -->
+          <div v-if="loading && allTables.length === 0" class="state-block">
+            <span class="state-icon spinner">⏳</span>
+            <span class="state-text">正在读取静态数据表列表…</span>
+          </div>
         </div>
-        <button class="export-btn" @click="onExport">📦 导出 .staticmod</button>
-      </div>
+      </section>
 
-      <!-- 记录浏览器 + 编辑器 -->
-      <div v-if="selectedTable" class="edit-body">
-        <!-- 记录列表 -->
-        <div class="record-browser">
-          <div class="record-browser-header">
-            <span>记录列表</span>
-            <span class="record-count-badge lme-mono">
+      <!-- ── 中：记录列表 ── -->
+      <section class="panel panel-records">
+        <div class="panel-head compact">
+          <div class="panel-title">
+            <span class="panel-title-text">记录列表</span>
+            <span class="panel-badge lme-mono">
               {{ totalRecordCount.toLocaleString('zh-CN') }}
             </span>
           </div>
+        </div>
+
+        <div class="panel-body">
           <VirtualList
+            v-if="records.length > 0"
             :items="records"
-            :item-height="28"
+            :item-height="30"
             :overscan="8"
+            grow
           >
             <template #default="{ item }">
               <div
                 class="record-row"
                 :class="{ selected: selectedRecord?.key === item.key }"
+                :title="item.key"
                 @click="onSelectRecord(item)"
               >
-                <span class="record-key lme-ellipsis" :title="item.key">
-                  {{ item.key }}
-                </span>
-                <span
-                  class="record-state"
-                  :class="'state-' + item.editState"
-                >
+                <span class="record-key lme-ellipsis">{{ item.key }}</span>
+                <span class="record-state" :class="'state-' + item.editState">
                   {{ item.editState === 'Unchanged' ? '未修改' : item.editState === 'Modified' ? '已修改' : item.editState === 'Added' ? '已添加' : '已删除' }}
                 </span>
               </div>
             </template>
           </VirtualList>
+
+          <div v-else-if="loading" class="state-block">
+            <span class="state-icon spinner">⏳</span>
+            <span class="state-text">正在读取记录…</span>
+          </div>
+
+          <div v-else class="state-block">
+            <span class="state-icon">📄</span>
+            <span class="state-text">{{ selectedTable ? '本页没有记录' : '未选择表' }}</span>
+            <span class="state-hint" v-if="!selectedTable">先在左侧选一张静态数据表</span>
+          </div>
+        </div>
+
+        <div class="panel-foot">
           <PageBar
             :current-page="currentPage"
             :page-count="pageCount"
@@ -700,26 +740,28 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
             @go-to="onGoToPage"
           />
         </div>
+      </section>
 
-        <!-- JSON 编辑器 -->
-        <div class="json-editor-panel">
-          <div class="editor-tabs">
+      <!-- ── 右：JSON 编辑器 ── -->
+      <section class="panel panel-editor">
+        <div class="panel-head compact">
+          <div class="segmented" role="tablist">
             <button
-              class="tab-btn"
+              class="segmented-btn"
               :class="{ active: editorMode === 'tree' && !showDiff }"
               @click="editorMode = 'tree'; showDiff = false"
             >
               🌳 树视图
             </button>
             <button
-              class="tab-btn"
+              class="segmented-btn"
               :class="{ active: editorMode === 'raw' && !showDiff }"
               @click="editorMode = 'raw'; showDiff = false"
             >
               {} 原始文本
             </button>
             <button
-              class="tab-btn diff-btn"
+              class="segmented-btn"
               :class="{ active: showDiff }"
               @click="onToggleDiff"
             >
@@ -727,6 +769,12 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
             </button>
           </div>
 
+          <span class="record-key-badge lme-mono" v-if="selectedRecord">
+            {{ selectedRecord.key }}
+          </span>
+        </div>
+
+        <div class="panel-body">
           <!-- 树视图 -->
           <div v-if="editorMode === 'tree' && !showDiff" class="tree-view">
             <div v-if="parseError" class="parse-error">
@@ -735,7 +783,11 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
             <div v-else-if="rootNode" class="tree-content">
               <JsonTreeNode :node="rootNode" :depth="0" />
             </div>
-            <div v-else class="empty-editor">选择记录以查看 JSON 内容</div>
+            <div v-else class="state-block">
+              <span class="state-icon">🌳</span>
+              <span class="state-text">选择一条记录以查看 JSON</span>
+              <span class="state-hint">点击中间列表里的任意一行</span>
+            </div>
           </div>
 
           <!-- 原始文本 -->
@@ -752,7 +804,7 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
             <!-- 记录编辑入口：改完直接保存，保存后用 static.readRecord 读回覆盖上面 -->
             <div class="save-bar">
               <button
-                class="save-btn"
+                class="action-btn primary"
                 :disabled="!selectedRecord || saving"
                 @click="onSaveRecord"
               >
@@ -773,19 +825,7 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
             <pre class="diff-content">{{ diffContent }}</pre>
           </div>
         </div>
-      </div>
-
-      <!-- 空状态 -->
-      <div v-else class="empty-state">
-        <div class="empty-icon">📊</div>
-        <div class="empty-title">静态数据工作台</div>
-        <div class="empty-desc">
-          从左侧选择一个静态数据表以开始编辑
-        </div>
-        <div class="empty-hint">
-          支持浏览、搜索、编辑和导出静态数据表
-        </div>
-      </div>
+      </section>
     </div>
   </div>
 </template>
@@ -793,83 +833,391 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
 <style scoped>
 .static-view {
   display: flex;
+  flex-direction: column;
   height: 100%;
   overflow: hidden;
   position: relative;
+  background: var(--lme-bg-base);
 }
 
-/* ── 浏览列 ── */
-.browser-column {
-  flex: 1;
+/* ── 加载进度条（顶部细条） ── */
+.loading-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  overflow: hidden;
+  z-index: var(--lme-z-raised);
+  background: var(--lme-progressbar-bg);
+}
+
+.loading-bar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  border-radius: var(--lme-radius-full);
+  background: var(--lme-progressbar-fill);
+  animation: loading-slide 1s var(--lme-ease-standard) infinite;
+}
+
+@keyframes loading-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(350%);
+  }
+}
+
+/* ── 页头工具栏 ── */
+.page-toolbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-lg);
+  padding: var(--lme-gap-sm) var(--lme-gap-lg);
+  background: var(--lme-bg-panel);
+  border-bottom: 1px solid var(--lme-border);
+}
+
+.toolbar-leading {
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-sm);
+  min-width: 0;
+}
+
+.toolbar-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--lme-radius-md);
+  background: var(--lme-bg-elevated);
+  border: 1px solid var(--lme-border);
+  font-size: var(--lme-font-size-md);
+  flex-shrink: 0;
+}
+
+.toolbar-titles {
   display: flex;
   flex-direction: column;
   min-width: 0;
+}
+
+.toolbar-name {
+  margin: 0;
+  font-size: var(--lme-font-size-lg);
+  font-weight: var(--lme-font-weight-semibold);
+  line-height: var(--lme-line-height-tight);
+  color: var(--lme-text-primary);
+}
+
+.toolbar-sub {
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-xs);
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toolbar-table {
+  color: var(--lme-text-secondary);
+}
+
+.toolbar-dot {
+  color: var(--lme-text-disabled);
+}
+
+.toolbar-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-md);
+  flex-shrink: 0;
+}
+
+.result-count {
+  font-size: var(--lme-font-size-sm);
+  color: var(--lme-text-muted);
+}
+
+.result-count strong {
+  color: var(--lme-text-primary);
+  font-weight: var(--lme-font-weight-semibold);
+}
+
+/* ── 按钮 ── */
+.action-btn {
+  padding: 5px 14px;
+  background: var(--lme-bg-elevated);
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-md);
+  color: var(--lme-text-secondary);
+  cursor: pointer;
+  font-size: var(--lme-font-size-sm);
+  font-family: var(--lme-font-family);
+  flex-shrink: 0;
+  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard),
+    color var(--lme-dur-fast) var(--lme-ease-standard),
+    background var(--lme-dur-fast) var(--lme-ease-standard);
+}
+
+.action-btn:hover:not(:disabled) {
+  border-color: var(--lme-accent);
+  color: var(--lme-text-primary);
+}
+
+.action-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--lme-shadow-focus);
+}
+
+.action-btn.primary {
+  background: var(--lme-accent-muted);
+  border-color: var(--lme-accent);
+  color: var(--lme-text-primary);
+  font-weight: var(--lme-font-weight-medium);
+}
+
+.action-btn.primary:hover:not(:disabled) {
+  background: var(--lme-accent);
+}
+
+.action-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ── 错误态 ── */
+.error-banner {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-sm);
+  margin: var(--lme-gap-md) var(--lme-gap-lg) 0;
+  padding: var(--lme-gap-sm) var(--lme-gap-md);
+  background: var(--lme-error-banner-bg);
+  border: 1px solid var(--lme-error);
+  border-radius: var(--lme-radius-md);
+  color: var(--lme-error);
+  font-size: var(--lme-font-size-sm);
+}
+
+/* ── 三栏栅格 ── */
+.workbench-body {
+  flex: 1;
+  display: flex;
+  gap: var(--lme-gap-md);
+  padding: var(--lme-gap-md) var(--lme-gap-lg) var(--lme-gap-lg);
+  min-height: 0;
   overflow: hidden;
 }
 
-.search-section {
-  padding: var(--lme-gap-md);
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--lme-bg-panel);
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-lg);
+  overflow: hidden;
+}
+
+.panel-tables {
+  flex: 0 0 300px;
+}
+
+.panel-records {
+  flex: 0 0 300px;
+}
+
+.panel-editor {
+  flex: 1;
+}
+
+@media (max-width: 1180px) {
+  .panel-tables,
+  .panel-records {
+    flex-basis: 240px;
+  }
+}
+
+.panel-head {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--lme-gap-sm);
+  padding: var(--lme-gap-sm) var(--lme-gap-md);
   border-bottom: 1px solid var(--lme-border);
+  background: var(--lme-bg-elevated);
+}
+
+.panel-head.compact {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--lme-gap-sm);
+  height: 38px;
+  padding: 0 var(--lme-gap-sm) 0 var(--lme-gap-md);
+}
+
+.panel-title {
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-sm);
+  min-width: 0;
+}
+
+.panel-title-text {
+  font-size: var(--lme-font-size-sm);
+  font-weight: var(--lme-font-weight-semibold);
+  color: var(--lme-text-secondary);
+  white-space: nowrap;
+}
+
+.panel-badge {
+  padding: 1px 8px;
+  background: var(--lme-bg-base);
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-full);
+  color: var(--lme-text-muted);
+  font-size: var(--lme-font-size-xs);
+  flex-shrink: 0;
+}
+
+.panel-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  position: relative;
+}
+
+.panel-foot {
+  flex-shrink: 0;
+  border-top: 1px solid var(--lme-border);
+  background: var(--lme-bg-elevated);
+}
+
+/* ── 搜索框 / 筛选 ── */
+.panel-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.panel-search-icon {
+  position: absolute;
+  left: 8px;
+  font-size: var(--lme-font-size-sm);
+  opacity: 0.6;
+  pointer-events: none;
 }
 
 .search-input {
   width: 100%;
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
+  padding: 5px 26px 5px 26px;
   background: var(--lme-bg-input);
   border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
+  border-radius: var(--lme-radius-md);
   color: var(--lme-text-primary);
-  font-size: var(--lme-font-size-md);
+  font-size: var(--lme-font-size-sm);
   font-family: var(--lme-font-family);
+  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard);
+}
+
+.search-input::placeholder {
+  color: var(--lme-text-disabled);
 }
 
 .search-input:focus {
   outline: none;
   border-color: var(--lme-accent);
+  box-shadow: var(--lme-shadow-focus);
+}
+
+.search-clear {
+  position: absolute;
+  right: 6px;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--lme-bg-elevated);
+  border: none;
+  border-radius: var(--lme-radius-full);
+  color: var(--lme-text-muted);
+  font-size: 9px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.search-clear:hover {
+  color: var(--lme-text-primary);
+  background: var(--lme-bg-hover);
 }
 
 .filter-row {
   display: flex;
   align-items: center;
   gap: var(--lme-gap-sm);
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  border-bottom: 1px solid var(--lme-border);
   flex-wrap: wrap;
 }
 
 .filter-label {
-  font-size: var(--lme-font-size-sm);
+  font-size: var(--lme-font-size-xs);
   color: var(--lme-text-muted);
+  flex-shrink: 0;
 }
 
 .filter-select {
-  padding: var(--lme-gap-xs) var(--lme-gap-sm);
+  flex: 1;
+  min-width: 88px;
+  padding: 3px var(--lme-gap-sm);
   background: var(--lme-bg-input);
   border: 1px solid var(--lme-border);
   border-radius: var(--lme-radius-sm);
   color: var(--lme-text-primary);
-  font-size: var(--lme-font-size-sm);
+  font-size: var(--lme-font-size-xs);
+  font-family: var(--lme-font-family);
+  cursor: pointer;
 }
 
-.table-list-container {
-  flex: 1;
-  overflow: hidden;
-  min-height: 0;
+.filter-select:focus {
+  outline: none;
+  border-color: var(--lme-accent);
 }
 
 /* ── 分组头 ── */
+.class-group {
+  display: flex;
+  flex-direction: column;
+}
+
 .class-group-header {
   display: flex;
   align-items: center;
   gap: var(--lme-gap-xs);
-  padding: 4px var(--lme-gap-md);
+  padding: 6px var(--lme-gap-md);
   cursor: pointer;
   background: var(--lme-bg-elevated);
   border-bottom: 1px solid var(--lme-border);
   font-size: var(--lme-font-size-sm);
-  font-weight: 600;
+  font-weight: var(--lme-font-weight-semibold);
   color: var(--lme-text-primary);
   user-select: none;
+  transition: background var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
 .class-group-header:hover {
@@ -879,7 +1227,7 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
 .group-arrow {
   width: 14px;
   text-align: center;
-  font-size: 10px;
+  font-size: 9px;
   flex-shrink: 0;
   color: var(--lme-text-muted);
 }
@@ -894,10 +1242,11 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
 .group-count {
   font-size: var(--lme-font-size-xs);
   color: var(--lme-text-muted);
-  background: var(--lme-bg-panel);
-  padding: 1px 6px;
-  border-radius: 8px;
-  font-weight: 400;
+  background: var(--lme-bg-base);
+  padding: 0 6px;
+  border-radius: var(--lme-radius-full);
+  font-weight: var(--lme-font-weight-regular);
+  flex-shrink: 0;
 }
 
 /* ── 表行 ── */
@@ -910,10 +1259,12 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
   display: flex;
   align-items: center;
   gap: var(--lme-gap-sm);
-  padding: 4px var(--lme-gap-md) 4px 28px;
+  height: 30px;
+  padding: 0 var(--lme-gap-md) 0 calc(var(--lme-gap-md) + 14px);
   cursor: pointer;
-  border-left: 3px solid transparent;
-  transition: background 0.1s;
+  border-left: 2px solid transparent;
+  border-bottom: 1px solid var(--lme-row-divider);
+  transition: background var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
 .table-row:hover {
@@ -932,140 +1283,34 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
   min-width: 0;
 }
 
+.table-row.selected .table-name {
+  font-weight: var(--lme-font-weight-medium);
+}
+
 .table-record-count {
-  width: 64px;
-  text-align: right;
   color: var(--lme-text-muted);
   font-size: var(--lme-font-size-xs);
   flex-shrink: 0;
 }
 
 .table-bundle {
-  width: 100px;
+  max-width: 76px;
   font-size: var(--lme-font-size-xs);
-  color: var(--lme-text-muted);
-  text-align: right;
-  flex-shrink: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* ── 分隔条 ── */
-.column-splitter {
-  width: 6px;
-  flex-shrink: 0;
-  background: var(--lme-border);
-  cursor: col-resize;
-}
-
-/* ── 编辑列 ── */
-.edit-column {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  background: var(--lme-bg-panel);
-  min-width: 320px;
-}
-
-.edit-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--lme-gap-md);
-  border-bottom: 1px solid var(--lme-border);
-  gap: var(--lme-gap-md);
+  color: var(--lme-text-disabled);
   flex-shrink: 0;
 }
 
-.header-info {
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-md);
-  min-width: 0;
-  flex: 1;
-}
-
-.header-table-name {
-  font-size: var(--lme-font-size-lg);
-  font-weight: 600;
-  color: var(--lme-text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.header-meta {
-  font-size: var(--lme-font-size-sm);
-  color: var(--lme-text-muted);
-  flex-shrink: 0;
-}
-
-.export-btn {
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  background: var(--lme-accent);
-  border: none;
-  border-radius: var(--lme-radius-sm);
-  color: #fff;
-  cursor: pointer;
-  font-size: var(--lme-font-size-sm);
-  font-weight: 500;
-  white-space: nowrap;
-  flex-shrink: 0;
-  transition: background 0.15s;
-}
-
-.export-btn:hover {
-  background: var(--lme-accent-hover);
-}
-
-/* ── 编辑主体 ── */
-.edit-body {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  min-height: 0;
-}
-
-/* ── 记录浏览器 ── */
-.record-browser {
-  display: flex;
-  flex-direction: column;
-  border-bottom: 1px solid var(--lme-border);
-  max-height: 240px;
-  min-height: 120px;
-}
-
-.record-browser-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  font-size: var(--lme-font-size-sm);
-  font-weight: 600;
-  color: var(--lme-text-secondary);
-  border-bottom: 1px solid var(--lme-border);
-  flex-shrink: 0;
-}
-
-.record-count-badge {
-  font-size: var(--lme-font-size-xs);
-  color: var(--lme-text-muted);
-  background: var(--lme-bg-elevated);
-  padding: 1px 6px;
-  border-radius: 8px;
-}
-
+/* ── 记录行 ── */
 .record-row {
   display: flex;
   align-items: center;
   gap: var(--lme-gap-sm);
+  height: 30px;
   padding: 0 var(--lme-gap-md);
   cursor: pointer;
-  border-left: 3px solid transparent;
-  transition: background 0.1s;
+  border-left: 2px solid transparent;
+  border-bottom: 1px solid var(--lme-row-divider);
+  transition: background var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
 .record-row:hover {
@@ -1080,14 +1325,18 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
 .record-key {
   flex: 1;
   font-size: var(--lme-font-size-sm);
-  color: var(--lme-text-primary);
+  color: var(--lme-text-secondary);
   min-width: 0;
+}
+
+.record-row.selected .record-key {
+  color: var(--lme-text-primary);
 }
 
 .record-state {
   font-size: var(--lme-font-size-xs);
   padding: 1px 6px;
-  border-radius: var(--lme-radius-sm);
+  border-radius: var(--lme-radius-full);
   flex-shrink: 0;
 }
 
@@ -1107,110 +1356,153 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
   background: var(--lme-state-deleted-bg);
 }
 
-/* ── JSON 编辑器面板 ── */
-.json-editor-panel {
+/* ── 空态 / 加载态（与资源工作台同一套） ── */
+.state-block {
   flex: 1;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
-  min-height: 0;
-}
-
-.editor-tabs {
-  display: flex;
   align-items: center;
-  gap: 0;
-  border-bottom: 1px solid var(--lme-border);
-  flex-shrink: 0;
-}
-
-.tab-btn {
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  background: transparent;
-  border: none;
-  border-bottom: 2px solid transparent;
+  justify-content: center;
+  gap: var(--lme-gap-sm);
+  padding: var(--lme-gap-xl) var(--lme-gap-md);
   color: var(--lme-text-muted);
-  cursor: pointer;
-  font-size: var(--lme-font-size-sm);
-  transition: color 0.15s, border-color 0.15s;
+  text-align: center;
 }
 
-.tab-btn:hover {
+.state-icon {
+  font-size: 28px;
+  opacity: 0.7;
+}
+
+.state-icon.spinner {
+  animation: state-spin 1.4s linear infinite;
+  display: inline-block;
+}
+
+@keyframes state-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.state-text {
+  font-size: var(--lme-font-size-sm);
   color: var(--lme-text-secondary);
 }
 
-.tab-btn.active {
-  color: var(--lme-text-primary);
-  border-bottom-color: var(--lme-accent);
+.state-hint {
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-disabled);
 }
 
-.diff-btn {
-  margin-left: auto;
+/* ── 分段控件（编辑器模式切换） ── */
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-md);
+  overflow: hidden;
+}
+
+.segmented-btn {
+  padding: 4px 12px;
+  background: var(--lme-bg-panel);
+  border: none;
+  color: var(--lme-text-secondary);
+  cursor: pointer;
+  font-size: var(--lme-font-size-xs);
+  font-family: var(--lme-font-family);
+  transition: background var(--lme-dur-fast) var(--lme-ease-standard),
+    color var(--lme-dur-fast) var(--lme-ease-standard);
+}
+
+.segmented-btn + .segmented-btn {
+  border-left: 1px solid var(--lme-border);
+}
+
+.segmented-btn:hover {
+  background: var(--lme-bg-hover);
+  color: var(--lme-text-primary);
+}
+
+.segmented-btn.active {
+  background: var(--lme-accent-muted);
+  color: var(--lme-text-primary);
+  font-weight: var(--lme-font-weight-medium);
+}
+
+.record-key-badge {
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-muted);
+  padding: 1px 8px;
+  background: var(--lme-bg-base);
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-full);
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ── 树视图 ── */
 .tree-view {
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   overflow: auto;
-  padding: var(--lme-gap-sm) 0;
 }
 
 .tree-content {
-  padding: 0 var(--lme-gap-sm);
+  padding: var(--lme-gap-sm);
 }
 
-/* ── JSON 树节点 ── */
-.json-tree-node {
+/* JSON 树节点由文件内 JsonTreeNode（defineComponent + h）渲染，用 :deep 穿透 */
+:deep(.json-tree-node) {
   font-family: var(--lme-font-mono);
   font-size: var(--lme-font-size-sm);
 }
 
-.json-tree-row {
+:deep(.json-tree-row) {
   display: flex;
   align-items: center;
   gap: var(--lme-gap-xs);
   padding: 2px var(--lme-gap-sm);
-  cursor: pointer;
   border-radius: var(--lme-radius-sm);
   color: var(--lme-text-secondary);
+  cursor: pointer;
   user-select: none;
+  transition: background var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
-.json-tree-row:hover {
+:deep(.json-tree-row:hover) {
   background: var(--lme-bg-hover);
   color: var(--lme-text-primary);
 }
 
-.json-tree-row.leaf {
+:deep(.json-tree-row.leaf) {
   cursor: default;
-  color: var(--lme-text-muted);
 }
 
-.json-tree-row.leaf:hover {
-  background: transparent;
-  color: var(--lme-text-muted);
-}
-
-.json-tree-arrow {
+:deep(.json-tree-arrow) {
   width: 14px;
   text-align: center;
-  font-size: 10px;
+  font-size: 9px;
   flex-shrink: 0;
   color: var(--lme-text-muted);
 }
 
-.json-tree-key {
+:deep(.json-tree-key) {
   color: var(--lme-text-primary);
   flex-shrink: 0;
 }
 
-.json-tree-label {
+:deep(.json-tree-label) {
   font-size: var(--lme-font-size-xs);
   color: var(--lme-text-muted);
   flex-shrink: 0;
 }
 
-.json-tree-value {
+:deep(.json-tree-value) {
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1223,38 +1515,46 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-height: 0;
   overflow: hidden;
-  padding: var(--lme-gap-sm);
+  padding: var(--lme-gap-md);
+  gap: var(--lme-gap-sm);
 }
 
-/* ── 保存记录 ── */
+.raw-textarea {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  background: var(--lme-bg-input);
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-md);
+  color: var(--lme-text-primary);
+  font-family: var(--lme-font-mono);
+  font-size: var(--lme-font-size-sm);
+  line-height: var(--lme-line-height-normal);
+  resize: none;
+  padding: var(--lme-gap-md);
+  tab-size: 2;
+  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard);
+}
+
+.raw-textarea:focus {
+  outline: none;
+  border-color: var(--lme-accent);
+  box-shadow: var(--lme-shadow-focus);
+}
+
+/* ── 保存条 ── */
 .save-bar {
   display: flex;
   align-items: center;
   gap: var(--lme-gap-sm);
-  padding-top: var(--lme-gap-sm);
   flex-shrink: 0;
-}
-
-.save-btn {
-  padding: 3px 12px;
-  background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
-  color: var(--lme-text-secondary);
-  cursor: pointer;
-  font-size: var(--lme-font-size-sm);
-  flex-shrink: 0;
-}
-
-.save-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .save-message {
   font-size: var(--lme-font-size-xs);
-  color: var(--lme-text-muted);
+  color: var(--lme-success);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1262,26 +1562,6 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
 
 .save-message.failed {
   color: var(--lme-error);
-}
-
-.raw-textarea {
-  flex: 1;
-  width: 100%;
-  background: var(--lme-bg-input);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
-  color: var(--lme-text-primary);
-  font-family: var(--lme-font-mono);
-  font-size: var(--lme-font-size-sm);
-  line-height: 1.5;
-  resize: none;
-  padding: var(--lme-gap-md);
-  tab-size: 2;
-}
-
-.raw-textarea:focus {
-  outline: none;
-  border-color: var(--lme-accent);
 }
 
 /* ── Diff 视图 ── */
@@ -1304,77 +1584,10 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
   padding: var(--lme-gap-sm) var(--lme-gap-md);
   background: var(--lme-error-banner-bg);
   border: 1px solid var(--lme-error);
+  border-radius: var(--lme-radius-md);
   color: var(--lme-error);
-  font-size: var(--lme-font-size-sm);
+  font-size: var(--lme-font-size-xs);
   font-family: var(--lme-font-mono);
   flex-shrink: 0;
-}
-
-/* ── 空编辑器 ── */
-.empty-editor {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  color: var(--lme-text-muted);
-  font-size: var(--lme-font-size-sm);
-}
-
-/* ── 空状态 ── */
-.empty-state {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--lme-gap-md);
-  color: var(--lme-text-muted);
-}
-
-.empty-icon {
-  font-size: 48px;
-  opacity: 0.5;
-}
-
-.empty-title {
-  font-size: var(--lme-font-size-xl);
-  font-weight: 600;
-  color: var(--lme-text-secondary);
-}
-
-.empty-desc {
-  font-size: var(--lme-font-size-md);
-  color: var(--lme-text-muted);
-}
-
-.empty-hint {
-  font-size: var(--lme-font-size-sm);
-  color: var(--lme-text-disabled);
-}
-
-/* ── 加载态 ── */
-.loading-overlay {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--lme-gap-sm);
-  background: var(--lme-overlay-bg);
-  color: var(--lme-text-secondary);
-  z-index: 10;
-}
-
-.loading-spinner {
-  font-size: 18px;
-}
-
-/* ── 错误态 ── */
-.error-banner {
-  padding: var(--lme-gap-md);
-  background: var(--lme-error-banner-bg);
-  border: 1px solid var(--lme-error);
-  color: var(--lme-error);
-  font-size: var(--lme-font-size-sm);
 }
 </style>

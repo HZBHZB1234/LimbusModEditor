@@ -9,9 +9,12 @@
  * 台词来源：分节 content + 分节内条目 body（实测 story:1D101 的台词在 entries[].body，
  * 只看 content 会误判为空）。
  * 纯展示 + 纯文本渲染（不解析 HTML，杜绝 XSS）。
+ * 呈现层使用 Naive UI（ui-redesign r5）：对话流卡片 + NTag 徽标 + NButton 章节导航。
+ * 数据来源（page.sections / entries[].body / bindings）与章节导航逻辑零改动。
  */
 
 import { computed, ref, watch } from 'vue'
+import { NButton, NCard, NEmpty, NTag } from 'naive-ui'
 import type { WikiPage, WikiSection, ResourceBinding, GalleryImage } from '@/ipc/types'
 import WikiAudioPlayer from '@/components/wiki/WikiAudioPlayer.vue'
 import WikiGallery from '@/components/wiki/WikiGallery.vue'
@@ -123,7 +126,7 @@ const tags = computed<string[]>(() => props.page.tags ?? [])
     <header class="story-header">
       <h1 class="story-title">{{ page.title }}</h1>
       <div class="story-meta">
-        <span class="story-badge">剧情</span>
+        <NTag class="story-badge" size="small" :bordered="false">剧情</NTag>
         <span v-if="chapters.length > 0" class="story-progress">
           第 {{ activeIndex + 1 }} / {{ chapters.length }} 章
         </span>
@@ -140,25 +143,35 @@ const tags = computed<string[]>(() => props.page.tags ?? [])
       <main class="story-main">
         <!-- 章节导航 -->
         <nav v-if="chapters.length > 0" class="chapter-nav">
-          <button class="nav-btn" :disabled="!hasPrev" @click="goPrev">← 上一章</button>
+          <NButton class="nav-btn" size="small" :disabled="!hasPrev" @click="goPrev">
+            ← 上一章
+          </NButton>
           <span class="chapter-name">{{ current?.title }}</span>
-          <button class="nav-btn" :disabled="!hasNext" @click="goNext">下一章 →</button>
+          <NButton class="nav-btn" size="small" :disabled="!hasNext" @click="goNext">
+            下一章 →
+          </NButton>
         </nav>
 
-        <!-- 对话流 -->
+        <!-- 对话流：每条台词一张卡片，说话人/旁白可区分 -->
         <section v-if="lines.length > 0" class="dialogue">
-          <div
+          <NCard
             v-for="(line, i) in lines"
             :key="i"
             class="dialogue-line"
             :class="line.kind"
+            size="small"
+            :bordered="false"
           >
             <span v-if="line.kind === 'speech'" class="dialogue-speaker">{{ line.speaker }}</span>
             <span v-else class="dialogue-speaker narration">旁白</span>
             <span class="dialogue-text">{{ line.text }}</span>
-          </div>
+          </NCard>
         </section>
-        <p v-else-if="current" class="dialogue-empty">该章节暂无可解析的对白文本。</p>
+        <NEmpty
+          v-else-if="current"
+          class="dialogue-empty"
+          description="该章节暂无可解析的对白文本。"
+        />
 
         <!-- 媒体 -->
         <WikiAudioPlayer
@@ -199,14 +212,14 @@ const tags = computed<string[]>(() => props.page.tags ?? [])
   flex-wrap: wrap;
 }
 
+/* 剧情徽标：NTag 套 wiki-chip 皮肤（金色系，禁紫） */
 .story-badge {
-  padding: 2px 10px;
-  border-radius: var(--wiki-chip-radius);
   font-size: var(--lme-font-size-xs);
   font-weight: 600;
   background: var(--wiki-chip-bg);
   border: 1px solid var(--wiki-chip-border);
   color: var(--wiki-chip-text);
+  border-radius: var(--wiki-chip-radius);
 }
 
 .story-progress {
@@ -253,25 +266,31 @@ const tags = computed<string[]>(() => props.page.tags ?? [])
 }
 
 .nav-btn {
-  padding: var(--lme-gap-xs) var(--lme-gap-md);
-  background: var(--lme-bg-panel);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
-  color: var(--lme-text-secondary);
   font-family: inherit;
-  font-size: var(--lme-font-size-sm);
-  cursor: pointer;
-  transition: all 0.15s;
 }
 
-.nav-btn:hover:not(:disabled) {
-  border-color: var(--wiki-accent);
-  color: var(--wiki-accent);
+/* ── 对话流：每条台词一张 NCard（卡片自带底色/圆角），左侧色条区分说话人/旁白 ── */
+.dialogue {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lme-gap-sm);
+  margin: var(--lme-gap-lg) 0;
 }
 
-.nav-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
+.dialogue-line {
+  border-left: 3px solid var(--wiki-accent);
+  border-radius: 0 var(--lme-radius-md) var(--lme-radius-md) 0;
+}
+
+/* NCard 的 content 容器承载「说话人 + 台词」横向流 */
+.dialogue-line :deep(.n-card__content) {
+  display: flex;
+  gap: var(--lme-gap-md);
+}
+
+.dialogue-line.narration {
+  border-left-color: var(--lme-border-strong);
+  background: transparent;
 }
 
 .chapter-name {
@@ -281,27 +300,6 @@ const tags = computed<string[]>(() => props.page.tags ?? [])
 }
 
 /* ── 对话流 ── */
-.dialogue {
-  display: flex;
-  flex-direction: column;
-  gap: var(--lme-gap-sm);
-  margin: var(--lme-gap-lg) 0;
-}
-
-.dialogue-line {
-  display: flex;
-  gap: var(--lme-gap-md);
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  border-left: 3px solid var(--wiki-accent);
-  background: var(--lme-bg-panel);
-  border-radius: 0 var(--lme-radius-md) var(--lme-radius-md) 0;
-}
-
-.dialogue-line.narration {
-  border-left-color: var(--lme-border-strong);
-  background: transparent;
-}
-
 .dialogue-speaker {
   flex-shrink: 0;
   min-width: 96px;
@@ -329,5 +327,6 @@ const tags = computed<string[]>(() => props.page.tags ?? [])
 
 .dialogue-empty {
   color: var(--lme-text-muted);
+  padding: var(--lme-gap-lg) 0;
 }
 </style>

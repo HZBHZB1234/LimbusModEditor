@@ -6,9 +6,26 @@
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ipc, IpcClientError } from '@/ipc'
+import {
+  NAlert,
+  NButton,
+  NCard,
+  NDescriptions,
+  NDescriptionsItem,
+  NEmpty,
+  NInput,
+  NSelect,
+  NSpin,
+  NTag,
+  NTooltip,
+  useMessage,
+} from 'naive-ui'
 import VirtualList from '@/components/VirtualList.vue'
 import PageBar from '@/components/PageBar.vue'
 import { useUiStateStore } from '@/stores/uiState'
+
+/** 轻量反馈（App.vue 的 NMessageProvider 已在位） */
+const message = useMessage()
 
 // ── 类型定义 ──────────────────────────────────────────────────
 
@@ -367,16 +384,9 @@ async function exportRebank() {
   }
 }
 
-/** 显示"暂未实现"提示 */
+/** 显示"暂未实现"提示（走 message 通道，不污染 bankError 错误态） */
 function showNotImplemented() {
-  // 轻量提示：复用 error 通道显示临时消息
-  const prevError = bankError.value
-  bankError.value = '暂未实现：该功能对应的 IPC 方法尚未在后端实现'
-  setTimeout(() => {
-    if (bankError.value === '暂未实现：该功能对应的 IPC 方法尚未在后端实现') {
-      bankError.value = prevError
-    }
-  }, 3000)
+  message.warning('暂未实现：该功能对应的 IPC 方法尚未在后端实现')
 }
 
 // ── 分隔条拖拽 ────────────────────────────────────────────────
@@ -441,67 +451,72 @@ onMounted(() => {
       </div>
 
       <div class="toolbar-actions">
-        <span class="result-count" v-if="!bankLoading">
+        <NTag size="small" :bordered="false" v-if="!bankLoading">
           共 <strong>{{ bankTotalCount.toLocaleString('zh-CN') }}</strong> 个银行
-        </span>
-        <button
-          class="action-btn"
-          title="导出为 .rebank 格式（需先选中一个银行）"
-          @click="exportRebank"
-        >
-          📤 导出 .rebank
-        </button>
+        </NTag>
+        <NTooltip placement="bottom" :show-arrow="false">
+          <template #trigger>
+            <NButton size="small" @click="exportRebank">📤 导出 .rebank</NButton>
+          </template>
+          导出为 .rebank 格式（需先选中一个银行）
+        </NTooltip>
       </div>
     </header>
 
     <!-- 银行列表错误态 -->
-    <div v-if="bankError" class="error-banner">
-      <span class="error-banner-icon">⚠️</span>
-      <span>{{ bankError }}</span>
-    </div>
+    <NAlert
+      v-if="bankError"
+      class="error-banner"
+      type="error"
+      :show-icon="false"
+      :bordered="true"
+    >
+      {{ bankError }}
+    </NAlert>
 
     <!-- 三栏：银行 | 采样 | 试听与详情 -->
     <div class="workbench-body">
       <!-- ── 左：银行列表 ── -->
-      <section class="panel panel-banks">
-        <div class="panel-head">
-          <div class="panel-search">
-            <span class="panel-search-icon">🔍</span>
-            <input
-              v-model="query.text"
+      <NCard size="small" class="panel panel-banks">
+        <template #header>
+          <div class="panel-head">
+            <NInput
+              v-model:value="query.text"
               class="search-input"
-              type="text"
+              size="small"
+              clearable
               placeholder="搜索银行路径或采样名称（支持中文）"
               @input="onSearchInput"
-            />
-            <button
-              v-if="query.text"
-              class="search-clear"
-              title="清空搜索"
-              @click="query.text = ''; onSearchInput()"
+              @clear="onSearchInput"
             >
-              ✕
-            </button>
+              <template #prefix>
+                <span class="panel-search-icon">🔍</span>
+              </template>
+            </NInput>
+
+            <div class="filter-row">
+              <span class="filter-label">类型</span>
+              <NSelect
+                v-model:value="query.bankType"
+                class="filter-select"
+                size="small"
+                :options="bankTypeOptions"
+                @update:value="onFilterChange"
+              />
+
+              <span class="filter-label">排序</span>
+              <NSelect
+                v-model:value="query.sort"
+                class="filter-select"
+                size="small"
+                :options="sortOptions"
+                @update:value="onFilterChange"
+              />
+
+              <NButton size="tiny" tertiary @click="clearFilters">清除筛选</NButton>
+            </div>
           </div>
-
-          <div class="filter-row">
-            <label class="filter-label">类型</label>
-            <select v-model="query.bankType" class="filter-select" @change="onFilterChange">
-              <option v-for="opt in bankTypeOptions" :key="opt.value" :value="opt.value">
-                {{ opt.label }}
-              </option>
-            </select>
-
-            <label class="filter-label">排序</label>
-            <select v-model="query.sort" class="filter-select" @change="onFilterChange">
-              <option v-for="opt in sortOptions" :key="opt.value" :value="opt.value">
-                {{ opt.label }}
-              </option>
-            </select>
-
-            <button class="action-btn small" @click="clearFilters">清除筛选</button>
-          </div>
-        </div>
+        </template>
 
         <div class="panel-body">
           <VirtualList
@@ -519,34 +534,50 @@ onMounted(() => {
                 @click="selectBank(item.bankId)"
               >
                 <span class="row-index lme-mono">{{ index + 1 + bankOffset }}</span>
-                <span class="row-type-badge" :style="{ color: bankTypeColor(item.bankType) }">
+                <NTag
+                  size="small"
+                  :bordered="false"
+                  class="row-type-badge"
+                  :style="{ color: bankTypeColor(item.bankType) }"
+                >
                   {{ bankTypeLabel(item.bankType) }}
-                </span>
+                </NTag>
                 <span class="row-name lme-ellipsis">{{ item.name }}</span>
                 <span class="row-count lme-mono">{{ item.sampleCount }} 采样</span>
-                <span v-if="item.fsbInfo" class="row-fsb lme-mono" :title="item.fsbInfo">{{ item.fsbInfo }}</span>
+                <NTag
+                  v-if="item.fsbInfo"
+                  size="small"
+                  :bordered="false"
+                  class="row-fsb lme-mono"
+                  :title="item.fsbInfo"
+                >
+                  {{ item.fsbInfo }}
+                </NTag>
               </div>
             </template>
           </VirtualList>
 
           <!-- 初次加载态 -->
           <div v-else-if="bankLoading" class="state-block">
-            <span class="state-icon spinner">⏳</span>
+            <NSpin size="small" />
             <span class="state-text">正在读取音频银行…</span>
           </div>
 
           <!-- 空态 -->
-          <div v-else-if="!bankError" class="state-block">
-            <span class="state-icon">🎵</span>
-            <span class="state-text">暂无音频银行数据</span>
-            <span class="state-hint">
-              尚未建立音频银行索引。请先运行「启动扫描」建立资源索引，
-              或检查项目目录中是否存在 FSB 音频文件。
-            </span>
-          </div>
+          <NEmpty v-else-if="!bankError" class="state-block" description="暂无音频银行数据">
+            <template #icon>
+              <span class="state-icon">🎵</span>
+            </template>
+            <template #extra>
+              <span class="state-hint">
+                尚未建立音频银行索引。请先运行「启动扫描」建立资源索引，
+                或检查项目目录中是否存在 FSB 音频文件。
+              </span>
+            </template>
+          </NEmpty>
         </div>
 
-        <div class="panel-foot">
+        <template #footer>
           <PageBar
             :current-page="currentPage"
             :page-count="pageCount"
@@ -555,30 +586,37 @@ onMounted(() => {
             :loading="bankLoading"
             @go-to="onGoToPage"
           />
-        </div>
-      </section>
+        </template>
+      </NCard>
 
       <!-- ── 中：采样列表 ── -->
-      <section class="panel panel-samples">
-        <div class="panel-head compact">
-          <div class="panel-title">
-            <span class="panel-title-text">采样列表</span>
-            <span class="panel-badge lme-mono">
-              {{ sampleList.length.toLocaleString('zh-CN') }}
+      <NCard size="small" class="panel panel-samples">
+        <template #header>
+          <div class="panel-head compact">
+            <div class="panel-title">
+              <span class="panel-title-text">采样列表</span>
+              <NTag size="small" :bordered="false" class="panel-badge lme-mono">
+                {{ sampleList.length.toLocaleString('zh-CN') }}
+              </NTag>
+            </div>
+
+            <span class="panel-bank lme-ellipsis" v-if="selectedBank" :title="selectedBank.path">
+              {{ selectedBank.name }}
             </span>
           </div>
-
-          <span class="panel-bank lme-ellipsis" v-if="selectedBank" :title="selectedBank.path">
-            {{ selectedBank.name }}
-          </span>
-        </div>
+        </template>
 
         <div class="panel-body">
           <!-- 采样加载错误 -->
-          <div v-if="sampleError" class="error-banner inline">
-            <span class="error-banner-icon">⚠️</span>
-            <span>{{ sampleError }}</span>
-          </div>
+          <NAlert
+            v-if="sampleError"
+            class="error-banner inline"
+            type="error"
+            :show-icon="false"
+            :bordered="true"
+          >
+            {{ sampleError }}
+          </NAlert>
 
           <!-- 采样列表表头 -->
           <div class="sample-table-header" v-if="sampleList.length > 0">
@@ -605,29 +643,48 @@ onMounted(() => {
                 @click="selectSample(item)"
               >
                 <span class="col col-name lme-ellipsis">{{ item.name }}</span>
-                <span class="col col-codec lme-mono">{{ item.codec }}</span>
-                <span class="col col-duration lme-mono">{{ formatDuration(item.duration) }}</span>
-                <span class="col col-size lme-mono">{{ formatSize(item.size) }}</span>
-                <span class="col col-channels lme-mono">{{ item.channels }}ch</span>
-                <span class="col col-rate lme-mono">{{ item.sampleRate }} Hz</span>
+                <span class="col col-codec">
+                  <NTag size="small" :bordered="false">{{ item.codec }}</NTag>
+                </span>
+                <span class="col col-duration">
+                  <NTag size="small" :bordered="false">
+                    {{ formatDuration(item.duration) }}
+                  </NTag>
+                </span>
+                <span class="col col-size">
+                  <NTag size="small" :bordered="false">{{ formatSize(item.size) }}</NTag>
+                </span>
+                <span class="col col-channels">
+                  <NTag size="small" :bordered="false">{{ item.channels }}ch</NTag>
+                </span>
+                <span class="col col-rate">
+                  <NTag size="small" :bordered="false">{{ item.sampleRate }} Hz</NTag>
+                </span>
               </div>
             </template>
           </VirtualList>
 
           <!-- 采样加载态 -->
           <div v-else-if="sampleLoading" class="state-block">
-            <span class="state-icon spinner">⏳</span>
+            <NSpin size="small" />
             <span class="state-text">正在读取采样列表…</span>
           </div>
 
           <!-- 采样空态 -->
-          <div v-else class="state-block">
-            <span class="state-icon">🔇</span>
-            <span class="state-text">{{ selectedBank ? '该银行暂无采样数据' : '未选择银行' }}</span>
-            <span class="state-hint" v-if="!selectedBank">先在左侧选一个音频银行</span>
-          </div>
+          <NEmpty
+            v-else
+            class="state-block"
+            :description="selectedBank ? '该银行暂无采样数据' : '未选择银行'"
+          >
+            <template #icon>
+              <span class="state-icon">🔇</span>
+            </template>
+            <template #extra>
+              <span class="state-hint" v-if="!selectedBank">先在左侧选一个音频银行</span>
+            </template>
+          </NEmpty>
         </div>
-      </section>
+      </NCard>
 
       <!-- ── 分隔条（拖拽调整试听列宽，写回 uiState.previewColumnWidth） ── -->
       <div
@@ -638,23 +695,31 @@ onMounted(() => {
       />
 
       <!-- ── 右：试听区 + 银行详情 ── -->
-      <section class="panel panel-player" :style="{ width: uiState.previewColumnWidth + 'px' }">
-        <div class="panel-head compact">
-          <div class="panel-title">
-            <span class="panel-title-text">试听</span>
-            <span class="panel-badge lme-mono">
-              {{ selectedSample ? selectedSample.codec : '—' }}
-            </span>
-          </div>
+      <NCard
+        size="small"
+        class="panel panel-player"
+        :style="{ width: uiState.previewColumnWidth + 'px' }"
+      >
+        <template #header>
+          <div class="panel-head compact">
+            <div class="panel-title">
+              <span class="panel-title-text">试听</span>
+              <NTag size="small" :bordered="false" class="panel-badge lme-mono">
+                {{ selectedSample ? selectedSample.codec : '—' }}
+              </NTag>
+            </div>
 
-          <span
-            class="panel-type"
-            v-if="selectedBank"
-            :style="{ color: bankTypeColor(selectedBank.bankType) }"
-          >
-            {{ bankTypeLabel(selectedBank.bankType) }}
-          </span>
-        </div>
+            <NTag
+              v-if="selectedBank"
+              size="small"
+              :bordered="false"
+              class="panel-type"
+              :style="{ color: bankTypeColor(selectedBank.bankType) }"
+            >
+              {{ bankTypeLabel(selectedBank.bankType) }}
+            </NTag>
+          </div>
+        </template>
 
         <div class="panel-body">
           <!-- 播放器卡：当前样本名 / 轨道底纹 / 原生播放器 / 元信息 -->
@@ -687,104 +752,107 @@ onMounted(() => {
               </div>
 
               <!-- 未实现提示（后端明确回 unsupported 才显示） -->
-              <div
+              <NEmpty
                 v-else-if="selectedSample && !sampleLoading && audioPreviewUnsupported"
                 class="state-block inline"
+                description="音频预览暂未实现"
               >
-                <span class="state-icon">🔇</span>
-                <span class="state-text">音频预览暂未实现</span>
-                <span class="state-hint">
-                  后端 bank.preview 返回 unsupported：该样本暂无法解码（需 FMOD 链路）
-                </span>
-              </div>
+                <template #icon>
+                  <span class="state-icon">🔇</span>
+                </template>
+                <template #extra>
+                  <span class="state-hint">
+                    后端 bank.preview 返回 unsupported：该样本暂无法解码（需 FMOD 链路）
+                  </span>
+                </template>
+              </NEmpty>
 
               <!-- 未选中采样 -->
-              <div v-else class="state-block inline">
-                <span class="state-icon">🎧</span>
-                <span class="state-text">请选择一个采样以预览</span>
-                <span class="state-hint">点击中间列表里的任意一行</span>
-              </div>
+              <NEmpty v-else class="state-block inline" description="请选择一个采样以预览">
+                <template #icon>
+                  <span class="state-icon">🎧</span>
+                </template>
+                <template #extra>
+                  <span class="state-hint">点击中间列表里的任意一行</span>
+                </template>
+              </NEmpty>
             </div>
 
-            <!-- 当前样本元信息 -->
-            <dl class="player-meta" v-if="selectedSample">
-              <div class="meta-item">
-                <dt class="meta-label">编码</dt>
-                <dd class="meta-value lme-mono">{{ selectedSample.codec }}</dd>
-              </div>
-              <div class="meta-item">
-                <dt class="meta-label">时长</dt>
-                <dd class="meta-value lme-mono">{{ formatDuration(selectedSample.duration) }}</dd>
-              </div>
-              <div class="meta-item">
-                <dt class="meta-label">声道</dt>
-                <dd class="meta-value lme-mono">{{ selectedSample.channels }}ch</dd>
-              </div>
-              <div class="meta-item">
-                <dt class="meta-label">采样率</dt>
-                <dd class="meta-value lme-mono">{{ selectedSample.sampleRate }} Hz</dd>
-              </div>
-              <div class="meta-item">
-                <dt class="meta-label">大小</dt>
-                <dd class="meta-value lme-mono">{{ formatSize(selectedSample.size) }}</dd>
-              </div>
-              <div class="meta-item">
-                <dt class="meta-label">所属银行</dt>
-                <dd class="meta-value lme-mono lme-ellipsis" :title="selectedSample.bankId">
-                  {{ selectedSample.bankId }}
-                </dd>
-              </div>
-            </dl>
+            <!-- 当前样本元信息（胶囊） -->
+            <div class="player-meta" v-if="selectedSample">
+              <NTag size="small" :bordered="false">
+                <span class="meta-label">编码</span>
+                <span class="meta-value lme-mono">{{ selectedSample.codec }}</span>
+              </NTag>
+              <NTag size="small" :bordered="false">
+                <span class="meta-label">时长</span>
+                <span class="meta-value lme-mono">
+                  {{ formatDuration(selectedSample.duration) }}
+                </span>
+              </NTag>
+              <NTag size="small" :bordered="false">
+                <span class="meta-label">声道</span>
+                <span class="meta-value lme-mono">{{ selectedSample.channels }}ch</span>
+              </NTag>
+              <NTag size="small" :bordered="false">
+                <span class="meta-label">采样率</span>
+                <span class="meta-value lme-mono">{{ selectedSample.sampleRate }} Hz</span>
+              </NTag>
+              <NTag size="small" :bordered="false">
+                <span class="meta-label">大小</span>
+                <span class="meta-value lme-mono">{{ formatSize(selectedSample.size) }}</span>
+              </NTag>
+              <NTag size="small" :bordered="false" :title="selectedSample.bankId">
+                <span class="meta-label">所属银行</span>
+                <span class="meta-value lme-mono lme-ellipsis">{{ selectedSample.bankId }}</span>
+              </NTag>
+            </div>
           </div>
 
           <!-- 银行详情 -->
-          <div class="bank-detail" v-if="selectedBank">
-            <div class="detail-title">银行详情</div>
-
-            <div class="detail-grid">
-              <div class="detail-row">
-                <span class="detail-label">类型</span>
-                <span
-                  class="detail-value"
-                  :style="{ color: bankTypeColor(selectedBank.bankType) }"
-                >
-                  {{ bankTypeLabel(selectedBank.bankType) }}
-                </span>
-              </div>
-              <div class="detail-row">
-                <span class="detail-label">采样数</span>
-                <span class="detail-value lme-mono">
-                  {{ selectedBank.sampleCount.toLocaleString('zh-CN') }}
-                </span>
-              </div>
-              <div class="detail-row">
-                <span class="detail-label">大小</span>
-                <span class="detail-value lme-mono">{{ formatSize(selectedBank.totalSize) }}</span>
-              </div>
-            </div>
-
-            <div class="detail-row column">
-              <span class="detail-label">路径</span>
+          <NDescriptions
+            v-if="selectedBank"
+            class="bank-detail"
+            title="银行详情"
+            size="small"
+            :column="1"
+            label-placement="left"
+          >
+            <NDescriptionsItem label="类型">
+              <span :style="{ color: bankTypeColor(selectedBank.bankType) }">
+                {{ bankTypeLabel(selectedBank.bankType) }}
+              </span>
+            </NDescriptionsItem>
+            <NDescriptionsItem label="采样数">
+              <span class="detail-value lme-mono">
+                {{ selectedBank.sampleCount.toLocaleString('zh-CN') }}
+              </span>
+            </NDescriptionsItem>
+            <NDescriptionsItem label="大小">
+              <span class="detail-value lme-mono">{{ formatSize(selectedBank.totalSize) }}</span>
+            </NDescriptionsItem>
+            <NDescriptionsItem label="路径">
               <span class="detail-value path lme-mono" :title="selectedBank.path">
                 {{ selectedBank.path }}
               </span>
-            </div>
-
-            <div class="detail-row column" v-if="selectedBank.fsbInfo">
-              <span class="detail-label">FSB</span>
+            </NDescriptionsItem>
+            <NDescriptionsItem v-if="selectedBank.fsbInfo" label="FSB">
               <span class="detail-value path lme-mono" :title="selectedBank.fsbInfo">
                 {{ selectedBank.fsbInfo }}
               </span>
-            </div>
-          </div>
+            </NDescriptionsItem>
+          </NDescriptions>
 
-          <div v-else class="state-block">
-            <span class="state-icon">🎵</span>
-            <span class="state-text">未选择银行</span>
-            <span class="state-hint">选中后这里显示试听与银行详情</span>
-          </div>
+          <NEmpty v-else class="state-block" description="未选择银行">
+            <template #icon>
+              <span class="state-icon">🎵</span>
+            </template>
+            <template #extra>
+              <span class="state-hint">选中后这里显示试听与银行详情</span>
+            </template>
+          </NEmpty>
         </div>
-      </section>
+      </NCard>
     </div>
   </div>
 </template>
@@ -904,59 +972,10 @@ onMounted(() => {
   flex-shrink: 0;
 }
 
-.result-count {
-  font-size: var(--lme-font-size-sm);
-  color: var(--lme-text-muted);
-}
-
-.result-count strong {
-  color: var(--lme-text-primary);
-  font-weight: var(--lme-font-weight-semibold);
-}
-
-/* ── 按钮 ── */
-.action-btn {
-  padding: 5px 14px;
-  background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-md);
-  color: var(--lme-text-secondary);
-  cursor: pointer;
-  font-size: var(--lme-font-size-sm);
-  font-family: var(--lme-font-family);
-  flex-shrink: 0;
-  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard),
-    color var(--lme-dur-fast) var(--lme-ease-standard),
-    background var(--lme-dur-fast) var(--lme-ease-standard);
-}
-
-.action-btn:hover {
-  border-color: var(--lme-accent);
-  color: var(--lme-text-primary);
-}
-
-.action-btn:focus-visible {
-  outline: none;
-  box-shadow: var(--lme-shadow-focus);
-}
-
-.action-btn.small {
-  padding: 3px 10px;
-  font-size: var(--lme-font-size-xs);
-}
-
-/* ── 错误态 ── */
+/* ── 错误态（库组件 NAlert，仅补外边距） ── */
 .error-banner {
   flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-sm);
   margin: var(--lme-gap-md) var(--lme-gap-lg) 0;
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  background: var(--lme-error-banner-bg);
-  border: 1px solid var(--lme-error);
-  border-radius: var(--lme-radius-md);
-  color: var(--lme-error);
   font-size: var(--lme-font-size-sm);
 }
 
@@ -974,15 +993,38 @@ onMounted(() => {
   overflow: hidden;
 }
 
+/* 面板容器走库组件 NCard：底色/边框/圆角由 naiveTheme.ts 从 tokens 派生 */
 .panel {
   display: flex;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  background: var(--lme-bg-panel);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-lg);
   overflow: hidden;
+}
+
+/* 卡头：自带 padding 改由 tokens 控制，并补一条分隔线 */
+.panel :deep(.n-card-header) {
+  flex-shrink: 0;
+  padding: var(--lme-gap-sm) var(--lme-gap-md);
+  background: var(--lme-bg-elevated);
+  border-bottom: 1px solid var(--lme-border);
+}
+
+/* 卡体：撑满剩余高度，供 VirtualList(grow) 取到有界高度 */
+.panel :deep(.n-card-content) {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+
+.panel :deep(.n-card__footer) {
+  flex-shrink: 0;
+  padding: 0;
+  background: var(--lme-bg-elevated);
+  border-top: 1px solid var(--lme-border);
 }
 
 .panel-banks {
@@ -1004,13 +1046,11 @@ onMounted(() => {
 }
 
 .panel-head {
-  flex-shrink: 0;
+  width: 100%;
   display: flex;
   flex-direction: column;
   gap: var(--lme-gap-sm);
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  border-bottom: 1px solid var(--lme-border);
-  background: var(--lme-bg-elevated);
+  min-width: 0;
 }
 
 .panel-head.compact {
@@ -1018,8 +1058,7 @@ onMounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: var(--lme-gap-sm);
-  height: 38px;
-  padding: 0 var(--lme-gap-sm) 0 var(--lme-gap-md);
+  min-height: 22px;
 }
 
 .panel-title {
@@ -1071,70 +1110,14 @@ onMounted(() => {
   position: relative;
 }
 
-.panel-foot {
-  flex-shrink: 0;
-  border-top: 1px solid var(--lme-border);
-  background: var(--lme-bg-elevated);
-}
-
-/* ── 搜索框 / 筛选 ── */
-.panel-search {
-  position: relative;
-  display: flex;
-  align-items: center;
+/* ── 搜索框 / 筛选（库组件 NInput / NSelect） ── */
+.search-input {
+  width: 100%;
 }
 
 .panel-search-icon {
-  position: absolute;
-  left: 8px;
   font-size: var(--lme-font-size-sm);
   opacity: 0.6;
-  pointer-events: none;
-}
-
-.search-input {
-  width: 100%;
-  padding: 5px 26px;
-  background: var(--lme-bg-input);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-md);
-  color: var(--lme-text-primary);
-  font-size: var(--lme-font-size-sm);
-  font-family: var(--lme-font-family);
-  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard),
-    box-shadow var(--lme-dur-fast) var(--lme-ease-standard);
-}
-
-.search-input::placeholder {
-  color: var(--lme-text-disabled);
-}
-
-.search-input:focus {
-  outline: none;
-  border-color: var(--lme-accent);
-  box-shadow: var(--lme-shadow-focus);
-}
-
-.search-clear {
-  position: absolute;
-  right: 6px;
-  width: 16px;
-  height: 16px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--lme-bg-elevated);
-  border: none;
-  border-radius: var(--lme-radius-full);
-  color: var(--lme-text-muted);
-  font-size: 9px;
-  cursor: pointer;
-  padding: 0;
-}
-
-.search-clear:hover {
-  color: var(--lme-text-primary);
-  background: var(--lme-bg-hover);
 }
 
 .filter-row {
@@ -1152,24 +1135,7 @@ onMounted(() => {
 
 .filter-select {
   flex: 1;
-  min-width: 88px;
-  padding: 3px var(--lme-gap-sm);
-  background: var(--lme-bg-input);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
-  color: var(--lme-text-primary);
-  font-size: var(--lme-font-size-xs);
-  font-family: var(--lme-font-family);
-  cursor: pointer;
-}
-
-.filter-select:hover {
-  border-color: var(--lme-border-strong);
-}
-
-.filter-select:focus {
-  outline: none;
-  border-color: var(--lme-accent);
+  min-width: 96px;
 }
 
 /* ── 银行行 ── */
@@ -1207,19 +1173,11 @@ onMounted(() => {
   flex-shrink: 0;
 }
 
+/* 类型胶囊（NTag）：固定宽度，文字居中 */
 .row-type-badge {
   width: 54px;
-  font-size: var(--lme-font-size-xs);
   flex-shrink: 0;
-  font-weight: var(--lme-font-weight-semibold);
-  text-align: center;
-  padding: 1px 4px;
-  border-radius: var(--lme-radius-full);
-  background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  justify-content: center;
 }
 
 .row-name {
@@ -1242,14 +1200,16 @@ onMounted(() => {
 }
 
 .row-fsb {
-  max-width: 80px;
-  text-align: right;
-  color: var(--lme-text-disabled);
-  font-size: var(--lme-font-size-xs);
+  max-width: 96px;
   flex-shrink: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+}
+
+/* 银行行内的胶囊统一压到行高内 */
+.bank-row :deep(.n-tag) {
+  max-height: 18px;
+  padding: 0 var(--lme-gap-xs);
+  font-size: var(--lme-font-size-xs);
 }
 
 /* ── 采样列表 ── */
@@ -1344,6 +1304,25 @@ onMounted(() => {
   font-size: var(--lme-font-size-xs);
 }
 
+/* 采样行的信息胶囊（NTag）：压到行高内，数值列按列对齐 */
+.sample-row :deep(.n-tag) {
+  width: 100%;
+  max-height: 18px;
+  padding: 0 var(--lme-gap-xs);
+  font-size: var(--lme-font-size-xs);
+}
+
+.sample-row .col-codec :deep(.n-tag),
+.sample-row .col-channels :deep(.n-tag) {
+  justify-content: center;
+}
+
+.sample-row .col-duration :deep(.n-tag),
+.sample-row .col-size :deep(.n-tag),
+.sample-row .col-rate :deep(.n-tag) {
+  justify-content: flex-end;
+}
+
 /* ── 分隔条 ── */
 .column-splitter {
   flex: 0 0 4px;
@@ -1435,79 +1414,40 @@ onMounted(() => {
   background: var(--lme-bg-input);
 }
 
-/* ── 样本元信息 ── */
+/* ── 样本元信息（胶囊） ── */
 .player-meta {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--lme-gap-xs) var(--lme-gap-md);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--lme-gap-xs);
   margin: 0;
   padding-top: var(--lme-gap-sm);
   border-top: 1px solid var(--lme-border);
 }
 
-.meta-item {
-  display: flex;
-  align-items: baseline;
-  gap: var(--lme-gap-xs);
-  min-width: 0;
+.player-meta :deep(.n-tag) {
+  max-width: 100%;
 }
 
 .meta-label {
   font-size: var(--lme-font-size-xs);
   color: var(--lme-text-muted);
-  flex-shrink: 0;
+  margin-right: var(--lme-gap-xs);
 }
 
 .meta-value {
-  margin: 0;
   font-size: var(--lme-font-size-xs);
   color: var(--lme-text-secondary);
   min-width: 0;
 }
 
-/* ── 银行详情 ── */
+/* ── 银行详情（库组件 NDescriptions） ── */
 .bank-detail {
   flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--lme-gap-sm);
   margin: 0 var(--lme-gap-md) var(--lme-gap-md);
   padding: var(--lme-gap-md);
   background: var(--lme-bg-elevated);
   border: 1px solid var(--lme-border);
   border-radius: var(--lme-radius-lg);
-}
-
-.detail-title {
-  font-size: var(--lme-font-size-sm);
-  font-weight: var(--lme-font-weight-semibold);
-  color: var(--lme-text-primary);
-  padding-bottom: var(--lme-gap-xs);
-  border-bottom: 1px solid var(--lme-border);
-}
-
-.detail-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--lme-gap-xs) var(--lme-gap-md);
-}
-
-.detail-row {
-  display: flex;
-  align-items: baseline;
-  gap: var(--lme-gap-xs);
-  min-width: 0;
-}
-
-.detail-row.column {
-  flex-direction: column;
-  gap: 2px;
-}
-
-.detail-label {
-  font-size: var(--lme-font-size-xs);
-  color: var(--lme-text-muted);
-  flex-shrink: 0;
 }
 
 .detail-value {
@@ -1517,6 +1457,8 @@ onMounted(() => {
 }
 
 .detail-value.path {
+  display: block;
+  max-width: 100%;
   font-size: var(--lme-font-size-xs);
   color: var(--lme-text-muted);
   padding: 2px var(--lme-gap-sm);
@@ -1525,7 +1467,6 @@ onMounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  width: 100%;
 }
 
 /* ── 空态 / 加载态 ── */
@@ -1549,17 +1490,6 @@ onMounted(() => {
 .state-icon {
   font-size: 28px;
   opacity: 0.7;
-}
-
-.state-icon.spinner {
-  animation: state-spin 1.4s linear infinite;
-  display: inline-block;
-}
-
-@keyframes state-spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 
 .state-text {

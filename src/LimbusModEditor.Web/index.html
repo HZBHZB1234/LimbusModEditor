@@ -1,9 +1,22 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark" data-accent="amber">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
     <title>Limbus Mod Editor</title>
+    <!--
+      首帧底色内联，避免样式表加载前白屏。
+      取值与 tokens.css 的默认基色一致（深色 #16181c）；主题切换后由 JS 覆盖。
+    -->
+    <style>
+      html {
+        background: #16181c;
+      }
+      html[data-theme='light'] {
+        background: #f4f5f7;
+      }
+    </style>
   </head>
   <body>
     <div id="app"></div>

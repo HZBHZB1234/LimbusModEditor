@@ -3,21 +3,29 @@
 
     <!-- ══════════════════════════════════════════════════════════════
          色板（全应用统一；XAML / 代码请引用这些键，不要再硬编码色值）
+
+         2026-09-18 UI 重构：整组换成本项目 Web 前端的默认深色令牌
+         （见 src/LimbusModEditor.Web/src/styles/tokens.css 的 [data-theme='dark']
+         与 [data-accent='amber'] 两段）。原生标题栏/状态栏因此与 WebView 内的
+         界面同色，不再出现「外面蓝灰、里面紫」的割裂。
+
+         注意：这些是 WebView 外层的原生 chrome，无法跟随前端切换明暗/配色，
+         固定使用默认的「深色 + 琥珀」。改动时请同步 tokens.css 的默认值。
          ══════════════════════════════════════════════════════════════ -->
-    <SolidColorBrush x:Key="WindowBackgroundBrush" Color="#11151A"/>
-    <SolidColorBrush x:Key="PanelBackgroundBrush" Color="#171D24"/>
-    <SolidColorBrush x:Key="ElevatedBackgroundBrush" Color="#1B222B"/>
-    <SolidColorBrush x:Key="HoverBackgroundBrush" Color="#1D242E"/>
-    <SolidColorBrush x:Key="BorderLineBrush" Color="#2A3540"/>
-    <SolidColorBrush x:Key="TextPrimaryBrush" Color="#E8EDF2"/>
-    <SolidColorBrush x:Key="TextSecondaryBrush" Color="#9FB0BF"/>
-    <SolidColorBrush x:Key="TextMutedBrush" Color="#7F93A4"/>
-    <SolidColorBrush x:Key="TextFaintBrush" Color="#5F7285"/>
-    <SolidColorBrush x:Key="AccentBrush" Color="#4C8DDA"/>
-    <SolidColorBrush x:Key="AccentHoverBrush" Color="#5F9DE8"/>
-    <SolidColorBrush x:Key="ModifiedBrush" Color="#FFD37A"/>
-    <SolidColorBrush x:Key="DangerBrush" Color="#D9554F"/>
-    <SolidColorBrush x:Key="SuccessBrush" Color="#4CB77C"/>
+    <SolidColorBrush x:Key="WindowBackgroundBrush" Color="#16181C"/>
+    <SolidColorBrush x:Key="PanelBackgroundBrush" Color="#1B1E23"/>
+    <SolidColorBrush x:Key="ElevatedBackgroundBrush" Color="#22262D"/>
+    <SolidColorBrush x:Key="HoverBackgroundBrush" Color="#262B33"/>
+    <SolidColorBrush x:Key="BorderLineBrush" Color="#2A2F37"/>
+    <SolidColorBrush x:Key="TextPrimaryBrush" Color="#E7EAEF"/>
+    <SolidColorBrush x:Key="TextSecondaryBrush" Color="#A9B1BD"/>
+    <SolidColorBrush x:Key="TextMutedBrush" Color="#79818D"/>
+    <SolidColorBrush x:Key="TextFaintBrush" Color="#545B66"/>
+    <SolidColorBrush x:Key="AccentBrush" Color="#D99A3D"/>
+    <SolidColorBrush x:Key="AccentHoverBrush" Color="#E8AB52"/>
+    <SolidColorBrush x:Key="ModifiedBrush" Color="#D9A441"/>
+    <SolidColorBrush x:Key="DangerBrush" Color="#E0575F"/>
+    <SolidColorBrush x:Key="SuccessBrush" Color="#46B17B"/>
 
     <!-- ══════════════════════════════════════════════════════════════
          隐式样式：所有普通窗口（含代码构建的对话框）默认深色底。

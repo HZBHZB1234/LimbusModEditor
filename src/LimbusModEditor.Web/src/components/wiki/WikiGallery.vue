@@ -2,8 +2,10 @@
 // 维基画廊：立绘/图标/图集缩略图网格 + 点击放大（lightbox）
 // 数据源：resource_bindings kind='Image'；地址走 lme.data 虚拟主机，禁止 base64
 // 纯展示；空数组不渲染；图裂显示占位态但不伪造图片
+// ui-redesign r6：×/‹/› 等字符换 AppIcon（lucide）。
 import { computed, onUnmounted, ref, watch } from 'vue'
 import type { GalleryImage } from '@/ipc'
+import AppIcon from '@/components/AppIcon.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -119,7 +121,9 @@ onUnmounted(() => {
     <!-- 放大遮罩：遮罩层 --lme-z-overlay，图片面板 --lme-z-modal -->
     <div v-if="isOpen" class="wiki-lightbox-overlay" @click="close">
       <div class="wiki-lightbox-panel" @click.stop>
-        <button class="wiki-lightbox-close" type="button" aria-label="关闭" @click="close">×</button>
+        <button class="wiki-lightbox-close" type="button" aria-label="关闭" @click="close">
+          <AppIcon name="close" :size="15" />
+        </button>
         <button
           v-if="images.length > 1"
           class="wiki-lightbox-nav prev"
@@ -127,7 +131,7 @@ onUnmounted(() => {
           aria-label="上一张"
           @click="step(-1)"
         >
-          ‹
+          <AppIcon name="chevronLeft" :size="18" />
         </button>
 
         <figure class="wiki-lightbox-figure">
@@ -151,7 +155,7 @@ onUnmounted(() => {
           aria-label="下一张"
           @click="step(1)"
         >
-          ›
+          <AppIcon name="chevronRight" :size="18" />
         </button>
       </div>
     </div>
@@ -166,8 +170,8 @@ onUnmounted(() => {
 .wiki-gallery-title {
   margin: 0 0 var(--lme-gap-sm);
   font-size: var(--lme-font-size-lg);
-  font-weight: 600;
-  color: var(--wiki-section-title);
+  font-weight: var(--lme-font-weight-semibold);
+  color: var(--lme-text-primary);
 }
 
 .wiki-gallery-grid {
@@ -189,7 +193,7 @@ onUnmounted(() => {
 }
 
 .wiki-gallery-item:hover {
-  border-color: var(--wiki-accent);
+  border-color: var(--lme-accent);
   transform: translateY(-2px);
 }
 
@@ -224,7 +228,7 @@ onUnmounted(() => {
 .wiki-gallery-edit {
   padding: 0 var(--lme-gap-sm) var(--lme-gap-xs);
   font-size: var(--lme-font-size-xs);
-  color: var(--wiki-link);
+  color: var(--lme-accent);
   text-align: left;
 }
 
@@ -261,13 +265,15 @@ onUnmounted(() => {
   position: absolute;
   top: var(--lme-gap-sm);
   right: var(--lme-gap-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 28px;
   height: 28px;
   background: transparent;
   border: 1px solid var(--wiki-tab-border);
   border-radius: var(--lme-radius-sm);
   color: var(--lme-text-secondary);
-  font-size: var(--lme-font-size-lg);
   cursor: pointer;
 }
 
@@ -277,6 +283,9 @@ onUnmounted(() => {
 }
 
 .wiki-lightbox-nav {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
   width: 32px;
   height: 48px;
@@ -284,13 +293,12 @@ onUnmounted(() => {
   border: 1px solid var(--wiki-tab-border);
   border-radius: var(--lme-radius-sm);
   color: var(--lme-text-secondary);
-  font-size: var(--lme-font-size-xl);
   cursor: pointer;
 }
 
 .wiki-lightbox-nav:hover {
-  color: var(--wiki-accent);
-  border-color: var(--wiki-accent);
+  color: var(--lme-accent);
+  border-color: var(--lme-accent);
 }
 
 .wiki-lightbox-figure {

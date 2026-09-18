@@ -1,9 +1,11 @@
 <script setup lang="ts">
 // 容器树：惰性展开（只展开到可视层，不一次性物化全部节点）
 // 对应 WPF 旧界面的目录树视图
+// ui-redesign r6：emoji 换 AppIcon，字号/字重走令牌；IPC 与 props / emits 未变
 
 import { ref } from 'vue'
 import { ipc } from '@/ipc'
+import AppIcon from '@/components/AppIcon.vue'
 import TreeNode from './TreeNode.vue'
 import type { TreeNode as TreeNodeModel } from './TreeNode.vue'
 
@@ -88,7 +90,10 @@ loadRoots()
 
 <template>
   <div class="container-tree" v-if="visible">
-    <div v-if="loading" class="tree-loading">加载目录树…</div>
+    <div v-if="loading" class="tree-loading">
+      <AppIcon name="loader" :size="14" class="tree-spin" />
+      <span>加载目录树…</span>
+    </div>
     <div v-else class="tree-nodes">
       <TreeNode
         v-for="node in rootNodes"
@@ -98,7 +103,9 @@ loadRoots()
         @select="(id: string) => emit('select', id)"
       />
       <div v-if="rootNodes.length === 0 && !loading" class="tree-empty">
-        <div class="empty-icon">📂</div>
+        <div class="empty-icon">
+          <AppIcon name="tree" :size="32" :stroke="1.4" />
+        </div>
         <div class="empty-title">暂无容器数据</div>
         <div class="empty-desc">尚未建立资源目录索引。请先运行「启动扫描」建立索引，或检查缓存目录配置是否正确。</div>
       </div>
@@ -124,14 +131,26 @@ loadRoots()
   gap: var(--lme-gap-sm);
 }
 
+.tree-spin {
+  animation: lme-spin 1.1s linear infinite;
+}
+
 .empty-icon {
-  font-size: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
   margin-bottom: var(--lme-gap-sm);
+  border-radius: var(--lme-radius-full);
+  background: var(--lme-bg-elevated);
+  border: 1px solid var(--lme-border);
+  color: var(--lme-text-disabled);
 }
 
 .empty-title {
   font-size: var(--lme-font-size-md);
-  font-weight: 600;
+  font-weight: var(--lme-font-weight-medium);
   color: var(--lme-text-secondary);
 }
 
@@ -139,6 +158,6 @@ loadRoots()
   font-size: var(--lme-font-size-sm);
   color: var(--lme-text-muted);
   max-width: 280px;
-  line-height: 1.5;
+  line-height: var(--lme-line-height-normal);
 }
 </style>

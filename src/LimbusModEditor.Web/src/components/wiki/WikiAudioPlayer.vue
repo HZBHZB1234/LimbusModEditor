@@ -2,8 +2,10 @@
 // 维基音频预览：语音/音效列表 + 单条播放 + 时长 + 关联台词
 // 数据源：resource_bindings kind='Audio'（含 duration_sec）
 // 纯展示 + 本地播放控制；二进制走 lme.data 虚拟主机，禁止 base64
+// ui-redesign r6：播放/暂停符号换 AppIcon（lucide），配色统一到全局令牌。
 import { computed, nextTick, onUnmounted, ref } from 'vue'
 import type { ResourceBinding } from '@/ipc'
+import AppIcon from '@/components/AppIcon.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -120,10 +122,11 @@ onUnmounted(() => {
           disabled: !row.url,
           failed: row.key === failedKey,
         }"
+        :title="row.url ? (row.key === playingKey ? '暂停' : '播放') : '该条没有可播放的地址'"
         @click="toggle(row)"
       >
         <span class="wiki-audio-icon" aria-hidden="true">
-          {{ row.key === playingKey ? '⏸' : '▶' }}
+          <AppIcon :name="row.key === playingKey ? 'pause' : 'play'" :size="13" />
         </span>
         <span class="wiki-audio-main">
           <span class="wiki-audio-label">{{ row.label }}</span>
@@ -154,8 +157,8 @@ onUnmounted(() => {
 .wiki-audio-title {
   margin: 0 0 var(--lme-gap-sm);
   font-size: var(--lme-font-size-lg);
-  font-weight: 600;
-  color: var(--wiki-section-title);
+  font-weight: var(--lme-font-weight-semibold);
+  color: var(--lme-text-primary);
 }
 
 .wiki-audio-list {
@@ -200,10 +203,12 @@ onUnmounted(() => {
 }
 
 .wiki-audio-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
   width: 18px;
-  text-align: center;
-  color: var(--wiki-accent);
+  color: var(--lme-accent);
 }
 
 .wiki-audio-row.disabled .wiki-audio-icon {

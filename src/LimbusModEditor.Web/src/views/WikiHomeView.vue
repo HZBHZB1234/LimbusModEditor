@@ -2,13 +2,18 @@
 // 维基首页（WikiHomeView）
 // Hero 区域 + 分类卡片网格 + 最近编辑 + 统计概览
 // 数据来源：ipc.request('wiki.home', {})
-// 布局：WikiShell 包裹；呈现层使用 Naive UI（ui-redesign r3，维基区主色为金）
+// 布局：WikiShell 包裹；呈现层使用 Naive UI（ui-redesign r6：图标走 AppIcon，配色统一到全局令牌）
 
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { NAlert, NButton, NCard, NEmpty, NInput, NProgress, NSpin, NTag, NTooltip } from 'naive-ui'
+import { NAlert, NButton, NCard, NInput, NProgress, NTag, NTooltip } from 'naive-ui'
 import { ipc } from '@/ipc'
 import WikiShell from '@/components/WikiShell.vue'
+import PageHeader from '@/components/PageHeader.vue'
+import StateBlock from '@/components/StateBlock.vue'
+import AppIcon from '@/components/AppIcon.vue'
+import type { IconName } from '@/components/icons'
+import { useStatusStore } from '@/stores/status'
 import type {
   HomeData,
   HomeCategoryCard,
@@ -22,6 +27,7 @@ import type {
 import { WikiPageCategoryLabels } from '@/ipc/types'
 
 const router = useRouter()
+const status = useStatusStore()
 
 // ── 数据状态 ──
 const homeData = ref<HomeData | null>(null)
@@ -53,6 +59,7 @@ async function loadHomeData() {
     homeData.value = result
   } catch (e: unknown) {
     errorMessage.value = e instanceof Error ? e.message : String(e)
+    status.notify('error', `维基首页数据加载失败：${errorMessage.value}`)
     // 离线降级：展示骨架占位
     homeData.value = {
       categories: [],
@@ -102,6 +109,9 @@ async function generatePages() {
   generateError.value = ''
   generateMessage.value = ''
   generateProgress.value = null
+  // 全局状态登记：与 progress 事件的 operationId 同 id，
+  // 事件到达时 store 会把进度补进同一条活动（原有订阅逻辑不变）。
+  status.beginActivity(generateOperationId, '正在生成维基页面')
   try {
     const result = await ipc.request<WikiGenerateResponse>(
       'wiki.generate',
@@ -111,13 +121,16 @@ async function generatePages() {
       900000,
     )
     generateMessage.value = result.message
+    status.notify('success', result.message || '维基页面生成完成')
     await loadHomeData()
     await loadGenerateStatus()
   } catch (e: unknown) {
     generateError.value = e instanceof Error ? e.message : String(e)
+    status.notify('error', `生成维基页面失败：${generateError.value}`)
   } finally {
     isGenerating.value = false
     generateProgress.value = null
+    status.endActivity(generateOperationId)
   }
 }
 
@@ -125,26 +138,26 @@ async function generatePages() {
 // 缺席的分类照常给入口卡片，但计数显示「本地无来源」而不是假数字。
 const ALL_CATEGORIES = Object.keys(WikiPageCategoryLabels) as WikiPageCategory[]
 
-const CATEGORY_ICONS: Record<WikiPageCategory, string> = {
-  persona: '🎭',
-  enemy: '👹',
-  abnormality: '🌀',
-  ego: '⚔️',
-  ego_gift: '💍',
-  announcer: '📢',
-  story: '📖',
-  stage: '🗺️',
-  item: '🎒',
-  mechanism: '⚙️',
-  keyword: '🔑',
+const CATEGORY_ICONS: Record<WikiPageCategory, IconName> = {
+  persona: 'wikiPersona',
+  enemy: 'wikiEnemy',
+  abnormality: 'wikiAbnormality',
+  ego: 'wikiEgo',
+  ego_gift: 'wikiEgoGift',
+  announcer: 'wikiAnnouncer',
+  story: 'wikiStory',
+  stage: 'wikiStage',
+  item: 'wikiItem',
+  mechanism: 'wikiMechanism',
+  keyword: 'wikiKeyword',
 }
 
 function categoryLabel(category: WikiPageCategory): string {
   return WikiPageCategoryLabels[category] ?? category
 }
 
-function categoryIcon(category: WikiPageCategory): string {
-  return CATEGORY_ICONS[category] ?? '📄'
+function categoryIcon(category: WikiPageCategory): IconName {
+  return CATEGORY_ICONS[category] ?? 'file'
 }
 
 /** 后端计数按分类索引；只信真实回传，不补零 */
@@ -179,6 +192,12 @@ onMounted(() => {
     const progress = payload as ProgressPayload
     if (progress.operationId !== generateOperationId) return
     generateProgress.value = progress
+    // 额外登记到全局状态（本地进度逻辑保持不变）
+    status.updateActivity(generateOperationId, {
+      detail: progress.message || '',
+      current: progress.total ? progress.current : null,
+      total: progress.total ? progress.total : null,
+    })
   })
   loadHomeData()
   loadGenerateStatus()
@@ -192,11 +211,20 @@ onUnmounted(() => {
 <template>
   <WikiShell>
     <div class="wiki-home">
-      <!-- 顶部细进度条（与资源/静态工作台同一套加载语言） -->
-      <div v-if="isLoading" class="loading-bar" aria-hidden="true" />
+      <!-- 顶部细进度条（统一工具类 .lme-loadingbar） -->
+      <div v-if="isLoading" class="lme-loadingbar" aria-hidden="true" />
+
+      <PageHeader
+        class="wiki-home-header"
+        icon="wiki"
+        title="维基首页"
+        description="由本地游戏数据生成的维基：按分类浏览人格、E.G.O、敌方单位与剧情。"
+        hint="首次使用先点「生成页面」——要扫本地全部资源，耗时较长；进度会显示在底部状态栏。"
+        hint-key="wiki-home"
+      />
 
       <div class="wiki-home-container">
-        <!-- ── Hero 区域（对齐灰机首页：暗底横幅 + 金色大标题） ── -->
+        <!-- ── Hero 区域（对齐灰机首页：暗底横幅 + 主文字色大标题） ── -->
         <section class="hero-section wiki-section">
           <div class="hero-content">
             <h1 class="hero-title page-title">Limbus Company 中文维基</h1>
@@ -276,13 +304,17 @@ onUnmounted(() => {
         <NAlert v-if="generateError" type="error" class="page-error">{{ generateError }}</NAlert>
 
         <!-- ── 错误提示 ── -->
-        <NAlert v-if="errorMessage" type="error" class="page-error">{{ errorMessage }}</NAlert>
+        <NAlert v-if="errorMessage" type="error" class="page-error" :title="errorMessage">
+          <NButton size="small" @click="loadHomeData">重试</NButton>
+        </NAlert>
 
         <!-- ── 加载中 ── -->
-        <div v-if="isLoading" class="loading-state state-block">
-          <NSpin size="small" />
-          <span class="state-text">加载中…</span>
-        </div>
+        <StateBlock
+          v-if="isLoading"
+          class="loading-state"
+          state="loading"
+          title="正在加载维基首页…"
+        />
 
         <!-- ── 统计概览 ── -->
         <section v-if="homeData" class="stats-section wiki-section">
@@ -320,7 +352,7 @@ onUnmounted(() => {
               @click="navigateToCategory(entry.category)"
             >
               <div class="card-header">
-                <span class="card-icon">{{ entry.card?.icon || entry.icon }}</span>
+                <span class="card-icon"><AppIcon :name="entry.icon" :size="22" /></span>
                 <span class="card-label">{{ entry.card?.label || entry.label }}</span>
               </div>
               <div v-if="entry.card && entry.card.pageCount > 0" class="card-count">
@@ -361,13 +393,14 @@ onUnmounted(() => {
               <span class="recent-time">{{ formatTime(page.lastModified) }}</span>
             </div>
           </div>
-          <div v-else class="empty-state state-block">
-            <NEmpty description="暂无最近编辑">
-              <template #extra>
-                <span class="state-hint">点上方「生成页面」后这里会列出最近的变更</span>
-              </template>
-            </NEmpty>
-          </div>
+          <StateBlock
+            v-else
+            class="empty-state"
+            state="empty"
+            icon="clock"
+            title="暂无最近编辑"
+            description="点上方「生成页面」后，这里会列出最近变更的维基页面"
+          />
         </section>
       </div>
     </div>
@@ -382,36 +415,7 @@ onUnmounted(() => {
   background: var(--lme-bg-base);
 }
 
-/* ── 顶部细进度条（同 AssetsView / StaticView 模式） ── */
-.loading-bar {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: var(--wiki-loadingbar-height);
-  overflow: hidden;
-  z-index: var(--lme-z-raised);
-  background: var(--lme-progressbar-bg);
-}
-
-.loading-bar::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  width: 40%;
-  border-radius: var(--lme-radius-full);
-  background: var(--wiki-accent);
-  animation: loading-slide var(--wiki-loadingbar-cycle) var(--lme-ease-standard) infinite;
-}
-
-@keyframes loading-slide {
-  from {
-    transform: translateX(-100%);
-  }
-  to {
-    transform: translateX(350%);
-  }
-}
+/* ── 顶部细进度条：统一用 tokens.css 的 .lme-loadingbar 工具类，此处不再重复定义 ── */
 
 /* ── 内容容器：宽屏居中，让页面「呼吸」 ── */
 .wiki-home-container {
@@ -521,29 +525,9 @@ onUnmounted(() => {
   font-size: var(--lme-font-size-sm);
 }
 
-/* ── 加载 / 空状态（与全站同一套 state-block） ── */
-.state-block {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--lme-gap-sm);
-  padding: var(--lme-gap-xl) var(--lme-gap-md);
-  text-align: center;
-}
-
-.state-text {
-  font-size: var(--lme-font-size-sm);
-  color: var(--lme-text-secondary);
-}
-
-.state-hint {
-  font-size: var(--lme-font-size-xs);
-  color: var(--lme-text-disabled);
-}
-
+/* ── 加载 / 空状态：三态由 StateBlock 统一呈现，这里只留页内间距 ── */
 .loading-state {
-  color: var(--lme-text-muted);
+  padding: var(--lme-gap-xl) var(--lme-gap-md);
 }
 
 /* ── 统计概览 ── */
@@ -598,7 +582,7 @@ onUnmounted(() => {
   margin: 0;
   font-size: var(--lme-font-size-lg);
   font-weight: var(--lme-font-weight-semibold);
-  color: var(--wiki-section-title);
+  color: var(--lme-text-primary);
   padding-bottom: var(--lme-gap-sm);
   border-bottom: 1px solid var(--wiki-section-head-border);
 }
@@ -644,7 +628,15 @@ onUnmounted(() => {
 }
 
 .card-icon {
-  font-size: var(--lme-font-size-2xl);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: var(--lme-radius-md);
+  background: var(--lme-bg-inset);
+  color: var(--lme-text-secondary);
 }
 
 .card-label {
@@ -672,7 +664,7 @@ onUnmounted(() => {
 
 .featured-item {
   font-size: var(--lme-font-size-xs);
-  color: var(--wiki-link);
+  color: var(--lme-accent);
   cursor: pointer;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -681,7 +673,7 @@ onUnmounted(() => {
 }
 
 .featured-item:hover {
-  color: var(--wiki-accent-strong);
+  color: var(--lme-accent-hover);
   text-decoration: underline;
 }
 
@@ -727,7 +719,7 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-/* 分类胶囊：NTag 套 wiki-chip 皮肤（金色系，禁紫） */
+/* 分类胶囊：NTag 套 wiki-chip 皮肤（跟随全局强调色） */
 .recent-category.wiki-chip {
   background: var(--wiki-chip-bg);
   color: var(--wiki-chip-text);

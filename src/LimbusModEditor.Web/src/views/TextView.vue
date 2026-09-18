@@ -9,25 +9,30 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ipc } from '@/ipc'
-import VirtualList from '@/components/VirtualList.vue'
 import {
   NAlert,
   NButton,
   NCard,
-  NEmpty,
   NInput,
   NSelect,
-  NSpin,
   NTag,
   NTooltip,
   useMessage,
 } from 'naive-ui'
+import AppIcon from '@/components/AppIcon.vue'
+import PageHeader from '@/components/PageHeader.vue'
+import StateBlock from '@/components/StateBlock.vue'
+import VirtualList from '@/components/VirtualList.vue'
+import { useStatusStore } from '@/stores/status'
 
 const route = useRoute()
 const router = useRouter()
 
 // 呈现层提示（App.vue 已提供 NMessageProvider），不参与 IPC 时序
 const message = useMessage()
+
+/** 全局状态：耗时操作登记为「活动」，失败/完成同时记一条全局通知 */
+const status = useStatusStore()
 
 // ── 本地模型 ──────────────────────────────────────────────
 
@@ -370,7 +375,8 @@ function restoreEntry(entry: KeyValueEntry) {
 // ── 保存补丁 ─────────────────────────────────────────────
 
 async function saveAsPatch() {
-  if (!selectedFilePath.value) return
+  const path = selectedFilePath.value
+  if (!path) return
   saving.value = true
   saveError.value = ''
   const changeCount = changedEntries.value.length
@@ -384,13 +390,20 @@ async function saveAsPatch() {
         state: e.editState,
       }))
 
-    await ipc.request('text.applyPatch', {
-      path: selectedFilePath.value,
-      patches,
-    })
+    // 保存登记进全局状态：底部状态栏可见进度，成功/失败都发一条通知
+    await status.track(
+      'text-save',
+      '正在保存补丁',
+      () =>
+        ipc.request('text.applyPatch', {
+          path,
+          patches,
+        }),
+      { successText: `已保存 ${changeCount} 处改动`, errorPrefix: '保存补丁' },
+    )
 
     // 保存成功后重新加载条目（服务器可能规范化格式）
-    await loadEntriesPage(selectedFilePath.value, 0, false)
+    await loadEntriesPage(path, 0, false)
     message.success(`已保存 ${changeCount} 处改动`)
   } catch {
     // IPC 方法未实现时显示提示（错误条，替代原生 alert）
@@ -447,33 +460,22 @@ onUnmounted(() => {
 
 <template>
   <div class="text-view">
-    <!-- 顶部细进度条（替代整屏遮罩） -->
-    <div
-      v-if="fileTreeLoading || searchLoading || entriesLoading"
-      class="loading-bar"
-      aria-hidden="true"
-    />
-
-    <!-- 页头工具栏 -->
-    <header class="page-toolbar">
-      <div class="toolbar-leading">
-        <span class="toolbar-icon">📝</span>
-        <div class="toolbar-titles">
-          <h1 class="toolbar-name">文本 / 本地化</h1>
-          <span class="toolbar-sub" v-if="selectedFilePath">
-            <span class="toolbar-file lme-mono">{{ selectedFilePath }}</span>
-            <span class="toolbar-dot">·</span>
-            <span class="toolbar-language" v-if="selectedFileLanguage">
-              {{ selectedFileLanguage }}
-            </span>
+    <!-- 页头：标题 + 一句话说明 + 可关闭的操作指引 -->
+    <PageHeader
+      icon="text"
+      title="文本工作台"
+      description="浏览本地化文件、逐条改写文本，并把改动保存成替换补丁"
+      hint="先在左侧选一个语言文件，再在中间列表里改值，右侧会实时显示差异"
+      hint-key="text"
+    >
+      <template #meta>
+        <span class="toolbar-sub" v-if="selectedFilePath">
+          <span class="toolbar-file lme-mono">{{ selectedFilePath }}</span>
+          <span class="toolbar-dot">·</span>
+          <span class="toolbar-language" v-if="selectedFileLanguage">
+            {{ selectedFileLanguage }}
           </span>
-          <span class="toolbar-sub" v-else>
-            从左侧选择一个语言文件，逐条改键名对应的文本
-          </span>
-        </div>
-      </div>
-
-      <div class="toolbar-actions">
+        </span>
         <NTag
           v-if="!fileTreeLoading && !searchLoading"
           class="result-count"
@@ -495,8 +497,35 @@ onUnmounted(() => {
         <NTag v-if="deletedCount > 0" class="toolbar-chip" size="small" type="error" round>
           已删除 {{ deletedCount }}
         </NTag>
-      </div>
-    </header>
+      </template>
+
+      <template #actions>
+        <NTooltip placement="bottom" :show-arrow="false">
+          <template #trigger>
+            <NButton
+              size="small"
+              type="primary"
+              :disabled="saving || changedEntries.length === 0"
+              :loading="saving"
+              @click="saveAsPatch"
+            >
+              <template #icon>
+                <AppIcon name="save" :size="14" />
+              </template>
+              {{ saving ? '保存中…' : '保存补丁' }}
+            </NButton>
+          </template>
+          把本文件的改动存成替换补丁（text.applyPatch）
+        </NTooltip>
+      </template>
+    </PageHeader>
+
+    <!-- 顶部细进度条（替代整屏遮罩） -->
+    <div
+      v-if="fileTreeLoading || searchLoading || entriesLoading"
+      class="lme-loadingbar"
+      aria-hidden="true"
+    />
 
     <!-- 错误态（保存失败 / IPC 未实现） -->
     <NAlert v-if="saveError" class="error-banner" type="error" closable @close="saveError = ''">
@@ -525,37 +554,51 @@ onUnmounted(() => {
                 @clear="onSearchInput"
               >
                 <template #prefix>
-                  <span class="panel-search-icon">🔍</span>
+                  <span class="panel-search-icon">
+                    <AppIcon name="search" :size="13" />
+                  </span>
                 </template>
               </NInput>
             </div>
 
             <div class="filter-row">
               <span class="filter-label">语言</span>
-              <NSelect
-                v-model:value="languageFilter"
-                class="filter-select"
-                size="small"
-                :options="languageOptions"
-              />
+              <NTooltip placement="bottom" :show-arrow="false">
+                <template #trigger>
+                  <NSelect
+                    v-model:value="languageFilter"
+                    class="filter-select"
+                    size="small"
+                    :options="languageOptions"
+                  />
+                </template>
+                只看某个语言的文件；留空表示全部语言
+              </NTooltip>
 
               <span class="filter-label">类型</span>
-              <NSelect
-                v-model:value="fileTypeFilter"
-                class="filter-select"
-                size="small"
-                :options="fileTypeOptions"
-              />
+              <NTooltip placement="bottom" :show-arrow="false">
+                <template #trigger>
+                  <NSelect
+                    v-model:value="fileTypeFilter"
+                    class="filter-select"
+                    size="small"
+                    :options="fileTypeOptions"
+                  />
+                </template>
+                按文件格式筛选（JSON / YAML / CSV / PO）
+              </NTooltip>
             </div>
           </div>
         </template>
 
         <div class="panel-body scroll">
           <!-- 加载态 -->
-          <div v-if="fileTreeLoading || searchLoading" class="state-block">
-            <NSpin size="small" />
-            <span class="state-text">正在读取语言文件…</span>
-          </div>
+          <StateBlock
+            v-if="fileTreeLoading || searchLoading"
+            class="fill"
+            state="loading"
+            title="正在读取语言文件…"
+          />
 
           <!-- 搜索结果 -->
           <template v-else-if="searchResults.length > 0">
@@ -578,16 +621,13 @@ onUnmounted(() => {
             </div>
 
             <!-- 原文此处条件与外层互斥（恒不可达），保持原样未改 -->
-            <div
+            <StateBlock
               v-if="searchResults.length === 0 && searchText.trim()"
-              class="state-block"
-            >
-              <NEmpty size="small" description="未找到匹配文件">
-                <template #extra>
-                  <span class="state-hint">尝试调整搜索关键词或清除筛选条件</span>
-                </template>
-              </NEmpty>
-            </div>
+              state="empty"
+              icon="search"
+              title="未找到匹配文件"
+              description="换个关键词，或清除语言 / 类型筛选后重试"
+            />
           </template>
 
           <!-- 目录树 -->
@@ -600,7 +640,18 @@ onUnmounted(() => {
                 @click="toggleFileNode(node)"
               >
                 <span class="tree-arrow">
-                  {{ node.isLeaf ? '•' : node.loading ? '⏳' : node.expanded ? '▼' : '▶' }}
+                  <AppIcon v-if="node.isLeaf" name="file" :size="12" />
+                  <AppIcon
+                    v-else-if="node.loading"
+                    class="tree-spinner"
+                    name="loader"
+                    :size="12"
+                  />
+                  <AppIcon
+                    v-else
+                    :name="node.expanded ? 'chevronDown' : 'chevronRight'"
+                    :size="12"
+                  />
                 </span>
                 <span class="tree-node-name lme-ellipsis" :title="node.name">
                   {{ node.name }}
@@ -621,7 +672,18 @@ onUnmounted(() => {
                   @click="toggleFileNode(child)"
                 >
                   <span class="tree-arrow">
-                    {{ child.isLeaf ? '•' : child.loading ? '⏳' : child.expanded ? '▼' : '▶' }}
+                    <AppIcon v-if="child.isLeaf" name="file" :size="12" />
+                    <AppIcon
+                      v-else-if="child.loading"
+                      class="tree-spinner"
+                      name="loader"
+                      :size="12"
+                    />
+                    <AppIcon
+                      v-else
+                      :name="child.expanded ? 'chevronDown' : 'chevronRight'"
+                      :size="12"
+                    />
                   </span>
                   <span class="tree-node-name lme-ellipsis" :title="child.name">
                     {{ child.name }}
@@ -634,15 +696,18 @@ onUnmounted(() => {
             </div>
 
             <!-- 空态 -->
-            <div v-if="fileTreeRoots.length === 0" class="state-block">
-              <NEmpty size="small" description="暂无语言文件">
-                <template #extra>
-                  <span class="state-hint">
-                    未找到可用的本地化语言文件。请确认项目已包含 .json / .yaml 等文本资源。
-                  </span>
-                </template>
-              </NEmpty>
-            </div>
+            <StateBlock
+              v-if="fileTreeRoots.length === 0"
+              class="fill"
+              state="empty"
+              icon="fileJson"
+              title="暂无语言文件"
+              description="确认项目里包含 .json / .yaml 等文本资源，或先建立资源索引后点「重新读取」"
+            >
+              <template #actions>
+                <NButton size="small" @click="loadFileTreeRoots">重新读取</NButton>
+              </template>
+            </StateBlock>
           </template>
         </div>
       </NCard>
@@ -673,30 +738,22 @@ onUnmounted(() => {
                   placeholder="搜索键名或值内容…"
                 >
                   <template #prefix>
-                    <span class="panel-search-icon">🔍</span>
+                    <span class="panel-search-icon">
+                      <AppIcon name="search" :size="13" />
+                    </span>
                   </template>
                 </NInput>
               </div>
 
               <!-- 差异视图开关：保持原生 checkbox（截图脚本统计 input 元素） -->
-              <label class="diff-toggle">
-                <input type="checkbox" v-model="showDiffView" />
-                差异视图
-              </label>
-
               <NTooltip placement="bottom" :show-arrow="false">
                 <template #trigger>
-                  <NButton
-                    size="small"
-                    type="primary"
-                    :disabled="saving || changedEntries.length === 0"
-                    :loading="saving"
-                    @click="saveAsPatch"
-                  >
-                    {{ saving ? '保存中…' : '💾 保存补丁' }}
-                  </NButton>
+                  <label class="diff-toggle">
+                    <input type="checkbox" v-model="showDiffView" />
+                    差异视图
+                  </label>
                 </template>
-                把本文件的改动存成替换补丁（text.applyPatch）
+                在右侧逐条对照「原值」与「新值」
               </NTooltip>
             </div>
           </div>
@@ -712,27 +769,32 @@ onUnmounted(() => {
 
           <div class="kv-list-container">
             <!-- 加载态 -->
-            <div v-if="entriesLoading && entries.length === 0" class="state-block">
-              <NSpin size="small" />
-              <span class="state-text">正在读取键值条目…</span>
-            </div>
+            <StateBlock
+              v-if="entriesLoading && entries.length === 0"
+              class="fill"
+              state="loading"
+              title="正在读取键值条目…"
+            />
 
             <!-- 空态：未选文件 -->
-            <div v-else-if="!selectedFilePath" class="state-block">
-              <NEmpty size="small" description="未选择语言文件">
-                <template #extra>
-                  <span class="state-hint">
-                    请从左侧文件树中选择一个语言文件进行编辑，或通过搜索框快速定位键值文本。支持
-                    JSON、YAML、CSV、PO 等格式。
-                  </span>
-                </template>
-              </NEmpty>
-            </div>
+            <StateBlock
+              v-else-if="!selectedFilePath"
+              class="fill"
+              state="empty"
+              icon="fileJson"
+              title="未选择语言文件"
+              description="从左侧文件树里选一个文件，或用搜索框按键名 / 值内容快速定位。支持 JSON、YAML、CSV、PO"
+            />
 
             <!-- 空态：文件无条目 -->
-            <div v-else-if="entries.length === 0" class="state-block">
-              <NEmpty size="small" description="该文件无键值条目" />
-            </div>
+            <StateBlock
+              v-else-if="entries.length === 0"
+              class="fill"
+              state="empty"
+              icon="list"
+              title="该文件无键值条目"
+              description="换一个文件试试，或确认该文件不是空文件"
+            />
 
             <!-- 键值行（虚拟滚动，滚动到底自动取下一页） -->
             <VirtualList
@@ -828,22 +890,22 @@ onUnmounted(() => {
 
         <div class="panel-body scroll">
           <!-- 未开启 -->
-          <div v-if="!showDiffView" class="state-block">
-            <NEmpty size="small" description="差异视图已关闭">
-              <template #extra>
-                <span class="state-hint">勾选中间栏的「差异视图」在此查看原值 → 新值</span>
-              </template>
-            </NEmpty>
-          </div>
+          <StateBlock
+            v-if="!showDiffView"
+            state="empty"
+            icon="split"
+            title="差异视图已关闭"
+            description="勾选中间栏的「差异视图」，这里就会逐条列出原值与新值"
+          />
 
           <!-- 无改动 -->
-          <div v-else-if="changedEntries.length === 0" class="state-block">
-            <NEmpty size="small" description="暂无修改">
-              <template #extra>
-                <span class="state-hint">在键值列表里改值后，此处将显示差异</span>
-              </template>
-            </NEmpty>
-          </div>
+          <StateBlock
+            v-else-if="changedEntries.length === 0"
+            state="empty"
+            icon="check"
+            title="暂无修改"
+            description="在中间的键值列表里改一个值，这里会立刻显示差异"
+          />
 
           <!-- 变更列表 -->
           <div v-else class="diff-list">
@@ -876,7 +938,9 @@ onUnmounted(() => {
                 <div v-else class="diff-old">
                   <del>{{ entry.originalValue || '(空)' }}</del>
                 </div>
-                <div class="diff-arrow">→</div>
+                <div class="diff-arrow">
+                  <AppIcon name="arrowRight" :size="12" />
+                </div>
                 <div v-if="entry.editState === 'Deleted'" class="diff-new diff-deleted">
                   (已删除)
                 </div>
@@ -900,82 +964,9 @@ onUnmounted(() => {
   background: var(--lme-bg-base);
 }
 
-/* ── 加载进度条（顶部细条） ── */
-.loading-bar {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 2px;
-  overflow: hidden;
-  z-index: var(--lme-z-raised);
-  background: var(--lme-progressbar-bg);
-}
+/* 顶部细进度条改用工具类 .lme-loadingbar（见 tokens.css），此处不再重复实现 */
 
-.loading-bar::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  width: 40%;
-  border-radius: var(--lme-radius-full);
-  background: var(--lme-progressbar-fill);
-  animation: loading-slide 1s var(--lme-ease-standard) infinite;
-}
-
-@keyframes loading-slide {
-  from {
-    transform: translateX(-100%);
-  }
-  to {
-    transform: translateX(350%);
-  }
-}
-
-/* ── 页头工具栏 ── */
-.page-toolbar {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-lg);
-  padding: var(--lme-gap-sm) var(--lme-gap-lg);
-  background: var(--lme-bg-panel);
-  border-bottom: 1px solid var(--lme-border);
-}
-
-.toolbar-leading {
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-sm);
-  min-width: 0;
-}
-
-.toolbar-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: var(--lme-radius-md);
-  background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
-  font-size: var(--lme-font-size-md);
-  flex-shrink: 0;
-}
-
-.toolbar-titles {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.toolbar-name {
-  margin: 0;
-  font-size: var(--lme-font-size-lg);
-  font-weight: var(--lme-font-weight-semibold);
-  line-height: var(--lme-line-height-tight);
-  color: var(--lme-text-primary);
-}
-
+/* ── 页头右侧的选中文件摘要（计数与操作按钮由 PageHeader 插槽承载） ── */
 .toolbar-sub {
   display: flex;
   align-items: center;
@@ -989,6 +980,7 @@ onUnmounted(() => {
 }
 
 .toolbar-file {
+  max-width: 280px;
   color: var(--lme-text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1002,14 +994,6 @@ onUnmounted(() => {
 
 .toolbar-dot {
   color: var(--lme-text-disabled);
-}
-
-.toolbar-actions {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-sm);
-  flex-shrink: 0;
 }
 
 .result-count {
@@ -1191,8 +1175,9 @@ onUnmounted(() => {
 }
 
 .panel-search-icon {
-  font-size: var(--lme-font-size-sm);
-  opacity: 0.6;
+  display: inline-flex;
+  align-items: center;
+  color: var(--lme-text-muted);
 }
 
 .search-input {
@@ -1341,11 +1326,17 @@ onUnmounted(() => {
 }
 
 .tree-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 14px;
-  text-align: center;
-  font-size: 9px;
   flex-shrink: 0;
   color: var(--lme-text-muted);
+}
+
+/* 懒加载子节点时的转圈（关键帧在 tokens.css） */
+.tree-spinner {
+  animation: lme-spin 1.1s linear infinite;
 }
 
 .tree-node-name {
@@ -1583,9 +1574,10 @@ onUnmounted(() => {
 }
 
 .diff-arrow {
+  display: inline-flex;
+  align-items: center;
   color: var(--lme-text-muted);
   flex-shrink: 0;
-  font-size: var(--lme-font-size-xs);
 }
 
 .diff-deleted {
@@ -1593,29 +1585,10 @@ onUnmounted(() => {
   font-style: italic;
 }
 
-/* ── 空态 / 加载态（与资源/静态工作台同一套） ── */
-.state-block {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--lme-gap-sm);
-  padding: var(--lme-gap-xl) var(--lme-gap-md);
-  color: var(--lme-text-muted);
-  text-align: center;
-}
-
-.state-text {
-  font-size: var(--lme-font-size-sm);
-  color: var(--lme-text-secondary);
-}
-
-.state-hint {
-  font-size: var(--lme-font-size-xs);
-  color: var(--lme-text-disabled);
-  line-height: var(--lme-line-height-relaxed);
-  max-width: 280px;
+/* ── 三态块（StateBlock 自带排版；这里只调面板内的撑满与内嵌内边距） ── */
+.panel-body > .state-block,
+.kv-list-container > .state-block {
+  min-height: 0;
 }
 
 /* ── 库组件聚焦环（沿用 v2 聚焦阴影令牌） ── */
@@ -1636,17 +1609,24 @@ onUnmounted(() => {
   - 键值编辑表格（值可内联修改）
   - 文件内搜索（键名/值匹配高亮）
   - 差异视图（修改 vs 原始值对比）
-  - 保存补丁（text.applyPatch → 注册为替换资源）
+  - 保存补丁（text.applyPatch，注册为替换资源）
   - 服务端分页（滚动加载更多）
   - 虚拟滚动（复用 VirtualList）
 
   依赖的 IPC 方法：
-  - text.fileTreeRoots    → 目录树根节点
-  - text.fileTreeChildren → 目录树子节点（懒加载）
-  - text.fileEntries      → 键值条目分页查询
-  - text.fileSearch       → 全文搜索（文件路径 / 键 / 值）
-  - text.applyPatch       → 保存补丁到替换资源
+  - text.fileTreeRoots      目录树根节点
+  - text.fileTreeChildren   目录树子节点（懒加载）
+  - text.fileEntries        键值条目分页查询
+  - text.fileSearch         全文搜索（文件路径 / 键 / 值）
+  - text.applyPatch         保存补丁到替换资源
 
   未实现降级：
   - IPC 方法不可用时在页头下方显示 NAlert 错误条（原为原生 alert）
+
+  ui-redesign r6（本次改造）：
+  - 页头工具栏换成 PageHeader（图标 / 说明 / 可关闭指引），主要操作「保存补丁」上移到页头
+  - 手写的加载/空态换成 StateBlock，顶部细进度条改用 .lme-loadingbar 工具类
+  - 树箭头 / 差异箭头 / 搜索图标等符号换成 AppIcon，页面内不再有 emoji
+  - 保存补丁接入 status.track，进度与结果在底部状态栏可见
+  - IPC 方法名、载荷字段与调用时序零改动；?file= 深链保持可用
 -->

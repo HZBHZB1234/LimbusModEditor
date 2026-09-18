@@ -3,6 +3,8 @@
 // 对应 WPF 旧界面 StaticWorkbenchPage
 // 三栏布局：浏览 | 分隔条 | 编辑
 // v3（ui-redesign r3）：手写版式替换为 Naive UI 组件（面板/按钮/输入/下拉/标签/空态/提示），功能不变
+// v4（ui-redesign r6）：emoji/几何符号换 AppIcon；页头换 PageHeader；三态换 StateBlock；
+//                       顶部细进度条换 .lme-loadingbar；耗时操作登记进 status store。IPC 与深链未动
 
 import { ref, computed, onMounted, defineComponent, h, type DefineComponent } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -11,10 +13,8 @@ import {
   NAlert,
   NButton,
   NCard,
-  NEmpty,
   NInput,
   NSelect,
-  NSpin,
   NTab,
   NTabs,
   NTag,
@@ -27,10 +27,17 @@ const route = useRoute()
 const router = useRouter()
 import VirtualList from '@/components/VirtualList.vue'
 import PageBar from '@/components/PageBar.vue'
+import AppIcon from '@/components/AppIcon.vue'
+import PageHeader from '@/components/PageHeader.vue'
+import StateBlock from '@/components/StateBlock.vue'
+import { useStatusStore } from '@/stores/status'
 
 // 呈现层提示（App.vue 已提供 NMessageProvider / NDialogProvider），不参与 IPC 时序
 const message = useMessage()
 const dialog = useDialog()
+
+// 全局状态：耗时操作在底部状态栏可见（本 store 不发 IPC，也不改调用时序）
+const status = useStatusStore()
 
 // ── 类型定义 ──────────────────────────────────────────────
 
@@ -179,7 +186,12 @@ const JsonTreeNode = defineComponent({
               onClick: () => toggleNode(node),
             },
             [
-              h('span', { class: 'json-tree-arrow' }, node.expanded ? '▼' : '▶'),
+              h('span', { class: 'json-tree-arrow' }, [
+                h(AppIcon, {
+                  name: node.expanded ? 'chevronDown' : 'chevronRight',
+                  size: 13,
+                }),
+              ]),
               h('span', { class: 'json-tree-key' }, node.displayKey),
               h('span', { class: 'json-tree-label' }, `${label} ${childCount} 项`),
             ],
@@ -198,7 +210,7 @@ const JsonTreeNode = defineComponent({
           'div',
           { class: 'json-tree-row leaf', style: { paddingLeft: indent + 'px' } },
           [
-            h('span', { class: 'json-tree-arrow' }, '•'),
+            h('span', { class: 'json-tree-arrow' }, [h(AppIcon, { name: 'dot', size: 12 })]),
             h('span', { class: 'json-tree-key' }, node.displayKey),
             h(
               'span',
@@ -384,6 +396,7 @@ async function performSearch() {
   } catch {
     allTables.value = []
     error.value = '静态数据表列表加载失败'
+    status.notify('error', '静态数据表列表加载失败，请检查游戏目录设置后重试')
   } finally {
     lastQueryMs.value = performance.now() - t0
     loading.value = false
@@ -516,6 +529,7 @@ async function onSaveRecord() {
   parseError.value = null
 
   saving.value = true
+  status.beginActivity('static-save', '正在保存静态数据记录')
   try {
     await ipc.request('static.editRecord', {
       tableId: table.tableId,
@@ -537,10 +551,14 @@ async function onSaveRecord() {
       rootNode.value = null // 读回的不是合法 JSON：树视图留空，原始文本里照实显示
     }
     message.success('已保存（该改动会随导出写进 .staticmod）')
+    status.notify('success', '静态数据记录已保存')
   } catch (e: unknown) {
-    message.error(`保存失败：${e instanceof Error ? e.message : String(e)}`)
+    const reason = e instanceof Error ? e.message : String(e)
+    message.error(`保存失败：${reason}`)
+    status.notify('error', `静态数据记录保存失败：${reason}`)
   } finally {
     saving.value = false
+    status.endActivity('static-save')
   }
 }
 
@@ -573,19 +591,26 @@ function onToggleDiff() {
 
 async function onExport() {
   // 契约方法 static.exportStaticmod：载荷 { targetDirectory }（导出当前静态编辑集，不按单表）
+  status.beginActivity('static-export', '正在导出 .staticmod')
   try {
     const picked = await ipc.request<{ path: string }>('dialog.folderPick', {
       title: '选择 .staticmod 导出目录',
     })
     if (!picked.path) return
 
+    status.updateActivity('static-export', { detail: '正在写出静态数据补丁' })
+
     const result = await ipc.request<{ ok: boolean; outputPath: string; written: number }>(
       'static.exportStaticmod',
       { targetDirectory: picked.path },
     )
     message.success(`已导出 ${result.written} 条补丁至: ${result.outputPath}`)
+    status.notify('success', `已导出 ${result.written} 条静态数据补丁`)
   } catch {
     message.error('导出失败：请确认已打开项目并有静态数据改动')
+    status.notify('error', '导出 .staticmod 失败：请确认已打开项目并有静态数据改动')
+  } finally {
+    status.endActivity('static-export')
   }
 }
 
@@ -628,41 +653,42 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
 
 <template>
   <div class="static-view">
-    <!-- 加载进度条（顶部细条，替代整屏遮罩） -->
-    <div v-if="loading" class="loading-bar" aria-hidden="true" />
-
-    <!-- 页头工具栏 -->
-    <header class="page-toolbar">
-      <div class="toolbar-leading">
-        <span class="toolbar-icon">📊</span>
-        <div class="toolbar-titles">
-          <h1 class="toolbar-name">静态数据</h1>
-          <span class="toolbar-sub" v-if="selectedTable">
-            <span class="toolbar-table lme-mono">{{ selectedTable.tableName }}</span>
-            <span class="toolbar-dot">·</span>
-            {{ selectedTable.recordCount.toLocaleString('zh-CN') }} 条记录
-          </span>
-          <span class="toolbar-sub" v-else>从左侧选择一张表开始浏览与编辑</span>
-        </div>
-      </div>
-
-      <div class="toolbar-actions">
+    <!-- 页头：标题 + 一句话说明 + 可关闭的操作指引 + 主操作 -->
+    <PageHeader
+      icon="staticData"
+      title="静态数据工作台"
+      description="查看与修改游戏静态数据表；改过的记录会随项目一起导出"
+      hint="先在左侧选一张表，再从中间列表点开一条记录；改完 JSON 记得点「保存修改」"
+      hint-key="static"
+    >
+      <template #meta>
+        <span v-if="selectedTable" class="toolbar-sub">
+          <span class="toolbar-table lme-mono">{{ selectedTable.tableName }}</span>
+          <span class="toolbar-dot">·</span>
+          {{ selectedTable.recordCount.toLocaleString('zh-CN') }} 条记录
+        </span>
         <NTag v-if="!loading" class="result-count" size="small" :bordered="false">
           共 <strong>{{ filteredTables.length.toLocaleString('zh-CN') }}</strong> 张表
         </NTag>
+      </template>
+
+      <template #actions>
         <NTooltip placement="bottom" :show-arrow="false">
           <template #trigger>
-            <NButton size="small" tertiary @click="onExport">📦 导出 .staticmod</NButton>
+            <NButton size="small" tertiary @click="onExport">
+              <template #icon>
+                <AppIcon name="export" :size="13" />
+              </template>
+              导出 .staticmod
+            </NButton>
           </template>
           导出当前静态编辑集为 .staticmod（不按单表）
         </NTooltip>
-      </div>
-    </header>
+      </template>
+    </PageHeader>
 
-    <!-- 错误态 -->
-    <NAlert v-if="error" class="error-banner" type="error" :closable="false">
-      {{ error }}
-    </NAlert>
+    <!-- 加载进度条（顶部细条，工具类 .lme-loadingbar，替代整屏遮罩） -->
+    <div v-if="loading" class="lme-loadingbar" aria-hidden="true" />
 
     <!-- 三栏主从：表 / 记录 / 编辑器 -->
     <div class="workbench-body">
@@ -681,7 +707,7 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
                 @clear="onSearchClear"
               >
                 <template #prefix>
-                  <span class="panel-search-icon">🔍</span>
+                  <AppIcon name="search" :size="14" class="panel-search-icon" />
                 </template>
               </NInput>
             </div>
@@ -710,56 +736,77 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
         </template>
 
         <div class="panel-body">
-          <!-- 表最多取 200 张，直接渲染；分组头 + 表行（虚拟列表按固定行高切，展开后会溢出，故不套 VirtualList） -->
-          <div
-            v-for="group in groupedTables"
-            :key="group.dataClass"
-            class="class-group"
+          <!-- 错误态：表列表没读出来时给出路（重试 / 换关键词），而不是只重复一句报错 -->
+          <StateBlock
+            v-if="error && allTables.length === 0"
+            class="state-block"
+            state="error"
+            :title="error"
+            description="检查游戏目录设置后重试；也可以换个关键词，或把「数据类」切回「全部」"
           >
-            <div class="class-group-header" @click="toggleClassGroup(group.dataClass)">
-              <span class="group-arrow">
-                {{ expandedClasses.has(group.dataClass) ? '▼' : '▶' }}
-              </span>
-              <span class="group-name">{{ group.dataClass }}</span>
-              <NTag class="group-count" size="small" round :bordered="false">
-                {{ group.tables.length }} 表
-              </NTag>
-            </div>
-
-            <div v-if="expandedClasses.has(group.dataClass)" class="class-group-tables">
-              <div
-                v-for="table in group.tables"
-                :key="table.tableName"
-                class="table-row"
-                :class="{ selected: selectedTable?.tableName === table.tableName }"
-                :title="table.bundleSource ? `${table.tableName}（来源：${table.bundleSource}）` : table.tableName"
-                @click="onSelectTable(table)"
-              >
-                <span class="table-name lme-ellipsis">{{ table.tableName }}</span>
-                <span class="table-record-count lme-mono">
-                  {{ table.recordCount.toLocaleString('zh-CN') }}
-                </span>
-                <span v-if="table.bundleSource" class="table-bundle lme-ellipsis">
-                  {{ table.bundleSource }}
-                </span>
-              </div>
-            </div>
-          </div>
-
-          <!-- 空态 -->
-          <div v-if="!loading && groupedTables.length === 0" class="state-block">
-            <NEmpty size="small" description="没有命中的静态数据表">
-              <template #extra>
-                <span class="state-hint">换个关键词，或把「数据类」切回「全部」</span>
-              </template>
-            </NEmpty>
-          </div>
+            <template #actions>
+              <NButton size="small" @click="performSearch">重试</NButton>
+            </template>
+          </StateBlock>
 
           <!-- 初次加载态 -->
-          <div v-if="loading && allTables.length === 0" class="state-block">
-            <NSpin size="small" />
-            <span class="state-text">正在读取静态数据表列表…</span>
-          </div>
+          <StateBlock
+            v-else-if="loading && allTables.length === 0"
+            class="state-block"
+            state="loading"
+            title="正在读取静态数据表列表…"
+          />
+
+          <!-- 空态 -->
+          <StateBlock
+            v-else-if="groupedTables.length === 0"
+            class="state-block"
+            state="empty"
+            icon="staticData"
+            title="没有命中的静态数据表"
+            description="换个关键词，或把「数据类」切回「全部」"
+          />
+
+          <!-- 表最多取 200 张，直接渲染；分组头 + 表行（虚拟列表按固定行高切，展开后会溢出，故不套 VirtualList） -->
+          <template v-else>
+            <div
+              v-for="group in groupedTables"
+              :key="group.dataClass"
+              class="class-group"
+            >
+              <div class="class-group-header" @click="toggleClassGroup(group.dataClass)">
+                <span class="group-arrow">
+                  <AppIcon
+                    :name="expandedClasses.has(group.dataClass) ? 'chevronDown' : 'chevronRight'"
+                    :size="13"
+                  />
+                </span>
+                <span class="group-name">{{ group.dataClass }}</span>
+                <NTag class="group-count" size="small" round :bordered="false">
+                  {{ group.tables.length }} 表
+                </NTag>
+              </div>
+
+              <div v-if="expandedClasses.has(group.dataClass)" class="class-group-tables">
+                <div
+                  v-for="table in group.tables"
+                  :key="table.tableName"
+                  class="table-row"
+                  :class="{ selected: selectedTable?.tableName === table.tableName }"
+                  :title="table.bundleSource ? `${table.tableName}（来源：${table.bundleSource}）` : table.tableName"
+                  @click="onSelectTable(table)"
+                >
+                  <span class="table-name lme-ellipsis">{{ table.tableName }}</span>
+                  <span class="table-record-count lme-mono">
+                    {{ table.recordCount.toLocaleString('zh-CN') }}
+                  </span>
+                  <span v-if="table.bundleSource" class="table-bundle lme-ellipsis">
+                    {{ table.bundleSource }}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </template>
         </div>
       </NCard>
 
@@ -804,21 +851,35 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
             </template>
           </VirtualList>
 
-          <div v-else-if="loading" class="state-block">
-            <NSpin size="small" />
-            <span class="state-text">正在读取记录…</span>
-          </div>
+          <StateBlock
+            v-else-if="loading"
+            class="state-block"
+            state="loading"
+            title="正在读取记录…"
+          />
 
-          <div v-else class="state-block">
-            <NEmpty
-              size="small"
-              :description="selectedTable ? '本页没有记录' : '未选择表'"
-            >
-              <template #extra>
-                <span v-if="!selectedTable" class="state-hint">先在左侧选一张静态数据表</span>
-              </template>
-            </NEmpty>
-          </div>
+          <!-- 记录加载失败（表列表已就绪，说明这条 error 来自 static.records） -->
+          <StateBlock
+            v-else-if="error && allTables.length > 0"
+            class="state-block"
+            state="error"
+            :title="error"
+            description="回到左侧重新选一张表，或稍后重试；表列表仍可正常浏览"
+          />
+
+          <!-- 空态：未选表 / 本页无记录，各给一句下一步 -->
+          <StateBlock
+            v-else
+            class="state-block"
+            state="empty"
+            :icon="selectedTable ? 'staticData' : 'database'"
+            :title="selectedTable ? '本页没有记录' : '还没有选择静态数据表'"
+            :description="
+              selectedTable
+                ? '翻到其他页，或回到左侧换一张表'
+                : '先在左侧的表列表里点一张表，这里会列出它的记录'
+            "
+          />
         </div>
 
         <template #footer>
@@ -846,9 +907,24 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
               :value="editorTab"
               @update:value="onEditorTabChange"
             >
-              <NTab class="segmented-btn" name="tree">🌳 树视图</NTab>
-              <NTab class="segmented-btn" name="raw">{} 原始文本</NTab>
-              <NTab class="segmented-btn" name="diff">⚖️ 差异对比</NTab>
+              <NTab class="segmented-btn" name="tree">
+                <span class="tab-label">
+                  <AppIcon name="tree" :size="13" />
+                  树视图
+                </span>
+              </NTab>
+              <NTab class="segmented-btn" name="raw">
+                <span class="tab-label">
+                  <AppIcon name="braces" :size="13" />
+                  原始文本
+                </span>
+              </NTab>
+              <NTab class="segmented-btn" name="diff">
+                <span class="tab-label">
+                  <AppIcon name="split" :size="13" />
+                  差异对比
+                </span>
+              </NTab>
             </NTabs>
 
             <NTag v-if="selectedRecord" class="record-key-badge" size="small" :bordered="false">
@@ -871,13 +947,14 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
             <div v-else-if="rootNode" class="tree-content">
               <JsonTreeNode :node="rootNode" :depth="0" />
             </div>
-            <div v-else class="state-block">
-              <NEmpty size="small" description="选择一条记录以查看 JSON">
-                <template #extra>
-                  <span class="state-hint">点击中间列表里的任意一行</span>
-                </template>
-              </NEmpty>
-            </div>
+            <StateBlock
+              v-else
+              class="state-block"
+              state="empty"
+              icon="fileJson"
+              title="还没有打开任何记录"
+              description="点击中间列表里的任意一行，这里会显示它的 JSON 结构"
+            />
           </div>
 
           <!-- 原始文本 -->
@@ -909,7 +986,10 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
                     :disabled="!selectedRecord || saving"
                     @click="requestSaveRecord"
                   >
-                    {{ saving ? '保存中…' : '💾 保存修改' }}
+                    <template #icon>
+                      <AppIcon name="save" :size="13" />
+                    </template>
+                    {{ saving ? '保存中…' : '保存修改' }}
                   </NButton>
                 </template>
                 用编辑器里的 JSON 整条替换该记录（会写进静态编辑集）
@@ -937,82 +1017,9 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
   background: var(--lme-bg-base);
 }
 
-/* ── 加载进度条（顶部细条） ── */
-.loading-bar {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 2px;
-  overflow: hidden;
-  z-index: var(--lme-z-raised);
-  background: var(--lme-progressbar-bg);
-}
+/* ── 顶部细进度条：统一用 tokens.css 的 .lme-loadingbar（本页不再自绘） ── */
 
-.loading-bar::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  width: 40%;
-  border-radius: var(--lme-radius-full);
-  background: var(--lme-progressbar-fill);
-  animation: loading-slide 1s var(--lme-ease-standard) infinite;
-}
-
-@keyframes loading-slide {
-  from {
-    transform: translateX(-100%);
-  }
-  to {
-    transform: translateX(350%);
-  }
-}
-
-/* ── 页头工具栏 ── */
-.page-toolbar {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-lg);
-  padding: var(--lme-gap-sm) var(--lme-gap-lg);
-  background: var(--lme-bg-panel);
-  border-bottom: 1px solid var(--lme-border);
-}
-
-.toolbar-leading {
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-sm);
-  min-width: 0;
-}
-
-.toolbar-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: var(--lme-radius-md);
-  background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
-  font-size: var(--lme-font-size-md);
-  flex-shrink: 0;
-}
-
-.toolbar-titles {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.toolbar-name {
-  margin: 0;
-  font-size: var(--lme-font-size-lg);
-  font-weight: var(--lme-font-weight-semibold);
-  line-height: var(--lme-line-height-tight);
-  color: var(--lme-text-primary);
-}
-
+/* ── 页头计数 / 当前表（PageHeader 的 #meta 槽） ── */
 .toolbar-sub {
   display: flex;
   align-items: center;
@@ -1033,14 +1040,6 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
   color: var(--lme-text-disabled);
 }
 
-.toolbar-actions {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-md);
-  flex-shrink: 0;
-}
-
 .result-count {
   font-size: var(--lme-font-size-sm);
   color: var(--lme-text-muted);
@@ -1049,14 +1048,6 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
 .result-count :deep(strong) {
   color: var(--lme-text-primary);
   font-weight: var(--lme-font-weight-semibold);
-}
-
-/* ── 错误态 ── */
-.error-banner {
-  flex-shrink: 0;
-  margin: var(--lme-gap-md) var(--lme-gap-lg) 0;
-  border-radius: var(--lme-radius-md);
-  font-size: var(--lme-font-size-sm);
 }
 
 /* ── 三栏栅格 ── */
@@ -1191,8 +1182,7 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
 }
 
 .panel-search-icon {
-  font-size: var(--lme-font-size-sm);
-  opacity: 0.6;
+  color: var(--lme-text-muted);
 }
 
 .search-input {
@@ -1249,8 +1239,9 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
 
 .group-arrow {
   width: 14px;
-  text-align: center;
-  font-size: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
   color: var(--lme-text-muted);
 }
@@ -1356,33 +1347,23 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
   color: var(--lme-text-primary);
 }
 
-/* ── 空态 / 加载态（与资源工作台同一套） ── */
+/* ── 空态 / 加载态：StateBlock 负责呈现，本页只让它撑满面板并居中 ── */
 .state-block {
   flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--lme-gap-sm);
-  padding: var(--lme-gap-xl) var(--lme-gap-md);
-  color: var(--lme-text-muted);
-  text-align: center;
-}
-
-.state-text {
-  font-size: var(--lme-font-size-sm);
-  color: var(--lme-text-secondary);
-}
-
-.state-hint {
-  font-size: var(--lme-font-size-xs);
-  color: var(--lme-text-disabled);
+  min-height: 0;
 }
 
 /* ── 编辑器分段 Tab（树视图 / 原始文本 / 差异对比） ── */
 .editor-tabs {
   flex: 1;
   min-width: 0;
+}
+
+/* Tab 标签：图标 + 文字（NTabs 没有图标槽，故自带一层 flex 包裹） */
+.tab-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--lme-gap-xs);
 }
 
 .editor-tabs :deep(.n-tabs-nav) {
@@ -1466,8 +1447,9 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
 
 :deep(.json-tree-arrow) {
   width: 14px;
-  text-align: center;
-  font-size: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
   color: var(--lme-text-muted);
 }

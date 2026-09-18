@@ -1,16 +1,19 @@
 <script setup lang="ts">
-// 维基提示块：页首「需要改进」/注意事项等，左侧金黄竖条
+// 维基提示块：页首「需要改进」/注意事项等，左侧竖条
 // 纯展示；文本为空时整块不渲染（不占位、不编造）
+// ui-redesign r6：图标改走 AppIcon（语义名），不再接受 emoji 字符。
 import { computed } from 'vue'
+import AppIcon from '@/components/AppIcon.vue'
+import type { IconName } from '@/components/icons'
 
 const props = withDefaults(
   defineProps<{
     /** 提示正文；空/纯空白时不渲染 */
     text: string
-    /** 形态：info（默认，金条）| warning（警示） */
+    /** 形态：info（默认，强调色竖条）| warning（警示） */
     variant?: 'info' | 'warning'
-    /** 可选图标（emoji 或字符），缺省不显示 */
-    icon?: string
+    /** 可选图标（语义名，见 components/icons.ts），缺省不显示 */
+    icon?: IconName
   }>(),
   { variant: 'info' },
 )
@@ -20,7 +23,9 @@ const hasText = computed(() => props.text.trim() !== '')
 
 <template>
   <div v-if="hasText" class="wiki-notice" :class="variant">
-    <span v-if="icon" class="wiki-notice-icon" aria-hidden="true">{{ icon }}</span>
+    <span v-if="icon" class="wiki-notice-icon">
+      <AppIcon :name="icon" :size="16" />
+    </span>
     <p class="wiki-notice-text">{{ text }}</p>
   </div>
 </template>
@@ -41,10 +46,16 @@ const hasText = computed(() => props.text.trim() !== '')
   border-left-color: var(--lme-warning);
 }
 
+.wiki-notice.warning .wiki-notice-icon {
+  color: var(--lme-warning);
+}
+
 .wiki-notice-icon {
   flex-shrink: 0;
-  font-size: var(--lme-font-size-xl);
-  line-height: 1.4;
+  display: inline-flex;
+  align-items: center;
+  margin-top: 3px;
+  color: var(--lme-accent);
 }
 
 .wiki-notice-text {

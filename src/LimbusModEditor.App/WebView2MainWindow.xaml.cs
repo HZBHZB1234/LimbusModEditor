@@ -135,11 +135,15 @@ public partial class WebView2MainWindow : Wpf.Ui.Controls.FluentWindow, IDisposa
             // ── 6. 注册消息处理器 ──
             _webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
 
+            // 前端首帧就绪后：折叠启动期状态栏（此后状态栏由前端自己绘制），
+            // 并按契约 §7 推一条 session.hello 让前端拿到版本信息。
+            _webView.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
+
             // ── 7. 导航到前端 ──
             StatusText.Text = "正在加载前端…";
             _webView.CoreWebView2.Navigate("https://lme.app/index.html");
 
-            StatusText.Text = $"✓ WebView2 就绪 | {_webView.CoreWebView2.Environment.BrowserVersionString}";
+            StatusText.Text = $"WebView2 就绪 | {_webView.CoreWebView2.Environment.BrowserVersionString}";
         }
         catch (OperationCanceledException)
         {
@@ -148,9 +152,38 @@ public partial class WebView2MainWindow : Wpf.Ui.Controls.FluentWindow, IDisposa
         catch (Exception ex)
         {
             Log.Error(ex, "WebView2 初始化失败");
-            StatusText.Text = $"❌ 初始化失败: {ex.Message}";
+            StatusText.Text = $"初始化失败: {ex.Message}";
             MessageBox.Show(this, $"WebView2 初始化失败:\n\n{ex.Message}", "错误",
                 MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    /// <summary>
+    /// 前端首帧就绪：收起启动期状态栏，并推 session.hello（契约 §7）。
+    /// 之后界面里的全局状态栏由前端 StatusBar.vue 绘制，两条不并存。
+    /// </summary>
+    private void OnNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)
+    {
+        if (!e.IsSuccess)
+        {
+            Log.Warn("前端导航失败: {0}", e.WebErrorStatus);
+            StatusText.Text = $"前端加载失败: {e.WebErrorStatus}";
+            return;
+        }
+
+        // 启动期信息已无意义，交给前端状态栏
+        BootStatusBar.Visibility = Visibility.Collapsed;
+
+        var runtimeVersion = _webView?.CoreWebView2?.Environment?.BrowserVersionString ?? "";
+        var appVersion = typeof(WebView2MainWindow).Assembly.GetName().Version?.ToString() ?? "";
+        try
+        {
+            SendEvent(IpcEvent.Create("session.hello", IpcJson.SerializePayload(
+                new SessionHelloPayload(IpcContractVersion.V1, appVersion, runtimeVersion))));
+        }
+        catch (Exception ex)
+        {
+            Log.Warn(ex, "推送 session.hello 失败（不影响功能）");
         }
     }
 
@@ -163,6 +196,7 @@ public partial class WebView2MainWindow : Wpf.Ui.Controls.FluentWindow, IDisposa
         if (_webView?.CoreWebView2 is not null)
         {
             _webView.CoreWebView2.WebMessageReceived -= OnWebMessageReceived;
+            _webView.CoreWebView2.NavigationCompleted -= OnNavigationCompleted;
         }
 
         // 释放资源
@@ -257,7 +291,7 @@ public partial class WebView2MainWindow : Wpf.Ui.Controls.FluentWindow, IDisposa
             VerticalAlignment = VerticalAlignment.Center,
         };
         WebViewHost.Child = placeholder;
-        StatusText.Text = "❌ WebView2 运行时未安装";
+        StatusText.Text = "WebView2 运行时未安装";
     }
 
     private void ShowFrontendMissingPlaceholder()
@@ -273,7 +307,7 @@ public partial class WebView2MainWindow : Wpf.Ui.Controls.FluentWindow, IDisposa
             VerticalAlignment = VerticalAlignment.Center,
         };
         WebViewHost.Child = placeholder;
-        StatusText.Text = "⚠ 前端产物不存在（请先构建 src/LimbusModEditor.Web/）";
+        StatusText.Text = "前端产物不存在（请先构建 src/LimbusModEditor.Web/）";
     }
 
     public void Dispose()

@@ -131,7 +131,7 @@ function onKeydown(e: KeyboardEvent, index: number) {
   background: var(--wiki-tab-active-bg);
   border-color: var(--wiki-tab-active-border);
   color: var(--wiki-tab-active-text);
-  font-weight: 600;
+  font-weight: var(--lme-font-weight-semibold);
 }
 
 .wiki-tab-badge {
@@ -141,7 +141,7 @@ function onKeydown(e: KeyboardEvent, index: number) {
   border-radius: var(--wiki-chip-radius);
   color: var(--wiki-chip-text);
   font-size: var(--lme-font-size-xs);
-  font-weight: 400;
+  font-weight: var(--lme-font-weight-regular);
 }
 
 .wiki-tab-panel {

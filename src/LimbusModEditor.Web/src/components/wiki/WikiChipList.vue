@@ -78,7 +78,7 @@ function onClick(value: string) {
   background: var(--wiki-chip-active-bg);
   border-color: var(--wiki-chip-active-bg);
   color: var(--wiki-chip-active-text);
-  font-weight: 600;
+  font-weight: var(--lme-font-weight-semibold);
 }
 
 button.wiki-chip {

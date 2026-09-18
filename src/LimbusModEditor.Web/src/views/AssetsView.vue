@@ -10,13 +10,15 @@ import {
   NAlert,
   NButton,
   NCard,
-  NEmpty,
-  NSpin,
   NTag,
   NTooltip,
 } from 'naive-ui'
+import AppIcon from '@/components/AppIcon.vue'
+import PageHeader from '@/components/PageHeader.vue'
+import StateBlock from '@/components/StateBlock.vue'
 import { useCatalogStore } from '@/stores/catalog'
 import { usePreviewStore } from '@/stores/preview'
+import { useStatusStore } from '@/stores/status'
 import { useUiStateStore } from '@/stores/uiState'
 import { ipc } from '@/ipc'
 import type { AssetSearchQuery, RelationSubject } from '@/ipc'
@@ -29,6 +31,7 @@ import ContainerTree from '@/components/ContainerTree.vue'
 const catalog = useCatalogStore()
 const previewStore = usePreviewStore()
 const uiState = useUiStateStore()
+const status = useStatusStore()
 const route = useRoute()
 const router = useRouter()
 
@@ -69,6 +72,16 @@ function onGoToPage(pageIndex: number) {
   catalog.goToPage(pageIndex).then(() => {
     recordPerf(`翻页→第${pageIndex + 1}页`, performance.now() - t0)
   })
+}
+
+/** 恢复默认判据（与 SearchFilters 的「清除筛选」同口径），并立即重查 */
+function clearSearch() {
+  onSearch({ sort: 'Name', hasContainerEntry: true, showStaticTables: false, text: undefined, type: undefined })
+}
+
+/** 页内跳转（错误态里的「打开设置」等） */
+function navigate(path: string) {
+  void router.push(path)
 }
 
 // 选中资产
@@ -255,9 +268,11 @@ async function onReplaceAsset() {
       await previewStore.loadPreview(refreshed.assetId)
     }
     replaceMessage.value = `已替换：${picked.path}`
+    status.notify('success', `已替换资源：${logicalPath.split('/').pop() || logicalPath}`)
   } catch (e: unknown) {
     replaceFailed.value = true
     replaceMessage.value = e instanceof Error ? e.message : String(e)
+    status.notify('error', `替换失败：${replaceMessage.value}`)
   } finally {
     replaceBusy.value = false
   }
@@ -301,6 +316,10 @@ async function onBatchReplace() {
       `替换 ${res?.replaced ?? 0} 条 / 跳过 ${res?.skipped ?? 0} 条` +
       (res?.info ? ` · ${res.info}` : '')
     batchWarnings.value = res?.warnings ?? []
+    status.notify(
+      (res?.skipped ?? 0) > 0 ? 'warning' : 'success',
+      `批量替换：替换 ${res?.replaced ?? 0} 条，跳过 ${res?.skipped ?? 0} 条`,
+    )
 
     // 刷新：本页重拉（列表行「已修改」由后端按项目态给出）+ 预览重拉
     await catalog.fetchPage(catalog.offset)
@@ -309,6 +328,7 @@ async function onBatchReplace() {
   } catch (e: unknown) {
     replaceFailed.value = true
     replaceMessage.value = e instanceof Error ? e.message : String(e)
+    status.notify('error', `批量替换失败：${replaceMessage.value}`)
   } finally {
     batchBusy.value = false
   }
@@ -340,6 +360,7 @@ async function onClearEdits() {
 
     replaceMessage.value =
       res?.info ?? `已清掉 ${res?.clearedCount ?? 0} 条，剩余 ${res?.remainingEdits ?? 0} 条`
+    status.notify('success', replaceMessage.value)
 
     // 刷新：本页重拉（编辑标记回到「未修改」）+ 预览重拉（回到原版）
     await catalog.fetchPage(catalog.offset)
@@ -351,6 +372,7 @@ async function onClearEdits() {
   } catch (e: unknown) {
     replaceFailed.value = true
     replaceMessage.value = e instanceof Error ? e.message : String(e)
+    status.notify('error', `撤销编辑失败：${replaceMessage.value}`)
   } finally {
     clearBusy.value = false
   }
@@ -362,19 +384,21 @@ const listHeight = ref(600)
 
 <template>
   <div class="assets-view">
-    <!-- 中栏：搜索 + 筛选 + 浏览 -->
-    <div class="browser-column">
-      <!-- 加载进度条（顶部细条，替代整屏遮罩的常规路径） -->
-      <div v-if="catalog.loading" class="loading-bar" aria-hidden="true" />
+    <!-- ── 页头：标题 / 说明 / 可关闭指引 + 视图切换、命中计数、性能面板 ── -->
+    <PageHeader
+      icon="assets"
+      title="资源工作台"
+      description="浏览游戏资源目录，预览贴图、文本与音频，并把选中的资源替换成自己的文件"
+      hint="先在上面搜索或切到目录树找到目标资源；选中一行后，右侧面板可以预览、替换或撤销编辑"
+      hint-key="assets"
+    >
+      <template #meta>
+        <NTag v-if="!catalog.loading" class="result-count" size="small" :bordered="false">
+          共 <strong>{{ catalog.totalCount.toLocaleString('zh-CN') }}</strong> 条命中
+        </NTag>
+      </template>
 
-      <!-- 搜索筛选栏 -->
-      <SearchFilters
-        :model-value="catalog.query"
-        @search="onSearch"
-      />
-
-      <!-- 视图切换 + 计数 + 性能 -->
-      <div class="view-toggle-row">
+      <template #actions>
         <div class="segmented">
           <NButton
             class="segmented-btn"
@@ -383,7 +407,8 @@ const listHeight = ref(600)
             :secondary="viewMode === 'list'"
             @click="viewMode = 'list'"
           >
-            ☰ 列表
+            <template #icon><AppIcon name="list" :size="13" /></template>
+            列表
           </NButton>
           <NButton
             class="segmented-btn"
@@ -392,215 +417,258 @@ const listHeight = ref(600)
             :secondary="viewMode === 'tree'"
             @click="viewMode = 'tree'"
           >
-            🗂 目录树
+            <template #icon><AppIcon name="tree" :size="13" /></template>
+            目录树
           </NButton>
         </div>
 
-        <NTag class="result-count" size="small" :bordered="false" v-if="!catalog.loading">
-          共 <strong>{{ catalog.totalCount.toLocaleString('zh-CN') }}</strong> 条命中
-        </NTag>
+        <NTooltip :show-arrow="false" placement="bottom">
+          <template #trigger>
+            <NButton
+              class="perf-toggle"
+              size="tiny"
+              tertiary
+              :class="{ active: showPerfPanel }"
+              @click="showPerfPanel = !showPerfPanel"
+            >
+              <template #icon><AppIcon name="gauge" :size="13" /></template>
+              性能
+            </NButton>
+          </template>
+          查看搜索/翻页的实测耗时，用于判断索引是否需要重建
+        </NTooltip>
+      </template>
+    </PageHeader>
 
-        <NButton
-          class="perf-toggle"
-          size="tiny"
-          tertiary
-          :class="{ active: showPerfPanel }"
-          @click="showPerfPanel = !showPerfPanel"
+    <div class="assets-body">
+      <!-- 中栏：搜索 + 筛选 + 浏览 -->
+      <div class="browser-column">
+        <!-- 加载进度条（顶部细条，替代整屏遮罩的常规路径） -->
+        <div v-if="catalog.loading" class="lme-loadingbar" aria-hidden="true" />
+
+        <!-- 搜索筛选栏 -->
+        <SearchFilters :model-value="catalog.query" @search="onSearch" />
+
+        <!-- 列表视图 -->
+        <div
+          v-if="viewMode === 'list'"
+          class="list-container"
+          :class="{ dimmed: catalog.loading }"
         >
-          📊 性能
-        </NButton>
-      </div>
+          <div class="list-header">
+            <span class="col-index">#</span>
+            <span class="col-type">类型</span>
+            <span class="col-name">名称</span>
+            <span class="col-size">大小</span>
+            <span class="col-state">状态</span>
+          </div>
 
-      <!-- 列表视图 -->
-      <div v-if="viewMode === 'list'" class="list-container" :class="{ dimmed: catalog.loading }">
-        <div class="list-header">
-          <span class="col-index">#</span>
-          <span class="col-type">类型</span>
-          <span class="col-name">名称</span>
-          <span class="col-size">大小</span>
-          <span class="col-state">状态</span>
+          <VirtualList
+            :items="catalog.items"
+            :item-height="30"
+            :height="listHeight"
+            :overscan="8"
+          >
+            <template #default="{ item, index }">
+              <div
+                class="asset-row"
+                :class="{ selected: item.assetId === catalog.selectedAssetId }"
+                @click="onSelectAsset(item.assetId)"
+                @dblclick="onSelectAsset(item.assetId)"
+              >
+                <span class="row-index lme-mono">{{ index + 1 + catalog.offset }}</span>
+                <span class="row-type">
+                  <span class="type-dot" :style="{ background: typeColor(item.type) }" />
+                  <span class="type-name" :style="{ color: typeColor(item.type) }">{{
+                    item.type
+                  }}</span>
+                </span>
+                <span class="row-name lme-ellipsis" :title="item.logicalPath">
+                  {{ item.logicalPath.split('/').pop() || item.logicalPath }}
+                </span>
+                <span class="row-size lme-mono">{{ formatSize(item.size) }}</span>
+                <NTag
+                  class="row-state"
+                  :class="'state-' + item.editState"
+                  size="small"
+                  round
+                  :bordered="false"
+                  :type="stateTagType(item.editState)"
+                >
+                  {{ stateLabel(item.editState) }}
+                </NTag>
+              </div>
+            </template>
+          </VirtualList>
+
+          <!-- 页码条 -->
+          <PageBar
+            :current-page="catalog.currentPage"
+            :page-count="catalog.pageCount"
+            :total-count="catalog.totalCount"
+            :query-ms="catalog.lastQueryMs"
+            :loading="catalog.loading"
+            @go-to="onGoToPage"
+          />
         </div>
 
-        <VirtualList
-          :items="catalog.items"
-          :item-height="30"
-          :height="listHeight"
-          :overscan="8"
-        >
-          <template #default="{ item, index }">
-            <div
-              class="asset-row"
-              :class="{ selected: item.assetId === catalog.selectedAssetId }"
-              @click="onSelectAsset(item.assetId)"
-              @dblclick="onSelectAsset(item.assetId)"
-            >
-              <span class="row-index lme-mono">{{ index + 1 + catalog.offset }}</span>
-              <span class="row-type">
-                <span class="type-dot" :style="{ background: typeColor(item.type) }" />
-                <span class="type-name" :style="{ color: typeColor(item.type) }">{{ item.type }}</span>
-              </span>
-              <span class="row-name lme-ellipsis" :title="item.logicalPath">
-                {{ item.logicalPath.split('/').pop() || item.logicalPath }}
-              </span>
-              <span class="row-size lme-mono">{{ formatSize(item.size) }}</span>
-              <NTag
-                class="row-state"
-                :class="'state-' + item.editState"
-                size="small"
-                round
-                :bordered="false"
-                :type="stateTagType(item.editState)"
-              >
-                {{ stateLabel(item.editState) }}
-              </NTag>
-            </div>
-          </template>
-        </VirtualList>
+        <!-- 目录树视图 -->
+        <ContainerTree v-else :visible="viewMode === 'tree'" @select="onSelectAsset" />
 
-        <!-- 页码条 -->
-        <PageBar
-          :current-page="catalog.currentPage"
-          :page-count="catalog.pageCount"
-          :total-count="catalog.totalCount"
-          :query-ms="catalog.lastQueryMs"
-          :loading="catalog.loading"
-          @go-to="onGoToPage"
+        <!-- 初次加载态 -->
+        <StateBlock
+          v-if="isInitialLoading"
+          class="state-block fill"
+          state="loading"
+          title="正在查询资源目录…"
+          description="首次查询需要建立索引，稍等片刻"
         />
-      </div>
 
-      <!-- 目录树视图 -->
-      <ContainerTree
-        v-else
-        :visible="viewMode === 'tree'"
-        @select="onSelectAsset"
-      />
-
-      <!-- 初次加载态 -->
-      <div v-if="isInitialLoading" class="state-block">
-        <NSpin size="small" />
-        <span class="state-text">正在查询资源目录…</span>
-      </div>
-
-      <!-- 空态 -->
-      <NEmpty
-        v-else-if="isEmpty && viewMode === 'list'"
-        class="state-block"
-        description="没有命中的资源"
-      >
-        <template #icon>
-          <span class="state-icon">🗄</span>
-        </template>
-        <template #extra>
-          <span class="state-hint">换个关键词，或在上方「清除筛选」恢复默认视图</span>
-        </template>
-      </NEmpty>
-
-      <!-- 错误态 -->
-      <NAlert
-        v-if="catalog.error"
-        class="error-banner"
-        type="error"
-        :show-icon="false"
-        :bordered="true"
-      >
-        {{ catalog.error }}
-      </NAlert>
-    </div>
-
-    <!-- 分隔条 -->
-    <div class="column-splitter" />
-
-    <!-- 预览列 -->
-    <div class="preview-column" :style="{ width: uiState.previewColumnWidth + 'px' }">
-      <!-- 编辑操作组：选中一条资源后可用 -->
-      <div class="edit-actions">
-        <NTooltip :disabled="!catalog.selectedAsset" placement="bottom" :show-arrow="false">
-          <template #trigger>
-            <NButton
-              class="action-btn primary"
-              size="small"
-              type="primary"
-              :secondary="true"
-              :disabled="!catalog.selectedAsset || replaceBusy"
-              @click="onReplaceAsset"
-            >
-              {{ replaceBusy ? '替换中…' : '替换…' }}
+        <!-- 空态 -->
+        <StateBlock
+          v-else-if="isEmpty && viewMode === 'list'"
+          class="state-block fill"
+          state="empty"
+          icon="database"
+          title="没有命中的资源"
+          description="换个关键词，或点上方的「清除筛选」恢复默认视图；也可以先确认设置里的游戏目录是否正确"
+        >
+          <template #actions>
+            <NButton size="small" @click="clearSearch">
+              <template #icon><AppIcon name="erase" :size="13" /></template>
+              清除筛选
             </NButton>
           </template>
-          {{ catalog.selectedAsset ? catalog.selectedAsset.logicalPath : '先选中一条资源' }}
-        </NTooltip>
+        </StateBlock>
 
-        <NTooltip placement="bottom" :show-arrow="false">
-          <template #trigger>
-            <NButton
-              class="action-btn"
-              size="small"
-              :disabled="batchBusy || replaceBusy"
-              @click="onBatchReplace"
-            >
-              {{ batchBusy ? '批量替换中…' : '批量替换…' }}
+        <!-- 错误态（列表为空时占满区域；有数据时退化为顶部提示） -->
+        <StateBlock
+          v-if="catalog.error && catalog.items.length === 0"
+          class="state-block fill"
+          state="error"
+          title="资源目录查询失败"
+          :description="catalog.error + '。请检查设置里的游戏目录与 Unity 缓存目录，然后重试'"
+        >
+          <template #actions>
+            <NButton size="small" type="primary" @click="onSearch(catalog.query)">
+              <template #icon><AppIcon name="refresh" :size="13" /></template>
+              重试
+            </NButton>
+            <NButton size="small" @click="navigate('/settings')">
+              <template #icon><AppIcon name="settings" :size="13" /></template>
+              打开设置
             </NButton>
           </template>
-          选一个目录，按文件名批量登记替换（已有替换标记的资源默认不覆盖）
-        </NTooltip>
+        </StateBlock>
 
-        <NTooltip :disabled="!catalog.selectedAsset" placement="bottom" :show-arrow="false">
-          <template #trigger>
-            <NButton
-              class="action-btn"
-              size="small"
-              :disabled="!catalog.selectedAsset || clearBusy || replaceBusy"
-              @click="onClearEdits"
-            >
-              {{ clearBusy ? '撤销中…' : '撤销编辑' }}
-            </NButton>
-          </template>
-          {{ catalog.selectedAsset ? `撤销「${catalog.selectedAsset.logicalPath}」的编辑` : '先选中一条资源' }}
-        </NTooltip>
+        <NAlert
+          v-if="catalog.error && catalog.items.length > 0"
+          class="error-banner"
+          type="error"
+          :show-icon="false"
+          :bordered="true"
+        >
+          {{ catalog.error }}
+        </NAlert>
       </div>
 
-      <!-- 操作结果（成功中性 / 失败红） -->
-      <div
-        v-if="replaceMessage"
-        class="action-message"
-        :class="{ failed: replaceFailed }"
-      >
-        {{ replaceMessage }}
-      </div>
+      <!-- 分隔条 -->
+      <div class="column-splitter" />
 
-      <!-- 批量替换的跳过原因（后端逐条给，照原样列出来） -->
-      <ul v-if="batchWarnings.length > 0" class="batch-warnings">
-        <li v-for="(w, i) in batchWarnings" :key="i">{{ w }}</li>
-      </ul>
+      <!-- 预览列 -->
+      <div class="preview-column" :style="{ width: uiState.previewColumnWidth + 'px' }">
+        <!-- 编辑操作组：选中一条资源后可用 -->
+        <div class="edit-actions">
+          <NTooltip :disabled="!catalog.selectedAsset" placement="bottom" :show-arrow="false">
+            <template #trigger>
+              <NButton
+                class="action-btn primary"
+                size="small"
+                type="primary"
+                :secondary="true"
+                :disabled="!catalog.selectedAsset || replaceBusy"
+                @click="onReplaceAsset"
+              >
+                <template #icon><AppIcon name="replace" :size="13" /></template>
+                {{ replaceBusy ? '替换中…' : '替换…' }}
+              </NButton>
+            </template>
+            {{ catalog.selectedAsset ? catalog.selectedAsset.logicalPath : '先选中一条资源' }}
+          </NTooltip>
 
-      <!-- 详情/预览区（库组件 NCard 外壳，内容仍是 PreviewPane） -->
-      <NCard size="small" class="preview-card">
-        <PreviewPane :asset="catalog.selectedAsset" />
-      </NCard>
+          <NTooltip placement="bottom" :show-arrow="false">
+            <template #trigger>
+              <NButton
+                class="action-btn"
+                size="small"
+                :disabled="batchBusy || replaceBusy"
+                @click="onBatchReplace"
+              >
+                <template #icon><AppIcon name="upload" :size="13" /></template>
+                {{ batchBusy ? '批量替换中…' : '批量替换…' }}
+              </NButton>
+            </template>
+            选一个目录，按文件名批量登记替换（已有替换标记的资源默认不覆盖）
+          </NTooltip>
 
-      <!-- 关联对象：只读列表，数据来自 relation.describe -->
-      <NCard
-        v-if="catalog.selectedAsset"
-        size="small"
-        class="related-card"
-        title="关联对象"
-      >
-        <ul class="related-list">
-          <li v-for="s in relatedSubjects" :key="s.subjectId" class="related-item">
-            <div class="related-item-main">
-              <span class="related-item-name">{{ s.displayName }}</span>
-              <span class="related-item-cat">{{ s.categoryLabel }}</span>
-              <span class="related-item-kind">{{ s.kindLabel }}</span>
-            </div>
-            <div class="related-item-display lme-mono">{{ s.display }}</div>
-            <RouterLink v-if="s.pageId" class="related-item-link" :to="`/wiki/page/${s.pageId}`">
-              打开维基页 →
-            </RouterLink>
-          </li>
-          <li v-if="relatedSubjects.length === 0" class="related-empty">未找到关联对象</li>
+          <NTooltip :disabled="!catalog.selectedAsset" placement="bottom" :show-arrow="false">
+            <template #trigger>
+              <NButton
+                class="action-btn"
+                size="small"
+                :disabled="!catalog.selectedAsset || clearBusy || replaceBusy"
+                @click="onClearEdits"
+              >
+                <template #icon><AppIcon name="undo" :size="13" /></template>
+                {{ clearBusy ? '撤销中…' : '撤销编辑' }}
+              </NButton>
+            </template>
+            {{
+              catalog.selectedAsset
+                ? `撤销「${catalog.selectedAsset.logicalPath}」的编辑`
+                : '先选中一条资源'
+            }}
+          </NTooltip>
+        </div>
+
+        <!-- 操作结果（成功中性 / 失败红） -->
+        <div v-if="replaceMessage" class="action-message" :class="{ failed: replaceFailed }">
+          <AppIcon :name="replaceFailed ? 'error' : 'success'" :size="13" />
+          <span class="lme-ellipsis">{{ replaceMessage }}</span>
+        </div>
+
+        <!-- 批量替换的跳过原因（后端逐条给，照原样列出来） -->
+        <ul v-if="batchWarnings.length > 0" class="batch-warnings">
+          <li v-for="(w, i) in batchWarnings" :key="i">{{ w }}</li>
         </ul>
-        <div v-if="relatedInfo" class="related-info">{{ relatedInfo }}</div>
-      </NCard>
+
+        <!-- 详情/预览区（库组件 NCard 外壳，内容仍是 PreviewPane） -->
+        <NCard size="small" class="preview-card">
+          <PreviewPane :asset="catalog.selectedAsset" />
+        </NCard>
+
+        <!-- 关联对象：只读列表，数据来自 relation.describe -->
+        <NCard v-if="catalog.selectedAsset" size="small" class="related-card" title="关联对象">
+          <ul class="related-list">
+            <li v-for="s in relatedSubjects" :key="s.subjectId" class="related-item">
+              <div class="related-item-main">
+                <span class="related-item-name">{{ s.displayName }}</span>
+                <span class="related-item-cat">{{ s.categoryLabel }}</span>
+                <span class="related-item-kind">{{ s.kindLabel }}</span>
+              </div>
+              <div class="related-item-display lme-mono">{{ s.display }}</div>
+              <RouterLink v-if="s.pageId" class="related-item-link" :to="`/wiki/page/${s.pageId}`">
+                <span>打开维基页</span>
+                <AppIcon name="arrowRight" :size="12" />
+              </RouterLink>
+            </li>
+            <li v-if="relatedSubjects.length === 0" class="related-empty">
+              未找到关联对象{{ relatedInfo ? '' : '（这条资源暂未登记在维基索引里）' }}
+            </li>
+          </ul>
+          <div v-if="relatedInfo" class="related-info">{{ relatedInfo }}</div>
+        </NCard>
+      </div>
     </div>
 
     <!-- 性能面板 -->
@@ -625,12 +693,11 @@ const listHeight = ref(600)
           </tr>
         </tbody>
       </table>
-      <div class="perf-summary" v-if="perfMeasurements.length > 0">
+      <div v-if="perfMeasurements.length > 0" class="perf-summary">
         <div>最近操作数: {{ perfMeasurements.length }}</div>
         <div v-if="catalog.items.length > 0">
           当前页: {{ catalog.items.length }} 条 / {{ catalog.pageSize }} 条每页
         </div>
-        <div>数据规模: 1,275,623 条资源 / 1,459 bundle</div>
       </div>
     </div>
   </div>
@@ -639,10 +706,19 @@ const listHeight = ref(600)
 <style scoped>
 .assets-view {
   display: flex;
+  flex-direction: column;
   height: 100%;
   overflow: hidden;
   position: relative;
   background: var(--lme-bg-base);
+}
+
+/* 页头之下：浏览器列 + 分隔条 + 预览列 */
+.assets-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .browser-column {
@@ -654,47 +730,7 @@ const listHeight = ref(600)
   position: relative;
 }
 
-/* ── 加载进度条（顶部细条） ── */
-.loading-bar {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 2px;
-  overflow: hidden;
-  z-index: var(--lme-z-raised);
-  background: var(--lme-progressbar-bg);
-}
-
-.loading-bar::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  width: 40%;
-  border-radius: var(--lme-radius-full);
-  background: var(--lme-progressbar-fill);
-  animation: loading-slide 1s var(--lme-ease-standard) infinite;
-}
-
-@keyframes loading-slide {
-  from {
-    transform: translateX(-100%);
-  }
-  to {
-    transform: translateX(350%);
-  }
-}
-
-/* ── 视图切换行 ── */
-.view-toggle-row {
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-md);
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  border-bottom: 1px solid var(--lme-border);
-}
-
-/* 分段控件外壳；两枚按钮是库组件 NButton（激活态用 secondary 变体） */
+/* ── 视图切换分段控件（库组件 NButton 外壳） ── */
 .segmented {
   display: inline-flex;
   gap: 1px;
@@ -715,8 +751,7 @@ const listHeight = ref(600)
 
 /* 计数胶囊（库组件 NTag） */
 .result-count {
-  margin-right: auto;
-  font-size: var(--lme-font-size-sm);
+  font-size: var(--lme-font-size-xs);
   color: var(--lme-text-muted);
 }
 
@@ -754,7 +789,7 @@ const listHeight = ref(600)
   align-items: center;
   gap: var(--lme-gap-sm);
   padding: 0 var(--lme-gap-md);
-  height: 28px;
+  height: var(--lme-row-height);
   border-bottom: 1px solid var(--lme-border);
   background: var(--lme-bg-panel);
   font-size: var(--lme-font-size-xs);
@@ -844,35 +879,14 @@ const listHeight = ref(600)
   justify-content: center;
 }
 
-/* ── 空态 / 初次加载 ── */
-.state-block {
+/* ── 三态（StateBlock 撑满浏览列） ── */
+.state-block.fill {
   position: absolute;
   inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--lme-gap-sm);
-  color: var(--lme-text-muted);
-  pointer-events: none;
+  background: var(--lme-bg-base);
 }
 
-.state-icon {
-  font-size: 36px;
-  opacity: 0.7;
-}
-
-.state-text {
-  font-size: var(--lme-font-size-md);
-  color: var(--lme-text-secondary);
-}
-
-.state-hint {
-  font-size: var(--lme-font-size-sm);
-  color: var(--lme-text-muted);
-}
-
-/* ── 错误态（库组件 NAlert，仅补外边距） ── */
+/* ── 错误提示（有数据时的非阻塞形态，库组件 NAlert） ── */
 .error-banner {
   margin: var(--lme-gap-md);
   font-size: var(--lme-font-size-sm);
@@ -910,13 +924,14 @@ const listHeight = ref(600)
 }
 
 .action-message {
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-xs);
   padding: var(--lme-gap-xs) var(--lme-gap-md);
   font-size: var(--lme-font-size-xs);
   color: var(--lme-success);
   border-bottom: 1px solid var(--lme-border);
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .action-message.failed {
@@ -980,7 +995,7 @@ const listHeight = ref(600)
 
 .related-item {
   padding: var(--lme-gap-sm);
-  background: var(--lme-bg-panel);
+  background: var(--lme-bg-inset);
   border: 1px solid var(--lme-border);
   border-radius: var(--lme-radius-md);
 }
@@ -1015,10 +1030,12 @@ const listHeight = ref(600)
 }
 
 .related-item-link {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   margin-top: var(--lme-gap-xs);
   font-size: var(--lme-font-size-xs);
-  color: var(--lme-accent-hover);
+  color: var(--lme-accent);
   text-decoration: none;
 }
 
@@ -1041,8 +1058,8 @@ const listHeight = ref(600)
 /* ── 性能面板 ── */
 .perf-panel {
   position: absolute;
-  bottom: 40px;
-  left: var(--lme-gap-md);
+  bottom: var(--lme-statusbar-height);
+  right: var(--lme-gap-md);
   width: 320px;
   max-height: 280px;
   background: var(--lme-bg-elevated);

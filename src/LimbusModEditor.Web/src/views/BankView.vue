@@ -2,30 +2,39 @@
 // 音频工作台（Bank 浏览 / 预览 / 导出）
 // 对应 WPF 旧界面的 AudioWorkbenchPage
 // 布局：页头工具栏 + 三栏面板（银行 | 采样 | 试听与详情），与 StaticView 同一套设计语言
+//
+// ui-redesign r6（本次改造）：页头换成 PageHeader（图标 / 说明 / 可关闭指引），
+// 手写的加载/空/错误态换成 StateBlock，顶部细进度条改用 .lme-loadingbar 工具类，
+// 页面里的 emoji 全部换成 AppIcon，导出接入 status.track（进度与结果进底部状态栏）。
+// IPC 方法名、载荷字段与调用时序零改动；?bank=&sample= 深链保持可用。
 
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ipc, IpcClientError } from '@/ipc'
 import {
-  NAlert,
   NButton,
   NCard,
   NDescriptions,
   NDescriptionsItem,
-  NEmpty,
   NInput,
   NSelect,
-  NSpin,
   NTag,
   NTooltip,
   useMessage,
 } from 'naive-ui'
+import AppIcon from '@/components/AppIcon.vue'
+import PageHeader from '@/components/PageHeader.vue'
+import StateBlock from '@/components/StateBlock.vue'
 import VirtualList from '@/components/VirtualList.vue'
 import PageBar from '@/components/PageBar.vue'
 import { useUiStateStore } from '@/stores/uiState'
+import { useStatusStore } from '@/stores/status'
 
 /** 轻量反馈（App.vue 的 NMessageProvider 已在位） */
 const message = useMessage()
+
+/** 全局状态：耗时操作登记为「活动」，失败/完成同时记一条全局通知 */
+const status = useStatusStore()
 
 // ── 类型定义 ──────────────────────────────────────────────────
 
@@ -332,6 +341,7 @@ async function loadSamples(bankId: string) {
   } catch (e: unknown) {
     if (gen !== sampleGeneration.value) return
     sampleError.value = e instanceof Error ? e.message : String(e)
+    status.notify('error', `读取采样列表失败：${sampleError.value}`)
     sampleList.value = []
   } finally {
     if (gen === sampleGeneration.value) {
@@ -347,7 +357,7 @@ async function selectSample(sample: SampleInfo) {
   audioPreviewUnsupported.value = false
 
   try {
-    // 契约方法 bank.preview：载荷 { bankId, sampleName } → { audioUrl }（可直接播放的 WAV 地址）
+    // 契约方法 bank.preview：载荷 { bankId, sampleName } 返回 { audioUrl }（可直接播放的 WAV 地址）
     const result = await ipc.request<{ audioUrl: string }>('bank.preview', {
       bankId: sample.bankId,
       sampleName: sample.name,
@@ -365,7 +375,8 @@ async function selectSample(sample: SampleInfo) {
 
 /** 导出为 .rebank 格式 */
 async function exportRebank() {
-  if (!selectedBank.value) return
+  const bank = selectedBank.value
+  if (!bank) return
 
   try {
     // BankExportRebankRequest 需要 targetDirectory：走宿主原生目录对话框（不用 Web 文件输入）
@@ -374,10 +385,17 @@ async function exportRebank() {
     })
     if (!picked.path) return
 
-    await ipc.request('bank.exportRebank', {
-      bankId: selectedBank.value.bankId,
-      targetDirectory: picked.path,
-    })
+    // 耗时导出登记进全局状态：底部状态栏可见进度，成功/失败都发一条通知
+    await status.track(
+      'bank-export',
+      '正在导出音频',
+      () =>
+        ipc.request('bank.exportRebank', {
+          bankId: bank.bankId,
+          targetDirectory: picked.path,
+        }),
+      { successText: `已导出「${bank.name}」为 .rebank`, errorPrefix: '导出音频' },
+    )
   } catch {
     // 导出 IPC 未实现
     showNotImplemented()
@@ -430,49 +448,44 @@ onMounted(() => {
 
 <template>
   <div class="bank-view">
-    <!-- 顶部细进度条：银行列表或采样列表加载时显示（替代整屏遮罩） -->
-    <div v-if="bankLoading || sampleLoading" class="loading-bar" aria-hidden="true" />
-
-    <!-- 页头工具栏 -->
-    <header class="page-toolbar">
-      <div class="toolbar-leading">
-        <span class="toolbar-icon">🎵</span>
-        <div class="toolbar-titles">
-          <h1 class="toolbar-name">音频工作台</h1>
-          <span class="toolbar-sub" v-if="selectedBank">
-            <span class="toolbar-bank lme-ellipsis">{{ selectedBank.name }}</span>
-            <span class="toolbar-dot">·</span>
-            {{ selectedBank.sampleCount.toLocaleString('zh-CN') }} 个采样
-            <span class="toolbar-dot">·</span>
-            {{ formatSize(selectedBank.totalSize) }}
-          </span>
-          <span class="toolbar-sub" v-else>从左侧选择一个音频银行</span>
-        </div>
-      </div>
-
-      <div class="toolbar-actions">
+    <!-- 页头：标题 + 一句话说明 + 可关闭的操作指引 -->
+    <PageHeader
+      icon="audio"
+      title="音频工作台"
+      description="试听游戏音频库里的音效，并把选中的条目替换成自己的音频文件"
+      hint="先在左侧选一个音频库，再在列表里点一条试听"
+      hint-key="bank"
+    >
+      <template #meta>
+        <span class="toolbar-sub" v-if="selectedBank">
+          <span class="toolbar-bank lme-ellipsis">{{ selectedBank.name }}</span>
+          <span class="toolbar-dot">·</span>
+          {{ selectedBank.sampleCount.toLocaleString('zh-CN') }} 个采样
+          <span class="toolbar-dot">·</span>
+          {{ formatSize(selectedBank.totalSize) }}
+        </span>
         <NTag size="small" :bordered="false" v-if="!bankLoading">
           共 <strong>{{ bankTotalCount.toLocaleString('zh-CN') }}</strong> 个银行
         </NTag>
+      </template>
+
+      <template #actions>
         <NTooltip placement="bottom" :show-arrow="false">
           <template #trigger>
-            <NButton size="small" @click="exportRebank">📤 导出 .rebank</NButton>
+            <NButton size="small" :disabled="!selectedBank" @click="exportRebank">
+              <template #icon>
+                <AppIcon name="export" :size="14" />
+              </template>
+              导出 .rebank
+            </NButton>
           </template>
           导出为 .rebank 格式（需先选中一个银行）
         </NTooltip>
-      </div>
-    </header>
+      </template>
+    </PageHeader>
 
-    <!-- 银行列表错误态 -->
-    <NAlert
-      v-if="bankError"
-      class="error-banner"
-      type="error"
-      :show-icon="false"
-      :bordered="true"
-    >
-      {{ bankError }}
-    </NAlert>
+    <!-- 顶部细进度条：银行列表或采样列表加载时显示（替代整屏遮罩） -->
+    <div v-if="bankLoading || sampleLoading" class="lme-loadingbar" aria-hidden="true" />
 
     <!-- 三栏：银行 | 采样 | 试听与详情 -->
     <div class="workbench-body">
@@ -490,30 +503,47 @@ onMounted(() => {
               @clear="onSearchInput"
             >
               <template #prefix>
-                <span class="panel-search-icon">🔍</span>
+                <span class="panel-search-icon">
+                  <AppIcon name="search" :size="13" />
+                </span>
               </template>
             </NInput>
 
             <div class="filter-row">
               <span class="filter-label">类型</span>
-              <NSelect
-                v-model:value="query.bankType"
-                class="filter-select"
-                size="small"
-                :options="bankTypeOptions"
-                @update:value="onFilterChange"
-              />
+              <NTooltip placement="bottom" :show-arrow="false">
+                <template #trigger>
+                  <NSelect
+                    v-model:value="query.bankType"
+                    class="filter-select"
+                    size="small"
+                    :options="bankTypeOptions"
+                    @update:value="onFilterChange"
+                  />
+                </template>
+                按银行类型筛选（后端暂不提供类型时统一显示「未知」）
+              </NTooltip>
 
               <span class="filter-label">排序</span>
-              <NSelect
-                v-model:value="query.sort"
-                class="filter-select"
-                size="small"
-                :options="sortOptions"
-                @update:value="onFilterChange"
-              />
+              <NTooltip placement="bottom" :show-arrow="false">
+                <template #trigger>
+                  <NSelect
+                    v-model:value="query.sort"
+                    class="filter-select"
+                    size="small"
+                    :options="sortOptions"
+                    @update:value="onFilterChange"
+                  />
+                </template>
+                按名称 / 采样数 / 大小 / 类型排序
+              </NTooltip>
 
-              <NButton size="small" tertiary @click="clearFilters">清除筛选</NButton>
+              <NTooltip placement="bottom" :show-arrow="false">
+                <template #trigger>
+                  <NButton size="small" tertiary @click="clearFilters">清除筛选</NButton>
+                </template>
+                清空关键词、类型与排序，回到默认视图
+              </NTooltip>
             </div>
           </div>
         </template>
@@ -557,24 +587,37 @@ onMounted(() => {
             </template>
           </VirtualList>
 
+          <!-- 错误态：银行列表没读到，整块换成可重试的提示 -->
+          <StateBlock
+            v-else-if="bankError"
+            class="fill"
+            state="error"
+            icon="database"
+            :title="bankError"
+            description="检查游戏目录设置与资源索引，再点「重试」重新读取"
+          >
+            <template #actions>
+              <NButton size="small" @click="performSearch">重试</NButton>
+            </template>
+          </StateBlock>
+
           <!-- 初次加载态 -->
-          <div v-else-if="bankLoading" class="state-block">
-            <NSpin size="small" />
-            <span class="state-text">正在读取音频银行…</span>
-          </div>
+          <StateBlock
+            v-else-if="bankLoading"
+            class="fill"
+            state="loading"
+            title="正在读取音频银行…"
+          />
 
           <!-- 空态 -->
-          <NEmpty v-else-if="!bankError" class="state-block" description="暂无音频银行数据">
-            <template #icon>
-              <span class="state-icon">🎵</span>
-            </template>
-            <template #extra>
-              <span class="state-hint">
-                尚未建立音频银行索引。请先运行「启动扫描」建立资源索引，
-                或检查项目目录中是否存在 FSB 音频文件。
-              </span>
-            </template>
-          </NEmpty>
+          <StateBlock
+            v-else
+            class="fill"
+            state="empty"
+            icon="audio"
+            title="暂无音频银行数据"
+            description="先运行「启动扫描」建立资源索引，或确认项目目录里存在 FSB 音频文件"
+          />
         </div>
 
         <template #footer>
@@ -608,15 +651,14 @@ onMounted(() => {
 
         <div class="panel-body">
           <!-- 采样加载错误 -->
-          <NAlert
+          <StateBlock
             v-if="sampleError"
-            class="error-banner inline"
-            type="error"
-            :show-icon="false"
-            :bordered="true"
-          >
-            {{ sampleError }}
-          </NAlert>
+            class="fill"
+            state="error"
+            icon="database"
+            :title="sampleError"
+            description="在左侧换一个银行重试；若始终失败，请先重建资源索引"
+          />
 
           <!-- 采样列表表头 -->
           <div class="sample-table-header" v-if="sampleList.length > 0">
@@ -665,24 +707,26 @@ onMounted(() => {
           </VirtualList>
 
           <!-- 采样加载态 -->
-          <div v-else-if="sampleLoading" class="state-block">
-            <NSpin size="small" />
-            <span class="state-text">正在读取采样列表…</span>
-          </div>
+          <StateBlock
+            v-else-if="sampleLoading"
+            class="fill"
+            state="loading"
+            title="正在读取采样列表…"
+          />
 
-          <!-- 采样空态 -->
-          <NEmpty
-            v-else
-            class="state-block"
-            :description="selectedBank ? '该银行暂无采样数据' : '未选择银行'"
-          >
-            <template #icon>
-              <span class="state-icon">🔇</span>
-            </template>
-            <template #extra>
-              <span class="state-hint" v-if="!selectedBank">先在左侧选一个音频银行</span>
-            </template>
-          </NEmpty>
+          <!-- 采样空态（错误已单独占位，避免两个态同时出现） -->
+          <StateBlock
+            v-else-if="!sampleError"
+            class="fill"
+            state="empty"
+            icon="mute"
+            :title="selectedBank ? '该银行暂无采样数据' : '未选择银行'"
+            :description="
+              selectedBank
+                ? '换一个银行看看，或确认该 FSB 内确实含有采样'
+                : '先在左侧选一个音频银行，再在列表里点一条试听'
+            "
+          />
         </div>
       </NCard>
 
@@ -752,30 +796,24 @@ onMounted(() => {
               </div>
 
               <!-- 未实现提示（后端明确回 unsupported 才显示） -->
-              <NEmpty
+              <StateBlock
                 v-else-if="selectedSample && !sampleLoading && audioPreviewUnsupported"
-                class="state-block inline"
-                description="音频预览暂未实现"
-              >
-                <template #icon>
-                  <span class="state-icon">🔇</span>
-                </template>
-                <template #extra>
-                  <span class="state-hint">
-                    后端 bank.preview 返回 unsupported：该样本暂无法解码（需 FMOD 链路）
-                  </span>
-                </template>
-              </NEmpty>
+                class="state-inline"
+                state="empty"
+                icon="mute"
+                title="音频预览暂未实现"
+                description="后端 bank.preview 返回 unsupported：该样本暂无法解码（需 FMOD 链路）"
+              />
 
               <!-- 未选中采样 -->
-              <NEmpty v-else class="state-block inline" description="请选择一个采样以预览">
-                <template #icon>
-                  <span class="state-icon">🎧</span>
-                </template>
-                <template #extra>
-                  <span class="state-hint">点击中间列表里的任意一行</span>
-                </template>
-              </NEmpty>
+              <StateBlock
+                v-else
+                class="state-inline"
+                state="empty"
+                icon="audio"
+                title="请选择一个采样以预览"
+                description="点击中间列表里的任意一行"
+              />
             </div>
 
             <!-- 当前样本元信息（胶囊） -->
@@ -843,14 +881,14 @@ onMounted(() => {
             </NDescriptionsItem>
           </NDescriptions>
 
-          <NEmpty v-else class="state-block" description="未选择银行">
-            <template #icon>
-              <span class="state-icon">🎵</span>
-            </template>
-            <template #extra>
-              <span class="state-hint">选中后这里显示试听与银行详情</span>
-            </template>
-          </NEmpty>
+          <StateBlock
+            v-else
+            class="fill"
+            state="empty"
+            icon="audio"
+            title="未选择银行"
+            description="在左侧选中一个银行后，这里显示试听与银行详情"
+          />
         </div>
       </NCard>
     </div>
@@ -867,82 +905,9 @@ onMounted(() => {
   background: var(--lme-bg-base);
 }
 
-/* ── 顶部细进度条 ── */
-.loading-bar {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 2px;
-  overflow: hidden;
-  z-index: var(--lme-z-raised);
-  background: var(--lme-progressbar-bg);
-}
+/* 顶部细进度条改用工具类 .lme-loadingbar（见 tokens.css），此处不再重复实现 */
 
-.loading-bar::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  width: 40%;
-  border-radius: var(--lme-radius-full);
-  background: var(--lme-progressbar-fill);
-  animation: loading-slide 1s var(--lme-ease-standard) infinite;
-}
-
-@keyframes loading-slide {
-  from {
-    transform: translateX(-100%);
-  }
-  to {
-    transform: translateX(350%);
-  }
-}
-
-/* ── 页头工具栏 ── */
-.page-toolbar {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-lg);
-  padding: var(--lme-gap-sm) var(--lme-gap-lg);
-  background: var(--lme-bg-panel);
-  border-bottom: 1px solid var(--lme-border);
-}
-
-.toolbar-leading {
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-sm);
-  min-width: 0;
-}
-
-.toolbar-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: var(--lme-radius-md);
-  background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
-  font-size: var(--lme-font-size-md);
-  flex-shrink: 0;
-}
-
-.toolbar-titles {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.toolbar-name {
-  margin: 0;
-  font-size: var(--lme-font-size-lg);
-  font-weight: var(--lme-font-weight-semibold);
-  line-height: var(--lme-line-height-tight);
-  color: var(--lme-text-primary);
-}
-
+/* ── 页头右侧的选中银行摘要（计数与操作按钮由 PageHeader 插槽承载） ── */
 .toolbar-sub {
   display: flex;
   align-items: center;
@@ -962,25 +927,6 @@ onMounted(() => {
 
 .toolbar-dot {
   color: var(--lme-text-disabled);
-}
-
-.toolbar-actions {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-md);
-  flex-shrink: 0;
-}
-
-/* ── 错误态（库组件 NAlert，仅补外边距） ── */
-.error-banner {
-  flex-shrink: 0;
-  margin: var(--lme-gap-md) var(--lme-gap-lg) 0;
-  font-size: var(--lme-font-size-sm);
-}
-
-.error-banner.inline {
-  margin: var(--lme-gap-sm) var(--lme-gap-md);
 }
 
 /* ── 三栏栅格 ── */
@@ -1116,8 +1062,9 @@ onMounted(() => {
 }
 
 .panel-search-icon {
-  font-size: var(--lme-font-size-sm);
-  opacity: 0.6;
+  display: inline-flex;
+  align-items: center;
+  color: var(--lme-text-muted);
 }
 
 .filter-row {
@@ -1461,7 +1408,7 @@ onMounted(() => {
   max-width: 100%;
   font-size: var(--lme-font-size-xs);
   color: var(--lme-text-muted);
-  padding: 2px var(--lme-gap-sm);
+  padding: var(--lme-gap-2xs) var(--lme-gap-sm);
   background: var(--lme-bg-input);
   border-radius: var(--lme-radius-sm);
   overflow: hidden;
@@ -1469,38 +1416,13 @@ onMounted(() => {
   white-space: nowrap;
 }
 
-/* ── 空态 / 加载态 ── */
-.state-block {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--lme-gap-sm);
-  padding: var(--lme-gap-xl) var(--lme-gap-md);
-  color: var(--lme-text-muted);
-  text-align: center;
+/* ── 三态块（StateBlock 自带排版；这里只调面板内的撑满与内嵌内边距） ── */
+.panel-body > .state-block {
+  min-height: 0;
 }
 
-.state-block.inline {
-  flex: 0 0 auto;
+/* 试听卡里的内嵌态：不撑满，收一点内边距 */
+.state-inline {
   padding: var(--lme-gap-lg) var(--lme-gap-md);
-}
-
-.state-icon {
-  font-size: 28px;
-  opacity: 0.7;
-}
-
-.state-text {
-  font-size: var(--lme-font-size-sm);
-  color: var(--lme-text-secondary);
-}
-
-.state-hint {
-  font-size: var(--lme-font-size-xs);
-  color: var(--lme-text-disabled);
-  line-height: var(--lme-line-height-relaxed);
-  max-width: 280px;
 }
 </style>

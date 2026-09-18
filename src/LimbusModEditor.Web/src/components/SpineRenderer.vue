@@ -1,20 +1,33 @@
 <template>
   <div class="spine-renderer">
     <canvas ref="canvasRef" class="spine-canvas" :width="width" :height="height"></canvas>
-    <div v-if="loading" class="spine-loading">加载中…</div>
-    <div v-if="error" class="spine-error">{{ error }}</div>
+    <div v-if="loading" class="spine-loading">
+      <AppIcon name="loader" :size="14" class="spine-spin" />
+      <span>加载中…</span>
+    </div>
+    <div v-if="error" class="spine-error">
+      <AppIcon name="error" :size="14" />
+      <span>{{ error }}</span>
+    </div>
     <div v-if="!loading && !error && animations.length > 0" class="spine-controls">
       <select v-model="selectedAnimation" class="spine-select" @change="changeAnimation">
         <option v-for="anim in animations" :key="anim" :value="anim">{{ anim }}</option>
       </select>
-      <button class="spine-btn" @click="togglePlay">{{ playing ? '⏸ 暂停' : '▶ 播放' }}</button>
-      <button class="spine-btn" @click="resetAnimation">⏮ 重置</button>
+      <button class="spine-btn" @click="togglePlay">
+        <AppIcon :name="playing ? 'pause' : 'play'" :size="13" />
+        {{ playing ? '暂停' : '播放' }}
+      </button>
+      <button class="spine-btn" @click="resetAnimation">
+        <AppIcon name="skipBack" :size="13" />
+        重置
+      </button>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch } from 'vue'
+import AppIcon from '@/components/AppIcon.vue'
 import { spine } from './spine-runtime'
 
 const props = defineProps<{
@@ -227,7 +240,7 @@ function resetAnimation() {
 .spine-canvas {
   border: 1px solid var(--lme-border);
   border-radius: var(--lme-radius-sm);
-  background: var(--wiki-canvas-bg);
+  background: var(--lme-canvas-bg);
 }
 
 .spine-loading {
@@ -235,13 +248,26 @@ function resetAnimation() {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--lme-gap-xs);
   color: var(--lme-text-secondary);
+  font-size: var(--lme-font-size-sm);
+}
+
+.spine-spin {
+  animation: lme-spin 1.1s linear infinite;
 }
 
 .spine-error {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--lme-gap-xs);
   color: var(--lme-error);
   padding: var(--lme-gap-md);
   text-align: center;
+  font-size: var(--lme-font-size-sm);
 }
 
 .spine-controls {
@@ -256,19 +282,29 @@ function resetAnimation() {
   border: 1px solid var(--lme-border);
   background: var(--lme-bg-input);
   color: var(--lme-text-primary);
+  font-family: var(--lme-font-family);
+  font-size: var(--lme-font-size-sm);
 }
 
 .spine-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--lme-gap-xs);
   padding: var(--lme-gap-xs) var(--lme-gap-sm);
   border-radius: var(--lme-radius-sm);
   border: 1px solid var(--lme-border);
   background: var(--lme-bg-input);
   color: var(--lme-text-primary);
+  font-family: var(--lme-font-family);
+  font-size: var(--lme-font-size-sm);
   cursor: pointer;
+  transition: background var(--lme-dur-fast) var(--lme-ease-standard),
+    color var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
 .spine-btn:hover {
   background: var(--lme-accent);
-  color: var(--wiki-infobox-header-text);
+  border-color: var(--lme-accent);
+  color: var(--lme-accent-contrast);
 }
 </style>

@@ -1,81 +1,192 @@
 <script setup lang="ts">
-// v3 外壳（组件库版 Naive UI）：
-//   顶部命令栏（品牌 + 全局命令面板入口 + 常驻入口）+ 工作区 tab 条
-//   命令面板由 NModal + NInput 实现；主题从 tokens.css 派生（见 src/theme/naiveTheme.ts）
-// 路由与 v1/v2 完全一致，功能无损
+/**
+ * 应用外壳（VS Code 式布局）。
+ *
+ *  ┌──────────────────────────────────────────────┐
+ *  │ 工具条：品牌 + 命令面板入口 + 外观控制            │
+ *  ├────┬─────────────────────────────────────────┤
+ *  │活动 │                                         │
+ *  │栏  │           页面宿主（router-view）          │
+ *  │48px│                                         │
+ *  ├────┴─────────────────────────────────────────┤
+ *  │ 状态栏：项目 / 进度 / 通知 / 连接 / 版本          │
+ *  └──────────────────────────────────────────────┘
+ *
+ * 导航收敛到左侧活动栏（唯一入口），不再有工作区 Tab 条。
+ * 路由、query 深链、各页 IPC 调用一律未改。
+ */
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { useRouter, useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import {
   NConfigProvider,
   NDialogProvider,
   NMessageProvider,
   NNotificationProvider,
-  NTabs,
-  NTab,
   NTooltip,
-  NButton,
-  NInput,
   zhCN,
   dateZhCN,
 } from 'naive-ui'
 import CommandPalette from '@/components/CommandPalette.vue'
-import { buildThemeOverrides, lmeDarkTheme } from '@/theme/naiveTheme'
+import StatusBar from '@/components/StatusBar.vue'
+import AppearanceControl from '@/components/AppearanceControl.vue'
+import AppIcon from '@/components/AppIcon.vue'
+import type { IconName } from '@/components/icons'
+import { useAppearanceStore } from '@/stores/appearance'
+import { useStatusStore } from '@/stores/status'
 
 const router = useRouter()
 const route = useRoute()
+const appearance = useAppearanceStore()
+const status = useStatusStore()
 
-const navItems = [
-  { key: 'assets', label: '资源', icon: '📦', route: '/assets' },
-  { key: 'bank', label: '音频', icon: '🎵', route: '/bank' },
-  { key: 'text', label: '文本', icon: '📝', route: '/text' },
-  { key: 'static', label: '静态数据', icon: '📊', route: '/static' },
-  { key: 'export', label: '导出', icon: '📤', route: '/export' },
-  { key: 'project', label: '项目', icon: '📁', route: '/project' },
-  { key: 'settings', label: '设置', icon: '⚙️', route: '/settings' },
-  { key: 'help', label: '帮助', icon: '❓', route: '/help' },
-  { key: 'wiki', label: '维基', icon: '📖', route: '/wiki' },
+interface NavItem {
+  key: string
+  label: string
+  icon: IconName
+  route: string
+  /** 一句话说明（悬停提示用） */
+  hint: string
+  /** 快捷键序号（Ctrl+N） */
+  order: number
+}
+
+/** 主模块（活动栏上半部分） */
+const modules: NavItem[] = [
+  {
+    key: 'assets',
+    label: '资源',
+    icon: 'assets',
+    route: '/assets',
+    hint: '浏览、预览与替换游戏资源',
+    order: 1,
+  },
+  {
+    key: 'bank',
+    label: '音频',
+    icon: 'audio',
+    route: '/bank',
+    hint: '试听与替换音频库中的音效',
+    order: 2,
+  },
+  {
+    key: 'text',
+    label: '文本',
+    icon: 'text',
+    route: '/text',
+    hint: '编辑游戏语言文本并生成补丁',
+    order: 3,
+  },
+  {
+    key: 'static',
+    label: '静态数据',
+    icon: 'staticData',
+    route: '/static',
+    hint: '查看与修改静态数据表',
+    order: 4,
+  },
+  {
+    key: 'export',
+    label: '导出',
+    icon: 'export',
+    route: '/export',
+    hint: '把改动打包成可用的模组',
+    order: 5,
+  },
+  {
+    key: 'project',
+    label: '项目',
+    icon: 'project',
+    route: '/project',
+    hint: '新建 / 打开 / 保存模组项目',
+    order: 6,
+  },
+  {
+    key: 'wiki',
+    label: '维基',
+    icon: 'wiki',
+    route: '/wiki',
+    hint: '查阅游戏资料，并直达对应资源',
+    order: 7,
+  },
+]
+
+/** 次要入口（活动栏下半部分） */
+const secondary: NavItem[] = [
+  { key: 'help', label: '帮助', icon: 'help', route: '/help', hint: '使用指南与快捷键', order: 0 },
+  { key: 'settings', label: '设置', icon: 'settings', route: '/settings', hint: '路径、外观与偏好', order: 0 },
 ]
 
 const paletteOpen = ref(false)
 
-const isWikiZone = computed(() => route.path.startsWith('/wiki'))
-
-/** 库主题：维基区主色用金色，其余用紫色（两者都来自 tokens.css） */
-const themeOverrides = computed(() =>
-  buildThemeOverrides(isWikiZone.value ? '--wiki-accent' : '--lme-accent'),
-)
-
 const activeKey = computed(() => {
   const path = route.path
-  if (path.startsWith('/wiki')) return 'wiki'
-  const hit = navItems.find((i) => path === i.route || path.startsWith(i.route + '/'))
+  const hit = [...modules, ...secondary].find(
+    (i) => path === i.route || path.startsWith(i.route + '/'),
+  )
   return hit?.key ?? 'assets'
 })
 
-function onTabChange(key: string) {
-  const item = navItems.find((i) => i.key === key)
-  if (item) void router.push(item.route)
-}
+/** 维基区（含子路由）——用于在工具条上提示当前区域 */
+const currentModule = computed(() =>
+  [...modules, ...secondary].find((i) => i.key === activeKey.value),
+)
 
 function navigate(routePath: string) {
+  if (route.path === routePath) return
   void router.push(routePath)
 }
 
+function togglePalette() {
+  paletteOpen.value = !paletteOpen.value
+}
+
 function onGlobalKeydown(e: KeyboardEvent) {
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+  const mod = e.ctrlKey || e.metaKey
+
+  // Ctrl+K / Ctrl+Shift+P：命令面板
+  if (mod && !e.altKey && (e.key.toLowerCase() === 'k' || (e.shiftKey && e.key.toLowerCase() === 'p'))) {
     e.preventDefault()
-    paletteOpen.value = !paletteOpen.value
+    togglePalette()
+    return
+  }
+
+  // Ctrl+,：设置
+  if (mod && e.key === ',') {
+    e.preventDefault()
+    navigate('/settings')
+    return
+  }
+
+  // Ctrl+1..7：切换主模块
+  if (mod && !e.shiftKey && !e.altKey && /^[1-9]$/.test(e.key)) {
+    const target = modules.find((m) => m.order === Number(e.key))
+    if (target) {
+      e.preventDefault()
+      navigate(target.route)
+    }
+    return
+  }
+
+  // Alt+← / Alt+→：前进后退
+  if (e.altKey && !mod && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    e.preventDefault()
+    if (e.key === 'ArrowLeft') router.back()
+    else router.forward()
   }
 }
 
-onMounted(() => window.addEventListener('keydown', onGlobalKeydown, true))
+onMounted(() => {
+  window.addEventListener('keydown', onGlobalKeydown, true)
+  // 全局状态订阅（宿主事件 + 在途请求）只挂一次
+  status.attach()
+})
 onUnmounted(() => window.removeEventListener('keydown', onGlobalKeydown, true))
 </script>
 
 <template>
   <NConfigProvider
-    :theme="lmeDarkTheme"
-    :theme-overrides="themeOverrides"
+    :theme="appearance.baseTheme"
+    :theme-overrides="appearance.themeOverrides"
     :locale="zhCN"
     :date-locale="dateZhCN"
   >
@@ -83,67 +194,95 @@ onUnmounted(() => window.removeEventListener('keydown', onGlobalKeydown, true))
       <NDialogProvider>
         <NNotificationProvider>
           <div class="app-shell">
-            <!-- 顶部命令栏 -->
-            <header class="topbar">
-              <div class="brand" title="回到资源工作台" @click="navigate('/assets')">
+            <!-- ══ 工具条 ══ -->
+            <header class="toolbar">
+              <div class="brand" title="Limbus Mod Editor" @click="navigate('/assets')">
                 <span class="brand-mark">LME</span>
                 <span class="brand-name">Limbus Mod Editor</span>
+                <span v-if="currentModule" class="brand-context">{{ currentModule.label }}</span>
               </div>
 
-              <!-- 命令面板入口（Naive UI Input，只读 + 点击唤起） -->
-              <div class="command-trigger" @click="paletteOpen = true">
-                <NInput
-                  readonly
-                  class="command-input"
-                  placeholder="搜索或跳转：工作台、维基分类…"
-                >
-                  <template #prefix>
-                    <span class="command-trigger-icon">🔍</span>
-                  </template>
-                  <template #suffix>
-                    <kbd class="command-trigger-kbd">Ctrl+K</kbd>
-                  </template>
-                </NInput>
-              </div>
+              <button class="command-trigger" title="搜索或跳转（Ctrl+K）" @click="togglePalette">
+                <AppIcon name="search" :size="14" class="ct-icon" />
+                <span class="ct-text">搜索或跳转：工作台、维基分类…</span>
+                <kbd class="lme-kbd ct-kbd">Ctrl K</kbd>
+              </button>
 
-              <div class="topbar-actions">
-                <NTooltip placement="bottom" :show-arrow="false">
-                  <template #trigger>
-                    <NButton quaternary circle @click="navigate('/help')">❓</NButton>
-                  </template>
-                  帮助
-                </NTooltip>
-                <NTooltip placement="bottom" :show-arrow="false">
-                  <template #trigger>
-                    <NButton quaternary circle @click="navigate('/settings')">⚙️</NButton>
-                  </template>
-                  设置
-                </NTooltip>
+              <div class="toolbar-actions">
+                <AppearanceControl />
               </div>
             </header>
 
-            <!-- 工作区 tab 条 -->
-            <nav class="workspace-tabs">
-              <NTabs
-                type="line"
-                size="small"
-                :value="activeKey"
-                class="workspace-tabs-inner"
-                @update:value="onTabChange"
-              >
-                <NTab v-for="item in navItems" :key="item.key" :name="item.key">
-                  <span class="workspace-tab-icon">{{ item.icon }}</span>
-                  <span class="workspace-tab-label">{{ item.label }}</span>
-                </NTab>
-              </NTabs>
-            </nav>
+            <!-- ══ 主体：活动栏 + 页面 ══ -->
+            <div class="app-body">
+              <nav class="activitybar" aria-label="主导航">
+                <div class="ab-group">
+                  <NTooltip
+                    v-for="item in modules"
+                    :key="item.key"
+                    placement="right"
+                    :show-arrow="false"
+                    :delay="300"
+                  >
+                    <template #trigger>
+                      <button
+                        class="ab-item"
+                        :class="{ active: activeKey === item.key }"
+                        :aria-current="activeKey === item.key ? 'page' : undefined"
+                        @click="navigate(item.route)"
+                      >
+                        <AppIcon :name="item.icon" :size="20" :stroke="1.7" />
+                        <span class="ab-indicator" />
+                      </button>
+                    </template>
+                    <div class="ab-tip">
+                      <span class="ab-tip-title">{{ item.label }}</span>
+                      <span class="ab-tip-hint">{{ item.hint }}</span>
+                      <span v-if="item.order > 0" class="ab-tip-key">
+                        快捷键 <kbd class="lme-kbd">Ctrl {{ item.order }}</kbd>
+                      </span>
+                    </div>
+                  </NTooltip>
+                </div>
 
-            <!-- 页面宿主 -->
-            <main class="page-host">
-              <router-view />
-            </main>
+                <div class="ab-spacer" />
 
-            <!-- 全局命令面板 -->
+                <div class="ab-group">
+                  <NTooltip
+                    v-for="item in secondary"
+                    :key="item.key"
+                    placement="right"
+                    :show-arrow="false"
+                    :delay="300"
+                  >
+                    <template #trigger>
+                      <button
+                        class="ab-item"
+                        :class="{ active: activeKey === item.key }"
+                        :aria-current="activeKey === item.key ? 'page' : undefined"
+                        @click="navigate(item.route)"
+                      >
+                        <AppIcon :name="item.icon" :size="20" :stroke="1.7" />
+                        <span class="ab-indicator" />
+                      </button>
+                    </template>
+                    <div class="ab-tip">
+                      <span class="ab-tip-title">{{ item.label }}</span>
+                      <span class="ab-tip-hint">{{ item.hint }}</span>
+                    </div>
+                  </NTooltip>
+                </div>
+              </nav>
+
+              <main class="page-host">
+                <router-view />
+              </main>
+            </div>
+
+            <!-- ══ 状态栏 ══ -->
+            <StatusBar />
+
+            <!-- ══ 命令面板 ══ -->
             <CommandPalette v-model:open="paletteOpen" />
           </div>
         </NNotificationProvider>
@@ -158,121 +297,221 @@ onUnmounted(() => window.removeEventListener('keydown', onGlobalKeydown, true))
   flex-direction: column;
   height: 100%;
   overflow: hidden;
+  background: var(--lme-bg-base);
 }
 
-/* ── 顶部命令栏 ── */
-.topbar {
-  height: var(--lme-topbar-height);
+/* ══ 工具条 ══ */
+.toolbar {
+  height: var(--lme-toolbar-height);
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: var(--lme-gap-lg);
+  gap: var(--lme-gap-md);
   padding: 0 var(--lme-gap-md);
-  background: var(--lme-topbar-bg);
-  border-bottom: 1px solid var(--lme-topbar-border);
+  background: var(--lme-toolbar-bg);
+  border-bottom: 1px solid var(--lme-toolbar-border);
 }
 
 .brand {
   display: flex;
   align-items: center;
   gap: var(--lme-gap-sm);
+  flex-shrink: 0;
   cursor: pointer;
   user-select: none;
-  flex-shrink: 0;
 }
 
 .brand-mark {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
   border-radius: var(--lme-radius-md);
   background: var(--lme-brand-mark-bg);
   color: var(--lme-brand-mark-text);
-  font-size: var(--lme-font-size-xs);
+  font-size: var(--lme-font-size-2xs);
   font-weight: var(--lme-font-weight-bold);
-  letter-spacing: 0.5px;
+  letter-spacing: 0.4px;
 }
 
 .brand-name {
-  font-size: var(--lme-font-size-md);
+  font-size: var(--lme-font-size-sm);
   font-weight: var(--lme-font-weight-semibold);
   color: var(--lme-text-primary);
   white-space: nowrap;
 }
 
-.command-trigger {
-  flex: 1;
-  max-width: 520px;
-  margin: 0 auto;
-  cursor: pointer;
-}
-
-.command-trigger :deep(.n-input) {
-  background: var(--lme-cmdbar-bg);
+/* 当前区域：跟随活动栏，给出「我在哪」 */
+.brand-context {
+  padding: 1px 7px;
   border-radius: var(--lme-radius-full);
-  cursor: pointer;
-}
-
-.command-trigger :deep(.n-input:hover) {
-  border-color: var(--lme-accent);
-}
-
-.command-trigger-icon {
-  font-size: var(--lme-font-size-sm);
-  opacity: 0.8;
-}
-
-.command-trigger-kbd {
-  padding: 1px 6px;
-  background: var(--lme-cmdbar-kbd-bg);
-  border: 1px solid var(--lme-cmdbar-kbd-border);
-  border-radius: var(--lme-radius-sm);
-  color: var(--lme-cmdbar-kbd-text);
-  font-size: var(--lme-font-size-xs);
-  font-family: var(--lme-font-mono);
+  background: var(--lme-accent-subtle);
+  color: var(--lme-accent);
+  font-size: var(--lme-font-size-2xs);
+  font-weight: var(--lme-font-weight-medium);
   white-space: nowrap;
 }
 
-.topbar-actions {
+/* ── 命令面板入口 ── */
+.command-trigger {
+  flex: 1;
+  max-width: 560px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-sm);
+  height: var(--lme-control-height-md);
+  padding: 0 var(--lme-gap-sm);
+  border: 1px solid var(--lme-cmdbar-border);
+  border-radius: var(--lme-radius-md);
+  background: var(--lme-cmdbar-bg);
+  color: var(--lme-cmdbar-placeholder);
+  font-family: inherit;
+  font-size: var(--lme-font-size-sm);
+  cursor: pointer;
+  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard),
+    background var(--lme-dur-fast) var(--lme-ease-standard);
+}
+
+.command-trigger:hover {
+  border-color: var(--lme-accent-border);
+  background: var(--lme-bg-elevated);
+}
+
+.ct-icon {
+  color: var(--lme-text-muted);
+}
+
+.ct-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.ct-kbd {
+  flex-shrink: 0;
+}
+
+.toolbar-actions {
   display: flex;
   align-items: center;
   gap: var(--lme-gap-xs);
   flex-shrink: 0;
 }
 
-/* ── 工作区 tab 条 ── */
-.workspace-tabs {
-  height: var(--lme-tabbar-height);
-  flex-shrink: 0;
+/* ══ 主体 ══ */
+.app-body {
+  flex: 1;
   display: flex;
-  align-items: stretch;
-  padding: 0 var(--lme-gap-sm);
-  background: var(--lme-tabbar-bg);
-  border-bottom: 1px solid var(--lme-tabbar-border);
+  min-height: 0;
   overflow: hidden;
 }
 
-.workspace-tabs-inner {
+/* ── 活动栏 ── */
+.activitybar {
+  width: var(--lme-activitybar-width);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  padding: var(--lme-gap-xs) 0;
+  background: var(--lme-activitybar-bg);
+  border-right: 1px solid var(--lme-activitybar-border);
+}
+
+.ab-group {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.ab-spacer {
+  flex: 1;
+}
+
+.ab-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 100%;
+  height: 42px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--lme-activitybar-item-text);
+  cursor: pointer;
+  transition: color var(--lme-dur-fast) var(--lme-ease-standard),
+    background var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
-.workspace-tabs :deep(.n-tabs-nav) {
-  height: var(--lme-tabbar-height);
+.ab-item:hover {
+  color: var(--lme-activitybar-item-hover-text);
+  background: var(--lme-activitybar-item-hover-bg);
 }
 
-.workspace-tab-icon {
-  font-size: var(--lme-font-size-md);
-  margin-right: var(--lme-gap-xs);
+.ab-item.active {
+  color: var(--lme-activitybar-item-active-text);
+  background: var(--lme-activitybar-item-active-bg);
+}
+
+/* 左侧激活指示条（VS Code 特征） */
+.ab-indicator {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 2px;
+  height: 0;
+  border-radius: 0 var(--lme-radius-full) var(--lme-radius-full) 0;
+  background: var(--lme-activitybar-indicator);
+  transform: translateY(-50%);
+  transition: height var(--lme-dur-base) var(--lme-ease-emphasized);
+}
+
+.ab-item.active .ab-indicator {
+  height: 22px;
+}
+
+/* ── 活动栏提示气泡 ── */
+.ab-tip {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 240px;
+}
+
+.ab-tip-title {
+  font-size: var(--lme-font-size-sm);
+  font-weight: var(--lme-font-weight-semibold);
+  color: var(--lme-text-primary);
+}
+
+.ab-tip-hint {
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-secondary);
+  line-height: var(--lme-line-height-normal);
+}
+
+.ab-tip-key {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 2px;
+  font-size: var(--lme-font-size-2xs);
+  color: var(--lme-text-muted);
 }
 
 /* ── 页面宿主 ── */
 .page-host {
   flex: 1;
-  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  min-height: 0;
+  overflow: hidden;
 }
 </style>

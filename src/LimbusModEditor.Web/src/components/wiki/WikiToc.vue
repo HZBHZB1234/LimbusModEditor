@@ -149,6 +149,6 @@ const flatItems = computed<FlatItem[]>(() => {
 }
 
 .wiki-toc-back-top:hover {
-  color: var(--wiki-accent-strong);
+  color: var(--lme-accent-hover);
 }
 </style>

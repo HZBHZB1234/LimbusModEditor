@@ -17,16 +17,18 @@
 // ③ spine.export —— 把某条（或勾选的若干条）的三件套**真正写到磁盘**（此前后端已实现，
 //    但前端没有调用点，用户在界面上点不到导出）。流程：dialog.folderPick 选目录 →
 //    二次确认覆盖策略 → spine.export（带 operationId）→ 进度条 + 可取消 → 中文结果反馈。
+//
+// ui-redesign r6：页头走 PageHeader、三态走 StateBlock、成功失败标记与翻页符号换 AppIcon；
+// 导出额外登记进全局状态 store（progress 事件订阅与 IPC 调用时序零改动）。
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   NAlert,
   NButton,
-  NEmpty,
   NInput,
   NProgress,
-  NSpin,
   NSwitch,
   NTag,
+  NTooltip,
   useDialog,
   useMessage,
 } from 'naive-ui'
@@ -39,12 +41,17 @@ import type {
   SpineResolveResult,
 } from '@/ipc'
 import WikiShell from '@/components/WikiShell.vue'
+import PageHeader from '@/components/PageHeader.vue'
+import StateBlock from '@/components/StateBlock.vue'
+import AppIcon from '@/components/AppIcon.vue'
 import WikiSpineViewer from '@/components/wiki/WikiSpineViewer.vue'
+import { useStatusStore } from '@/stores/status'
 
 const PAGE_SIZE = 60
 
 const message = useMessage()
 const dialog = useDialog()
+const status = useStatusStore()
 
 const loading = ref(false)
 const error = ref<string | null>(null)
@@ -211,6 +218,10 @@ async function exportItems(targets: SpineCatalogItem[]) {
     exportFailed.value = []
     exportSummary.value = ''
     exportOperationId = `spine-export-${Date.now()}`
+    // 全局状态登记：与 spine.export 的 operationId 同 id，
+    // progress 事件到达时 store 会把进度补进同一条活动（本地进度条逻辑不变）。
+    const operationId = exportOperationId
+    status.beginActivity(operationId, `正在导出 ${label}`)
 
     // 解一套要整读一个大 bundle（实测 2～5s），批量线性叠加；给足超时余量。
     const timeoutMs = Math.max(120000, refKeys.length * 60000)
@@ -223,8 +234,10 @@ async function exportItems(targets: SpineCatalogItem[]) {
   } catch (e: unknown) {
     const reason = e instanceof Error ? e.message : String(e)
     message.error(`导出失败：${reason}`)
+    status.notify('error', `导出 Spine 失败：${reason}`)
     exportFailed.value = [reason]
   } finally {
+    if (exportOperationId) status.endActivity(exportOperationId)
     exporting.value = false
     exportProgress.value = null
     exportOperationId = null
@@ -255,6 +268,7 @@ function cancelExport() {
   if (!exportOperationId) return
   ipc.cancel(exportOperationId)
   message.info('已请求取消导出，正在收尾…')
+  status.notify('info', '已请求取消 Spine 导出，正在收尾')
 }
 
 /** 把响应里的逐条明细摊成中文结果；失败逐条显示，不静默。 */
@@ -285,10 +299,13 @@ function reportExport(result: SpineExportResponse) {
   const cancelledNote = result.cancelled ? '（本次导出被取消，已写出的文件保留）' : ''
   if (exportFailed.value.length > 0) {
     message.error(`${exportSummary.value} · 失败 ${exportFailed.value.length} 条${cancelledNote}`)
+    status.notify('error', `Spine 导出完成，但有 ${exportFailed.value.length} 条失败${cancelledNote}`)
   } else if (skippedFiles > 0) {
     message.warning(`${exportSummary.value} · 跳过 ${skippedFiles} 个已存在文件${cancelledNote}`)
+    status.notify('warning', `${exportSummary.value} · 跳过 ${skippedFiles} 个已存在文件${cancelledNote}`)
   } else {
     message.success(`${exportSummary.value}${cancelledNote}`)
+    status.notify('success', `${exportSummary.value}${cancelledNote}`)
   }
 }
 
@@ -303,6 +320,12 @@ unsubscribeProgress = ipc.on('progress', (payload) => {
   const p = payload as ProgressPayload
   if (!exportOperationId || p.operationId !== exportOperationId) return
   exportProgress.value = p
+  // 额外登记到全局状态（本地进度条逻辑保持不变）
+  status.updateActivity(exportOperationId, {
+    detail: p.message || '',
+    current: p.total ? p.current : null,
+    total: p.total ? p.total : null,
+  })
 })
 </script>
 
@@ -315,239 +338,300 @@ unsubscribeProgress = ipc.on('progress', (payload) => {
     ]"
   >
     <div class="spine-browser">
-      <header class="spine-head">
-        <h1 class="spine-title">Spine 总览</h1>
-        <p class="spine-sub">
-          全库 Spine 挂点（人格立绘 + 战斗用的敌人 / 异想体 / 人格 / E.G.O）。名册只列清单，
-          点开才解那一条的三件套 —— 解一套要整读一个大 bundle，全量预解不现实。
-        </p>
-        <div class="spine-stats">
-          <NTag size="small" :bordered="false">挂点 {{ summary.total }}</NTag>
-          <NTag size="small" type="info" :bordered="false">已被页面绑定 {{ summary.bound }}</NTag>
-          <NTag size="small" type="warning" :bordered="false">未绑定 {{ summary.unbound }}</NTag>
-          <NTag size="small" type="error" :bordered="false">
-            bundle 不在本机 {{ summary.bundleMissing }}
-          </NTag>
-        </div>
-      </header>
+      <!-- 顶部细进度条（统一工具类 .lme-loadingbar） -->
+      <div v-if="loading" class="lme-loadingbar" aria-hidden="true" />
 
-      <div class="spine-filters">
-        <NInput
-          v-model:value="keyword"
-          placeholder="按骨架名或路径搜索（如 fairy_ism、SD/Enemy）"
-          clearable
-          style="width: 320px"
-          @keyup.enter="applyFilters"
-        />
-        <NButton size="small" type="primary" @click="applyFilters">搜索</NButton>
-        <label class="spine-switch">
-          <NSwitch v-model:value="onlyUnbound" size="small" @update:value="applyFilters" />
-          <span>只看未被页面绑定的</span>
-        </label>
-        <label class="spine-switch">
-          <NSwitch v-model:value="showMissing" size="small" />
-          <span>显示 bundle 不在本机的</span>
-        </label>
-        <NButton
-          size="small"
-          secondary
-          :disabled="exporting || selectedKeys.length === 0"
-          @click="exportItems(items.filter((i) => selectedKeys.includes(i.refKey)))"
-        >
-          导出勾选{{ selectedKeys.length > 0 ? `（${selectedKeys.length}）` : '' }}
-        </NButton>
-        <NButton v-if="selectedKeys.length > 0" size="small" text @click="clearSelection">
-          清空勾选
-        </NButton>
-      </div>
-
-      <!-- 导出进度与取消（progress 事件带 operationId，见契约 §4） -->
-      <div v-if="exporting" class="spine-export-progress">
-        <NProgress
-          type="line"
-          :percentage="
-            exportProgress && exportProgress.total > 0
-              ? Math.round((exportProgress.current / exportProgress.total) * 100)
-              : 0
-          "
-          :indeterminate="!exportProgress || exportProgress.total === 0"
-          :show-indicator="false"
-          size="small"
-        />
-        <span class="spine-export-progress-text">
-          {{ exportProgress?.message ?? '正在解三件套并写盘（解一套要整读它所在的 bundle，可能要几秒）…' }}
-        </span>
-        <NButton size="tiny" secondary type="warning" @click="cancelExport">取消导出</NButton>
-      </div>
-
-      <!-- 结果反馈：成功汇总 + 逐条失败中文原因（失败不静默） -->
-      <NAlert v-if="exportSummary" type="default" :bordered="false" class="spine-alert">
-        <div class="spine-export-title">{{ exportSummary }}</div>
-        <div v-if="exportReport.length > 0" class="spine-export-lines">
-          <div v-for="line in exportReport" :key="line" class="spine-export-line">✓ {{ line }}</div>
-        </div>
-        <div v-if="exportFailed.length > 0" class="spine-export-lines">
-          <div v-for="line in exportFailed" :key="line" class="spine-export-line spine-export-line-fail">
-            ✗ {{ line }}
+      <!-- ── 页头：标题 + 说明 + 统计 + 批量导出 ── -->
+      <PageHeader
+        class="spine-head"
+        icon="wikiSpine"
+        title="Spine 总览"
+        description="浏览全库 Spine 挂点（人格立绘 + 战斗用的敌人 / 异想体 / 人格 / E.G.O）。"
+        hint="点左边一条才解它的三件套 —— 解一套要整读一个大 bundle，全量预解不现实；勾选后可批量导出到磁盘。"
+        hint-key="wiki-spine"
+      >
+        <template #meta>
+          <div class="spine-stats">
+            <NTag size="small" :bordered="false">挂点 {{ summary.total }}</NTag>
+            <NTag size="small" type="info" :bordered="false">已被页面绑定 {{ summary.bound }}</NTag>
+            <NTag size="small" type="warning" :bordered="false">未绑定 {{ summary.unbound }}</NTag>
+            <NTag size="small" type="error" :bordered="false">
+              bundle 不在本机 {{ summary.bundleMissing }}
+            </NTag>
           </div>
+        </template>
+        <template #actions>
+          <NButton
+            size="small"
+            secondary
+            :disabled="exporting || selectedKeys.length === 0"
+            @click="exportItems(items.filter((i) => selectedKeys.includes(i.refKey)))"
+          >
+            导出勾选{{ selectedKeys.length > 0 ? `（${selectedKeys.length}）` : '' }}
+          </NButton>
+          <NButton v-if="selectedKeys.length > 0" size="small" text @click="clearSelection">
+            清空勾选
+          </NButton>
+        </template>
+      </PageHeader>
+
+      <div class="spine-content">
+        <div class="spine-filters">
+          <NInput
+            v-model:value="keyword"
+            placeholder="按骨架名或路径搜索（如 fairy_ism、SD/Enemy）"
+            clearable
+            style="width: 320px"
+            @keyup.enter="applyFilters"
+          >
+            <template #prefix>
+              <AppIcon name="search" :size="13" />
+            </template>
+          </NInput>
+          <NButton size="small" type="primary" @click="applyFilters">搜索</NButton>
+          <label class="spine-switch">
+            <NSwitch v-model:value="onlyUnbound" size="small" @update:value="applyFilters" />
+            <span>只看未被页面绑定的</span>
+          </label>
+          <label class="spine-switch">
+            <NSwitch v-model:value="showMissing" size="small" />
+            <span>显示 bundle 不在本机的</span>
+          </label>
         </div>
-      </NAlert>
 
-      <NAlert v-if="error" type="error" :bordered="false" class="spine-alert">
-        取 Spine 名册失败：{{ error }}
-      </NAlert>
+        <!-- 导出进度与取消（progress 事件带 operationId，见契约 §4） -->
+        <div v-if="exporting" class="spine-export-progress">
+          <NProgress
+            type="line"
+            :percentage="
+              exportProgress && exportProgress.total > 0
+                ? Math.round((exportProgress.current / exportProgress.total) * 100)
+                : 0
+            "
+            :indeterminate="!exportProgress || exportProgress.total === 0"
+            :show-indicator="false"
+            size="small"
+          />
+          <span class="spine-export-progress-text">
+            {{ exportProgress?.message ?? '正在解三件套并写盘（解一套要整读它所在的 bundle，可能要几秒）…' }}
+          </span>
+          <NButton size="tiny" secondary type="warning" @click="cancelExport">取消导出</NButton>
+        </div>
 
-      <div class="spine-body">
-        <!-- 左：名册 -->
-        <div class="spine-list">
-          <div v-if="loading" class="spine-list-state"><NSpin size="small" /> 加载中…</div>
-          <NEmpty v-else-if="visibleItems.length === 0" size="small" description="没有匹配的 Spine 挂点" />
-          <ul v-else class="spine-items">
-            <li
-              v-for="item in visibleItems"
-              :key="item.refKey"
-              class="spine-item"
-              :class="{ active: selected?.refKey === item.refKey }"
-              :title="item.refKey"
-              @click="openItem(item)"
-            >
-              <div class="spine-item-main">
-                <input
-                  type="checkbox"
-                  class="spine-item-check"
-                  :checked="selectedKeys.includes(item.refKey)"
-                  :title="'勾选后可批量导出'"
-                  @click.stop
-                  @change.stop="toggleSelect(item.refKey)"
-                />
-                <span class="spine-item-name">{{ item.name }}</span>
-                <NTag size="tiny" :bordered="false">{{ item.group }}</NTag>
-                <NTag v-if="item.boundPageCount > 0" size="tiny" type="info" :bordered="false">
-                  {{ item.boundPageCount }} 页
-                </NTag>
+        <!-- 结果反馈：成功汇总 + 逐条失败中文原因（失败不静默） -->
+        <NAlert v-if="exportSummary" type="default" :bordered="false" class="spine-alert">
+          <div class="spine-export-title">{{ exportSummary }}</div>
+          <div v-if="exportReport.length > 0" class="spine-export-lines">
+            <div v-for="line in exportReport" :key="line" class="spine-export-line">
+              <AppIcon name="success" :size="13" /> {{ line }}
+            </div>
+          </div>
+          <div v-if="exportFailed.length > 0" class="spine-export-lines">
+            <div v-for="line in exportFailed" :key="line" class="spine-export-line spine-export-line-fail">
+              <AppIcon name="error" :size="13" /> {{ line }}
+            </div>
+          </div>
+        </NAlert>
+
+        <StateBlock
+          v-if="error"
+          class="spine-alert"
+          state="error"
+          title="取 Spine 名册失败"
+          :description="`${error} —— 检查游戏目录设置后重试`"
+        >
+          <template #actions>
+            <NButton size="small" @click="loadCatalog">重试</NButton>
+          </template>
+        </StateBlock>
+
+        <div class="spine-body">
+          <!-- 左：名册 -->
+          <div class="spine-list">
+            <StateBlock
+              v-if="loading"
+              class="spine-list-state"
+              state="loading"
+              title="正在读取 Spine 名册…"
+            />
+            <StateBlock
+              v-else-if="visibleItems.length === 0"
+              class="spine-list-state"
+              state="empty"
+              icon="search"
+              title="没有匹配的 Spine 挂点"
+              description="换个关键词，或打开「只看未被页面绑定的」缩小范围"
+            />
+            <ul v-else class="spine-items">
+              <li
+                v-for="item in visibleItems"
+                :key="item.refKey"
+                class="spine-item"
+                :class="{ active: selected?.refKey === item.refKey }"
+                :title="item.refKey"
+                @click="openItem(item)"
+              >
+                <div class="spine-item-main">
+                  <input
+                    type="checkbox"
+                    class="spine-item-check"
+                    :checked="selectedKeys.includes(item.refKey)"
+                    :title="'勾选后可批量导出'"
+                    @click.stop
+                    @change.stop="toggleSelect(item.refKey)"
+                  />
+                  <span class="spine-item-name">{{ item.name }}</span>
+                  <NTag size="tiny" :bordered="false">{{ item.group }}</NTag>
+                  <NTag v-if="item.boundPageCount > 0" size="tiny" type="info" :bordered="false">
+                    {{ item.boundPageCount }} 页
+                  </NTag>
+                  <NTag
+                    size="tiny"
+                    :bordered="false"
+                    :type="statusTagType(item.parseStatus)"
+                  >
+                    {{ item.parseStatusLabel }}
+                  </NTag>
+                  <NTooltip placement="top" :show-arrow="false">
+                    <template #trigger>
+                      <NButton
+                        size="tiny"
+                        secondary
+                        :disabled="exporting"
+                        class="spine-item-export"
+                        @click.stop="exportItems([item])"
+                      >
+                        导出
+                      </NButton>
+                    </template>
+                    把这条的三件套（骨架 / 图集 / 纹理）导出到磁盘
+                  </NTooltip>
+                </div>
+                <div class="spine-item-path lme-mono">{{ item.refKey }}</div>
+                <div class="spine-item-source">
+                  <span>{{ item.source }}</span>
+                  <RouterLink
+                    v-for="owner in item.ownerPageIds"
+                    :key="owner"
+                    class="spine-item-link"
+                    :to="`/wiki/page/${owner}`"
+                    @click.stop
+                  >
+                    去 {{ owner }}
+                  </RouterLink>
+                </div>
+              </li>
+            </ul>
+
+            <div v-if="pageCount > 1" class="spine-pager">
+              <NButton size="tiny" :disabled="page === 0" @click="goToPage(page - 1)">
+                <AppIcon name="chevronLeft" :size="12" /> 上一页
+              </NButton>
+              <span class="spine-pager-text">{{ page + 1 }} / {{ pageCount }}（共 {{ total }} 条）</span>
+              <NButton size="tiny" :disabled="page + 1 >= pageCount" @click="goToPage(page + 1)">
+                下一页 <AppIcon name="chevronRight" :size="12" />
+              </NButton>
+            </div>
+          </div>
+
+          <!-- 右：预览 -->
+          <div class="spine-preview">
+            <StateBlock
+              v-if="!selected"
+              class="spine-preview-state"
+              state="empty"
+              icon="wikiSpine"
+              title="从左边选一条查看三件套"
+              description="名册只列清单，点开哪条才解哪条的三件套地址"
+            />
+
+            <template v-else>
+              <div class="spine-preview-head">
+                <span class="spine-preview-name">{{ selected.name }}</span>
+                <NTag size="tiny" :bordered="false">{{ selected.group }}</NTag>
                 <NTag
                   size="tiny"
                   :bordered="false"
-                  :type="statusTagType(item.parseStatus)"
+                  :type="statusTagType(resolved?.parseStatus ?? selected.parseStatus)"
                 >
-                  {{ item.parseStatusLabel }}
+                  {{ resolved?.parseStatusLabel ?? selected.parseStatusLabel }}
                 </NTag>
-                <NButton
-                  size="tiny"
-                  secondary
-                  :disabled="exporting"
-                  class="spine-item-export"
-                  title="把这条的三件套（骨架 / 图集 / 纹理）导出到磁盘"
-                  @click.stop="exportItems([item])"
-                >
-                  导出
-                </NButton>
+                <NTooltip placement="top" :show-arrow="false">
+                  <template #trigger>
+                    <NButton
+                      size="tiny"
+                      type="primary"
+                      secondary
+                      :disabled="exporting"
+                      @click="exportItems([selected])"
+                    >
+                      导出三件套
+                    </NButton>
+                  </template>
+                  把这条的三件套（骨架 / 图集 / 纹理）导出到磁盘
+                </NTooltip>
               </div>
-              <div class="spine-item-path lme-mono">{{ item.refKey }}</div>
-              <div class="spine-item-source">
-                <span>{{ item.source }}</span>
+              <div class="spine-preview-path lme-mono">{{ selected.refKey }}</div>
+
+              <div class="spine-preview-source">
+                <span class="spine-preview-source-label">来源</span>
+                <span>{{ resolved?.source ?? selected.source }}</span>
+              </div>
+              <div v-if="ownerLinks.length > 0" class="spine-preview-owners">
+                <span class="spine-preview-source-label">归属页面</span>
                 <RouterLink
-                  v-for="owner in item.ownerPageIds"
+                  v-for="owner in ownerLinks"
                   :key="owner"
                   class="spine-item-link"
                   :to="`/wiki/page/${owner}`"
-                  @click.stop
                 >
-                  去 {{ owner }}
+                  {{ owner }}
                 </RouterLink>
               </div>
-            </li>
-          </ul>
 
-          <div v-if="pageCount > 1" class="spine-pager">
-            <NButton size="tiny" :disabled="page === 0" @click="goToPage(page - 1)">上一页</NButton>
-            <span class="spine-pager-text">{{ page + 1 }} / {{ pageCount }}（共 {{ total }} 条）</span>
-            <NButton size="tiny" :disabled="page + 1 >= pageCount" @click="goToPage(page + 1)">下一页</NButton>
-          </div>
-        </div>
-
-        <!-- 右：预览 -->
-        <div class="spine-preview">
-          <NEmpty v-if="!selected" size="small" description="从左边选一条查看三件套" />
-
-          <template v-else>
-            <div class="spine-preview-head">
-              <span class="spine-preview-name">{{ selected.name }}</span>
-              <NTag size="tiny" :bordered="false">{{ selected.group }}</NTag>
-              <NTag
-                size="tiny"
-                :bordered="false"
-                :type="statusTagType(resolved?.parseStatus ?? selected.parseStatus)"
-              >
-                {{ resolved?.parseStatusLabel ?? selected.parseStatusLabel }}
-              </NTag>
-              <NButton
-                size="tiny"
-                type="primary"
-                secondary
-                :disabled="exporting"
-                title="把这条的三件套（骨架 / 图集 / 纹理）导出到磁盘"
-                @click="exportItems([selected])"
-              >
-                导出三件套
-              </NButton>
-            </div>
-            <div class="spine-preview-path lme-mono">{{ selected.refKey }}</div>
-
-            <div class="spine-preview-source">
-              <span class="spine-preview-source-label">来源</span>
-              <span>{{ resolved?.source ?? selected.source }}</span>
-            </div>
-            <div v-if="ownerLinks.length > 0" class="spine-preview-owners">
-              <span class="spine-preview-source-label">归属页面</span>
-              <RouterLink
-                v-for="owner in ownerLinks"
-                :key="owner"
-                class="spine-item-link"
-                :to="`/wiki/page/${owner}`"
-              >
-                {{ owner }}
-              </RouterLink>
-            </div>
-
-            <div v-if="resolving" class="spine-preview-state">
-              <NSpin size="small" /> 正在解三件套（要整读它所在的 bundle，可能要几秒）…
-            </div>
-
-            <NAlert v-else-if="resolved && !resolved.ok" type="warning" :bordered="false">
-              <div class="spine-reason-title">这条取不到 Spine 三件套</div>
-              <div class="spine-reason">{{ resolved.reason ?? '原因未知' }}</div>
-              <div v-if="!resolved.bundlePresent" class="spine-reason-hint">
-                它所在的 bundle 文件此刻不在本机（Unity 临时缓存被清）。
-                这不是代码能补的 —— 跑一次游戏或让平台重新下载后就会回来。
-              </div>
-              <div v-else class="spine-reason-hint">
-                该 prefab 的引用链里确实没有骨架与图集，它本来就不是 Spine 资源
-                （界面如实显示原因，不拿别的素材凑）。
-              </div>
-            </NAlert>
-
-            <template v-else-if="resolved?.ok">
-              <WikiSpineViewer
-                :skeleton-url="resolved.skeletonUrl ?? undefined"
-                :atlas-url="resolved.atlasUrl ?? undefined"
-                :texture-urls="resolved.textureUrls ?? undefined"
-                :title="resolved.label ?? selected.name"
-                :width="480"
-                :height="560"
+              <StateBlock
+                v-if="resolving"
+                class="spine-preview-state"
+                state="loading"
+                title="正在解三件套…"
+                description="要整读它所在的 bundle，可能要几秒"
               />
-              <dl class="spine-files">
-                <dt>骨架（{{ resolved.skeletonFormat }}）</dt>
-                <dd class="lme-mono">{{ resolved.skeletonUrl }}</dd>
-                <dt>图集</dt>
-                <dd class="lme-mono">{{ resolved.atlasUrl }}</dd>
-                <dt>纹理页</dt>
-                <dd class="lme-mono">
-                  {{ Object.keys(resolved.textureUrls ?? {}).join('、') || '（无）' }}
-                </dd>
-              </dl>
+
+              <NAlert v-else-if="resolved && !resolved.ok" type="warning" :bordered="false">
+                <div class="spine-reason-title">这条取不到 Spine 三件套</div>
+                <div class="spine-reason">{{ resolved.reason ?? '原因未知' }}</div>
+                <div v-if="!resolved.bundlePresent" class="spine-reason-hint">
+                  它所在的 bundle 文件此刻不在本机（Unity 临时缓存被清）。
+                  这不是代码能补的 —— 跑一次游戏或让平台重新下载后就会回来。
+                </div>
+                <div v-else class="spine-reason-hint">
+                  该 prefab 的引用链里确实没有骨架与图集，它本来就不是 Spine 资源
+                  （界面如实显示原因，不拿别的素材凑）。
+                </div>
+              </NAlert>
+
+              <template v-else-if="resolved?.ok">
+                <WikiSpineViewer
+                  :skeleton-url="resolved.skeletonUrl ?? undefined"
+                  :atlas-url="resolved.atlasUrl ?? undefined"
+                  :texture-urls="resolved.textureUrls ?? undefined"
+                  :title="resolved.label ?? selected.name"
+                  :width="480"
+                  :height="560"
+                />
+                <dl class="spine-files">
+                  <dt>骨架（{{ resolved.skeletonFormat }}）</dt>
+                  <dd class="lme-mono">{{ resolved.skeletonUrl }}</dd>
+                  <dt>图集</dt>
+                  <dd class="lme-mono">{{ resolved.atlasUrl }}</dd>
+                  <dt>纹理页</dt>
+                  <dd class="lme-mono">
+                    {{ Object.keys(resolved.textureUrls ?? {}).join('、') || '（无）' }}
+                  </dd>
+                </dl>
+              </template>
             </template>
-          </template>
+          </div>
         </div>
       </div>
     </div>
@@ -556,32 +640,25 @@ unsubscribeProgress = ipc.on('progress', (payload) => {
 
 <style scoped>
 .spine-browser {
+  position: relative;
   height: 100%;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  padding: var(--lme-gap-lg);
+}
+
+/* ── 页头下方的可滚动内容区 ── */
+.spine-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   gap: var(--lme-gap-md);
+  padding: var(--lme-gap-lg);
+  overflow: hidden;
 }
 
-.spine-head {
-  flex-shrink: 0;
-}
-
-.spine-title {
-  margin: 0 0 var(--lme-gap-xs);
-  font-size: var(--lme-font-size-xl);
-  font-weight: var(--lme-font-weight-semibold);
-  color: var(--wiki-section-title);
-}
-
-.spine-sub {
-  margin: 0 0 var(--lme-gap-sm);
-  font-size: var(--lme-font-size-sm);
-  color: var(--lme-text-muted);
-  max-width: 780px;
-}
-
+/* ── 页头（PageHeader）右侧的统计胶囊 ── */
 .spine-stats {
   display: flex;
   gap: var(--lme-gap-xs);
@@ -627,12 +704,8 @@ unsubscribeProgress = ipc.on('progress', (payload) => {
 }
 
 .spine-list-state {
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-sm);
-  padding: var(--lme-gap-lg);
-  color: var(--lme-text-muted);
-  font-size: var(--lme-font-size-sm);
+  flex: 1;
+  min-height: 0;
 }
 
 .spine-items {
@@ -655,8 +728,8 @@ unsubscribeProgress = ipc.on('progress', (payload) => {
 }
 
 .spine-item.active {
-  background: var(--wiki-nav-active-bg);
-  border-color: var(--wiki-nav-active-bar);
+  background: var(--lme-accent-subtle);
+  border-color: var(--lme-accent);
 }
 
 .spine-item-main {
@@ -719,6 +792,9 @@ unsubscribeProgress = ipc.on('progress', (payload) => {
 }
 
 .spine-export-line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--lme-gap-xs);
   font-size: var(--lme-font-size-xs);
   color: var(--lme-text-secondary);
   word-break: break-all;
@@ -754,7 +830,7 @@ unsubscribeProgress = ipc.on('progress', (payload) => {
 }
 
 .spine-item-link {
-  color: var(--wiki-link);
+  color: var(--lme-accent);
   text-decoration: none;
 }
 
@@ -823,12 +899,8 @@ unsubscribeProgress = ipc.on('progress', (payload) => {
 }
 
 .spine-preview-state {
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-sm);
-  color: var(--lme-text-muted);
-  font-size: var(--lme-font-size-sm);
-  padding: var(--lme-gap-md) 0;
+  flex: 1;
+  min-height: 0;
 }
 
 .spine-reason-title {

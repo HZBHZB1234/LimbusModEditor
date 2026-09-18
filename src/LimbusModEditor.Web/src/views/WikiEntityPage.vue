@@ -11,18 +11,16 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ipc } from '@/ipc'
 import {
-  NAlert,
   NButton,
   NCard,
-  NEmpty,
   NInput,
-  NSpin,
   NTabs,
   NTabPane,
   NTag,
   useMessage,
 } from 'naive-ui'
 import WikiShell from '@/components/WikiShell.vue'
+import StateBlock from '@/components/StateBlock.vue'
 import WikiToc from '@/components/wiki/WikiToc.vue'
 import WikiInfoboxCard from '@/components/wiki/WikiInfoboxCard.vue'
 import WikiQuoteBlock from '@/components/wiki/WikiQuoteBlock.vue'
@@ -611,20 +609,29 @@ function formatFieldValue(field: { value: string; type: string }): string {
     @search="handleSearch"
   >
     <div class="wiki-entity-page">
-      <!-- 顶部细进度条（与首页 / 资源工作台同一套加载语言） -->
-      <div v-if="loading" class="loading-bar" aria-hidden="true" />
+      <!-- 顶部细进度条（统一工具类 .lme-loadingbar） -->
+      <div v-if="loading" class="lme-loadingbar" aria-hidden="true" />
 
       <!-- 加载状态 -->
-      <div v-if="loading" class="page-state state-block">
-        <NSpin size="medium" />
-        <span class="state-text">加载页面内容…</span>
-      </div>
+      <StateBlock
+        v-if="loading"
+        class="page-state"
+        state="loading"
+        title="正在加载页面内容…"
+      />
 
       <!-- 错误状态 -->
-      <NAlert v-else-if="error" type="error" class="page-error">
-        <template #header>{{ error }}</template>
-        <NButton size="small" type="primary" @click="loadPage">重试</NButton>
-      </NAlert>
+      <StateBlock
+        v-else-if="error"
+        class="page-error"
+        state="error"
+        :title="error"
+        description="检查游戏目录设置或稍后重试；也可以先回维基首页换个入口"
+      >
+        <template #actions>
+          <NButton size="small" type="primary" @click="loadPage">重试</NButton>
+        </template>
+      </StateBlock>
 
       <!--
         剧情类走专用视图（WikiStoryView）。
@@ -636,12 +643,12 @@ function formatFieldValue(field: { value: string; type: string }): string {
 
       <!-- 实体页内容 -->
       <template v-else-if="page">
-        <!-- 标题区：金色大标题 + 副题 + 元信息，下缘分隔线 -->
+        <!-- 标题区：大标题（主文字色）+ 副题 + 元信息，下缘分隔线 -->
         <header class="page-header">
           <h1 class="page-title">{{ page.title }}</h1>
           <p v-if="page.subtitle" class="page-subtitle">{{ page.subtitle }}</p>
           <div class="page-meta">
-            <!-- type="primary" 在维基工作区即金色（库主题主色取 --wiki-accent） -->
+            <!-- type="primary" 在维基工作区即强调色（库主题主色取 --lme-accent） -->
             <NTag v-if="categoryLabel" size="small" type="primary">{{ categoryLabel }}</NTag>
             <WikiChipList v-if="tags.length > 0" :items="tags" class="page-meta-tags" />
             <span v-if="page.lastModified" class="meta-date">
@@ -650,7 +657,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
           </div>
         </header>
 
-        <WikiNoticeBox v-if="noticeText" :text="noticeText" icon="ℹ️" />
+        <WikiNoticeBox v-if="noticeText" :text="noticeText" icon="info" />
 
         <div class="page-body">
           <!-- 左栏：编号目录（吸顶 + 当前项高亮 + 回到顶部） -->
@@ -957,9 +964,14 @@ function formatFieldValue(field: { value: string; type: string }): string {
       </template>
 
       <!-- 空态：既无数据也无错误（页面不存在等） -->
-      <div v-else class="state-block page-empty">
-        <NEmpty description="当前没有可展示的页面内容" />
-      </div>
+      <StateBlock
+        v-else
+        class="page-empty"
+        state="empty"
+        icon="file"
+        title="当前没有可展示的页面内容"
+        description="回维基首页重新选一个页面，或先点「生成页面」刷新本地维基内容"
+      />
     </div>
   </WikiShell>
 </template>
@@ -971,62 +983,19 @@ function formatFieldValue(field: { value: string; type: string }): string {
   padding: var(--lme-gap-xl) var(--lme-gap-2xl) var(--lme-gap-3xl);
 }
 
-/* ═══════════════ 状态：顶部细进度条 / state-block / NAlert 错误条 ═══════════════ */
-.loading-bar {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 2px;
-  overflow: hidden;
-  z-index: var(--lme-z-raised);
-  background: var(--lme-progressbar-bg);
-}
+/* ═══════════════ 状态：顶部细进度条（.lme-loadingbar 工具类）/ StateBlock 三态 ═══════════════ */
 
-.loading-bar::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  width: 40%;
-  border-radius: var(--lme-radius-full);
-  background: var(--wiki-accent);
-  animation: loading-slide 1s var(--lme-ease-standard) infinite;
-}
-
-@keyframes loading-slide {
-  from {
-    transform: translateX(-100%);
-  }
-  to {
-    transform: translateX(350%);
-  }
-}
-
-.page-state.state-block {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--lme-gap-md);
+.page-state,
+.page-empty {
   padding: var(--lme-gap-3xl) var(--lme-gap-md);
-  color: var(--lme-text-muted);
-  font-size: var(--lme-font-size-md);
 }
 
-.state-text {
-  font-size: var(--lme-font-size-sm);
-}
-
-/* 错误提示条：库 NAlert（配色走库主题的 --lme-error），只补下缘间距 */
+/* 错误态：StateBlock 统一呈现，只补下缘间距 */
 .page-error {
   margin-bottom: var(--lme-gap-lg);
 }
 
-/* 空态：库 NEmpty */
-.page-empty.state-block {
-  padding: var(--lme-gap-3xl) var(--lme-gap-md);
-}
-
-/* ═══════════════ 标题区：金标题 + 分隔线 ═══════════════ */
+/* ═══════════════ 标题区：大标题（主文字色）+ 分隔线 ═══════════════ */
 .page-header {
   max-width: var(--wiki-content-max-width);
   margin: 0 auto var(--lme-gap-xl);
@@ -1039,7 +1008,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
   font-size: var(--wiki-title-size);
   line-height: var(--wiki-title-line);
   font-weight: var(--lme-font-weight-bold);
-  color: var(--wiki-title);
+  color: var(--lme-text-primary);
 }
 
 .page-subtitle {
@@ -1168,7 +1137,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
   padding: 0;
 }
 
-/* ═══════════════ 分节：维基式开放式排版（金标题 + 下缘分隔线） ═══════════════ */
+/* ═══════════════ 分节：维基式开放式排版（大标题 + 下缘分隔线） ═══════════════ */
 .wiki-section {
   margin: 0 0 var(--lme-gap-2xl);
   scroll-margin-top: var(--lme-gap-sm);
@@ -1183,7 +1152,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
   padding-bottom: var(--lme-gap-sm);
   font-size: var(--lme-font-size-xl);
   font-weight: var(--lme-font-weight-bold);
-  color: var(--wiki-section-title);
+  color: var(--lme-text-primary);
   border-bottom: 1px solid var(--wiki-section-head-border);
 }
 
@@ -1198,13 +1167,13 @@ function formatFieldValue(field: { value: string; type: string }): string {
   gap: var(--lme-gap-sm);
 }
 
-/* 分节操作（库 NButton text）：hover 收金色，与维基强调色一致 */
+/* 分节操作（库 NButton text）：hover 收强调色 */
 .section-actions :deep(.n-button) {
   color: var(--lme-text-muted);
 }
 
 .section-actions :deep(.n-button:hover) {
-  color: var(--wiki-accent);
+  color: var(--lme-accent);
 }
 
 .wiki-section.collapsed .section-content {
@@ -1214,7 +1183,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
 .section-content {
   padding: 0 0 var(--lme-gap-md);
   font-size: var(--lme-font-size-md);
-  color: var(--wiki-body-text);
+  color: var(--lme-text-primary);
   line-height: var(--lme-line-height-relaxed);
   white-space: pre-wrap;
 }
@@ -1247,7 +1216,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
 
 .entry-item {
   padding-left: var(--lme-gap-md);
-  border-left: 2px solid var(--wiki-accent-dim);
+  border-left: 2px solid var(--lme-accent-border);
 }
 
 .entry-head {
@@ -1261,13 +1230,13 @@ function formatFieldValue(field: { value: string; type: string }): string {
   margin: 0;
   font-size: var(--lme-font-size-md);
   font-weight: var(--lme-font-weight-semibold);
-  color: var(--wiki-entry-title);
+  color: var(--lme-text-primary);
 }
 
 .entry-body {
   margin-top: var(--lme-gap-xs);
   font-size: var(--lme-font-size-md);
-  color: var(--wiki-body-text);
+  color: var(--lme-text-primary);
   line-height: var(--lme-line-height-relaxed);
   white-space: pre-wrap;
   word-break: break-word;
@@ -1312,7 +1281,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
   word-break: break-all;
 }
 
-/* 「去编辑」：库 NButton text-primary（维基区即金色） */
+/* 「去编辑」：库 NButton text-primary（维基区即强调色） */
 .binding-edit-btn {
   flex-shrink: 0;
 }
@@ -1347,7 +1316,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
 
 .related-item-title {
   font-size: var(--lme-font-size-sm);
-  color: var(--wiki-link);
+  color: var(--lme-accent);
 }
 
 .related-item-cat {
@@ -1355,7 +1324,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
   color: var(--lme-text-muted);
 }
 
-/* ═══════════════ 焦点可访问性（聚焦环一律金色，不用紫） ═══════════════ */
+/* ═══════════════ 焦点可访问性（聚焦环统一用强调色光晕） ═══════════════ */
 .page-header :deep(.n-button:focus-visible),
 .page-main :deep(.n-button:focus-visible),
 .page-aside :deep(.n-button:focus-visible),

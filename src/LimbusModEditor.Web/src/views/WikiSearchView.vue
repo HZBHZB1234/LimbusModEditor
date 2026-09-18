@@ -3,11 +3,15 @@
 // IPC：wiki.search（方法名与参数语义零改动，仅以既有 offset/limit 做服务端分页）
 // 深链：?q=（零改动）
 // 后端能力：WikiPageQueryService.SearchEntries → SQL LIMIT/OFFSET + COUNT，返回 total（真分页）
+// ui-redesign r6：页头走 PageHeader，三态走 StateBlock，箭头符号换 AppIcon。
 import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { NButton, NEmpty, NInput, NList, NListItem, NPagination, NSpin, NTag } from 'naive-ui'
+import { NButton, NInput, NList, NListItem, NPagination, NTag } from 'naive-ui'
 import { ipc } from '@/ipc'
 import WikiShell from '@/components/WikiShell.vue'
+import PageHeader from '@/components/PageHeader.vue'
+import StateBlock from '@/components/StateBlock.vue'
+import AppIcon from '@/components/AppIcon.vue'
 import { WikiPageCategoryLabels } from '@/ipc/types'
 import type { WikiSearchResult, WikiPageCategory, WikiSearchResponse } from '@/ipc'
 
@@ -108,18 +112,19 @@ if (keyword.value.trim()) doSearch(1)
 <template>
   <WikiShell :breadcrumbs="breadcrumbs">
     <div class="wiki-search">
-      <div class="wiki-search-container">
-        <header class="search-header">
-          <h1 class="page-title">搜索</h1>
-          <p v-if="searched && !loading" class="results-info">
-            {{
-              total > 0
-                ? `找到 ${total} 个与「${keyword}」相关的页面 · 第 ${currentPage} / ${totalPageCount} 页`
-                : `没有与「${keyword}」相关的页面`
-            }}
-          </p>
-        </header>
+      <!-- 顶部细进度条（统一工具类 .lme-loadingbar） -->
+      <div v-if="loading" class="lme-loadingbar" aria-hidden="true" />
 
+      <PageHeader
+        class="search-header"
+        icon="search"
+        title="搜索"
+        description="在本地维基的全部页面里按标题与正文搜索。"
+        hint="输入关键词后回车；结果按分类打标，点一行进入详情页。"
+        hint-key="wiki-search"
+      />
+
+      <div class="wiki-search-container">
         <div class="search-box">
           <NInput
             v-model:value="input"
@@ -138,30 +143,38 @@ if (keyword.value.trim()) doSearch(1)
           </NButton>
         </div>
 
-        <div v-if="loading" class="loading-state">
-          <NSpin size="small" />
-          <span>搜索中…</span>
-        </div>
+        <p v-if="searched && !loading" class="results-info">
+          {{
+            total > 0
+              ? `找到 ${total} 个与「${keyword}」相关的页面 · 第 ${currentPage} / ${totalPageCount} 页`
+              : `没有与「${keyword}」相关的页面`
+          }}
+        </p>
 
-        <NEmpty
+        <StateBlock
+          v-if="loading"
+          class="loading-state"
+          state="loading"
+          title="正在搜索…"
+        />
+
+        <StateBlock
           v-else-if="!keyword.trim()"
           class="empty-state"
-          description="输入关键词开始搜索"
-        >
-          <template #extra>
-            <span class="empty-desc">支持页面标题与内容匹配</span>
-          </template>
-        </NEmpty>
+          state="empty"
+          icon="search"
+          title="输入关键词开始搜索"
+          description="支持页面标题与正文匹配；也可以先从左侧分类导航逐类浏览"
+        />
 
-        <NEmpty
+        <StateBlock
           v-else-if="results.length === 0"
           class="empty-state"
-          description="未找到匹配页面"
-        >
-          <template #extra>
-            <span class="empty-desc">尝试调整搜索关键词</span>
-          </template>
-        </NEmpty>
+          state="empty"
+          icon="search"
+          title="未找到匹配页面"
+          description="换个更短的关键词（如只留名词），或从左侧分类页里逐条找"
+        />
 
         <template v-else>
           <NList class="results-list" clickable hoverable>
@@ -188,7 +201,7 @@ if (keyword.value.trim()) doSearch(1)
               :disabled="currentPage <= 1 || loading"
               @click="goToPage(currentPage - 1)"
             >
-              ‹ 上一页
+              <AppIcon name="chevronLeft" :size="13" /> 上一页
             </NButton>
             <NPagination
               class="page-pager"
@@ -205,7 +218,7 @@ if (keyword.value.trim()) doSearch(1)
               :disabled="currentPage >= totalPageCount || loading"
               @click="goToPage(currentPage + 1)"
             >
-              下一页 ›
+              下一页 <AppIcon name="chevronRight" :size="13" />
             </NButton>
             <span class="page-info">共 {{ total }} 条 / 第 {{ currentPage }} 页</span>
           </div>
@@ -217,6 +230,7 @@ if (keyword.value.trim()) doSearch(1)
 
 <style scoped>
 .wiki-search {
+  position: relative;
   height: 100%;
   overflow-y: auto;
   background: var(--lme-bg-base);
@@ -231,21 +245,7 @@ if (keyword.value.trim()) doSearch(1)
   gap: var(--lme-gap-lg);
 }
 
-.search-header {
-  display: flex;
-  flex-direction: column;
-  gap: var(--lme-gap-xs);
-  padding-bottom: var(--lme-gap-md);
-  border-bottom: 1px solid var(--wiki-section-head-border);
-}
-
-.page-title {
-  margin: 0;
-  font-size: var(--wiki-title-size);
-  font-weight: 700;
-  line-height: var(--wiki-title-line);
-  color: var(--wiki-title);
-}
+/* ── 页头：改用统一 PageHeader（.search-header 保留作回归定位） ── */
 
 .results-info {
   margin: 0;
@@ -266,23 +266,13 @@ if (keyword.value.trim()) doSearch(1)
   white-space: nowrap;
 }
 
+/* 三态由 StateBlock 呈现，这里只留页内间距 */
 .loading-state {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--lme-gap-sm);
   padding: var(--lme-gap-xl);
-  color: var(--lme-text-muted);
-  font-size: var(--lme-font-size-md);
 }
 
 .empty-state {
   padding: var(--lme-gap-xl);
-}
-
-.empty-desc {
-  font-size: var(--lme-font-size-sm);
-  color: var(--lme-text-muted);
 }
 
 .results-list {
@@ -326,7 +316,7 @@ if (keyword.value.trim()) doSearch(1)
   text-decoration: underline;
 }
 
-/* 分类胶囊：NTag 套 wiki-chip 皮肤（金色系，禁紫） */
+/* 分类胶囊：NTag 套 wiki-chip 皮肤（跟随全局强调色） */
 .result-category {
   flex-shrink: 0;
   font-size: var(--lme-font-size-xs);
@@ -356,6 +346,11 @@ if (keyword.value.trim()) doSearch(1)
 
 .page-pager {
   margin-left: var(--lme-gap-xs);
+}
+
+/* 翻页按钮内的图标与文字间距 */
+.page-btn :deep(.n-button__content) {
+  gap: var(--lme-gap-2xs);
 }
 
 .page-info {

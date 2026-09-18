@@ -9,13 +9,15 @@
  * 台词来源：分节 content + 分节内条目 body（实测 story:1D101 的台词在 entries[].body，
  * 只看 content 会误判为空）。
  * 纯展示 + 纯文本渲染（不解析 HTML，杜绝 XSS）。
- * 呈现层使用 Naive UI（ui-redesign r5）：对话流卡片 + NTag 徽标 + NButton 章节导航。
+ * 呈现层使用 Naive UI（ui-redesign r6：箭头符号换 AppIcon，配色统一到全局令牌）。
  * 数据来源（page.sections / entries[].body / bindings）与章节导航逻辑零改动。
  */
 
 import { computed, ref, watch } from 'vue'
-import { NButton, NCard, NEmpty, NTag } from 'naive-ui'
+import { NButton, NCard, NTag } from 'naive-ui'
 import type { WikiPage, WikiSection, ResourceBinding, GalleryImage } from '@/ipc/types'
+import AppIcon from '@/components/AppIcon.vue'
+import StateBlock from '@/components/StateBlock.vue'
 import WikiAudioPlayer from '@/components/wiki/WikiAudioPlayer.vue'
 import WikiGallery from '@/components/wiki/WikiGallery.vue'
 import WikiToc from '@/components/wiki/WikiToc.vue'
@@ -134,7 +136,7 @@ const tags = computed<string[]>(() => props.page.tags ?? [])
       </div>
     </header>
 
-    <WikiNoticeBox v-if="noticeText" :text="noticeText" icon="ℹ️" />
+    <WikiNoticeBox v-if="noticeText" :text="noticeText" icon="info" />
 
     <div class="story-body">
       <!-- 章节目录 -->
@@ -144,11 +146,11 @@ const tags = computed<string[]>(() => props.page.tags ?? [])
         <!-- 章节导航 -->
         <nav v-if="chapters.length > 0" class="chapter-nav">
           <NButton class="nav-btn" size="small" :disabled="!hasPrev" @click="goPrev">
-            ← 上一章
+            <AppIcon name="chevronLeft" :size="13" /> 上一章
           </NButton>
           <span class="chapter-name">{{ current?.title }}</span>
           <NButton class="nav-btn" size="small" :disabled="!hasNext" @click="goNext">
-            下一章 →
+            下一章 <AppIcon name="chevronRight" :size="13" />
           </NButton>
         </nav>
 
@@ -167,10 +169,13 @@ const tags = computed<string[]>(() => props.page.tags ?? [])
             <span class="dialogue-text">{{ line.text }}</span>
           </NCard>
         </section>
-        <NEmpty
+        <StateBlock
           v-else-if="current"
           class="dialogue-empty"
-          description="该章节暂无可解析的对白文本。"
+          state="empty"
+          icon="text"
+          title="该章节暂无可解析的对白文本"
+          description="换一章看，或到维基首页重新生成页面以刷新正文"
         />
 
         <!-- 媒体 -->
@@ -200,8 +205,8 @@ const tags = computed<string[]>(() => props.page.tags ?? [])
   margin: 0;
   font-size: var(--wiki-title-size);
   line-height: var(--wiki-title-line);
-  font-weight: 700;
-  color: var(--wiki-title);
+  font-weight: var(--lme-font-weight-bold);
+  color: var(--lme-text-primary);
 }
 
 .story-meta {
@@ -212,7 +217,7 @@ const tags = computed<string[]>(() => props.page.tags ?? [])
   flex-wrap: wrap;
 }
 
-/* 剧情徽标：NTag 套 wiki-chip 皮肤（金色系，禁紫） */
+/* 剧情徽标：NTag 套 wiki-chip 皮肤（跟随全局强调色） */
 .story-badge {
   font-size: var(--lme-font-size-xs);
   font-weight: 600;
@@ -269,6 +274,11 @@ const tags = computed<string[]>(() => props.page.tags ?? [])
   font-family: inherit;
 }
 
+/* 章节导航按钮内的图标与文字间距 */
+.nav-btn :deep(.n-button__content) {
+  gap: var(--lme-gap-2xs);
+}
+
 /* ── 对话流：每条台词一张 NCard（卡片自带底色/圆角），左侧色条区分说话人/旁白 ── */
 .dialogue {
   display: flex;
@@ -278,7 +288,7 @@ const tags = computed<string[]>(() => props.page.tags ?? [])
 }
 
 .dialogue-line {
-  border-left: 3px solid var(--wiki-accent);
+  border-left: 3px solid var(--lme-accent);
   border-radius: 0 var(--lme-radius-md) var(--lme-radius-md) 0;
 }
 
@@ -295,8 +305,8 @@ const tags = computed<string[]>(() => props.page.tags ?? [])
 
 .chapter-name {
   font-size: var(--lme-font-size-md);
-  font-weight: 600;
-  color: var(--wiki-section-title);
+  font-weight: var(--lme-font-weight-semibold);
+  color: var(--lme-text-primary);
 }
 
 /* ── 对话流 ── */
@@ -304,8 +314,8 @@ const tags = computed<string[]>(() => props.page.tags ?? [])
   flex-shrink: 0;
   min-width: 96px;
   font-size: var(--lme-font-size-sm);
-  font-weight: 700;
-  color: var(--wiki-accent);
+  font-weight: var(--lme-font-weight-bold);
+  color: var(--lme-accent);
 }
 
 .dialogue-speaker.narration {
@@ -315,8 +325,8 @@ const tags = computed<string[]>(() => props.page.tags ?? [])
 
 .dialogue-text {
   font-size: var(--lme-font-size-md);
-  line-height: 1.8;
-  color: var(--wiki-body-text);
+  line-height: var(--lme-line-height-relaxed);
+  color: var(--lme-text-primary);
   white-space: pre-wrap;
 }
 
@@ -326,7 +336,6 @@ const tags = computed<string[]>(() => props.page.tags ?? [])
 }
 
 .dialogue-empty {
-  color: var(--lme-text-muted);
   padding: var(--lme-gap-lg) 0;
 }
 </style>

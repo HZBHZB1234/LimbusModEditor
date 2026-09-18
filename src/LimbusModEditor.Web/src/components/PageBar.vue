@@ -1,7 +1,11 @@
 <script setup lang="ts">
 // 页码条：服务端分页导航（只服务列表视图）
+// ui-redesign r6：手写按钮/输入框换成 NButton / NInput，emoji 换 AppIcon；
+// props / emits（go-to 的 0-based 语义）保持不变
 
 import { ref, computed } from 'vue'
+import { NButton, NInput } from 'naive-ui'
+import AppIcon from '@/components/AppIcon.vue'
 
 const props = defineProps<{
   currentPage: number // 1-based
@@ -31,16 +35,24 @@ function jump() {
 
 <template>
   <div class="page-bar">
-    <button class="page-btn" :disabled="currentPage <= 1 || loading" @click="emit('go-to', 0)">
-      ⏮ 首页
-    </button>
-    <button
+    <NButton
       class="page-btn"
+      size="small"
+      :disabled="currentPage <= 1 || loading"
+      @click="emit('go-to', 0)"
+    >
+      <AppIcon name="skipBack" :size="14" />
+      首页
+    </NButton>
+    <NButton
+      class="page-btn"
+      size="small"
       :disabled="currentPage <= 1 || loading"
       @click="emit('go-to', currentPage - 2)"
     >
-      ◀ 上一页
-    </button>
+      <AppIcon name="chevronLeft" :size="14" />
+      上一页
+    </NButton>
 
     <span class="page-info">
       第 <strong>{{ displayCurrent }}</strong> / {{ displayPageCount }} 页
@@ -49,30 +61,35 @@ function jump() {
     <span class="total-info">共 {{ totalCount.toLocaleString('zh-CN') }} 条</span>
 
     <div class="page-jump">
-      <input
-        v-model="jumpInput"
-        type="text"
+      <NInput
+        v-model:value="jumpInput"
         class="jump-input"
+        size="small"
         placeholder="页码"
+        :style="{ width: '52px' }"
         @keydown.enter="jump"
       />
-      <button class="page-btn small" @click="jump">跳转</button>
+      <NButton class="page-btn small" size="small" @click="jump">跳转</NButton>
     </div>
 
-    <button
+    <NButton
       class="page-btn"
+      size="small"
       :disabled="currentPage >= pageCount || loading"
       @click="emit('go-to', currentPage)"
     >
-      下一页 ▶
-    </button>
-    <button
+      下一页
+      <AppIcon name="chevronRight" :size="14" />
+    </NButton>
+    <NButton
       class="page-btn"
+      size="small"
       :disabled="currentPage >= pageCount || loading"
       @click="emit('go-to', pageCount - 1)"
     >
-      末页 ⏭
-    </button>
+      末页
+      <AppIcon name="skipForward" :size="14" />
+    </NButton>
 
     <span v-if="queryMs > 0" class="query-time lme-mono">{{ queryMs.toFixed(0) }} ms</span>
   </div>
@@ -88,33 +105,13 @@ function jump() {
   flex-wrap: wrap;
 }
 
+/* 分页按钮（库组件 NButton：底色/边框/圆角由 naiveTheme.ts 从 tokens 派生） */
 .page-btn {
-  padding: 3px 10px;
-  background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-md);
-  color: var(--lme-text-secondary);
-  cursor: pointer;
   font-size: var(--lme-font-size-sm);
-  font-family: var(--lme-font-family);
-  transition: background var(--lme-dur-fast) var(--lme-ease-standard),
-    color var(--lme-dur-fast) var(--lme-ease-standard),
-    border-color var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
-.page-btn:hover:not(:disabled) {
-  background: var(--lme-bg-hover);
-  border-color: var(--lme-border-strong);
-  color: var(--lme-text-primary);
-}
-
-.page-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.page-btn.small {
-  padding: 2px 8px;
+.page-btn :deep(.app-icon) {
+  margin: 0 var(--lme-gap-2xs);
 }
 
 .page-info,
@@ -125,6 +122,7 @@ function jump() {
 
 .page-info strong {
   color: var(--lme-text-primary);
+  font-weight: var(--lme-font-weight-semibold);
 }
 
 .page-jump {
@@ -133,15 +131,10 @@ function jump() {
   gap: var(--lme-gap-xs);
 }
 
-.jump-input {
-  width: 48px;
-  padding: 2px 4px;
-  background: var(--lme-bg-input);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
-  color: var(--lme-text-primary);
+/* 页码输入（库组件 NInput，宽度在模板里给 52px） */
+.jump-input :deep(.n-input__input-el) {
   text-align: center;
-  font-size: var(--lme-font-size-sm);
+  font-family: var(--lme-font-mono);
 }
 
 .query-time {

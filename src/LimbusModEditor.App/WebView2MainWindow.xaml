@@ -3,13 +3,34 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
         Title="Limbus Mod Editor" Height="800" Width="1280" MinHeight="540" MinWidth="960"
-        WindowBackdropType="None" ExtendsContentIntoTitleBar="True" Foreground="#E8EDF2">
+        WindowBackdropType="None" ExtendsContentIntoTitleBar="True"
+        Background="{StaticResource WindowBackgroundBrush}"
+        Foreground="{StaticResource TextPrimaryBrush}">
+    <!--
+        外壳配色说明（2026-09-18 UI 重构）：
+        本窗口只保留「原生标题栏」与「启动期状态栏」两条 chrome，
+        色值一律引用 Themes/Theme.xaml 的具名画刷，不再就地硬编码。
+
+        状态栏只在 WebView 加载期间可见（显示运行时检测 / 前端加载进度），
+        WebView 首帧就绪后由代码折叠 —— 之后的全局状态栏由前端自己绘制
+        （src/components/StatusBar.vue），避免出现两条状态栏叠在一起。
+    -->
     <DockPanel>
-        <ui:TitleBar DockPanel.Dock="Top" Title="Limbus Mod Editor" Padding="12,0" FontWeight="SemiBold"/>
-        <StatusBar DockPanel.Dock="Bottom" Background="#1B222B" Foreground="#9FB0BF">
-            <StatusBarItem><TextBlock x:Name="StatusText" Text="正在初始化 WebView2…"/></StatusBarItem>
-            <StatusBarItem HorizontalAlignment="Right"><TextBlock x:Name="RuntimeVersionText" Foreground="#5CC97A"/></StatusBarItem>
+        <ui:TitleBar DockPanel.Dock="Top" Title="Limbus Mod Editor" Padding="12,0" FontWeight="SemiBold"
+                     Background="{StaticResource WindowBackgroundBrush}"
+                     Foreground="{StaticResource TextPrimaryBrush}"/>
+
+        <StatusBar x:Name="BootStatusBar" DockPanel.Dock="Bottom">
+            <StatusBarItem>
+                <TextBlock x:Name="StatusText" Text="正在初始化 WebView2…"
+                           Foreground="{StaticResource TextSecondaryBrush}"/>
+            </StatusBarItem>
+            <StatusBarItem HorizontalAlignment="Right">
+                <TextBlock x:Name="RuntimeVersionText"
+                           Foreground="{StaticResource SuccessBrush}"/>
+            </StatusBarItem>
         </StatusBar>
-        <Border x:Name="WebViewHost" Background="#11151A"/>
+
+        <Border x:Name="WebViewHost" Background="{StaticResource WindowBackgroundBrush}"/>
     </DockPanel>
 </ui:FluentWindow>

@@ -52,16 +52,16 @@ const canRender = computed(
 .wiki-spine-title {
   margin: 0 0 var(--lme-gap-sm);
   font-size: var(--lme-font-size-lg);
-  font-weight: 600;
-  color: var(--wiki-section-title);
+  font-weight: var(--lme-font-weight-semibold);
+  color: var(--lme-text-primary);
 }
 
 .wiki-spine-stage {
   display: flex;
   justify-content: center;
   padding: var(--lme-gap-md);
-  background: var(--wiki-canvas-bg);
-  border: 1px solid var(--wiki-tab-border);
+  background: var(--lme-canvas-bg);
+  border: 1px solid var(--lme-border);
   border-radius: var(--lme-radius-md);
 }
 </style>

@@ -32,11 +32,31 @@ export class IpcClient {
   private seq = 0
   private pending = new Map<string, PendingReq>()
   private listeners = new Map<string, Set<(payload: unknown) => void>>()
+  private pendingListeners = new Set<(count: number, method: string) => void>()
   private connected = false
   private messageHandler: ((event: { data: string }) => void) | null = null
 
   constructor() {
     this.attachHost()
+  }
+
+  /**
+   * 订阅「在途请求数变化」——供全局状态栏显示后台活动。
+   * 纯增量能力，不影响任何既有请求语义。
+   * @returns 退订函数
+   */
+  onPendingChange(handler: (count: number, method: string) => void): () => void {
+    this.pendingListeners.add(handler)
+    return () => this.pendingListeners.delete(handler)
+  }
+
+  private emitPending(method: string): void {
+    for (const h of this.pendingListeners) h(this.pending.size, method)
+  }
+
+  /** 当前在途请求数 */
+  get pendingCount(): number {
+    return this.pending.size
   }
 
   private attachHost(): void {
@@ -109,6 +129,7 @@ export class IpcClient {
       const pending = this.pending.get(msg.id)
       if (!pending) return
       this.pending.delete(msg.id)
+      this.emitPending(pending.method)
       if (msg.ok) {
         pending.resolve(msg.payload)
       } else {
@@ -140,6 +161,7 @@ export class IpcClient {
 
       const timer = setTimeout(() => {
         this.pending.delete(id)
+        this.emitPending(method)
         reject(new IpcClientError('internal', `请求超时: ${method}`))
       }, timeoutMs)
 
@@ -157,6 +179,7 @@ export class IpcClient {
       })
 
       this.post(req)
+      this.emitPending(method)
     })
   }
 

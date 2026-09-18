@@ -6,7 +6,8 @@
 //   防抖（250ms）、筛选即发、清空即发、清除筛选回默认值的判据与时序一字未改
 
 import { ref, watch } from 'vue'
-import { NButton, NCheckbox, NInput, NSelect } from 'naive-ui'
+import { NButton, NCheckbox, NInput, NSelect, NTooltip } from 'naive-ui'
+import AppIcon from '@/components/AppIcon.vue'
 import type { AssetSearchQuery, AssetSortKind, AssetType } from '@/ipc'
 
 const props = defineProps<{
@@ -98,12 +99,12 @@ function onTypeChange(): void {
   onFilterChange()
 }
 
-function onContainerEntryChange(value: boolean): void {
+function onContainerEntryChanged(value: boolean): void {
   localQuery.value.hasContainerEntry = value
   onFilterChange()
 }
 
-function onShowStaticTablesChange(value: boolean): void {
+function onShowStaticTablesChanged(value: boolean): void {
   localQuery.value.showStaticTables = value
   onFilterChange()
 }
@@ -122,47 +123,70 @@ function onShowStaticTablesChange(value: boolean): void {
       @clear="onFilterChange"
     >
       <template #prefix>
-        <span class="search-input-icon">🔍</span>
+        <AppIcon name="search" :size="14" class="search-input-icon" />
       </template>
     </NInput>
 
-    <!-- 筛选下拉 -->
+    <!-- 筛选行 -->
     <div class="filter-row">
-      <NSelect
-        v-model:value="localQuery.type"
-        class="filter-select"
-        size="small"
-        :options="assetTypeOptions"
-        title="按类型筛选"
-        @update:value="onTypeChange"
-      />
+      <NTooltip :show-arrow="false" placement="bottom">
+        <template #trigger>
+          <NSelect
+            v-model:value="localQuery.type"
+            class="filter-select"
+            size="small"
+            :options="assetTypeOptions"
+            @update:value="onTypeChange"
+          />
+        </template>
+        只显示指定类型的资源；选「全部类型」不过滤
+      </NTooltip>
 
-      <NSelect
-        v-model:value="localQuery.sort"
-        class="filter-select"
-        size="small"
-        :options="sortOptions"
-        title="排序方式"
-        @update:value="onFilterChange"
-      />
+      <NTooltip :show-arrow="false" placement="bottom">
+        <template #trigger>
+          <NSelect
+            v-model:value="localQuery.sort"
+            class="filter-select"
+            size="small"
+            :options="sortOptions"
+            @update:value="onFilterChange"
+          />
+        </template>
+        结果列表的排序方式
+      </NTooltip>
 
-      <NCheckbox
-        class="filter-checkbox"
-        :checked="localQuery.hasContainerEntry !== false"
-        @update:checked="onContainerEntryChange"
-      >
-        仅容器内
-      </NCheckbox>
+      <NTooltip :show-arrow="false" placement="bottom">
+        <template #trigger>
+          <NCheckbox
+            class="filter-checkbox"
+            :checked="localQuery.hasContainerEntry !== false"
+            @update:checked="onContainerEntryChanged"
+          >
+            仅容器内
+          </NCheckbox>
+        </template>
+        只显示游戏里能通过资源路径访问到的对象，隐藏引擎内部的技术性资源
+      </NTooltip>
 
-      <NCheckbox
-        class="filter-checkbox"
-        :checked="localQuery.showStaticTables === true"
-        @update:checked="onShowStaticTablesChange"
-      >
-        显示静态表
-      </NCheckbox>
+      <NTooltip :show-arrow="false" placement="bottom">
+        <template #trigger>
+          <NCheckbox
+            class="filter-checkbox"
+            :checked="localQuery.showStaticTables === true"
+            @update:checked="onShowStaticTablesChanged"
+          >
+            显示静态表
+          </NCheckbox>
+        </template>
+        一并显示静态数据表资源（默认折叠，避免淹没常规资源）
+      </NTooltip>
 
-      <NButton class="filter-clear-btn" size="tiny" tertiary @click="clearFilters">清除筛选</NButton>
+      <NButton class="filter-clear-btn" size="tiny" tertiary @click="clearFilters">
+        <template #icon>
+          <AppIcon name="erase" :size="13" />
+        </template>
+        清除筛选
+      </NButton>
     </div>
   </div>
 </template>
@@ -185,8 +209,7 @@ function onShowStaticTablesChange(value: boolean): void {
 }
 
 .search-input-icon {
-  font-size: var(--lme-font-size-xs);
-  opacity: 0.6;
+  color: var(--lme-text-muted);
 }
 
 /* ── 筛选行 ── */

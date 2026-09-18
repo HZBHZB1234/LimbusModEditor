@@ -11,6 +11,16 @@
 > 逐条命令与原始输出见 [`docs/FINAL-DELIVERY.md`](FINAL-DELIVERY.md)；
 > 三项委托的完成度、已知缺口与人工冒烟清单也在该文档。
 
+> **2026-09-18（前端 UI 重构轮）**：Web 前端做了一次**破坏性重构**（用户授权），目标是
+> 「更美观 / 更多指引 / 状态可见 / 去 emoji 换配色」。内容：新增设计令牌体系
+> （明暗双主题 + 5 套强调色可切换）、lucide 图标体系替换全部 emoji、VS Code 式外壳
+> （工具条 + 左侧活动栏 + 页面 + 底部状态栏）、全局状态 store 与状态栏、`PageHeader`/`StateBlock`
+> 指引组件；WPF 外壳色板同步为前端默认深色令牌。
+> **约束**：IPC 方法名/载荷字段/调用时序与路由深链参数**零改动**（已逐文件机械核对）。
+> 规范见 [`docs/UI-DESIGN-SYSTEM.md`](UI-DESIGN-SYSTEM.md)。
+> 本轮前端门禁：`npm run type-check` **0 错**、`npm run build` **成功**；
+> 后端 `dotnet build` 因本机 NuGet 环境故障**未能复跑**（详见 §6.4），C# 侧改动待可用环境验证。
+
 > 接手入口文档：先读本文，再读 `docs/CODE-STRUCTURE.md`（结构与不变量）与
 > `docs/PROJECT-INDEX.md`（逐文件功能索引），最后按需查 `docs/USAGE.md`（用户手册）、
 > `docs/REALDATA-VERIFY.md`（真实数据验证证据）、`docs/REVIEW.md`（自审与风险）、
@@ -51,6 +61,8 @@ npm --prefix src/LimbusModEditor.Web run build      # 前端（必须在 publish
 **2026-09-17（重构交付轮）实测：864 项全绿 = Domain 94 + Format 74 + Application 696；四条命令（build / test / npm build / publish）退出码均为 0。**
 命令与逐项输出见 [`docs/FINAL-DELIVERY.md`](FINAL-DELIVERY.md) §2。
 
+**2026-09-18（UI 重构轮）实测：前端 `npm run type-check` 0 错、`npm run build` 成功（21.0s，含 `copy-licenses`）；`dotnet build` / `dotnet test` 因本机 NuGet 环境故障未能复跑（见 §6.4），本轮 C# 侧改动待可用环境验证。**
+
 **2026-09-13 实测：642 个测试全绿（74 Format + 568 Domain），本机真实数据门控测试全部真跑。**
 
 测试基线的历史轨迹（参考）：168 → 205 → 218 → 223 → 228 → 231 → 256 → 274 → 334 → 476 → 528 → 549 → 562 → 573 → 610 → 611 → 625 → 634 → 642 → 746（WPF 时代口径）→ 733 → **864**。
@@ -85,8 +97,10 @@ npm --prefix src/LimbusModEditor.Web run build      # 前端（必须在 publish
 9. **设计色只允许出现在** 前端 `src/LimbusModEditor.Web/src/styles/tokens.css`（收口验收门，见
    `docs/CODE-STRUCTURE.md` §6-34）；`src/views/`、`src/components/` 下硬编码色值必须为 0。
    历史条目（`App/Themes/Theme.xaml` + `App/Themes/WorkbenchStyles.xaml`）**仅对宿主外壳残留有效**：
-   两个文件 2026-09-17 实测**仍在且已无消费点**，`WebView2MainWindow.xaml` 另有 6 处内联色值——
-   属未修残留，见 `docs/FINAL-DELIVERY.md` G-08（旧 WPF 页面层的 `WorkbenchPages/` 硬编码色值门已随目录删除失效）。
+   2026-09-18 UI 重构轮已把 `WebView2MainWindow.xaml` 的 6 处内联色值改为引用 `Theme.xaml` 的具名画刷，
+   并把该文件色板同步为前端默认深色令牌（深色 + 琥珀）——宿主外壳色值**只允许**出现在 `Theme.xaml`；
+   仍未处理的是 `App/Themes/WorkbenchStyles.xaml`(443 行) 无消费点，见 `docs/FINAL-DELIVERY.md` G-08
+   （旧 WPF 页面层的 `WorkbenchPages/` 硬编码色值门已随目录删除失效）。
 10. **新增逻辑要可测**：`App` 项目没有测试工程，值得测的逻辑必须下沉到 `Application`。
 11. **文档索引与代码同步**：新增/删除源文件、改变职责边界或口径时，同步更新
     `docs/PROJECT-INDEX.md`（逐文件索引）与 `docs/CODE-STRUCTURE.md`（不变量表/流程）；
@@ -202,10 +216,12 @@ npm --prefix src/LimbusModEditor.Web run build      # 前端（必须在 publish
   当两次前端构建的**哈希文件名不同**（内容变了）时，旧 `assets/*` 会残留在 `wwwroot/`（此前观察到 17 个孤儿即属该情形）；
   本轮 `npm run build` → `dotnet publish` 连续两次实测 `wwwroot/` 与 `dist/` **52 = 52、逐文件 SHA256 一致、`diff -rq` 无输出**，
   故本次未复现。风险仍在（升级/改前端后重新发布到旧目录即可能出现）。见 FINAL-DELIVERY G-05。
-- **T-J7 宿主外壳残留（委托2 发现，未修）**：`App/Themes/Theme.xaml`(76 行) + `App/Themes/WorkbenchStyles.xaml`(443 行)
-  仍被 `App.xaml` 并入 `Application.Resources` 但**无任何消费点**（死资源）；`WPF-UI 4.3.0` 仍为
-  `PackageReference`（宿主外壳 `ui:FluentWindow`/`ui:TitleBar` 在用）；`WebView2MainWindow.xaml` 含 6 处内联色值。
-  见 FINAL-DELIVERY G-08。**交付轮硬约束「不改 `src/`」，故只登记不修。**
+- **T-J7 宿主外壳残留（2026-09-18 UI 重构轮部分修复）**：`WebView2MainWindow.xaml` 的 6 处内联色值已改为引用
+  `Theme.xaml` 的具名画刷；`Theme.xaml` 的色板已整组同步为前端默认深色令牌（深色 + 琥珀），
+  因此**它不再是死资源**（宿主外壳唯一消费点）。仍未处理：`App/Themes/WorkbenchStyles.xaml`(443 行)
+  被 `App.xaml` 并入 `Application.Resources` 但**无任何消费点**（死资源）；
+  `WPF-UI 4.3.0` 仍为 `PackageReference`（宿主外壳 `ui:FluentWindow`/`ui:TitleBar` 在用）。
+  见 FINAL-DELIVERY G-08。
 - **T-J8 sync-over-async 余量**：R2 新债 N-03 所述 `IpcGateway.cs` 8 处已由 t60 清零（实测 0 命中），
   但 Application 内**仍有 3 处**：`Assets/Preview/AssetPreviewProviders.cs:297`、`:354`、`Build/UnityCacheExportService.cs:206`。
   见 FINAL-DELIVERY G-09。
@@ -234,7 +250,7 @@ npm --prefix src/LimbusModEditor.Web run build      # 前端（必须在 publish
 | `tests/LimbusModEditor.Domain.Tests/UnitTest1.cs` 是空测试 | 无覆盖价值 | 保留（删除无收益，见 `docs/PROJECT-INDEX.md` §11.6） |
 | 游戏更新后缓存外层键变化 | Carra2 导出会与缓存不对齐 | 由导出诊断暴露（**不自动修复**） |
 | 旧导出通道与新导出并列 | 概念重叠 | 见 T-D 决策点 |
-| 宿主的 WPF 残留（死主题资源 + WPF-UI 依赖 + 内联色值 6 处） | 启动期多解析 519 行资源、依赖多一个包；不影响功能 | 未修（交付轮不改 `src/`）→ T-J7 / FINAL-DELIVERY G-08 |
+| 宿主的 WPF 残留（`WorkbenchStyles.xaml` 死资源 + WPF-UI 依赖） | 启动期多解析 443 行资源、依赖多一个包；不影响功能 | 2026-09-18 已修内联色值与 `Theme.xaml` 色板，剩余见 T-J7 / FINAL-DELIVERY G-08 |
 | Application 内 3 处 sync-over-async | 预览/导出路径有死锁与线程阻塞的理论风险（本机未复现） | 未修 → T-J8 / FINAL-DELIVERY G-09 |
 | 维基 14 类页面在本机为空 | 无法在界面上查看/编辑任何维基内容 | 生成链路未接通 → T-J1 / FINAL-DELIVERY G-01 |
 
@@ -278,6 +294,26 @@ npm --prefix src/LimbusModEditor.Web run build      # 前端（必须在 publish
   **教训**：仓库文本文件只通过 read/edit/write 工具修改（本项目铁律 §3-6），
   pwsh/脚本只用于 build / test / git / publish 与**只读**查询；派生数据（如行数表）也要用工具逐条改。
 
+### 6.4 本机 NuGet 环境故障（2026-09-18 发现，未修复）
+
+`dotnet build` / `dotnet restore` 在本机对**任何**项目都失败：
+
+```text
+error NETSDK1060: 读取资产文件时出错: 加载锁定文件"…/obj/project.assets.json"时出现错误:
+Value cannot be null. (Parameter 'path1')
+NuGet.targets(782,5): error : Value cannot be null. (Parameter 'path1')
+```
+
+**已排除仓库因素**：在临时目录新建一个只有 `<TargetFramework>net8.0</TargetFramework>` 的最小 `.csproj`，
+`dotnet restore` 同样报错。已尝试且**全部无效**：显式写 `~/.nuget/NuGet/NuGet.Config`、
+`unset NUGET_PACKAGES`、`/p:RestoreFallbackFolders=` 与 `/p:RestorePackagesPath=`。
+`~/.nuget/packages` 内已有 38 个包，`obj/*.nuget.g.props` 的 `NuGetPackageRoot` 也正常。
+
+**影响**：本轮及以后在**本机**无法编译/测试后端，`dotnet test` 的 IPC 契约门（`IpcMethodContractTests`）跑不了。
+**替代验证**（2026-09-18 UI 重构轮采用）：用脚本对每个改动文件做**新旧机械对比** ——
+`ipc.request/send/on` 的方法名集合、载荷顶层键名集合、路由 query/params 键名集合，三者均零差异。
+**结论**：环境问题，与仓库代码无关；换机器或修复 NuGet 安装后需重跑 §2 四条命令。
+
 ---
 
 ## 7. 文档地图与历史归档
@@ -300,6 +336,7 @@ npm --prefix src/LimbusModEditor.Web run build      # 前端（必须在 publish
 | `docs/RELATIONS-AUTHORITY-MATRIX.md` ★ | 权威来源矩阵：16 种权威来源、三档置信度、可写性判定；**禁止 id 数字窗口猜测** |
 | `docs/AUDIT-2026-R1.md` / `docs/AUDIT-2026-R2.md` | 委托2 两轮审查（重构前 / 重构后）；R2 含 R1 逐条复核、并发事故复核、新债与残余风险、§8 勘误 |
 | `docs/FINAL-DELIVERY.md` ★ | **三项委托的最终交付报告**：完成度与验收证据、与用户原话逐条对照、已知缺口与残余风险、过程风险与应对规则、**交付前人工冒烟清单** |
+| `docs/UI-DESIGN-SYSTEM.md` ★ | **前端设计体系的唯一规范**（2026-09-18 UI 重构轮）：四层设计令牌、`AppIcon`/`PageHeader`/`StateBlock`/`StatusBar` 用法、6 条硬性约束、单页改造套路、已知遗留 |
 
 **已删除/归档的历史文件**（2026-09-12）：
 

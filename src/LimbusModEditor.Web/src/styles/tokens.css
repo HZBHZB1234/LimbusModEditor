@@ -1,281 +1,386 @@
-/* 设计色唯一允许出处（对应铁律 §3-9 的 Web 约束） */
-/* views/ 与 components/ 下禁止硬编码色值，一律引用此文件 */
+/* ══════════════════════════════════════════════════════════════════════════
+   Limbus Mod Editor —— 设计令牌（设计色的唯一出处）
 
+   视图与组件中禁止出现色值字面量，一律引用本文件的变量。
+
+   分三层，按此顺序生效：
+     1) 结构令牌   与主题无关：间距 / 圆角 / 字体 / 动效 / 层级 / 尺寸
+     2) 基色层     html[data-theme="dark" | "light"]（默认 dark）
+     3) 强调色层   html[data-accent="amber" | "azure" | "crimson" | "emerald" | "violet"]
+
+   切换主题只需在 <html> 上改 data-theme / data-accent（见 src/theme/preferences.ts），
+   本文件内所有派生变量与 Naive UI 主题（src/theme/naiveTheme.ts）都会自动跟随。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ══════════════════════════════════════════════════════════════════════════
+   1. 结构令牌 —— 与主题无关
+   ══════════════════════════════════════════════════════════════════════════ */
 :root {
-  /* ── 背景层级 ── */
-  --lme-bg-base: #1e1e2e;
-  --lme-bg-panel: #252536;
-  --lme-bg-elevated: #2a2a3c;
-  --lme-bg-input: #1a1a28;
-  --lme-bg-hover: #33334a;
-  --lme-bg-selected: #3d3d5c;
-
-  /* ── 文字 ── */
-  --lme-text-primary: #e4e4ef;
-  --lme-text-secondary: #b0b0c0;
-  --lme-text-muted: #8888a0;
-  --lme-text-disabled: #5a5a70;
-
-  /* ── 边框 ── */
-  --lme-border: #3a3a50;
-  --lme-border-strong: #4a4a65;
-
-  /* ── 主题色 ── */
-  --lme-accent: #7c6ff7;
-  --lme-accent-hover: #9185ff;
-  --lme-accent-muted: #5a4fd0;
-
-  /* ── 状态色 ── */
-  --lme-success: #4caf7a;
-  --lme-warning: #e0a83a;
-  --lme-error: #d9534f;
-  --lme-info: #5b9bd5;
-
-  /* ── 资产类型色 ── */
-  --lme-type-texture: #7c6ff7;
-  --lme-type-sprite: #a78bfa;
-  --lme-type-audio: #4caf7a;
-  --lme-text-text: #e0a83a;
-  --lme-type-json: #5b9bd5;
-  --lme-type-mono: #d9534f;
-  --lme-type-binary: #8888a0;
-  --lme-type-mesh: #e07a3a;
-  --lme-type-animation: #d55bb0;
-  --lme-type-font: #3ab5e0;
-  --lme-type-video: #b55bd5;
-  --lme-type-material: #5bd5b5;
-  --lme-type-shader: #d5a85b;
-  --lme-type-component: #8a8aa0;
-  --lme-type-unknown: #6a6a80;
-
-  /* ── 状态标签色 ── */
-  --lme-state-modified: #e0a83a;
-  --lme-state-added: #4caf7a;
-  --lme-state-deleted: #d9534f;
-  --lme-state-conflict: #ff6b6b;
-  --lme-state-unchanged: #8888a0;
-
-  /* ── 间距 ── */
+  /* ── 间距（4px 基准栅格）── */
+  --lme-gap-2xs: 2px;
   --lme-gap-xs: 4px;
   --lme-gap-sm: 8px;
   --lme-gap-md: 12px;
   --lme-gap-lg: 16px;
   --lme-gap-xl: 24px;
+  --lme-gap-2xl: 32px;
+  --lme-gap-3xl: 48px;
 
   /* ── 圆角 ── */
+  --lme-radius-xs: 3px;
   --lme-radius-sm: 4px;
   --lme-radius-md: 6px;
   --lme-radius-lg: 8px;
+  --lme-radius-xl: 12px;
+  --lme-radius-full: 999px;
 
   /* ── 字体 ── */
-  --lme-font-family: 'Microsoft YaHei', 'PingFang SC', 'Segoe UI', system-ui, sans-serif;
-  --lme-font-mono: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
+  --lme-font-family: 'Segoe UI Variable Text', 'Segoe UI', 'Microsoft YaHei UI',
+    'Microsoft YaHei', 'PingFang SC', system-ui, -apple-system, sans-serif;
+  --lme-font-mono: 'Cascadia Mono', 'Cascadia Code', Consolas, 'Courier New', monospace;
+
+  --lme-font-size-2xs: 10px;
   --lme-font-size-xs: 11px;
   --lme-font-size-sm: 12px;
   --lme-font-size-md: 13px;
   --lme-font-size-lg: 15px;
   --lme-font-size-xl: 18px;
-
-  /* ── 阴影 ── */
-  --lme-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
-  --lme-shadow-md: 0 2px 8px rgba(0, 0, 0, 0.4);
-  --lme-shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.5);
-
-  /* ── 半透明背景（状态标签） ── */
-  --lme-state-modified-bg: rgba(224, 168, 58, 0.1);
-  --lme-state-added-bg: rgba(76, 175, 122, 0.1);
-  --lme-state-deleted-bg: rgba(217, 83, 79, 0.1);
-  --lme-overlay-bg: rgba(30, 30, 46, 0.7);
-  --lme-error-banner-bg: rgba(217, 83, 79, 0.15);
-
-  /* ── z-index 层级（全局统一，禁止组件自定数值） ── */
-  --lme-z-base: 0;        /* 常规文档流 */
-  --lme-z-raised: 10;     /* 悬浮卡片、tooltip */
-  --lme-z-sticky: 100;    /* 维基目录吸顶、粘性表头 */
-  --lme-z-dropdown: 200;  /* 下拉菜单、自动补全 */
-  --lme-z-overlay: 300;   /* 播放器浮层、灯箱 */
-  --lme-z-modal: 400;     /* 模态对话框 */
-  --lme-z-toast: 500;     /* 全局通知 */
-
-  /* ── 维基：强调金（对齐目标维基深色 + 金黄主题） ── */
-  --wiki-accent: #e6b646;            /* 主金黄：标题/强调/激活态 */
-  --wiki-accent-strong: #f0c75e;     /* hover 提亮 */
-  --wiki-accent-dim: #b08c30;        /* 弱化描边/分割 */
-  --wiki-title: #eec95e;             /* 超大页面标题色 */
-  --wiki-title-size: 30px;           /* 页面大标题字号（对齐目标维基观感） */
-  --wiki-title-line: 1.3;
-  --wiki-section-title: #edc55f;     /* 分节标题色 */
-  --wiki-link: #f2d478;              /* 正文内链色 */
-
-  /* ── 维基：信息框（右栏卡片） ── */
-  --wiki-infobox-bg: var(--lme-bg-elevated);
-  --wiki-infobox-border: var(--lme-border);
-  --wiki-infobox-header-bg: #e8b939;      /* 黄底标题栏 */
-  --wiki-infobox-header-text: #241f10;    /* 黄底上的深字 */
-  --wiki-infobox-subtitle-text: #4a422a;  /* 黄底上的次级字 */
-  --wiki-infobox-label-text: var(--lme-text-secondary);
-  --wiki-infobox-value-text: var(--lme-text-primary);
-  --wiki-infobox-width: 300px;
-
-  /* ── 维基：标签胶囊（chip） ── */
-  --wiki-chip-bg: rgba(230, 182, 70, 0.12);
-  --wiki-chip-border: rgba(230, 182, 70, 0.35);
-  --wiki-chip-text: var(--wiki-accent);
-  --wiki-chip-active-bg: var(--wiki-accent);
-  --wiki-chip-active-text: #241f10;
-  --wiki-chip-radius: 999px;
-
-  /* ── 维基：引用块（页面引言） ── */
-  --wiki-quote-bg: rgba(42, 42, 60, 0.6);
-  --wiki-quote-border: var(--wiki-accent);
-  --wiki-quote-text: #d8d0b8;
-  --wiki-quote-mark: rgba(230, 182, 70, 0.4);
-
-  /* ── 维基：提示块（需改进/注意） ── */
-  --wiki-notice-bg: var(--lme-bg-elevated);
-  --wiki-notice-border: var(--wiki-accent);
-  --wiki-notice-text: var(--lme-text-primary);
-
-  /* ── 维基：目录（左侧编号目录） ── */
-  --wiki-toc-text: var(--lme-text-muted);
-  --wiki-toc-text-hover: var(--wiki-accent);
-  --wiki-toc-active: var(--wiki-accent);
-  --wiki-toc-width: 180px;
-
-  /* ── 维基：画廊与媒体 ── */
-  --wiki-gallery-thumb-min: 96px;   /* 缩略图最小边 */
-  --wiki-gallery-thumb-max: 140px;  /* 缩略图最大边 */
-  --wiki-gallery-bg: var(--lme-bg-panel);
-  --wiki-media-radius: var(--lme-radius-md);
-  --wiki-audio-row-height: 40px;    /* 音频列表行高 */
-  --wiki-audio-row-hover: var(--lme-bg-hover);
-  --wiki-audio-playing-bg: rgba(230, 182, 70, 0.15);
-
-  /* ── 维基：媒体占位（图裂/无 URL 时的中性占位，不伪造内容） ── */
-  --wiki-media-broken-bg: var(--lme-bg-input);
-  --wiki-media-broken-text: var(--lme-text-disabled);
-  --wiki-canvas-bg: #0a0a1a; /* Spine/动画画布底色 */
-
-  /* ── 维基：分节 Tab 分组 ── */
-  --wiki-tab-text: var(--lme-text-secondary);
-  --wiki-tab-text-hover: var(--lme-text-primary);
-  --wiki-tab-active-text: var(--wiki-accent);
-  --wiki-tab-active-bg: rgba(230, 182, 70, 0.12);
-  --wiki-tab-border: var(--lme-border);
-  --wiki-tab-active-border: var(--wiki-accent);
-
-  /* ── 维基：来源标注徽章 ── */
-  --wiki-badge-bg: var(--lme-bg-elevated);
-  --wiki-badge-border: var(--lme-border-strong);
-  --wiki-badge-text: var(--lme-text-secondary);
-  --wiki-badge-writable-bg: rgba(76, 175, 122, 0.12);
-  --wiki-badge-writable-text: var(--lme-success);
-
-  /* ── 维基：正文区 ── */
-  --wiki-content-max-width: 980px;
-  --wiki-body-text: var(--lme-text-primary);
-  --wiki-entry-title: var(--lme-text-primary);
-
-  /* ── 维基：首页（对齐灰机首页：暗横幅 + 金标题 + 分类卡网格） ── */
-  --wiki-hero-bg: rgba(24, 24, 36, 0.85);          /* 首页横幅底 */
-  --wiki-hero-border: var(--wiki-accent-dim);
-  --wiki-hero-title: var(--wiki-title);
-  --wiki-hero-subtitle: var(--lme-text-secondary);
-  --wiki-hero-accent-line: var(--wiki-accent);
-  --wiki-stat-value: var(--wiki-accent);            /* 统计卡数值 */
-  --wiki-stat-label: var(--lme-text-muted);
-  --wiki-card-bg: var(--lme-bg-panel);              /* 分类卡 */
-  --wiki-card-border: var(--lme-border);
-  --wiki-card-hover-border: var(--wiki-accent);
-  --wiki-card-hover-bg: var(--lme-bg-hover);
-  --wiki-cat-empty-text: var(--lme-text-disabled);  /* "本地无来源" */
-  --wiki-section-head-border: var(--wiki-accent-dim); /* 区块标题分隔线 */
-  /* ui-redesign r3 追加（首页库组件化时的尺寸/时长令牌） */
-  --wiki-loadingbar-height: 2px;                    /* 顶部细进度条高度 */
-  --wiki-loadingbar-cycle: 1s;                      /* 顶部细进度条动画周期 */
-  --wiki-hero-accent-line-height: 3px;              /* 横幅顶部金色装饰线高度 */
-  --wiki-stat-col-min: 150px;                       /* 统计卡栅格最小列宽 */
-  --wiki-category-col-min: 220px;                   /* 分类卡栅格最小列宽 */
-  --wiki-recent-time-min: 140px;                    /* 最近编辑时间列最小宽 */
-  --wiki-card-lift: -2px;                           /* 卡片悬浮上浮位移 */
-
-  /* ── 维基：外壳（侧栏导航 + 面包屑 + 侧栏搜索框） ── */
-  --wiki-nav-active-bg: rgba(230, 182, 70, 0.12);
-  --wiki-nav-active-text: var(--wiki-accent);
-  --wiki-nav-active-bar: var(--wiki-accent);        /* 激活项左缘金条 */
-  --wiki-shell-search-bg: var(--lme-bg-input);
-  --wiki-breadcrumb-text: var(--lme-text-muted);
-  --wiki-breadcrumb-link: var(--wiki-link);
-
-  /* ── 维基：搜索页 / 分类页结果卡 ── */
-  --wiki-result-title: var(--wiki-link);
-  --wiki-result-snippet: var(--lme-text-secondary);
-  --wiki-thumb-bg: var(--lme-bg-elevated);          /* 缩略图/封面中性占位底 */
-  --wiki-thumb-icon: var(--lme-text-disabled);
-
-  /* ── 维基：实体页响应式栅格（ui-redesign r2 追加） ── */
-  --wiki-page-max-width: 1360px;                    /* 实体页三栏栅格整体最大宽度 */
-  --wiki-aside-min: 260px;                          /* 信息框列最小宽 */
-  --wiki-aside-max: 320px;                          /* 信息框列最大宽 */
-  --wiki-infobox-zebra-bg: rgba(255, 255, 255, 0.03); /* 信息框字段行 zebra 底 */
-  --wiki-infobox-row-hover: rgba(230, 182, 70, 0.08); /* 信息框字段行 hover 底 */
-
-  /* ── 维基：实体页库组件化（ui-redesign r3 追加） ── */
-  --wiki-focus-ring: 0 0 0 2px rgba(230, 182, 70, 0.35); /* 维基区聚焦环（金，不用紫） */
-
-  /* ════════════════════════════════════════════════════════════
-     v2 设计令牌（ui-redesign r1）—— 排版 / 间距 / 圆角 / 海拔 / 动效
-     ════════════════════════════════════════════════════════════ */
-
-  /* ── 排版比例：桌面 13px 基准，1.25 比率向上 ── */
   --lme-font-size-2xl: 22px;
   --lme-font-size-3xl: 28px;
-  --lme-line-height-tight: 1.25;    /* 标题 */
-  --lme-line-height-normal: 1.5;    /* 正文 */
-  --lme-line-height-relaxed: 1.7;   /* 说明/帮助文本 */
+
+  --lme-line-height-tight: 1.25;
+  --lme-line-height-normal: 1.5;
+  --lme-line-height-relaxed: 1.7;
+
   --lme-font-weight-regular: 400;
   --lme-font-weight-medium: 500;
   --lme-font-weight-semibold: 600;
   --lme-font-weight-bold: 700;
-  --lme-tracking-caps: 0.5px;       /* 全大写小标签的字距 */
 
-  /* ── 间距刻度补充（原有 xs~xl 保留） ── */
-  --lme-gap-2xl: 32px;
-  --lme-gap-3xl: 48px;
+  --lme-tracking-caps: 0.6px;
 
-  /* ── 圆角补充 ── */
-  --lme-radius-xl: 12px;
-  --lme-radius-full: 999px;
-
-  /* ── 海拔（阴影）补充：面板浮层与聚焦环 ── */
-  --lme-shadow-xl: 0 8px 32px rgba(0, 0, 0, 0.55);
-  --lme-shadow-focus: 0 0 0 2px rgba(124, 111, 247, 0.35);
-  --lme-overlay-scrim: rgba(12, 12, 20, 0.6);
-
-  /* ── 动效时长与缓动 ── */
+  /* ── 动效 ── */
+  --lme-dur-instant: 80ms;
   --lme-dur-fast: 120ms;
   --lme-dur-base: 180ms;
   --lme-dur-slow: 280ms;
   --lme-ease-standard: cubic-bezier(0.2, 0, 0, 1);
   --lme-ease-emphasized: cubic-bezier(0.3, 0, 0, 1);
 
-  /* ── 外壳：顶部命令栏 ── */
-  --lme-topbar-height: 46px;
-  --lme-topbar-bg: #17171f;
-  --lme-topbar-border: rgba(0, 0, 0, 0.45);
+  /* ── 层级（全局统一，禁止组件自定数值）── */
+  --lme-z-base: 0;
+  --lme-z-raised: 10;
+  --lme-z-sticky: 100;
+  --lme-z-dropdown: 200;
+  --lme-z-overlay: 300;
+  --lme-z-modal: 400;
+  --lme-z-toast: 500;
+
+  /* ── 外壳尺寸 ── */
+  --lme-titlebar-height: 34px;
+  --lme-toolbar-height: 40px;
+  --lme-activitybar-width: 48px;
+  --lme-statusbar-height: 24px;
+  --lme-topbar-height: 34px; /* 兼容旧名：等价 titlebar */
+  --lme-tabbar-height: 36px;
+
+  /* ── 控件尺寸 ── */
+  --lme-control-height-sm: 24px;
+  --lme-control-height-md: 28px;
+  --lme-control-height-lg: 34px;
+  --lme-row-height: 28px;
+  --lme-row-height-lg: 32px;
+  --lme-focus-ring-width: 2px;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   2. 基色层 —— 深色（默认）
+   ══════════════════════════════════════════════════════════════════════════ */
+:root,
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  /* ── 背景层级 ── */
+  --lme-bg-base: #16181c;
+  --lme-bg-panel: #1b1e23;
+  --lme-bg-elevated: #22262d;
+  --lme-bg-input: #121417;
+  --lme-bg-hover: #262b33;
+  --lme-bg-active: #2f3540;
+  --lme-bg-selected: #333a46;
+  --lme-bg-inset: #121417;
+  --lme-bg-scrim: rgba(9, 10, 12, 0.62);
+
+  /* ── 文字 ── */
+  --lme-text-primary: #e7eaef;
+  --lme-text-secondary: #a9b1bd;
+  --lme-text-muted: #79818d;
+  --lme-text-disabled: #545b66;
+  --lme-text-inverse: #14161a;
+  --lme-text-tertiary: var(--lme-text-muted); /* 兼容别名 */
+
+  /* ── 边框与分割 ── */
+  --lme-border: #2a2f37;
+  --lme-border-strong: #3b424d;
+  --lme-border-subtle: #21252b;
+  --lme-row-divider: rgba(255, 255, 255, 0.04);
+
+  /* ── 状态色 ── */
+  --lme-success: #46b17b;
+  --lme-warning: #d9a441;
+  --lme-error: #e0575f;
+  --lme-info: #4d9ce8;
+  --lme-success-subtle: rgba(70, 177, 123, 0.13);
+  --lme-warning-subtle: rgba(217, 164, 65, 0.13);
+  --lme-error-subtle: rgba(224, 87, 95, 0.13);
+  --lme-info-subtle: rgba(77, 156, 232, 0.13);
+  --lme-success-border: rgba(70, 177, 123, 0.35);
+  --lme-warning-border: rgba(217, 164, 65, 0.35);
+  --lme-error-border: rgba(224, 87, 95, 0.35);
+  --lme-info-border: rgba(77, 156, 232, 0.35);
+
+  /* ── 资产类型色（暗底取亮）── */
+  --lme-type-texture: #8b7cf0;
+  --lme-type-sprite: #a78bfa;
+  --lme-type-audio: #46b17b;
+  --lme-text-text: #d9a441;
+  --lme-type-json: #4d9ce8;
+  --lme-type-mono: #e0575f;
+  --lme-type-binary: #79818d;
+  --lme-type-mesh: #e07a3a;
+  --lme-type-animation: #d55bb0;
+  --lme-type-font: #3ab5e0;
+  --lme-type-video: #b55bd5;
+  --lme-type-material: #5bd5b5;
+  --lme-type-shader: #d5a85b;
+  --lme-type-component: #8a92a0;
+  --lme-type-unknown: #656d79;
+
+  /* ── 编辑状态 ── */
+  --lme-state-modified: #d9a441;
+  --lme-state-added: #46b17b;
+  --lme-state-deleted: #e0575f;
+  --lme-state-conflict: #ff6b6b;
+  --lme-state-unchanged: #79818d;
+  --lme-state-modified-bg: rgba(217, 164, 65, 0.12);
+  --lme-state-added-bg: rgba(70, 177, 123, 0.12);
+  --lme-state-deleted-bg: rgba(224, 87, 95, 0.12);
+
+  /* ── 海拔（阴影）── */
+  --lme-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --lme-shadow-md: 0 3px 10px rgba(0, 0, 0, 0.4);
+  --lme-shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.48);
+  --lme-shadow-xl: 0 16px 44px rgba(0, 0, 0, 0.58);
+
+  /* ── 覆盖层 ── */
+  --lme-overlay-bg: rgba(22, 24, 28, 0.72);
+  --lme-overlay-scrim: rgba(9, 10, 12, 0.62);
+  --lme-error-banner-bg: rgba(224, 87, 95, 0.12);
+
+  /* ── 滚动条 ── */
+  --lme-scrollbar-thumb: #383f4a;
+  --lme-scrollbar-thumb-hover: #4a525f;
+  --lme-scrollbar-track: transparent;
+
+  /* ── 媒体画布（Spine / 图像预览底，明暗主题都保持深色）── */
+  --lme-canvas-bg: #0e1116;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   2. 基色层 —— 浅色
+   ══════════════════════════════════════════════════════════════════════════ */
+[data-theme='light'] {
+  color-scheme: light;
+
+  /* ── 背景层级 ── */
+  --lme-bg-base: #f4f5f7;
+  --lme-bg-panel: #ffffff;
+  --lme-bg-elevated: #ffffff;
+  --lme-bg-input: #ffffff;
+  --lme-bg-hover: #eceef1;
+  --lme-bg-active: #e2e6ec;
+  --lme-bg-selected: #dce5f2;
+  --lme-bg-inset: #f0f2f5;
+  --lme-bg-scrim: rgba(28, 32, 38, 0.38);
+
+  /* ── 文字 ── */
+  --lme-text-primary: #1b1f24;
+  --lme-text-secondary: #4b545f;
+  --lme-text-muted: #6f7885;
+  --lme-text-disabled: #a3aab4;
+  --lme-text-inverse: #ffffff;
+  --lme-text-tertiary: var(--lme-text-muted);
+
+  /* ── 边框与分割 ── */
+  --lme-border: #dde1e6;
+  --lme-border-strong: #c3cad3;
+  --lme-border-subtle: #eaedf1;
+  --lme-row-divider: rgba(27, 31, 36, 0.06);
+
+  /* ── 状态色（白底取深）── */
+  --lme-success: #1a8f5a;
+  --lme-warning: #a9741a;
+  --lme-error: #c9343e;
+  --lme-info: #2b7fd4;
+  --lme-success-subtle: rgba(26, 143, 90, 0.1);
+  --lme-warning-subtle: rgba(169, 116, 26, 0.1);
+  --lme-error-subtle: rgba(201, 52, 62, 0.1);
+  --lme-info-subtle: rgba(43, 127, 212, 0.1);
+
+  /* ── 资产类型色（白底取深）── */
+  --lme-type-texture: #6b57e0;
+  --lme-type-sprite: #8b5cf6;
+  --lme-type-audio: #1a8f5a;
+  --lme-text-text: #a9741a;
+  --lme-type-json: #2b7fd4;
+  --lme-type-mono: #c9343e;
+  --lme-type-binary: #6f7885;
+  --lme-type-mesh: #c25a17;
+  --lme-type-animation: #b0348c;
+  --lme-type-font: #1a8fa8;
+  --lme-type-video: #8f3ab5;
+  --lme-type-material: #128f75;
+  --lme-type-shader: #a9741a;
+  --lme-type-component: #6f7885;
+  --lme-type-unknown: #8b939e;
+
+  /* ── 编辑状态 ── */
+  --lme-state-modified: #a9741a;
+  --lme-state-added: #1a8f5a;
+  --lme-state-deleted: #c9343e;
+  --lme-state-conflict: #d42b2b;
+  --lme-state-unchanged: #6f7885;
+  --lme-state-modified-bg: rgba(169, 116, 26, 0.1);
+  --lme-state-added-bg: rgba(26, 143, 90, 0.1);
+  --lme-state-deleted-bg: rgba(201, 52, 62, 0.1);
+
+  /* ── 海拔（浅色下阴影更收敛）── */
+  --lme-shadow-sm: 0 1px 2px rgba(27, 31, 36, 0.08);
+  --lme-shadow-md: 0 3px 10px rgba(27, 31, 36, 0.1);
+  --lme-shadow-lg: 0 8px 24px rgba(27, 31, 36, 0.13);
+  --lme-shadow-xl: 0 16px 44px rgba(27, 31, 36, 0.18);
+
+  /* ── 覆盖层 ── */
+  --lme-overlay-bg: rgba(244, 245, 247, 0.72);
+  --lme-overlay-scrim: rgba(28, 32, 38, 0.38);
+  --lme-error-banner-bg: rgba(201, 52, 62, 0.08);
+
+  /* ── 滚动条 ── */
+  --lme-scrollbar-thumb: #c6ccd4;
+  --lme-scrollbar-thumb-hover: #aab2bd;
+  --lme-scrollbar-track: transparent;
+
+  /* ── 媒体画布（明暗都保持深色，避免浅底看不清资源）── */
+  --lme-canvas-bg: #171a1f;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   3. 强调色层 —— 可在「设置 → 外观」切换
+   每套定义 7 个变量；其余派生色由下面「派生令牌」统一计算。
+   ══════════════════════════════════════════════════════════════════════════ */
+:root,
+[data-accent='amber'] {
+  --lme-accent: #d99a3d;
+  --lme-accent-hover: #e8ab52;
+  --lme-accent-muted: #b87f2c;
+  --lme-accent-subtle: rgba(217, 154, 61, 0.14);
+  --lme-accent-border: rgba(217, 154, 61, 0.42);
+  --lme-accent-contrast: #1c1508;
+  --lme-accent-glow: rgba(217, 154, 61, 0.4);
+}
+
+[data-accent='azure'] {
+  --lme-accent: #3d8ee0;
+  --lme-accent-hover: #559dea;
+  --lme-accent-muted: #2f74bb;
+  --lme-accent-subtle: rgba(61, 142, 224, 0.14);
+  --lme-accent-border: rgba(61, 142, 224, 0.42);
+  --lme-accent-contrast: #ffffff;
+  --lme-accent-glow: rgba(61, 142, 224, 0.4);
+}
+
+[data-accent='crimson'] {
+  --lme-accent: #d9535f;
+  --lme-accent-hover: #e56874;
+  --lme-accent-muted: #b33f4b;
+  --lme-accent-subtle: rgba(217, 83, 95, 0.14);
+  --lme-accent-border: rgba(217, 83, 95, 0.42);
+  --lme-accent-contrast: #ffffff;
+  --lme-accent-glow: rgba(217, 83, 95, 0.4);
+}
+
+[data-accent='emerald'] {
+  --lme-accent: #2fae83;
+  --lme-accent-hover: #3fc294;
+  --lme-accent-muted: #248c69;
+  --lme-accent-subtle: rgba(47, 174, 131, 0.14);
+  --lme-accent-border: rgba(47, 174, 131, 0.42);
+  --lme-accent-contrast: #06231a;
+  --lme-accent-glow: rgba(47, 174, 131, 0.4);
+}
+
+[data-accent='violet'] {
+  --lme-accent: #8878ef;
+  --lme-accent-hover: #9b8df6;
+  --lme-accent-muted: #6f5fd4;
+  --lme-accent-subtle: rgba(136, 120, 239, 0.14);
+  --lme-accent-border: rgba(136, 120, 239, 0.42);
+  --lme-accent-contrast: #ffffff;
+  --lme-accent-glow: rgba(136, 120, 239, 0.4);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   4. 派生令牌 —— 由基色 + 强调色计算，主题/配色切换后自动跟随
+   ══════════════════════════════════════════════════════════════════════════ */
+:root {
+  /* ── 聚焦环 ── */
+  --lme-shadow-focus: 0 0 0 var(--lme-focus-ring-width) var(--lme-accent-glow);
+
+  /* ── 进度条 ── */
+  --lme-progressbar-bg: var(--lme-bg-active);
+  --lme-progressbar-fill: var(--lme-accent);
+
+  /* ── 外壳：标题栏 ── */
+  --lme-topbar-bg: var(--lme-bg-panel);
+  --lme-topbar-border: var(--lme-border);
   --lme-topbar-text: var(--lme-text-secondary);
   --lme-topbar-icon-hover-bg: var(--lme-bg-hover);
   --lme-brand-mark-bg: var(--lme-accent);
-  --lme-brand-mark-text: #ffffff;
+  --lme-brand-mark-text: var(--lme-accent-contrast);
   --lme-cmdbar-bg: var(--lme-bg-input);
-  --lme-cmdbar-border: var(--lme-border-strong);
+  --lme-cmdbar-border: var(--lme-border);
   --lme-cmdbar-placeholder: var(--lme-text-muted);
   --lme-cmdbar-kbd-bg: var(--lme-bg-elevated);
   --lme-cmdbar-kbd-border: var(--lme-border);
   --lme-cmdbar-kbd-text: var(--lme-text-muted);
 
+  /* ── 外壳：活动栏 ── */
+  --lme-activitybar-bg: var(--lme-bg-base);
+  --lme-activitybar-border: var(--lme-border);
+  --lme-activitybar-item-text: var(--lme-text-muted);
+  --lme-activitybar-item-hover-text: var(--lme-text-primary);
+  --lme-activitybar-item-hover-bg: var(--lme-bg-hover);
+  --lme-activitybar-item-active-text: var(--lme-text-primary);
+  --lme-activitybar-item-active-bg: var(--lme-bg-active);
+  --lme-activitybar-indicator: var(--lme-accent);
+  --lme-activitybar-badge-bg: var(--lme-accent);
+  --lme-activitybar-badge-text: var(--lme-accent-contrast);
+
+  /* ── 外壳：工具条 ── */
+  --lme-toolbar-bg: var(--lme-bg-panel);
+  --lme-toolbar-border: var(--lme-border);
+
+  /* ── 外壳：底部状态栏 ── */
+  --lme-statusbar-bg: var(--lme-bg-elevated);
+  --lme-statusbar-border: var(--lme-border);
+  --lme-statusbar-text: var(--lme-text-muted);
+  --lme-statusbar-text-strong: var(--lme-text-secondary);
+  --lme-statusbar-item-hover-bg: var(--lme-bg-hover);
+  --lme-statusbar-accent: var(--lme-accent);
+  --lme-statusbar-error: var(--lme-error);
+  --lme-statusbar-warning: var(--lme-warning);
+
   /* ── 外壳：工作区 tab 条 ── */
-  --lme-tabbar-height: 38px;
   --lme-tabbar-bg: var(--lme-bg-panel);
   --lme-tabbar-border: var(--lme-border);
   --lme-tab-text: var(--lme-text-secondary);
@@ -283,23 +388,135 @@
   --lme-tab-hover-bg: var(--lme-bg-hover);
   --lme-tab-active-text: var(--lme-text-primary);
   --lme-tab-active-underline: var(--lme-accent);
-  --lme-tab-active-underline-wiki: var(--wiki-accent); /* 维基工作区激活时用金色 */
+  --lme-tab-active-underline-wiki: var(--lme-accent);
 
-  /* ── 命令面板（Ctrl+K） ── */
-  --lme-palette-scrim: var(--lme-overlay-scrim);
+  /* ── 命令面板（Ctrl+K）── */
   --lme-palette-bg: var(--lme-bg-elevated);
   --lme-palette-border: var(--lme-border-strong);
   --lme-palette-option-hover: var(--lme-bg-hover);
-  --lme-palette-option-active: var(--lme-bg-selected);
+  --lme-palette-option-active: var(--lme-accent-subtle);
   --lme-palette-group-text: var(--lme-text-muted);
+  --lme-palette-scrim: var(--lme-overlay-scrim);
 
-  /* ── 列表行质感 ── */
-  --lme-row-divider: rgba(255, 255, 255, 0.04);
-  --lme-progressbar-bg: var(--lme-bg-input);
-  --lme-progressbar-fill: var(--lme-accent);
+  /* ── 通用表面 ── */
+  --lme-surface-hover-border: var(--lme-border-strong);
+  --lme-surface-accent-border: var(--lme-accent-border);
+
+  /* ══ 维基区 ══
+     维基不再自带一套金色，统一跟随全局强调色（消除此前的紫/金割裂）。
+     变量名保留，仅颜色来源改变。 */
+  --wiki-accent: var(--lme-accent);
+  --wiki-accent-strong: var(--lme-accent-hover);
+  --wiki-accent-dim: var(--lme-accent-border);
+  --wiki-title: var(--lme-text-primary);
+  --wiki-title-size: 30px;
+  --wiki-title-line: 1.3;
+  --wiki-section-title: var(--lme-text-primary);
+  --wiki-link: var(--lme-accent);
+
+  --wiki-infobox-bg: var(--lme-bg-elevated);
+  --wiki-infobox-border: var(--lme-border);
+  --wiki-infobox-header-bg: var(--lme-accent-subtle);
+  --wiki-infobox-header-text: var(--lme-text-primary);
+  --wiki-infobox-subtitle-text: var(--lme-text-muted);
+  --wiki-infobox-label-text: var(--lme-text-secondary);
+  --wiki-infobox-value-text: var(--lme-text-primary);
+  --wiki-infobox-width: 300px;
+  --wiki-infobox-zebra-bg: var(--lme-bg-inset);
+  --wiki-infobox-row-hover: var(--lme-accent-subtle);
+
+  --wiki-chip-bg: var(--lme-accent-subtle);
+  --wiki-chip-border: var(--lme-accent-border);
+  --wiki-chip-text: var(--lme-accent);
+  --wiki-chip-active-bg: var(--lme-accent);
+  --wiki-chip-active-text: var(--lme-accent-contrast);
+  --wiki-chip-radius: var(--lme-radius-full);
+
+  --wiki-quote-bg: var(--lme-bg-inset);
+  --wiki-quote-border: var(--lme-accent);
+  --wiki-quote-text: var(--lme-text-secondary);
+  --wiki-quote-mark: var(--lme-accent-border);
+
+  --wiki-notice-bg: var(--lme-bg-elevated);
+  --wiki-notice-border: var(--lme-accent-border);
+  --wiki-notice-text: var(--lme-text-primary);
+
+  --wiki-toc-text: var(--lme-text-muted);
+  --wiki-toc-text-hover: var(--lme-accent);
+  --wiki-toc-active: var(--lme-accent);
+  --wiki-toc-width: 180px;
+
+  --wiki-gallery-thumb-min: 96px;
+  --wiki-gallery-thumb-max: 140px;
+  --wiki-gallery-bg: var(--lme-bg-panel);
+  --wiki-media-radius: var(--lme-radius-md);
+  --wiki-audio-row-height: 40px;
+  --wiki-audio-row-hover: var(--lme-bg-hover);
+  --wiki-audio-playing-bg: var(--lme-accent-subtle);
+
+  --wiki-media-broken-bg: var(--lme-bg-inset);
+  --wiki-media-broken-text: var(--lme-text-disabled);
+  --wiki-canvas-bg: var(--lme-canvas-bg);
+
+  --wiki-tab-text: var(--lme-text-secondary);
+  --wiki-tab-text-hover: var(--lme-text-primary);
+  --wiki-tab-active-text: var(--lme-accent);
+  --wiki-tab-active-bg: var(--lme-accent-subtle);
+  --wiki-tab-border: var(--lme-border);
+  --wiki-tab-active-border: var(--lme-accent);
+
+  --wiki-badge-bg: var(--lme-bg-elevated);
+  --wiki-badge-border: var(--lme-border-strong);
+  --wiki-badge-text: var(--lme-text-secondary);
+  --wiki-badge-writable-bg: var(--lme-success-subtle);
+  --wiki-badge-writable-text: var(--lme-success);
+
+  --wiki-content-max-width: 980px;
+  --wiki-body-text: var(--lme-text-primary);
+  --wiki-entry-title: var(--lme-text-primary);
+
+  --wiki-hero-bg: var(--lme-bg-panel);
+  --wiki-hero-border: var(--lme-border);
+  --wiki-hero-title: var(--lme-text-primary);
+  --wiki-hero-subtitle: var(--lme-text-secondary);
+  --wiki-hero-accent-line: var(--lme-accent);
+  --wiki-hero-accent-line-height: 3px;
+  --wiki-stat-value: var(--lme-accent);
+  --wiki-stat-label: var(--lme-text-muted);
+  --wiki-stat-col-min: 150px;
+  --wiki-card-bg: var(--lme-bg-panel);
+  --wiki-card-border: var(--lme-border);
+  --wiki-card-hover-border: var(--lme-accent);
+  --wiki-card-hover-bg: var(--lme-bg-hover);
+  --wiki-card-lift: -2px;
+  --wiki-cat-empty-text: var(--lme-text-disabled);
+  --wiki-section-head-border: var(--lme-border);
+  --wiki-loadingbar-height: 2px;
+  --wiki-loadingbar-cycle: 1s;
+  --wiki-category-col-min: 220px;
+  --wiki-recent-time-min: 140px;
+
+  --wiki-nav-active-bg: var(--lme-accent-subtle);
+  --wiki-nav-active-text: var(--lme-accent);
+  --wiki-nav-active-bar: var(--lme-accent);
+  --wiki-shell-search-bg: var(--lme-bg-input);
+  --wiki-breadcrumb-text: var(--lme-text-muted);
+  --wiki-breadcrumb-link: var(--lme-text-secondary);
+
+  --wiki-result-title: var(--lme-accent);
+  --wiki-result-snippet: var(--lme-text-secondary);
+  --wiki-thumb-bg: var(--lme-bg-elevated);
+  --wiki-thumb-icon: var(--lme-text-disabled);
+
+  --wiki-page-max-width: 1360px;
+  --wiki-aside-min: 260px;
+  --wiki-aside-max: 320px;
+  --wiki-focus-ring: 0 0 0 var(--lme-focus-ring-width) var(--lme-accent-glow);
 }
 
-/* ── 全局基础 ── */
+/* ══════════════════════════════════════════════════════════════════════════
+   5. 全局基础样式
+   ══════════════════════════════════════════════════════════════════════════ */
 * {
   box-sizing: border-box;
 }
@@ -313,30 +530,52 @@ body {
   color: var(--lme-text-primary);
   font-family: var(--lme-font-family);
   font-size: var(--lme-font-size-md);
+  line-height: var(--lme-line-height-normal);
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 #app {
   height: 100%;
 }
 
-/* ── 滚动条 ── */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-::-webkit-scrollbar-track {
-  background: var(--lme-bg-base);
-}
-::-webkit-scrollbar-thumb {
-  background: var(--lme-border);
-  border-radius: 4px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: var(--lme-border-strong);
+/* 选中文字用强调色 */
+::selection {
+  background: var(--lme-accent-subtle);
+  color: var(--lme-text-primary);
 }
 
-/* ── 通用工具类 ── */
+/* ── 滚动条（细、无轨道，贴近原生应用）── */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: var(--lme-scrollbar-track);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--lme-scrollbar-thumb);
+  border: 2px solid transparent;
+  background-clip: content-box;
+  border-radius: var(--lme-radius-full);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--lme-scrollbar-thumb-hover);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ── 键盘可达性：统一聚焦环 ── */
+:focus-visible {
+  outline: var(--lme-focus-ring-width) solid var(--lme-accent-glow);
+  outline-offset: 1px;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   6. 通用工具类
+   ══════════════════════════════════════════════════════════════════════════ */
 .lme-mono {
   font-family: var(--lme-font-mono);
   font-size: var(--lme-font-size-sm);
@@ -346,4 +585,68 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 小号全大写标签（分区标题、状态栏字段名） */
+.lme-caps {
+  font-size: var(--lme-font-size-2xs);
+  font-weight: var(--lme-font-weight-semibold);
+  letter-spacing: var(--lme-tracking-caps);
+  text-transform: uppercase;
+  color: var(--lme-text-muted);
+}
+
+/* 键帽（快捷键提示） */
+.lme-kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  background: var(--lme-cmdbar-kbd-bg);
+  border: 1px solid var(--lme-cmdbar-kbd-border);
+  border-radius: var(--lme-radius-xs);
+  color: var(--lme-cmdbar-kbd-text);
+  font-family: var(--lme-font-mono);
+  font-size: var(--lme-font-size-2xs);
+  line-height: 1;
+}
+
+/* 顶部分区细进度条（加载中） */
+.lme-loadingbar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--wiki-loadingbar-height);
+  overflow: hidden;
+  z-index: var(--lme-z-raised);
+  background: var(--lme-progressbar-bg);
+}
+
+.lme-loadingbar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  border-radius: var(--lme-radius-full);
+  background: var(--lme-progressbar-fill);
+  animation: lme-loading-slide var(--wiki-loadingbar-cycle) var(--lme-ease-standard) infinite;
+}
+
+@keyframes lme-loading-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(350%);
+  }
+}
+
+/* 旋转指示器 */
+@keyframes lme-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }

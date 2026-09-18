@@ -74,13 +74,7 @@ const router = createRouter({
       name: 'wiki-spine',
       component: () => import('@/views/WikiSpineBrowserView.vue'),
     },
-    // ── 组件库自检（不进工作区 tab，仅用于验证主题映射是否正确） ──
-    {
-      path: '/lib-check',
-      name: 'lib-check',
-      component: () => import('@/views/LibCheckView.vue'),
-    },
-    // 组件库自检页（不暴露在工作区 tab 中，仅供主题/组件验证）
+    // ── 组件库自检（不进活动栏，仅用于验证主题映射是否正确） ──
     {
       path: '/lib-check',
       name: 'lib-check',

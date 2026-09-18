@@ -2,14 +2,18 @@
 // 维基分类页面（WikiCategoryView）
 // 分类索引视图：标题+描述、搜索筛选、网格/列表、分页
 // 数据来源：ipc.request('wiki.categoryIndex', { category })
-// 布局：WikiShell 包裹；呈现层使用 Naive UI（ui-redesign r5，维基区主色为金）
+// 布局：WikiShell 包裹；呈现层使用 Naive UI（ui-redesign r6：图标走 AppIcon，配色统一到全局令牌）
 // IPC 与深链（?category）零改动。
 
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { NAlert, NButton, NCard, NEmpty, NInput, NPagination, NSelect, NSpin, NTag } from 'naive-ui'
+import { NButton, NCard, NInput, NPagination, NSelect, NTag, NTooltip } from 'naive-ui'
 import { ipc } from '@/ipc'
 import WikiShell from '@/components/WikiShell.vue'
+import PageHeader from '@/components/PageHeader.vue'
+import StateBlock from '@/components/StateBlock.vue'
+import AppIcon from '@/components/AppIcon.vue'
+import type { IconName } from '@/components/icons'
 import type {
   CategoryIndex,
   CategoryPageRef,
@@ -70,6 +74,23 @@ const categoryDescription = computed(() => {
   }
   return map[category.value] ?? `${categoryLabel.value}分类下的所有维基页面。`
 })
+
+/** 分类 → 图标（与侧栏同一套语义名，不用 emoji） */
+const CATEGORY_ICONS: Record<string, IconName> = {
+  persona: 'wikiPersona',
+  enemy: 'wikiEnemy',
+  abnormality: 'wikiAbnormality',
+  ego: 'wikiEgo',
+  ego_gift: 'wikiEgoGift',
+  announcer: 'wikiAnnouncer',
+  story: 'wikiStory',
+  stage: 'wikiStage',
+  item: 'wikiItem',
+  mechanism: 'wikiMechanism',
+  keyword: 'wikiKeyword',
+}
+
+const categoryIcon = computed<IconName>(() => CATEGORY_ICONS[category.value] ?? 'file')
 
 // 搜索过滤
 const filteredPages = computed(() => {
@@ -208,87 +229,116 @@ onUnmounted(() => {
 <template>
   <WikiShell>
     <div class="wiki-category">
-      <div class="wiki-category-container">
-        <!-- ── 分类头部 ── -->
-        <header class="category-header">
-          <h1 class="category-title"><span class="title-prefix">分类:</span>{{ categoryLabel }}</h1>
-          <p class="category-description">{{ categoryDescription }}</p>
-        </header>
+      <!-- 顶部细进度条（统一工具类 .lme-loadingbar） -->
+      <div v-if="isLoading" class="lme-loadingbar" aria-hidden="true" />
 
-        <!-- ── 错误提示 ── -->
-        <NAlert
-          v-if="errorMessage"
-          class="error-banner"
-          type="error"
-          :bordered="false"
-          :title="errorMessage"
+      <!-- ── 分类头部（统一页头：图标 + 分类名 + 一句话说明 + 可关闭指引） ── -->
+      <PageHeader
+        class="category-header"
+        :icon="categoryIcon"
+        :title="categoryLabel"
+        :description="categoryDescription"
+        hint="用下方搜索框筛页面；点卡片进详情页，详情页里可以编辑分节内容。"
+        hint-key="wiki-category"
+      >
+        <template #meta>
+          <NTag v-if="!isLoading" class="category-count" size="small" :bordered="false">
+            {{ totalPages }} 页
+          </NTag>
+        </template>
+      </PageHeader>
+
+      <div class="wiki-category-container">
+        <!-- ── 加载中 ── -->
+        <StateBlock
+          v-if="isLoading"
+          class="loading-state"
+          state="loading"
+          title="正在加载分类数据…"
         />
 
-        <!-- ── 工具栏：搜索 + 排序 + 视图切换 ── -->
-        <div class="toolbar">
-          <div class="toolbar-search">
-            <NInput
-              v-model:value="searchText"
-              class="search-input"
-              size="small"
-              clearable
-              :placeholder="`在「${categoryLabel}」中搜索页面…`"
-              @input="onSearchInput"
-            />
-          </div>
-          <div class="toolbar-controls">
-            <label class="control-label">排序</label>
-            <NSelect
-              v-model:value="sortKind"
-              class="control-select"
-              size="small"
-              :options="sortOptions"
-            />
-            <div class="view-toggle">
-              <NButton
-                class="toggle-btn"
-                :class="{ active: viewMode === 'grid' }"
-                :type="viewMode === 'grid' ? 'primary' : 'default'"
+        <!-- ── 错误提示（含下一步建议与重试） ── -->
+        <StateBlock
+          v-else-if="errorMessage"
+          class="error-banner"
+          state="error"
+          :title="errorMessage"
+          description="检查游戏目录设置后重试；也可以先从左侧换一个分类继续浏览"
+        >
+          <template #actions>
+            <NButton size="small" @click="loadCategoryIndex(category)">重试</NButton>
+          </template>
+        </StateBlock>
+
+        <template v-else>
+          <!-- ── 工具栏：搜索 + 排序 + 视图切换 ── -->
+          <div class="toolbar">
+            <div class="toolbar-search">
+              <NInput
+                v-model:value="searchText"
+                class="search-input"
                 size="small"
-                title="网格视图"
-                @click="viewMode = 'grid'"
-              >
-                ▦
-              </NButton>
-              <NButton
-                class="toggle-btn"
-                :class="{ active: viewMode === 'list' }"
-                :type="viewMode === 'list' ? 'primary' : 'default'"
+                clearable
+                :placeholder="`在「${categoryLabel}」中搜索页面…`"
+                @input="onSearchInput"
+              />
+            </div>
+            <div class="toolbar-controls">
+              <label class="control-label">排序</label>
+              <NSelect
+                v-model:value="sortKind"
+                class="control-select"
                 size="small"
-                title="列表视图"
-                @click="viewMode = 'list'"
-              >
-                ☰
-              </NButton>
+                :options="sortOptions"
+              />
+              <div class="view-toggle">
+                <NTooltip placement="bottom" :show-arrow="false">
+                  <template #trigger>
+                    <NButton
+                      class="toggle-btn"
+                      :class="{ active: viewMode === 'grid' }"
+                      :type="viewMode === 'grid' ? 'primary' : 'default'"
+                      size="small"
+                      @click="viewMode = 'grid'"
+                    >
+                      <AppIcon name="grid" :size="14" label="网格视图" />
+                    </NButton>
+                  </template>
+                  网格视图：以封面卡片浏览
+                </NTooltip>
+                <NTooltip placement="bottom" :show-arrow="false">
+                  <template #trigger>
+                    <NButton
+                      class="toggle-btn"
+                      :class="{ active: viewMode === 'list' }"
+                      :type="viewMode === 'list' ? 'primary' : 'default'"
+                      size="small"
+                      @click="viewMode = 'list'"
+                    >
+                      <AppIcon name="list" :size="14" label="列表视图" />
+                    </NButton>
+                  </template>
+                  列表视图：一屏看更多标题与副标题
+                </NTooltip>
+              </div>
             </div>
           </div>
-        </div>
 
-        <!-- ── 结果统计（对齐灰机措辞） ── -->
-        <div v-if="isLoading" class="loading-state">
-          <NSpin size="small" />
-          <span>加载分类数据中…</span>
-        </div>
-
-        <div v-else class="results-info">
-          <span v-if="searchText.trim()">
-            找到 <strong>{{ totalPages }}</strong> 个匹配页面
-          </span>
-          <span v-else>
-            以下 <strong>{{ totalPages }}</strong> 个页面属于本分类
-          </span>
-          <span v-if="totalPageCount > 1" class="page-info">
-            · 第 {{ currentPage }} / {{ totalPageCount }} 页
-          </span>
-        </div>
+          <!-- ── 结果统计（对齐灰机措辞） ── -->
+          <div class="results-info">
+            <span v-if="searchText.trim()">
+              找到 <strong>{{ totalPages }}</strong> 个匹配页面
+            </span>
+            <span v-else>
+              以下 <strong>{{ totalPages }}</strong> 个页面属于本分类
+            </span>
+            <span v-if="totalPageCount > 1" class="page-info">
+              · 第 {{ currentPage }} / {{ totalPageCount }} 页
+            </span>
+          </div>
 
         <!-- ── 网格视图 ── -->
-        <div v-if="!isLoading && viewMode === 'grid'" class="page-grid">
+        <div v-if="viewMode === 'grid'" class="page-grid">
           <NCard
             v-for="page in paginatedPages"
             :key="page.id"
@@ -307,7 +357,7 @@ onUnmounted(() => {
                   class="thumb-img"
                 />
                 <div v-else class="thumb-placeholder">
-                  <span class="thumb-icon">📄</span>
+                  <span class="thumb-icon"><AppIcon name="image" :size="28" /></span>
                 </div>
               </div>
             </template>
@@ -318,21 +368,22 @@ onUnmounted(() => {
           </NCard>
 
           <!-- 空状态 -->
-          <NEmpty
+          <StateBlock
             v-if="paginatedPages.length === 0"
             class="empty-state"
-            :description="searchText.trim() ? '未找到匹配页面' : '该分类暂无页面'"
-          >
-            <template #extra>
-              <span class="empty-desc">
-                {{ searchText.trim() ? '尝试调整搜索关键词' : '可从此处开始创建新页面' }}
-              </span>
-            </template>
-          </NEmpty>
+            state="empty"
+            icon="search"
+            :title="searchText.trim() ? '未找到匹配页面' : '该分类暂无页面'"
+            :description="
+              searchText.trim()
+                ? '换个关键词，或清空搜索框恢复本分类的全部页面'
+                : '先到维基首页点「生成页面」，或从左侧换个分类继续浏览'
+            "
+          />
         </div>
 
         <!-- ── 列表视图 ── -->
-        <div v-if="!isLoading && viewMode === 'list'" class="page-list">
+        <div v-if="viewMode === 'list'" class="page-list">
           <div class="list-header">
             <span class="col-thumb">缩略图</span>
             <span class="col-title">标题</span>
@@ -353,7 +404,7 @@ onUnmounted(() => {
                   class="thumb-img"
                   @error="onCoverError(page.id)"
                 />
-                <span v-else class="thumb-icon-small">📄</span>
+                <span v-else class="thumb-icon-small"><AppIcon name="image" :size="14" /></span>
               </div>
             </div>
             <span class="col-title">{{ page.title }}</span>
@@ -361,20 +412,25 @@ onUnmounted(() => {
           </div>
 
           <!-- 空状态 -->
-          <div v-if="paginatedPages.length === 0" class="empty-state-list">
-            <NEmpty :description="searchText.trim() ? '未找到匹配页面' : '该分类暂无页面'" />
-          </div>
+          <StateBlock
+            v-if="paginatedPages.length === 0"
+            class="empty-state-list"
+            state="empty"
+            icon="search"
+            :title="searchText.trim() ? '未找到匹配页面' : '该分类暂无页面'"
+            description="换个关键词，或清空搜索框恢复本分类的全部页面"
+          />
         </div>
 
         <!-- ── 分页 ── -->
-        <div v-if="!isLoading && totalPageCount > 1" class="pagination">
+        <div v-if="totalPageCount > 1" class="pagination">
           <NButton
             class="page-btn"
             size="small"
             :disabled="currentPage <= 1"
             @click="goToPage(currentPage - 1)"
           >
-            ‹ 上一页
+            <AppIcon name="chevronLeft" :size="13" /> 上一页
           </NButton>
           <NButton
             class="page-btn"
@@ -399,9 +455,10 @@ onUnmounted(() => {
             :disabled="currentPage >= totalPageCount"
             @click="goToPage(currentPage + 1)"
           >
-            下一页 ›
+            下一页 <AppIcon name="chevronRight" :size="13" />
           </NButton>
         </div>
+        </template>
       </div>
     </div>
   </WikiShell>
@@ -409,6 +466,7 @@ onUnmounted(() => {
 
 <style scoped>
 .wiki-category {
+  position: relative;
   height: 100%;
   overflow-y: auto;
   background: var(--lme-bg-base);
@@ -423,42 +481,12 @@ onUnmounted(() => {
   gap: var(--lme-gap-lg);
 }
 
-/* ── 分类头部（对齐灰机分类页：金色大标题 + 描述 + 分隔线） ── */
-.category-header {
-  display: flex;
-  flex-direction: column;
-  gap: var(--lme-gap-sm);
-  padding-bottom: var(--lme-gap-lg);
-  border-bottom: 1px solid var(--wiki-section-head-border);
-}
+/* ── 分类头部：改用统一页头 PageHeader（.category-header 保留作回归定位） ── */
 
-.category-title {
-  margin: 0;
-  font-size: var(--wiki-title-size);
-  font-weight: 700;
-  line-height: var(--wiki-title-line);
-  color: var(--wiki-title);
-}
-
-.category-title .title-prefix {
-  font-weight: 400;
-  color: var(--wiki-hero-subtitle);
-}
-
-.category-description {
-  margin: 0;
-  font-size: var(--lme-font-size-md);
+/* ── 结果计数（页头右侧） ── */
+.category-count {
+  font-size: var(--lme-font-size-xs);
   color: var(--lme-text-muted);
-}
-
-/* ── 错误提示 ── */
-.error-banner {
-  padding: var(--lme-gap-md);
-  background: var(--lme-error-banner-bg);
-  border: 1px solid var(--lme-error);
-  border-radius: var(--lme-radius-md);
-  color: var(--lme-error);
-  font-size: var(--lme-font-size-sm);
 }
 
 /* ── 工具栏 ── */
@@ -498,15 +526,9 @@ onUnmounted(() => {
   gap: 2px;
 }
 
-/* ── 加载状态 ── */
+/* ── 加载状态：三态由 StateBlock 呈现，这里只留页内间距 ── */
 .loading-state {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--lme-gap-sm);
   padding: var(--lme-gap-xl);
-  color: var(--lme-text-muted);
-  font-size: var(--lme-font-size-md);
 }
 
 /* ── 结果统计 ── */
@@ -570,8 +592,9 @@ onUnmounted(() => {
 }
 
 .thumb-icon {
-  font-size: 32px;
-  opacity: 0.4;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--wiki-thumb-icon);
 }
 
@@ -674,8 +697,10 @@ onUnmounted(() => {
 }
 
 .thumb-icon-small {
-  font-size: var(--lme-font-size-md);
-  opacity: 0.5;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--wiki-thumb-icon);
 }
 
 .list-row .col-title {
@@ -695,31 +720,13 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-/* ── 空状态 ── */
+/* ── 空状态：三态由 StateBlock 呈现 ── */
 .empty-state {
   grid-column: 1 / -1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--lme-gap-md);
-  padding: var(--lme-gap-xl);
-  text-align: center;
-}
-
-.empty-desc {
-  font-size: var(--lme-font-size-sm);
-  color: var(--lme-text-muted);
-  max-width: 280px;
-  line-height: 1.5;
 }
 
 .empty-state-list {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: var(--lme-gap-xl);
-  color: var(--lme-text-muted);
-  font-size: var(--lme-font-size-sm);
+  border-top: 1px solid var(--lme-border);
 }
 
 /* ── 分页 ── */
@@ -729,6 +736,11 @@ onUnmounted(() => {
   gap: var(--lme-gap-sm);
   padding: var(--lme-gap-md) 0;
   flex-wrap: wrap;
+}
+
+/* 翻页按钮内的图标与文字间距 */
+.page-btn :deep(.n-button__content) {
+  gap: var(--lme-gap-2xs);
 }
 
 .page-pager {

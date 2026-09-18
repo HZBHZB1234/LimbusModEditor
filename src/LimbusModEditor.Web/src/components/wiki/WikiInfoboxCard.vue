@@ -82,7 +82,7 @@ const rows = computed(() =>
 
 .wiki-infobox-title {
   font-size: var(--lme-font-size-lg);
-  font-weight: 700;
+  font-weight: var(--lme-font-weight-bold);
   line-height: 1.3;
 }
 
@@ -118,7 +118,7 @@ const rows = computed(() =>
   padding: var(--lme-gap-sm) var(--lme-gap-md);
   text-align: left;
   vertical-align: top;
-  font-weight: 600;
+  font-weight: var(--lme-font-weight-semibold);
   color: var(--wiki-infobox-label-text);
   border-top: 1px solid var(--wiki-infobox-border);
   white-space: nowrap;

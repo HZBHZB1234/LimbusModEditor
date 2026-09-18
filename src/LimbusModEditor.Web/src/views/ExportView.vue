@@ -1,6 +1,8 @@
 <script setup lang="ts">
 // 导出向导页面
 // 三栏布局：格式矩阵 | 分隔条 | 预览/分析/进度/报告
+// ui-redesign r6：emoji/几何符号换 AppIcon；页头换 PageHeader；空/错误态换 StateBlock；
+//                 导出过程登记进 status store；硬编码色值收进令牌。export.run 调用与 progress 订阅未动
 
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ipc } from '@/ipc'
@@ -10,13 +12,20 @@ import {
   NButton,
   NCard,
   NCheckbox,
-  NEmpty,
   NProgress,
+  NTooltip,
   useMessage,
 } from 'naive-ui'
+import AppIcon from '@/components/AppIcon.vue'
+import PageHeader from '@/components/PageHeader.vue'
+import StateBlock from '@/components/StateBlock.vue'
+import { useStatusStore } from '@/stores/status'
 
 /** 轻量反馈（App.vue 的 NMessageProvider 已在位） */
 const message = useMessage()
+
+/** 全局状态：导出过程在底部状态栏可见（本 store 不发 IPC，也不改调用时序） */
+const status = useStatusStore()
 
 // ── 导出槽位定义 ──
 interface ExportSlot {
@@ -184,12 +193,15 @@ async function startExport() {
   exportReport.value = []
   progress.value = null
 
+  status.beginActivity('export-run', '正在导出模组')
   try {
     // 契约方法 export.run：载荷只有 { targetDirectory }（契约 §2.6），目录走宿主原生对话框
     const picked = await ipc.request<{ path: string }>('dialog.folderPick', {
       title: '选择导出目标目录',
     })
     if (!picked.path) return
+
+    status.updateActivity('export-run', { detail: '正在写出模组文件' })
 
     const result = await ipc.request<{ ok: boolean; root: string; slots: number }>('export.run', {
       targetDirectory: picked.path,
@@ -199,11 +211,14 @@ async function startExport() {
     exportReport.value = []
     exportComplete.value = true
     message.success(`导出完成：${result.root}（${result.slots} 个槽位）`)
+    status.notify('success', `导出完成：${result.root}（${result.slots} 个槽位）`)
   } catch (e: unknown) {
     exportError.value = e instanceof Error ? e.message : String(e)
     message.error(`导出失败：${exportError.value}`)
+    status.notify('error', `导出失败：${exportError.value}`)
   } finally {
     isExporting.value = false
+    status.endActivity('export-run')
   }
 }
 
@@ -216,7 +231,7 @@ function cancelExport() {
 function openOutputLocation() {
   if (outputDir.value) {
     ipc.request('process.start', { appId: 'explorer', args: outputDir.value }).catch(() => {
-      // 暂未实现：错误提示
+      status.notify('error', `无法打开输出目录：${outputDir.value}`)
     })
   }
 }
@@ -249,134 +264,21 @@ onUnmounted(() => {
 
 <template>
   <div class="export-view">
-    <!-- 左栏：格式矩阵 -->
-    <div class="format-matrix-column">
-      <div class="column-header">
-        <h3>格式矩阵</h3>
-        <span class="column-subtitle">源格式 → 目标兼容性</span>
-      </div>
+    <!-- 页头：标题 + 一句话说明 + 可关闭的操作指引 + 主操作 -->
+    <PageHeader
+      icon="export"
+      title="导出工作台"
+      description="把当前项目的所有改动打包成游戏能加载的模组"
+      hint="先在左侧勾选导出槽位与分组，右侧「导出预览」会实时估算写出的文件数，确认后再点「开始导出」选目标目录"
+      hint-key="export"
+    >
+      <template #meta>
+        <span class="export-count">
+          {{ enabledSlots.length }} 个槽位 · {{ enabledGroups.length }} 个分组
+        </span>
+      </template>
 
-      <!-- 兼容性矩阵：源格式 × 目标格式（✓/✗） -->
-      <div class="matrix-container">
-        <table class="matrix-table">
-          <thead>
-            <tr>
-              <th>源格式</th>
-              <th v-for="target in ['PNG', 'DDS', 'TGA', 'WAV', 'OGG', 'JSON', 'YAML']" :key="target">
-                {{ target }}
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="row in formatMatrix" :key="row.source">
-              <td class="source-cell">{{ row.source }}</td>
-              <td
-                v-for="target in row.targets"
-                :key="target.format"
-                class="compat-cell"
-                :class="{ compatible: target.compatible, incompatible: !target.compatible }"
-              >
-                {{ target.compatible ? '✓' : '✗' }}
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <!-- 导出槽位：NCheckbox 只承载勾选态，切换仍走原 toggleSlot -->
-      <div class="slot-section">
-        <h4>导出槽位</h4>
-        <div class="slot-list">
-          <div
-            v-for="slot in exportSlots"
-            :key="slot.id"
-            class="slot-item"
-            :class="{ enabled: slot.enabled }"
-          >
-            <NCheckbox
-              class="slot-check"
-              size="small"
-              :checked="slot.enabled"
-              @update:checked="toggleSlot(slot.id)"
-            />
-            <span class="slot-label">{{ slot.label }}</span>
-            <span class="slot-ext lme-mono">{{ slot.ext }}</span>
-            <span class="slot-desc">{{ slot.description }}</span>
-          </div>
-        </div>
-      </div>
-
-      <div class="group-section">
-        <h4>导出分组</h4>
-        <div class="group-list">
-          <div
-            v-for="group in exportGroups"
-            :key="group.id"
-            class="group-item"
-            :class="{ enabled: group.enabled }"
-          >
-            <NCheckbox
-              class="group-check"
-              size="small"
-              :checked="group.enabled"
-              @update:checked="toggleGroup(group.id)"
-            />
-            <span class="group-label lme-mono">{{ group.label }}</span>
-            <span class="group-desc">{{ group.description }}</span>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- 分隔条 -->
-    <div class="column-splitter" />
-
-    <!-- 右栏：预览 / 分析 / 进度 / 报告 -->
-    <div class="preview-column">
-      <!-- 导出预览 -->
-      <NCard class="preview-section" size="small" title="导出预览">
-        <div class="preview-grid">
-          <div class="preview-item">
-            <span class="preview-value">{{ exportPreview.groups }}</span>
-            <span class="preview-label">分组</span>
-          </div>
-          <div class="preview-item">
-            <span class="preview-value">{{ exportPreview.slots }}</span>
-            <span class="preview-label">槽位</span>
-          </div>
-          <div class="preview-item">
-            <span class="preview-value">{{ exportPreview.estimatedFiles }}</span>
-            <span class="preview-label">预计文件</span>
-          </div>
-          <div class="preview-item">
-            <span class="preview-value">{{ exportPreview.estimatedSize }}</span>
-            <span class="preview-label">预计大小</span>
-          </div>
-        </div>
-      </NCard>
-
-      <!-- 导出顾问分析 -->
-      <NCard class="advisor-section" size="small" title="导出顾问">
-        <div class="advisor-list">
-          <NAlert
-            v-for="(item, i) in advisorItems"
-            :key="i"
-            class="advisor-item"
-            :class="'advisor-' + item.level"
-            :type="item.level === 'info' ? 'info' : item.level === 'warning' ? 'warning' : 'error'"
-            :title="item.message"
-            :bordered="false"
-          >
-            {{ item.reasoning }}
-          </NAlert>
-          <div v-if="advisorItems.length === 0" class="advisor-empty">
-            <NEmpty size="small" description="暂无分析建议" />
-          </div>
-        </div>
-      </NCard>
-
-      <!-- 导出操作：开始 / 取消（IPC 调用点未变） -->
-      <NCard class="progress-section" size="small" title="导出操作">
+      <template #actions>
         <div class="progress-actions">
           <NButton
             v-if="isExporting"
@@ -385,120 +287,294 @@ onUnmounted(() => {
             size="small"
             @click="cancelExport"
           >
+            <template #icon>
+              <AppIcon name="stopCircle" :size="13" />
+            </template>
             取消导出
           </NButton>
-          <NButton
-            v-else-if="!exportComplete"
-            class="btn btn-primary"
-            type="primary"
-            size="small"
-            @click="startExport"
-          >
-            开始导出
-          </NButton>
-          <NButton
-            v-else
-            class="btn btn-secondary"
-            size="small"
-            @click="startExport"
-          >
-            再次导出
-          </NButton>
+
+          <NTooltip v-else placement="bottom" :show-arrow="false">
+            <template #trigger>
+              <NButton
+                class="btn"
+                :class="exportComplete ? 'btn-secondary' : 'btn-primary'"
+                :type="exportComplete ? 'default' : 'primary'"
+                size="small"
+                @click="startExport"
+              >
+                <template #icon>
+                  <AppIcon name="export" :size="13" />
+                </template>
+                {{ exportComplete ? '再次导出' : '开始导出' }}
+              </NButton>
+            </template>
+            选一个目标目录，写出所有已启用槽位与分组的文件
+          </NTooltip>
+        </div>
+      </template>
+    </PageHeader>
+
+    <!-- 两栏主体：格式矩阵 | 预览 / 分析 / 进度 / 报告 -->
+    <div class="export-body">
+      <!-- 左栏：格式矩阵 -->
+      <div class="format-matrix-column">
+        <div class="column-header">
+          <h3>格式矩阵</h3>
+          <NTooltip placement="bottom" :show-arrow="false">
+            <template #trigger>
+              <span class="column-subtitle">源格式 → 目标兼容性</span>
+            </template>
+            打勾表示该目标格式可由后端无损写出，打叉表示暂不支持
+          </NTooltip>
         </div>
 
-        <!-- 进度条 -->
-        <div v-if="isExporting || exportComplete" class="progress-block">
-          <NProgress
-            class="progress-bar-container"
-            type="line"
-            :percentage="progressPercent"
-            :height="8"
-            :show-indicator="false"
-            :border-radius="4"
-          />
-          <div class="progress-info">
-            <span v-if="progress" class="progress-message">{{ progress.message }}</span>
-            <span class="progress-percent lme-mono">{{ progressPercent }}%</span>
+        <!-- 兼容性矩阵：源格式 × 目标格式（可写 / 不可写） -->
+        <div class="matrix-container">
+          <table class="matrix-table">
+            <thead>
+              <tr>
+                <th>源格式</th>
+                <th v-for="target in ['PNG', 'DDS', 'TGA', 'WAV', 'OGG', 'JSON', 'YAML']" :key="target">
+                  {{ target }}
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in formatMatrix" :key="row.source">
+                <td class="source-cell">{{ row.source }}</td>
+                <td
+                  v-for="target in row.targets"
+                  :key="target.format"
+                  class="compat-cell"
+                  :class="{ compatible: target.compatible, incompatible: !target.compatible }"
+                >
+                  <AppIcon :name="target.compatible ? 'check' : 'close'" :size="13" />
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- 导出槽位：NCheckbox 只承载勾选态，切换仍走原 toggleSlot -->
+        <div class="slot-section">
+          <h4>导出槽位</h4>
+          <div class="slot-list">
+            <div
+              v-for="slot in exportSlots"
+              :key="slot.id"
+              class="slot-item"
+              :class="{ enabled: slot.enabled }"
+            >
+              <NCheckbox
+                class="slot-check"
+                size="small"
+                :checked="slot.enabled"
+                @update:checked="toggleSlot(slot.id)"
+              />
+              <span class="slot-label">{{ slot.label }}</span>
+              <span class="slot-ext lme-mono">{{ slot.ext }}</span>
+              <span class="slot-desc">{{ slot.description }}</span>
+            </div>
           </div>
         </div>
-      </NCard>
 
-      <!-- 错误提示 -->
-      <NAlert
-        v-if="exportError"
-        class="error-banner"
-        type="error"
-        :closable="false"
-        title="导出失败"
-      >
-        {{ exportError }}
-      </NAlert>
-
-      <!-- 导出报告 -->
-      <NCard
-        v-if="exportComplete && exportReport.length > 0"
-        class="report-section"
-        size="small"
-        title="导出报告"
-      >
-        <div class="report-summary">
-          <span class="report-stat">
-            <span class="stat-value" style="color: var(--lme-success)">{{ exportReport.filter((r) => r.status === '已应用').length }}</span>
-            已应用
-          </span>
-          <span class="report-stat">
-            <span class="stat-value" style="color: var(--lme-text-muted)">{{ exportReport.filter((r) => r.status === '已跳过').length }}</span>
-            已跳过
-          </span>
-          <span class="report-stat">
-            <span class="stat-value" style="color: var(--lme-warning)">{{ exportReport.filter((r) => r.status === '保留未知').length }}</span>
-            保留未知
-          </span>
-          <span class="report-stat">
-            <span class="stat-value" style="color: var(--lme-info)">{{ exportReport.filter((r) => r.status === '已转换').length }}</span>
-            已转换
-          </span>
+        <div class="group-section">
+          <h4>导出分组</h4>
+          <div class="group-list">
+            <div
+              v-for="group in exportGroups"
+              :key="group.id"
+              class="group-item"
+              :class="{ enabled: group.enabled }"
+            >
+              <NCheckbox
+                class="group-check"
+                size="small"
+                :checked="group.enabled"
+                @update:checked="toggleGroup(group.id)"
+              />
+              <span class="group-label lme-mono">{{ group.label }}</span>
+              <span class="group-desc">{{ group.description }}</span>
+            </div>
+          </div>
         </div>
-        <div class="report-list">
-          <div
-            v-for="item in exportReport"
-            :key="item.assetId"
-            class="report-item"
-          >
-            <span class="report-name lme-ellipsis">{{ item.name }}</span>
-            <span class="report-status" :style="{ color: statusColor(item.status) }">
-              {{ item.status }}
+      </div>
+
+      <!-- 分隔条 -->
+      <div class="column-splitter" />
+
+      <!-- 右栏：预览 / 分析 / 进度 / 报告 -->
+      <div class="preview-column">
+        <!-- 导出预览 -->
+        <NCard class="preview-section" size="small" title="导出预览">
+          <div class="preview-grid">
+            <div class="preview-item">
+              <span class="preview-value">{{ exportPreview.groups }}</span>
+              <span class="preview-label">分组</span>
+            </div>
+            <div class="preview-item">
+              <span class="preview-value">{{ exportPreview.slots }}</span>
+              <span class="preview-label">槽位</span>
+            </div>
+            <div class="preview-item">
+              <span class="preview-value">{{ exportPreview.estimatedFiles }}</span>
+              <span class="preview-label">预计文件</span>
+            </div>
+            <div class="preview-item">
+              <span class="preview-value">{{ exportPreview.estimatedSize }}</span>
+              <span class="preview-label">预计大小</span>
+            </div>
+          </div>
+        </NCard>
+
+        <!-- 导出顾问分析 -->
+        <NCard class="advisor-section" size="small" title="导出顾问">
+          <div class="advisor-list">
+            <NAlert
+              v-for="(item, i) in advisorItems"
+              :key="i"
+              class="advisor-item"
+              :class="'advisor-' + item.level"
+              :type="item.level === 'info' ? 'info' : item.level === 'warning' ? 'warning' : 'error'"
+              :title="item.message"
+              :bordered="false"
+            >
+              {{ item.reasoning }}
+            </NAlert>
+            <StateBlock
+              v-if="advisorItems.length === 0"
+              class="advisor-empty"
+              state="empty"
+              icon="hint"
+              title="暂无分析建议"
+              description="勾选导出槽位或分组后，这里会给出配置建议"
+            />
+          </div>
+        </NCard>
+
+        <!-- 导出进度（开始 / 取消已移到页头，这里只看进度；IPC 调用点未变） -->
+        <NCard
+          v-if="isExporting || exportComplete"
+          class="progress-section"
+          size="small"
+          title="导出进度"
+        >
+          <div class="progress-block">
+            <NProgress
+              class="progress-bar-container"
+              type="line"
+              :percentage="progressPercent"
+              :height="8"
+              :show-indicator="false"
+              :border-radius="4"
+            />
+            <div class="progress-info">
+              <span v-if="progress" class="progress-message">{{ progress.message }}</span>
+              <span class="progress-percent lme-mono">{{ progressPercent }}%</span>
+            </div>
+          </div>
+        </NCard>
+
+        <!-- 错误提示：给出路，而不是只重复一句报错 -->
+        <StateBlock
+          v-if="exportError"
+          class="error-banner"
+          state="error"
+          :title="exportError"
+          description="检查目标目录是否可写、项目是否已打开，然后重新点右上角「开始导出」"
+        />
+
+        <!-- 导出报告 -->
+        <NCard
+          v-if="exportComplete && exportReport.length > 0"
+          class="report-section"
+          size="small"
+          title="导出报告"
+        >
+          <div class="report-summary">
+            <span class="report-stat">
+              <span class="stat-value" style="color: var(--lme-success)">{{ exportReport.filter((r) => r.status === '已应用').length }}</span>
+              已应用
             </span>
-            <span class="report-detail">{{ item.detail }}</span>
+            <span class="report-stat">
+              <span class="stat-value" style="color: var(--lme-text-muted)">{{ exportReport.filter((r) => r.status === '已跳过').length }}</span>
+              已跳过
+            </span>
+            <span class="report-stat">
+              <span class="stat-value" style="color: var(--lme-warning)">{{ exportReport.filter((r) => r.status === '保留未知').length }}</span>
+              保留未知
+            </span>
+            <span class="report-stat">
+              <span class="stat-value" style="color: var(--lme-info)">{{ exportReport.filter((r) => r.status === '已转换').length }}</span>
+              已转换
+            </span>
           </div>
-        </div>
-        <template #action>
-          <div class="report-actions">
-            <NButton class="btn btn-primary" type="primary" size="small" @click="openOutputLocation">
-              📂 打开输出目录
-            </NButton>
+          <div class="report-list">
+            <div
+              v-for="item in exportReport"
+              :key="item.assetId"
+              class="report-item"
+            >
+              <span class="report-name lme-ellipsis">{{ item.name }}</span>
+              <span class="report-status" :style="{ color: statusColor(item.status) }">
+                {{ item.status }}
+              </span>
+              <span class="report-detail">{{ item.detail }}</span>
+            </div>
           </div>
-        </template>
-      </NCard>
-
-      <!-- 空状态 -->
-      <div v-if="!isExporting && !exportComplete && !exportError" class="empty-state">
-        <NEmpty size="small" description="配置导出选项后点击「开始导出」">
-          <template #extra>
-            <span class="state-hint">左侧勾选导出槽位与分组，导出方向由宿主目录对话框决定</span>
+          <template #action>
+            <div class="report-actions">
+              <NTooltip placement="top" :show-arrow="false">
+                <template #trigger>
+                  <NButton class="btn btn-primary" type="primary" size="small" @click="openOutputLocation">
+                    <template #icon>
+                      <AppIcon name="folderOpen" :size="13" />
+                    </template>
+                    打开输出目录
+                  </NButton>
+                </template>
+                {{ outputDir || '导出完成后才有输出目录' }}
+              </NTooltip>
+            </div>
           </template>
-        </NEmpty>
+        </NCard>
+
+        <!-- 空状态：还没开始导出 -->
+        <div v-if="!isExporting && !exportComplete && !exportError" class="empty-state">
+          <StateBlock
+            state="empty"
+            icon="export"
+            title="还没有开始导出"
+            description="在左侧勾选要导出的槽位与分组，再点右上角「开始导出」选择目标目录"
+          />
+        </div>
       </div>
     </div>
   </div>
 </template>
 
 <style scoped>
+/* ── 页面骨架：页头在上，两栏主体在下 ── */
 .export-view {
   display: flex;
+  flex-direction: column;
   height: 100%;
   overflow: hidden;
   position: relative;
+  background: var(--lme-bg-base);
+}
+
+.export-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 页头 #meta 的计数 */
+.export-count {
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-muted);
 }
 
 /* ── 左栏：格式矩阵 ── */
@@ -527,6 +603,7 @@ onUnmounted(() => {
 .column-subtitle {
   font-size: var(--lme-font-size-sm);
   color: var(--lme-text-muted);
+  cursor: help;
 }
 
 .matrix-container {
@@ -552,7 +629,7 @@ onUnmounted(() => {
 .matrix-table th {
   background: var(--lme-bg-elevated);
   color: var(--lme-text-secondary);
-  font-weight: 500;
+  font-weight: var(--lme-font-weight-medium);
   position: sticky;
   top: 0;
 }
@@ -560,11 +637,11 @@ onUnmounted(() => {
 .source-cell {
   text-align: left;
   color: var(--lme-text-primary);
-  font-weight: 500;
+  font-weight: var(--lme-font-weight-medium);
 }
 
 .compat-cell {
-  font-weight: 600;
+  font-weight: var(--lme-font-weight-semibold);
 }
 
 .compat-cell.compatible {
@@ -605,7 +682,7 @@ onUnmounted(() => {
   padding: var(--lme-gap-sm) var(--lme-gap-md);
   border-radius: var(--lme-radius-sm);
   cursor: pointer;
-  transition: background 0.15s;
+  transition: background var(--lme-dur-base) var(--lme-ease-standard);
   border: 1px solid transparent;
 }
 
@@ -627,7 +704,7 @@ onUnmounted(() => {
 
 .slot-label,
 .group-label {
-  font-weight: 500;
+  font-weight: var(--lme-font-weight-medium);
   color: var(--lme-text-primary);
   min-width: 80px;
 }
@@ -701,7 +778,7 @@ onUnmounted(() => {
 
 .preview-value {
   font-size: var(--lme-font-size-xl);
-  font-weight: 600;
+  font-weight: var(--lme-font-weight-semibold);
   color: var(--lme-accent);
 }
 
@@ -727,17 +804,17 @@ onUnmounted(() => {
 
 .advisor-info {
   border-left-color: var(--lme-info);
-  background: rgba(91, 155, 213, 0.08);
+  background: var(--lme-info-subtle);
 }
 
 .advisor-warning {
   border-left-color: var(--lme-warning);
-  background: rgba(224, 168, 58, 0.08);
+  background: var(--lme-warning-subtle);
 }
 
 .advisor-error {
   border-left-color: var(--lme-error);
-  background: rgba(217, 83, 79, 0.08);
+  background: var(--lme-error-subtle);
 }
 
 .advisor-icon {
@@ -754,7 +831,7 @@ onUnmounted(() => {
 .advisor-message {
   font-size: var(--lme-font-size-sm);
   color: var(--lme-text-primary);
-  font-weight: 500;
+  font-weight: var(--lme-font-weight-medium);
 }
 
 .advisor-reasoning {
@@ -762,11 +839,9 @@ onUnmounted(() => {
   color: var(--lme-text-muted);
 }
 
+/* 顾问空态由 StateBlock 呈现，这里只保留定位钩子 */
 .advisor-empty {
-  color: var(--lme-text-muted);
-  font-size: var(--lme-font-size-sm);
-  text-align: center;
-  padding: var(--lme-gap-lg);
+  flex-shrink: 0;
 }
 
 /* ── 进度条（NProgress，尺寸由属性给定） ── */
@@ -774,7 +849,6 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: var(--lme-gap-sm);
-  margin-top: var(--lme-gap-md);
 }
 
 .progress-bar-container {
@@ -794,7 +868,7 @@ onUnmounted(() => {
 
 .progress-percent {
   color: var(--lme-text-primary);
-  font-weight: 600;
+  font-weight: var(--lme-font-weight-semibold);
 }
 
 .progress-actions {
@@ -802,44 +876,13 @@ onUnmounted(() => {
   gap: var(--lme-gap-sm);
 }
 
-/* ── 按钮 ── */
-.btn {
-  padding: var(--lme-gap-sm) var(--lme-gap-lg);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
-  cursor: pointer;
-  font-size: var(--lme-font-size-sm);
-  transition: all 0.15s;
-}
+/* ── 按钮 ──
+   外观一律交给 Naive UI 的 NButton（配色/内边距由 naiveTheme 从 tokens 派生）；
+   .btn / .btn-primary / .btn-secondary / .btn-danger 仅作回归定位钩子，不再覆盖库样式 */
 
-.btn-primary {
-  background: var(--lme-accent);
-  border-color: var(--lme-accent);
-  color: var(--lme-text-primary);
-}
-
-.btn-primary:hover {
-  background: var(--lme-accent-hover);
-}
-
-.btn-danger {
-  background: var(--lme-error);
-  border-color: var(--lme-error);
-  color: var(--lme-text-primary);
-}
-
-.btn-danger:hover {
-  opacity: 0.9;
-}
-
-/* ── 错误提示 ── */
+/* ── 错误提示：呈现交给 StateBlock，这里只保留定位钩子 ── */
 .error-banner {
-  padding: var(--lme-gap-md);
-  background: var(--lme-error-banner-bg);
-  border: 1px solid var(--lme-error);
-  border-radius: var(--lme-radius-md);
-  color: var(--lme-error);
-  font-size: var(--lme-font-size-sm);
+  flex-shrink: 0;
 }
 
 /* ── 报告 ── */
@@ -858,7 +901,7 @@ onUnmounted(() => {
 }
 
 .stat-value {
-  font-weight: 600;
+  font-weight: var(--lme-font-weight-semibold);
   font-size: var(--lme-font-size-md);
 }
 
@@ -888,7 +931,7 @@ onUnmounted(() => {
 }
 
 .report-status {
-  font-weight: 500;
+  font-weight: var(--lme-font-weight-medium);
   min-width: 60px;
   text-align: center;
 }
@@ -905,13 +948,13 @@ onUnmounted(() => {
   gap: var(--lme-gap-sm);
 }
 
-/* ── 空状态 ── */
+/* ── 空状态（内容交给 StateBlock，本页只让它撑满右栏） ── */
 .empty-state {
+  flex: 1;
+  min-height: 0;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: var(--lme-gap-xl);
-  color: var(--lme-text-muted);
-  font-size: var(--lme-font-size-sm);
 }
 </style>

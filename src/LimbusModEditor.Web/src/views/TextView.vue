@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // 文本/本地化工作台页面（TextView）
 // 三栏主从栅格：语言文件 | 键值条目 | 差异预览（v2 设计语言重做，只动模板与样式）
+// v3（ui-redesign r3）：手写版式替换为 Naive UI 组件（面板/按钮/输入/下拉/标签/空态/提示），功能不变
 // 对应 WPF 旧界面 TextWorkbenchPage
 // IPC 方法：text.fileTreeRoots / text.fileTreeChildren / text.fileEntries / text.applyPatch / text.fileSearch
 // 未实现的 IPC 方法降级为「暂未实现」提示
@@ -9,9 +10,24 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ipc } from '@/ipc'
 import VirtualList from '@/components/VirtualList.vue'
+import {
+  NAlert,
+  NButton,
+  NCard,
+  NEmpty,
+  NInput,
+  NSelect,
+  NSpin,
+  NTag,
+  NTooltip,
+  useMessage,
+} from 'naive-ui'
 
 const route = useRoute()
 const router = useRouter()
+
+// 呈现层提示（App.vue 已提供 NMessageProvider），不参与 IPC 时序
+const message = useMessage()
 
 // ── 本地模型 ──────────────────────────────────────────────
 
@@ -44,6 +60,23 @@ const fileTreeRoots = ref<FileNode[]>([])
 const fileTreeLoading = ref(false)
 let fileTreeGeneration = 0
 
+// 下拉选项（语言 / 文件类型）
+const languageOptions = [
+  { label: '全部语言', value: '' },
+  { label: '简体中文 (zh-CN)', value: 'zh-CN' },
+  { label: 'English (en-US)', value: 'en-US' },
+  { label: '日本語 (ja-JP)', value: 'ja-JP' },
+  { label: '한국어 (ko-KR)', value: 'ko-KR' },
+]
+
+const fileTypeOptions = [
+  { label: '全部类型', value: '' },
+  { label: 'JSON', value: 'json' },
+  { label: 'YAML', value: 'yaml' },
+  { label: 'CSV', value: 'csv' },
+  { label: 'PO (gettext)', value: 'po' },
+]
+
 // 搜索结果（当搜索框有值时替代目录树）
 const searchResults = ref<FileNode[]>([])
 const searchLoading = ref(false)
@@ -69,6 +102,8 @@ const showDiffView = ref(false)
 
 // 保存
 const saving = ref(false)
+// 保存失败（含 IPC 未实现）时的错误条文案，空串 = 无错误
+const saveError = ref('')
 
 // ── 计算属性 ──────────────────────────────────────────────
 
@@ -309,6 +344,11 @@ function onValueEdit(entry: KeyValueEntry, newValue: string) {
   entry.editState = newValue === entry.originalValue ? 'Unchanged' : 'Modified'
 }
 
+/** NInput 的 update:value 载荷可能是 [string, string]（成对输入），这里只取单值文本 */
+function onValueInput(entry: KeyValueEntry, value: string | [string, string]) {
+  onValueEdit(entry, typeof value === 'string' ? value : '')
+}
+
 function deleteEntry(entry: KeyValueEntry) {
   if (entry.editState === 'Added') {
     // 新增的直接移除
@@ -332,6 +372,8 @@ function restoreEntry(entry: KeyValueEntry) {
 async function saveAsPatch() {
   if (!selectedFilePath.value) return
   saving.value = true
+  saveError.value = ''
+  const changeCount = changedEntries.value.length
   try {
     const patches = changedEntries.value
       .filter((e) => e.editState === 'Modified' || e.editState === 'Added' || e.editState === 'Deleted')
@@ -349,9 +391,10 @@ async function saveAsPatch() {
 
     // 保存成功后重新加载条目（服务器可能规范化格式）
     await loadEntriesPage(selectedFilePath.value, 0, false)
+    message.success(`已保存 ${changeCount} 处改动`)
   } catch {
-    // IPC 方法未实现时显示提示
-    alert('暂未实现')
+    // IPC 方法未实现时显示提示（错误条，替代原生 alert）
+    saveError.value = '暂未实现：text.applyPatch 不可用（保存补丁）'
   } finally {
     saving.value = false
   }
@@ -431,74 +474,86 @@ onUnmounted(() => {
       </div>
 
       <div class="toolbar-actions">
-        <span class="result-count" v-if="!fileTreeLoading && !searchLoading">
+        <NTag
+          v-if="!fileTreeLoading && !searchLoading"
+          class="result-count"
+          size="small"
+          :bordered="false"
+        >
           共
           <strong>
             {{ (searchResults.length || fileTreeRoots.length).toLocaleString('zh-CN') }}
           </strong>
           个文件
-        </span>
-        <span v-if="modifiedCount > 0" class="toolbar-chip modified">
+        </NTag>
+        <NTag v-if="modifiedCount > 0" class="toolbar-chip" size="small" type="warning" round>
           已修改 {{ modifiedCount }}
-        </span>
-        <span v-if="addedCount > 0" class="toolbar-chip added">
+        </NTag>
+        <NTag v-if="addedCount > 0" class="toolbar-chip" size="small" type="success" round>
           已添加 {{ addedCount }}
-        </span>
-        <span v-if="deletedCount > 0" class="toolbar-chip deleted">
+        </NTag>
+        <NTag v-if="deletedCount > 0" class="toolbar-chip" size="small" type="error" round>
           已删除 {{ deletedCount }}
-        </span>
+        </NTag>
       </div>
     </header>
+
+    <!-- 错误态（保存失败 / IPC 未实现） -->
+    <NAlert v-if="saveError" class="error-banner" type="error" closable @close="saveError = ''">
+      {{ saveError }}
+    </NAlert>
 
     <!-- 三栏主从：语言文件 | 键值条目 | 差异预览 -->
     <div class="workbench-body">
       <!-- ── 左：语言文件（搜索结果 / 文件树） ── -->
-      <section class="panel panel-files">
-        <div class="panel-head">
-          <div class="panel-search">
-            <span class="panel-search-icon">🔍</span>
-            <input
-              v-model="searchText"
-              class="search-input"
-              type="text"
-              placeholder="搜索文件路径或键/值文本…"
-              @input="onSearchInput"
-            />
-            <button
-              v-if="searchText"
-              class="search-clear"
-              title="清空搜索"
-              @click="searchText = ''"
-            >
-              ✕
-            </button>
-          </div>
+      <NCard
+        class="panel panel-files"
+        size="small"
+        bordered
+        :content-style="{ padding: '0px' }"
+      >
+        <template #header>
+          <div class="panel-head">
+            <div class="panel-search">
+              <NInput
+                v-model:value="searchText"
+                class="search-input"
+                size="small"
+                clearable
+                placeholder="搜索文件路径或键/值文本…"
+                @update:value="onSearchInput"
+                @clear="onSearchInput"
+              >
+                <template #prefix>
+                  <span class="panel-search-icon">🔍</span>
+                </template>
+              </NInput>
+            </div>
 
-          <div class="filter-row">
-            <label class="filter-label">语言</label>
-            <select v-model="languageFilter" class="filter-select">
-              <option value="">全部语言</option>
-              <option value="zh-CN">简体中文 (zh-CN)</option>
-              <option value="en-US">English (en-US)</option>
-              <option value="ja-JP">日本語 (ja-JP)</option>
-              <option value="ko-KR">한국어 (ko-KR)</option>
-            </select>
+            <div class="filter-row">
+              <span class="filter-label">语言</span>
+              <NSelect
+                v-model:value="languageFilter"
+                class="filter-select"
+                size="small"
+                :options="languageOptions"
+              />
 
-            <label class="filter-label">类型</label>
-            <select v-model="fileTypeFilter" class="filter-select">
-              <option value="">全部类型</option>
-              <option value="json">JSON</option>
-              <option value="yaml">YAML</option>
-              <option value="csv">CSV</option>
-              <option value="po">PO (gettext)</option>
-            </select>
+              <span class="filter-label">类型</span>
+              <NSelect
+                v-model:value="fileTypeFilter"
+                class="filter-select"
+                size="small"
+                :options="fileTypeOptions"
+              />
+            </div>
           </div>
-        </div>
+        </template>
 
         <div class="panel-body scroll">
           <!-- 加载态 -->
           <div v-if="fileTreeLoading || searchLoading" class="state-block">
-            <span class="state-icon spinner">⏳</span>
+            <NSpin size="small" />
             <span class="state-text">正在读取语言文件…</span>
           </div>
 
@@ -514,9 +569,9 @@ onUnmounted(() => {
               @click="node.isLeaf && selectFileNode(node)"
             >
               <span class="file-name lme-mono lme-ellipsis">{{ node.path }}</span>
-              <span v-if="node.language" class="file-tag language-tag">
+              <NTag v-if="node.language" class="file-tag" size="small" round :bordered="false">
                 {{ node.language }}
-              </span>
+              </NTag>
               <span v-if="node.entryCount > 0" class="file-count lme-mono">
                 {{ node.entryCount }} 条
               </span>
@@ -527,9 +582,11 @@ onUnmounted(() => {
               v-if="searchResults.length === 0 && searchText.trim()"
               class="state-block"
             >
-              <span class="state-icon">🔍</span>
-              <span class="state-text">未找到匹配文件</span>
-              <span class="state-hint">尝试调整搜索关键词或清除筛选条件</span>
+              <NEmpty size="small" description="未找到匹配文件">
+                <template #extra>
+                  <span class="state-hint">尝试调整搜索关键词或清除筛选条件</span>
+                </template>
+              </NEmpty>
             </div>
           </template>
 
@@ -548,12 +605,9 @@ onUnmounted(() => {
                 <span class="tree-node-name lme-ellipsis" :title="node.name">
                   {{ node.name }}
                 </span>
-                <span v-if="node.isLeaf" class="tree-count lme-mono">
-                  {{ node.entryCount }}
-                </span>
-                <span v-else class="tree-count lme-mono">
-                  {{ node.children?.length ?? 0 }}
-                </span>
+                <NTag class="tree-count" size="small" round :bordered="false">
+                  {{ node.isLeaf ? node.entryCount : (node.children?.length ?? 0) }}
+                </NTag>
               </div>
 
               <!-- 子节点（展开时渲染） -->
@@ -572,72 +626,81 @@ onUnmounted(() => {
                   <span class="tree-node-name lme-ellipsis" :title="child.name">
                     {{ child.name }}
                   </span>
-                  <span v-if="child.isLeaf" class="tree-count lme-mono">
-                    {{ child.entryCount }}
-                  </span>
-                  <span v-else class="tree-count lme-mono">
-                    {{ child.children?.length ?? 0 }}
-                  </span>
+                  <NTag class="tree-count" size="small" round :bordered="false">
+                    {{ child.isLeaf ? child.entryCount : (child.children?.length ?? 0) }}
+                  </NTag>
                 </div>
               </template>
             </div>
 
             <!-- 空态 -->
             <div v-if="fileTreeRoots.length === 0" class="state-block">
-              <span class="state-icon">📝</span>
-              <span class="state-text">暂无语言文件</span>
-              <span class="state-hint">
-                未找到可用的本地化语言文件。请确认项目已包含 .json / .yaml 等文本资源。
-              </span>
+              <NEmpty size="small" description="暂无语言文件">
+                <template #extra>
+                  <span class="state-hint">
+                    未找到可用的本地化语言文件。请确认项目已包含 .json / .yaml 等文本资源。
+                  </span>
+                </template>
+              </NEmpty>
             </div>
           </template>
         </div>
-      </section>
+      </NCard>
 
       <!-- ── 中：键值条目（内联编辑） ── -->
-      <section class="panel panel-entries">
-        <div class="panel-head compact">
-          <div class="panel-title">
-            <span class="panel-title-text">键值条目</span>
-            <span class="panel-badge lme-mono">
-              {{ entries.length.toLocaleString('zh-CN') }}
-            </span>
-          </div>
-
-          <div class="panel-head-actions">
-            <div class="panel-search inline">
-              <span class="panel-search-icon">🔍</span>
-              <input
-                v-model="inlineSearchText"
-                class="search-input"
-                type="text"
-                placeholder="搜索键名或值内容…"
-              />
-              <button
-                v-if="inlineSearchText"
-                class="search-clear"
-                title="清空文件内搜索"
-                @click="inlineSearchText = ''"
-              >
-                ✕
-              </button>
+      <NCard
+        class="panel panel-entries"
+        size="small"
+        bordered
+        :content-style="{ padding: '0px' }"
+      >
+        <template #header>
+          <div class="panel-head compact">
+            <div class="panel-title">
+              <span class="panel-title-text">键值条目</span>
+              <NTag class="panel-badge" size="small" round :bordered="false">
+                {{ entries.length.toLocaleString('zh-CN') }}
+              </NTag>
             </div>
 
-            <label class="diff-toggle">
-              <input type="checkbox" v-model="showDiffView" />
-              差异视图
-            </label>
+            <div class="panel-head-actions">
+              <div class="panel-search inline">
+                <NInput
+                  v-model:value="inlineSearchText"
+                  class="search-input"
+                  size="small"
+                  clearable
+                  placeholder="搜索键名或值内容…"
+                >
+                  <template #prefix>
+                    <span class="panel-search-icon">🔍</span>
+                  </template>
+                </NInput>
+              </div>
 
-            <button
-              class="action-btn primary"
-              :disabled="saving || changedEntries.length === 0"
-              title="把本文件的改动存成替换补丁（text.applyPatch）"
-              @click="saveAsPatch"
-            >
-              {{ saving ? '保存中…' : '💾 保存补丁' }}
-            </button>
+              <!-- 差异视图开关：保持原生 checkbox（截图脚本统计 input 元素） -->
+              <label class="diff-toggle">
+                <input type="checkbox" v-model="showDiffView" />
+                差异视图
+              </label>
+
+              <NTooltip placement="bottom" :show-arrow="false">
+                <template #trigger>
+                  <NButton
+                    size="small"
+                    type="primary"
+                    :disabled="saving || changedEntries.length === 0"
+                    :loading="saving"
+                    @click="saveAsPatch"
+                  >
+                    {{ saving ? '保存中…' : '💾 保存补丁' }}
+                  </NButton>
+                </template>
+                把本文件的改动存成替换补丁（text.applyPatch）
+              </NTooltip>
+            </div>
           </div>
-        </div>
+        </template>
 
         <div class="panel-body fill">
           <!-- 列标题 -->
@@ -650,24 +713,25 @@ onUnmounted(() => {
           <div class="kv-list-container">
             <!-- 加载态 -->
             <div v-if="entriesLoading && entries.length === 0" class="state-block">
-              <span class="state-icon spinner">⏳</span>
+              <NSpin size="small" />
               <span class="state-text">正在读取键值条目…</span>
             </div>
 
             <!-- 空态：未选文件 -->
             <div v-else-if="!selectedFilePath" class="state-block">
-              <span class="state-icon">📝</span>
-              <span class="state-text">未选择语言文件</span>
-              <span class="state-hint">
-                请从左侧文件树中选择一个语言文件进行编辑，或通过搜索框快速定位键值文本。支持
-                JSON、YAML、CSV、PO 等格式。
-              </span>
+              <NEmpty size="small" description="未选择语言文件">
+                <template #extra>
+                  <span class="state-hint">
+                    请从左侧文件树中选择一个语言文件进行编辑，或通过搜索框快速定位键值文本。支持
+                    JSON、YAML、CSV、PO 等格式。
+                  </span>
+                </template>
+              </NEmpty>
             </div>
 
             <!-- 空态：文件无条目 -->
             <div v-else-if="entries.length === 0" class="state-block">
-              <span class="state-icon">🔤</span>
-              <span class="state-text">该文件无键值条目</span>
+              <NEmpty size="small" description="该文件无键值条目" />
             </div>
 
             <!-- 键值行（虚拟滚动，滚动到底自动取下一页） -->
@@ -693,78 +757,92 @@ onUnmounted(() => {
                   <span class="kv-key lme-mono lme-ellipsis" :title="item.key">
                     {{ item.key }}
                   </span>
-                  <span class="kv-value">
-                    <input
+                  <span class="kv-value" :title="item.value">
+                    <NInput
                       v-if="item.editState !== 'Deleted'"
-                      type="text"
                       :value="item.value"
                       class="value-input"
-                      :title="item.value"
-                      @input="
-                        onValueEdit(item, ($event.target as HTMLInputElement).value)
-                      "
+                      size="small"
+                      @update:value="onValueInput(item, $event)"
                     />
                     <del v-else class="deleted-text">{{ item.originalValue }}</del>
                   </span>
                   <span class="kv-actions">
-                    <button
+                    <NButton
                       v-if="item.editState !== 'Unchanged'"
-                      class="row-btn restore-btn"
+                      class="row-btn"
+                      size="tiny"
+                      quaternary
+                      type="info"
                       title="恢复原值"
                       @click="restoreEntry(item)"
                     >
                       恢复
-                    </button>
-                    <button
+                    </NButton>
+                    <NButton
                       v-if="item.editState !== 'Unchanged'"
                       class="row-btn delete-btn"
+                      size="tiny"
+                      quaternary
+                      type="error"
                       title="删除条目"
                       @click="deleteEntry(item)"
                     >
                       删除
-                    </button>
+                    </NButton>
                   </span>
                 </div>
               </template>
             </VirtualList>
           </div>
-        </div>
 
-        <!-- 还有下一页时的提示（滚动即自动加载） -->
-        <div
-          v-if="entriesOffset + entriesPageSize < entriesTotalCount"
-          class="panel-foot"
-        >
-          <span class="load-more-hint lme-mono">
-            向下滚动加载更多（{{ entries.length }} / {{ entriesTotalCount }}）
-          </span>
-        </div>
-      </section>
-
-      <!-- ── 右：差异预览 ── -->
-      <section class="panel panel-diff">
-        <div class="panel-head compact">
-          <div class="panel-title">
-            <span class="panel-title-text">差异预览</span>
-            <span class="panel-badge lme-mono">
-              {{ changedEntries.length }} 处变更
+          <!-- 还有下一页时的提示（滚动即自动加载） -->
+          <div
+            v-if="entriesOffset + entriesPageSize < entriesTotalCount"
+            class="panel-foot page-bar"
+          >
+            <span class="load-more-hint lme-mono">
+              向下滚动加载更多（{{ entries.length }} / {{ entriesTotalCount }}）
             </span>
           </div>
         </div>
+      </NCard>
+
+      <!-- ── 右：差异预览 ── -->
+      <NCard
+        class="panel panel-diff"
+        size="small"
+        bordered
+        :content-style="{ padding: '0px' }"
+      >
+        <template #header>
+          <div class="panel-head compact">
+            <div class="panel-title">
+              <span class="panel-title-text">差异预览</span>
+              <NTag class="panel-badge" size="small" round :bordered="false">
+                {{ changedEntries.length }} 处变更
+              </NTag>
+            </div>
+          </div>
+        </template>
 
         <div class="panel-body scroll">
           <!-- 未开启 -->
           <div v-if="!showDiffView" class="state-block">
-            <span class="state-icon">⚖️</span>
-            <span class="state-text">差异视图已关闭</span>
-            <span class="state-hint">勾选中间栏的「差异视图」在此查看原值 → 新值</span>
+            <NEmpty size="small" description="差异视图已关闭">
+              <template #extra>
+                <span class="state-hint">勾选中间栏的「差异视图」在此查看原值 → 新值</span>
+              </template>
+            </NEmpty>
           </div>
 
           <!-- 无改动 -->
           <div v-else-if="changedEntries.length === 0" class="state-block">
-            <span class="state-icon">🔍</span>
-            <span class="state-text">暂无修改</span>
-            <span class="state-hint">在键值列表里改值后，此处将显示差异</span>
+            <NEmpty size="small" description="暂无修改">
+              <template #extra>
+                <span class="state-hint">在键值列表里改值后，此处将显示差异</span>
+              </template>
+            </NEmpty>
           </div>
 
           <!-- 变更列表 -->
@@ -775,7 +853,22 @@ onUnmounted(() => {
               class="diff-entry"
               :class="'diff-' + entry.editState.toLowerCase()"
             >
-              <div class="diff-key lme-mono">{{ entry.key }}</div>
+              <div class="diff-head">
+                <span class="diff-key lme-mono">{{ entry.key }}</span>
+                <NTag
+                  size="small"
+                  :bordered="false"
+                  :type="
+                    entry.editState === 'Deleted'
+                      ? 'error'
+                      : entry.editState === 'Added'
+                        ? 'success'
+                        : 'warning'
+                  "
+                >
+                  {{ entry.editState === 'Deleted' ? '已删除' : entry.editState === 'Added' ? '已添加' : '已修改' }}
+                </NTag>
+              </div>
               <div class="diff-body">
                 <div v-if="entry.editState === 'Deleted'" class="diff-old">
                   {{ entry.originalValue || '(空)' }}
@@ -792,7 +885,7 @@ onUnmounted(() => {
             </div>
           </div>
         </div>
-      </section>
+      </NCard>
     </div>
   </div>
 </template>
@@ -915,7 +1008,7 @@ onUnmounted(() => {
   margin-left: auto;
   display: flex;
   align-items: center;
-  gap: var(--lme-gap-md);
+  gap: var(--lme-gap-sm);
   flex-shrink: 0;
 }
 
@@ -925,36 +1018,27 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-.result-count strong {
+.result-count :deep(strong) {
   color: var(--lme-text-primary);
   font-weight: var(--lme-font-weight-semibold);
 }
 
 .toolbar-chip {
-  padding: 1px var(--lme-gap-sm);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-full);
+  font-family: var(--lme-font-mono);
   font-size: var(--lme-font-size-xs);
-  font-weight: var(--lme-font-weight-medium);
   white-space: nowrap;
 }
 
-.toolbar-chip.modified {
-  color: var(--lme-state-modified);
-  border-color: var(--lme-state-modified);
-  background: var(--lme-state-modified-bg);
+.toolbar-chip :deep(.n-tag__text) {
+  font-family: var(--lme-font-mono);
 }
 
-.toolbar-chip.added {
-  color: var(--lme-state-added);
-  border-color: var(--lme-state-added);
-  background: var(--lme-state-added-bg);
-}
-
-.toolbar-chip.deleted {
-  color: var(--lme-state-deleted);
-  border-color: var(--lme-state-deleted);
-  background: var(--lme-state-deleted-bg);
+/* ── 错误条 ── */
+.error-banner {
+  flex-shrink: 0;
+  margin: var(--lme-gap-md) var(--lme-gap-lg) 0;
+  border-radius: var(--lme-radius-md);
+  font-size: var(--lme-font-size-sm);
 }
 
 /* ── 三栏主从栅格 ── */
@@ -973,9 +1057,32 @@ onUnmounted(() => {
   min-width: 0;
   min-height: 0;
   background: var(--lme-bg-panel);
-  border: 1px solid var(--lme-border);
   border-radius: var(--lme-radius-lg);
   overflow: hidden;
+}
+
+/* NCard 内部：头部 / 内容都交给 .panel-head / .panel-body 排版 */
+.panel :deep(.n-card-header) {
+  display: block;
+  padding: 0;
+  min-height: 0;
+  background: var(--lme-bg-elevated);
+  border-bottom: 1px solid var(--lme-border);
+}
+
+.panel :deep(.n-card-header__main) {
+  padding: 0;
+  width: 100%;
+  font-size: var(--lme-font-size-sm);
+}
+
+.panel :deep(.n-card-content) {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
 }
 
 .panel-files {
@@ -1003,7 +1110,6 @@ onUnmounted(() => {
   flex-direction: column;
   gap: var(--lme-gap-sm);
   padding: var(--lme-gap-sm) var(--lme-gap-md);
-  border-bottom: 1px solid var(--lme-border);
   background: var(--lme-bg-elevated);
 }
 
@@ -1031,13 +1137,13 @@ onUnmounted(() => {
 }
 
 .panel-badge {
-  padding: 1px var(--lme-gap-sm);
-  background: var(--lme-bg-base);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-full);
-  color: var(--lme-text-muted);
-  font-size: var(--lme-font-size-xs);
   flex-shrink: 0;
+  font-family: var(--lme-font-mono);
+  font-size: var(--lme-font-size-xs);
+}
+
+.panel-badge :deep(.n-tag__text) {
+  font-family: var(--lme-font-mono);
 }
 
 .panel-head-actions {
@@ -1074,7 +1180,6 @@ onUnmounted(() => {
 
 /* ── 搜索框 / 筛选 ── */
 .panel-search {
-  position: relative;
   display: flex;
   align-items: center;
 }
@@ -1086,56 +1191,12 @@ onUnmounted(() => {
 }
 
 .panel-search-icon {
-  position: absolute;
-  left: var(--lme-gap-sm);
   font-size: var(--lme-font-size-sm);
   opacity: 0.6;
-  pointer-events: none;
 }
 
 .search-input {
   width: 100%;
-  padding: 5px 26px;
-  background: var(--lme-bg-input);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-md);
-  color: var(--lme-text-primary);
-  font-size: var(--lme-font-size-sm);
-  font-family: var(--lme-font-family);
-  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard),
-    box-shadow var(--lme-dur-fast) var(--lme-ease-standard);
-}
-
-.search-input::placeholder {
-  color: var(--lme-text-disabled);
-}
-
-.search-input:focus {
-  outline: none;
-  border-color: var(--lme-accent);
-  box-shadow: var(--lme-shadow-focus);
-}
-
-.search-clear {
-  position: absolute;
-  right: var(--lme-gap-xs);
-  width: 16px;
-  height: 16px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--lme-bg-elevated);
-  border: none;
-  border-radius: var(--lme-radius-full);
-  color: var(--lme-text-muted);
-  font-size: 9px;
-  cursor: pointer;
-  padding: 0;
-}
-
-.search-clear:hover {
-  color: var(--lme-text-primary);
-  background: var(--lme-bg-hover);
 }
 
 .filter-row {
@@ -1154,69 +1215,9 @@ onUnmounted(() => {
 .filter-select {
   flex: 1;
   min-width: 88px;
-  padding: 3px var(--lme-gap-sm);
-  background: var(--lme-bg-input);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
-  color: var(--lme-text-primary);
-  font-size: var(--lme-font-size-xs);
-  font-family: var(--lme-font-family);
-  cursor: pointer;
-  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
-.filter-select:hover {
-  border-color: var(--lme-border-strong);
-}
-
-.filter-select:focus {
-  outline: none;
-  border-color: var(--lme-accent);
-  box-shadow: var(--lme-shadow-focus);
-}
-
-/* ── 按钮 ── */
-.action-btn {
-  padding: 5px 14px;
-  background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-md);
-  color: var(--lme-text-secondary);
-  cursor: pointer;
-  font-size: var(--lme-font-size-sm);
-  font-family: var(--lme-font-family);
-  flex-shrink: 0;
-  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard),
-    color var(--lme-dur-fast) var(--lme-ease-standard),
-    background var(--lme-dur-fast) var(--lme-ease-standard);
-}
-
-.action-btn:hover:not(:disabled) {
-  border-color: var(--lme-accent);
-  color: var(--lme-text-primary);
-}
-
-.action-btn:focus-visible {
-  outline: none;
-  box-shadow: var(--lme-shadow-focus);
-}
-
-.action-btn.primary {
-  background: var(--lme-accent-muted);
-  border-color: var(--lme-accent);
-  color: var(--lme-text-primary);
-  font-weight: var(--lme-font-weight-medium);
-}
-
-.action-btn.primary:hover:not(:disabled) {
-  background: var(--lme-accent);
-}
-
-.action-btn:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
+/* ── 差异视图开关（原生 checkbox，保留真实 input 元素） ── */
 .diff-toggle {
   display: flex;
   align-items: center;
@@ -1287,13 +1288,12 @@ onUnmounted(() => {
 
 .file-tag {
   flex-shrink: 0;
-  padding: 0 var(--lme-gap-xs);
-  border-radius: var(--lme-radius-full);
+  font-family: var(--lme-font-mono);
   font-size: var(--lme-font-size-xs);
 }
 
-.language-tag {
-  color: var(--lme-accent);
+.file-tag :deep(.n-tag__text) {
+  font-family: var(--lme-font-mono);
 }
 
 .file-count {
@@ -1355,11 +1355,13 @@ onUnmounted(() => {
 
 .tree-count {
   flex-shrink: 0;
+  font-family: var(--lme-font-mono);
   font-size: var(--lme-font-size-xs);
   color: var(--lme-text-muted);
-  background: var(--lme-bg-base);
-  padding: 0 var(--lme-gap-sm);
-  border-radius: var(--lme-radius-full);
+}
+
+.tree-count :deep(.n-tag__text) {
+  font-family: var(--lme-font-mono);
 }
 
 /* ── 中栏：键值表 ── */
@@ -1443,27 +1445,37 @@ onUnmounted(() => {
 .kv-value {
   flex: 3;
   min-width: 0;
+  display: flex;
+  align-items: center;
 }
 
+/* 值输入框（NInput 渲染真实 input，行内透明底、聚焦才描边） */
 .value-input {
   width: 100%;
-  padding: 2px var(--lme-gap-xs);
+}
+
+.value-input :deep(.n-input__wrapper) {
+  padding: 0 var(--lme-gap-xs);
+  min-height: 24px;
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--lme-radius-sm);
-  color: var(--lme-text-primary);
-  font-size: var(--lme-font-size-sm);
-  font-family: var(--lme-font-family);
   transition: border-color var(--lme-dur-fast) var(--lme-ease-standard),
     background var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
-.value-input:hover {
+.value-input :deep(.n-input__input-el) {
+  height: 22px;
+  line-height: var(--lme-line-height-normal);
+  font-size: var(--lme-font-size-sm);
+  font-family: var(--lme-font-family);
+}
+
+.value-input:hover :deep(.n-input__wrapper) {
   border-color: var(--lme-border);
 }
 
-.value-input:focus {
-  outline: none;
+.value-input.n-input--focus :deep(.n-input__wrapper) {
   border-color: var(--lme-accent);
   background: var(--lme-bg-input);
   box-shadow: var(--lme-shadow-focus);
@@ -1483,31 +1495,11 @@ onUnmounted(() => {
 }
 
 .row-btn {
-  padding: 1px var(--lme-gap-sm);
-  background: transparent;
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
-  color: var(--lme-text-muted);
-  cursor: pointer;
   font-size: var(--lme-font-size-xs);
-  font-family: var(--lme-font-family);
-  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard),
-    color var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
-.row-btn:focus-visible {
-  outline: none;
-  box-shadow: var(--lme-shadow-focus);
-}
-
-.restore-btn:hover {
-  border-color: var(--lme-info);
-  color: var(--lme-info);
-}
-
-.delete-btn:hover {
-  border-color: var(--lme-state-deleted);
-  color: var(--lme-state-deleted);
+.row-btn :deep(.n-button__content) {
+  font-size: var(--lme-font-size-xs);
 }
 
 .load-more-hint {
@@ -1549,7 +1541,16 @@ onUnmounted(() => {
   border-left-color: var(--lme-state-deleted);
 }
 
+.diff-head {
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-sm);
+  min-width: 0;
+}
+
 .diff-key {
+  flex: 1;
+  min-width: 0;
   font-size: var(--lme-font-size-xs);
   color: var(--lme-text-muted);
   overflow: hidden;
@@ -1605,22 +1606,6 @@ onUnmounted(() => {
   text-align: center;
 }
 
-.state-icon {
-  font-size: 28px;
-  opacity: 0.7;
-}
-
-.state-icon.spinner {
-  animation: state-spin 1.4s linear infinite;
-  display: inline-block;
-}
-
-@keyframes state-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 .state-text {
   font-size: var(--lme-font-size-sm);
   color: var(--lme-text-secondary);
@@ -1631,6 +1616,14 @@ onUnmounted(() => {
   color: var(--lme-text-disabled);
   line-height: var(--lme-line-height-relaxed);
   max-width: 280px;
+}
+
+/* ── 库组件聚焦环（沿用 v2 聚焦阴影令牌） ── */
+:deep(.n-button:focus-visible),
+:deep(.n-input:focus-visible),
+:deep(.n-base-selection:focus-visible) {
+  outline: none;
+  box-shadow: var(--lme-shadow-focus);
 }
 </style>
 
@@ -1655,5 +1648,5 @@ onUnmounted(() => {
   - text.applyPatch       → 保存补丁到替换资源
 
   未实现降级：
-  - IPC 方法不可用时显示「暂未实现」提示（alert）
+  - IPC 方法不可用时在页头下方显示 NAlert 错误条（原为原生 alert）
 -->

@@ -184,11 +184,14 @@ onUnmounted(() => {
 <template>
   <WikiShell>
     <div class="wiki-home">
+      <!-- 顶部细进度条（与资源/静态工作台同一套加载语言） -->
+      <div v-if="isLoading" class="loading-bar" aria-hidden="true" />
+
       <div class="wiki-home-container">
         <!-- ── Hero 区域（对齐灰机首页：暗底横幅 + 金色大标题） ── -->
-        <section class="hero-section">
+        <section class="hero-section wiki-section">
           <div class="hero-content">
-            <h1 class="hero-title">Limbus Company 中文维基</h1>
+            <h1 class="hero-title page-title">Limbus Company 中文维基</h1>
             <p class="hero-subtitle">
               边狱公司模组编辑知识库 · 人格、E.G.O、敌方单位与剧情百科 · 数据来自本地游戏文件
             </p>
@@ -242,20 +245,25 @@ onUnmounted(() => {
 
         <!-- ── 生成结果 / 失败 ── -->
         <div v-if="generateMessage" class="generate-result">✅ {{ generateMessage }}</div>
-        <div v-if="generateError" class="error-banner">⚠️ {{ generateError }}</div>
+        <div v-if="generateError" class="error-banner page-error">
+          <span class="error-banner-icon">⚠️</span>
+          <span>{{ generateError }}</span>
+        </div>
 
         <!-- ── 错误提示 ── -->
-        <div v-if="errorMessage" class="error-banner">
-          ⚠️ {{ errorMessage }}
+        <div v-if="errorMessage" class="error-banner page-error">
+          <span class="error-banner-icon">⚠️</span>
+          <span>{{ errorMessage }}</span>
         </div>
 
         <!-- ── 加载中 ── -->
-        <div v-if="isLoading" class="loading-state">
-          <span>加载中…</span>
+        <div v-if="isLoading" class="loading-state state-block">
+          <span class="state-icon spinner">⏳</span>
+          <span class="state-text">加载中…</span>
         </div>
 
         <!-- ── 统计概览 ── -->
-        <section v-if="homeData" class="stats-section">
+        <section v-if="homeData" class="stats-section wiki-section">
           <div class="stats-grid">
             <div class="stat-card">
               <span class="stat-value">{{ homeData.stats.totalPages.toLocaleString('zh-CN') }}</span>
@@ -277,7 +285,7 @@ onUnmounted(() => {
         </section>
 
         <!-- ── 分类卡片网格 ── -->
-        <section class="categories-section">
+        <section class="categories-section wiki-section">
           <h2 class="section-title">分类浏览</h2>
           <div class="category-grid">
             <div
@@ -299,7 +307,7 @@ onUnmounted(() => {
                 <span
                   v-for="fp in entry.card.featuredPages.slice(0, 3)"
                   :key="fp.id"
-                  class="featured-item"
+                  class="featured-item entry-item"
                   :title="fp.title"
                   @click.stop="navigateToPage(fp.id)"
                 >
@@ -311,7 +319,7 @@ onUnmounted(() => {
         </section>
 
         <!-- ── 最近编辑 ── -->
-        <section class="recent-section">
+        <section class="recent-section wiki-section">
           <h2 class="section-title">最近编辑</h2>
           <div v-if="homeData?.recentPages?.length" class="recent-list">
             <div
@@ -321,12 +329,14 @@ onUnmounted(() => {
               @click="navigateToPage(page.id)"
             >
               <span class="recent-title">{{ page.title }}</span>
-              <span class="recent-category">{{ categoryLabel(page.category) }}</span>
+              <span class="recent-category wiki-chip">{{ categoryLabel(page.category) }}</span>
               <span class="recent-time">{{ formatTime(page.lastModified) }}</span>
             </div>
           </div>
-          <div v-else class="empty-state">
-            <p>暂无最近编辑</p>
+          <div v-else class="empty-state state-block">
+            <span class="state-icon">📄</span>
+            <span class="state-text">暂无最近编辑</span>
+            <span class="state-hint">点上方「生成页面」后这里会列出最近的变更</span>
           </div>
         </section>
       </div>
@@ -336,15 +346,48 @@ onUnmounted(() => {
 
 <style scoped>
 .wiki-home {
+  position: relative;
   height: 100%;
   overflow-y: auto;
   background: var(--lme-bg-base);
 }
 
+/* ── 顶部细进度条（同 AssetsView / StaticView 模式） ── */
+.loading-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  overflow: hidden;
+  z-index: var(--lme-z-raised);
+  background: var(--lme-progressbar-bg);
+}
+
+.loading-bar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  border-radius: var(--lme-radius-full);
+  background: var(--wiki-accent);
+  animation: loading-slide 1s var(--lme-ease-standard) infinite;
+}
+
+@keyframes loading-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(350%);
+  }
+}
+
+/* ── 内容容器：宽屏居中，让页面「呼吸」 ── */
 .wiki-home-container {
-  max-width: 1100px;
+  max-width: var(--wiki-content-max-width);
   margin: 0 auto;
-  padding: var(--lme-gap-xl);
+  padding: var(--lme-gap-xl) var(--lme-gap-lg) var(--lme-gap-2xl);
   display: flex;
   flex-direction: column;
   gap: var(--lme-gap-xl);
@@ -355,7 +398,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: var(--lme-gap-lg);
-  padding: var(--lme-gap-xl) var(--lme-gap-xl) var(--lme-gap-lg);
+  padding: var(--lme-gap-2xl) var(--lme-gap-xl) var(--lme-gap-xl);
   background: var(--wiki-hero-bg);
   border: 1px solid var(--wiki-hero-border);
   border-radius: var(--lme-radius-lg);
@@ -383,18 +426,21 @@ onUnmounted(() => {
 
 .hero-title {
   margin: 0;
-  font-size: 34px;
-  font-weight: 700;
-  letter-spacing: 2px;
+  font-size: var(--wiki-title-size);
+  line-height: var(--wiki-title-line);
+  font-weight: var(--lme-font-weight-bold);
+  letter-spacing: var(--lme-tracking-caps);
   color: var(--wiki-hero-title);
 }
 
 .hero-subtitle {
   margin: 0;
   font-size: var(--lme-font-size-md);
+  line-height: var(--lme-line-height-relaxed);
   color: var(--wiki-hero-subtitle);
 }
 
+/* ── 搜索 ── */
 .hero-search {
   display: flex;
   gap: var(--lme-gap-sm);
@@ -409,27 +455,36 @@ onUnmounted(() => {
   color: var(--lme-text-primary);
   font-size: var(--lme-font-size-md);
   font-family: var(--lme-font-family);
+  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard);
+}
+
+.search-input::placeholder {
+  color: var(--lme-text-disabled);
 }
 
 .search-input:focus {
   outline: none;
-  border-color: var(--lme-accent);
+  border-color: var(--wiki-accent);
 }
 
 .search-btn {
   padding: var(--lme-gap-sm) var(--lme-gap-lg);
-  background: var(--lme-accent);
-  border: 1px solid var(--lme-accent);
+  background: var(--wiki-accent);
+  border: 1px solid var(--wiki-accent);
   border-radius: var(--lme-radius-sm);
-  color: var(--lme-text-primary);
+  color: var(--wiki-chip-active-text);
   font-size: var(--lme-font-size-md);
+  font-weight: var(--lme-font-weight-semibold);
+  font-family: var(--lme-font-family);
   cursor: pointer;
-  transition: background 0.15s;
+  transition: background var(--lme-dur-fast) var(--lme-ease-standard),
+    border-color var(--lme-dur-fast) var(--lme-ease-standard);
   white-space: nowrap;
 }
 
 .search-btn:hover:not(:disabled) {
-  background: var(--lme-accent-hover);
+  background: var(--wiki-accent-strong);
+  border-color: var(--wiki-accent-strong);
 }
 
 .search-btn:disabled {
@@ -441,27 +496,29 @@ onUnmounted(() => {
 .hero-generate {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: var(--lme-gap-sm);
-  margin-top: var(--lme-gap-sm);
+  margin-top: var(--lme-gap-xs);
 }
 
 .generate-btn {
   padding: var(--lme-gap-sm) var(--lme-gap-lg);
   background: transparent;
-  border: 1px solid var(--lme-border);
+  border: 1px solid var(--wiki-accent-dim);
   border-radius: var(--lme-radius-sm);
-  color: var(--lme-text-secondary);
+  color: var(--wiki-link);
   font-size: var(--lme-font-size-sm);
+  font-family: var(--lme-font-family);
   cursor: pointer;
   transition:
-    border-color 0.15s,
-    color 0.15s;
+    border-color var(--lme-dur-fast) var(--lme-ease-standard),
+    color var(--lme-dur-fast) var(--lme-ease-standard);
   white-space: nowrap;
 }
 
 .generate-btn:hover:not(:disabled) {
-  border-color: var(--lme-accent);
-  color: var(--lme-text-primary);
+  border-color: var(--wiki-accent);
+  color: var(--wiki-accent-strong);
 }
 
 .generate-btn:disabled {
@@ -474,10 +531,11 @@ onUnmounted(() => {
   font-size: var(--lme-font-size-xs);
 }
 
+/* ── 生成进度 ── */
 .generate-progress {
   padding: var(--lme-gap-md);
   background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
+  border: 1px solid var(--wiki-card-border);
   border-radius: var(--lme-radius-md);
 }
 
@@ -497,21 +555,21 @@ onUnmounted(() => {
 
 .progress-track {
   height: 4px;
-  background: var(--lme-bg-input);
-  border-radius: 2px;
+  background: var(--lme-progressbar-bg);
+  border-radius: var(--lme-radius-full);
   overflow: hidden;
 }
 
 .progress-bar {
   height: 100%;
-  background: var(--lme-accent);
-  transition: width 0.2s;
+  background: var(--wiki-accent);
+  transition: width var(--lme-dur-base) var(--lme-ease-standard);
 }
 
 .generate-result {
   padding: var(--lme-gap-md);
   background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
+  border: 1px solid var(--wiki-card-border);
   border-radius: var(--lme-radius-md);
   color: var(--lme-text-secondary);
   font-size: var(--lme-font-size-sm);
@@ -519,7 +577,10 @@ onUnmounted(() => {
 
 /* ── 错误提示 ── */
 .error-banner {
-  padding: var(--lme-gap-md);
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-sm);
+  padding: var(--lme-gap-sm) var(--lme-gap-md);
   background: var(--lme-error-banner-bg);
   border: 1px solid var(--lme-error);
   border-radius: var(--lme-radius-md);
@@ -527,14 +588,45 @@ onUnmounted(() => {
   font-size: var(--lme-font-size-sm);
 }
 
-/* ── 加载状态 ── */
-.loading-state {
+/* ── 加载 / 空状态（与全站同一套 state-block） ── */
+.state-block {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: var(--lme-gap-xl);
+  gap: var(--lme-gap-sm);
+  padding: var(--lme-gap-xl) var(--lme-gap-md);
+  text-align: center;
+}
+
+.state-icon {
+  font-size: var(--lme-font-size-3xl);
+  opacity: 0.7;
+}
+
+.state-icon.spinner {
+  display: inline-block;
+  animation: state-spin 1.4s linear infinite;
+}
+
+@keyframes state-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.state-text {
+  font-size: var(--lme-font-size-sm);
+  color: var(--lme-text-secondary);
+}
+
+.state-hint {
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-disabled);
+}
+
+.loading-state {
   color: var(--lme-text-muted);
-  font-size: var(--lme-font-size-md);
 }
 
 /* ── 统计概览 ── */
@@ -546,7 +638,7 @@ onUnmounted(() => {
 
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: var(--lme-gap-md);
 }
 
@@ -556,16 +648,27 @@ onUnmounted(() => {
   align-items: center;
   gap: var(--lme-gap-xs);
   padding: var(--lme-gap-lg);
-  background: var(--lme-bg-panel);
-  border: 1px solid var(--lme-border);
+  background: var(--wiki-card-bg);
+  border: 1px solid var(--wiki-card-border);
   border-radius: var(--lme-radius-md);
+  transition:
+    border-color var(--lme-dur-fast) var(--lme-ease-standard),
+    transform var(--lme-dur-fast) var(--lme-ease-standard),
+    box-shadow var(--lme-dur-fast) var(--lme-ease-standard);
+}
+
+.stat-card:hover {
+  border-color: var(--wiki-card-hover-border);
+  transform: translateY(-1px);
+  box-shadow: var(--lme-shadow-md);
 }
 
 .stat-value {
-  font-size: var(--lme-font-size-xl);
-  font-weight: 700;
+  font-size: var(--lme-font-size-2xl);
+  font-weight: var(--lme-font-weight-bold);
   color: var(--wiki-stat-value);
   font-variant-numeric: tabular-nums;
+  line-height: var(--lme-line-height-tight);
 }
 
 .stat-label {
@@ -577,7 +680,7 @@ onUnmounted(() => {
 .section-title {
   margin: 0;
   font-size: var(--lme-font-size-lg);
-  font-weight: 700;
+  font-weight: var(--lme-font-weight-semibold);
   color: var(--wiki-section-title);
   padding-bottom: var(--lme-gap-sm);
   border-bottom: 1px solid var(--wiki-section-head-border);
@@ -592,7 +695,7 @@ onUnmounted(() => {
 
 .category-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: var(--lme-gap-md);
 }
 
@@ -605,13 +708,18 @@ onUnmounted(() => {
   border: 1px solid var(--wiki-card-border);
   border-radius: var(--lme-radius-md);
   cursor: pointer;
-  transition: border-color 0.15s, background 0.15s, transform 0.15s;
+  transition:
+    border-color var(--lme-dur-fast) var(--lme-ease-standard),
+    background var(--lme-dur-fast) var(--lme-ease-standard),
+    transform var(--lme-dur-fast) var(--lme-ease-standard),
+    box-shadow var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
 .category-card:hover {
   border-color: var(--wiki-card-hover-border);
   background: var(--wiki-card-hover-bg);
-  transform: translateY(-1px);
+  transform: translateY(-2px);
+  box-shadow: var(--lme-shadow-md);
 }
 
 /* 无本地来源的分类：保留入口但视觉弱化，不显示假数字 */
@@ -626,12 +734,12 @@ onUnmounted(() => {
 }
 
 .card-icon {
-  font-size: 24px;
+  font-size: var(--lme-font-size-2xl);
 }
 
 .card-label {
   font-size: var(--lme-font-size-md);
-  font-weight: 600;
+  font-weight: var(--lme-font-weight-semibold);
   color: var(--lme-text-primary);
 }
 
@@ -648,17 +756,18 @@ onUnmounted(() => {
 .card-featured {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--lme-gap-xs);
   margin-top: auto;
 }
 
 .featured-item {
   font-size: var(--lme-font-size-xs);
   color: var(--wiki-link);
-  padding: 2px 0;
+  cursor: pointer;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  transition: color var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
 .featured-item:hover {
@@ -688,7 +797,9 @@ onUnmounted(() => {
   border: 1px solid var(--wiki-card-border);
   border-radius: var(--lme-radius-sm);
   cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
+  transition:
+    border-color var(--lme-dur-fast) var(--lme-ease-standard),
+    background var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
 .recent-item:hover {
@@ -699,8 +810,8 @@ onUnmounted(() => {
 .recent-title {
   flex: 1;
   font-size: var(--lme-font-size-sm);
+  font-weight: var(--lme-font-weight-medium);
   color: var(--lme-text-primary);
-  font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -709,10 +820,11 @@ onUnmounted(() => {
 .recent-category {
   font-size: var(--lme-font-size-xs);
   color: var(--wiki-chip-text);
-  padding: 1px 8px;
+  padding: 0 var(--lme-gap-sm);
   background: var(--wiki-chip-bg);
   border: 1px solid var(--wiki-chip-border);
   border-radius: var(--wiki-chip-radius);
+  line-height: var(--lme-line-height-normal);
   flex-shrink: 0;
 }
 
@@ -721,32 +833,45 @@ onUnmounted(() => {
   color: var(--lme-text-muted);
   flex-shrink: 0;
   min-width: 140px;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ── 空状态 ── */
 .empty-state {
   color: var(--lme-text-muted);
-  font-size: var(--lme-font-size-sm);
-  text-align: center;
-  padding: var(--lme-gap-lg);
+}
+
+/* ── 可达性：键盘焦点 ── */
+.search-input:focus-visible,
+.search-btn:focus-visible,
+.generate-btn:focus-visible,
+.category-card:focus-visible,
+.recent-item:focus-visible,
+.featured-item:focus-visible {
+  outline: none;
+  box-shadow: var(--lme-shadow-focus);
 }
 
 /* ── 响应式 ── */
 @media (max-width: 900px) {
-  .category-grid {
-    grid-template-columns: repeat(3, 1fr);
-  }
   .stats-grid {
     grid-template-columns: repeat(2, 1fr);
   }
 }
 
 @media (max-width: 640px) {
-  .category-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
   .hero-search {
     flex-direction: column;
+  }
+  .hero-generate {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .recent-item {
+    flex-wrap: wrap;
+  }
+  .recent-time {
+    min-width: 0;
   }
 }
 </style>

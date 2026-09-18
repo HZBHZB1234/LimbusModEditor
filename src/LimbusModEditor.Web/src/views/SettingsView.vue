@@ -126,11 +126,19 @@ async function browseDirectory(key: string) {
 
 async function autoConfigure() {
   try {
-    const result = await ipc.request<Record<string, string>>('config.autoDetect', {})
+    // 返回字段是**共享配置键名**（gameDirectory / unityCacheDirectory / modDirectory /
+    // fmodLibraryDirectory，camelCase），不是前端的 dir.key —— 这里必须经 CONFIG_KEYS
+    // 映射一次；直接用 dir.key 取会永远取不到，探测结果一个都填不进来。
+    const result = await ipc.request<Record<string, string | null | undefined>>(
+      'config.autoDetect',
+      {},
+    )
     let hit = 0
     for (const dir of directories.value) {
-      if (result[dir.key]) {
-        dir.path = result[dir.key]
+      const key = CONFIG_KEYS[dir.key]
+      const value = key ? result?.[key] : undefined
+      if (typeof value === 'string' && value.length > 0) {
+        dir.path = value
         hit += 1
       }
     }

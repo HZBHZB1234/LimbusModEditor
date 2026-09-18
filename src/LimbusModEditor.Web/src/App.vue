@@ -14,6 +14,11 @@
  *
  * 导航收敛到左侧活动栏（唯一入口），不再有工作区 Tab 条。
  * 路由、query 深链、各页 IPC 调用一律未改。
+ *
+ * 启动流程（2026-09-19 新增，见 stores/startup.ts）：
+ *   挂载即自动跑「路径定位 → 强制选择项目 → 自动扫描」，三步走完之前
+ *   工作区被锁定（`.locked` 不吃指针事件 + 全局快捷键短路），两个模态窗
+ *   由 ProjectGateDialog / StartupScanDialog 承担。
  */
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -30,14 +35,18 @@ import CommandPalette from '@/components/CommandPalette.vue'
 import StatusBar from '@/components/StatusBar.vue'
 import AppearanceControl from '@/components/AppearanceControl.vue'
 import AppIcon from '@/components/AppIcon.vue'
+import ProjectGateDialog from '@/components/ProjectGateDialog.vue'
+import StartupScanDialog from '@/components/StartupScanDialog.vue'
 import type { IconName } from '@/components/icons'
 import { useAppearanceStore } from '@/stores/appearance'
 import { useStatusStore } from '@/stores/status'
+import { useStartupStore } from '@/stores/startup'
 
 const router = useRouter()
 const route = useRoute()
 const appearance = useAppearanceStore()
 const status = useStatusStore()
+const startup = useStartupStore()
 
 interface NavItem {
   key: string
@@ -179,6 +188,8 @@ onMounted(() => {
   window.addEventListener('keydown', onGlobalKeydown, true)
   // 全局状态订阅（宿主事件 + 在途请求）只挂一次
   status.attach()
+  // 启动流程：自动路径定位 → 强制选择项目 → 自动扫描（幂等，见 stores/startup.ts）
+  void startup.start()
 })
 onUnmounted(() => window.removeEventListener('keydown', onGlobalKeydown, true))
 </script>
@@ -275,7 +286,20 @@ onUnmounted(() => window.removeEventListener('keydown', onGlobalKeydown, true))
               </nav>
 
               <main class="page-host">
-                <router-view />
+                <!-- 启动流程（定位 → 选项目 → 扫描）走完之前不挂载工作台：
+                     ① 这是「强制先选项目」最硬的一道锁；
+                     ② 各页挂载即查询索引，等扫描结束再挂载，首屏就是扫完的数据，
+                        不用为「扫完还要刷新」再造一套跨页失效通知。 -->
+                <template v-if="!startup.blocking">
+                  <router-view />
+                </template>
+                <div v-else class="boot-placeholder">
+                  <span class="bp-spinner">
+                    <AppIcon name="loader" :size="22" />
+                  </span>
+                  <p class="bp-title">正在准备启动</p>
+                  <p class="bp-desc">自动定位目录 → 选择项目 → 扫描游戏资源</p>
+                </div>
               </main>
             </div>
 
@@ -284,6 +308,12 @@ onUnmounted(() => window.removeEventListener('keydown', onGlobalKeydown, true))
 
             <!-- ══ 命令面板 ══ -->
             <CommandPalette v-model:open="paletteOpen" />
+
+            <!-- ══ 启动流程 ══
+                 ① 路径定位在挂载时自动跑；② 项目门不可关闭；③ 扫描模态显示进度。
+                 两个窗都在 stores/startup.ts 的 phase 驱动下出现/消失。 -->
+            <ProjectGateDialog />
+            <StartupScanDialog />
           </div>
         </NNotificationProvider>
       </NDialogProvider>
@@ -298,6 +328,12 @@ onUnmounted(() => window.removeEventListener('keydown', onGlobalKeydown, true))
   height: 100%;
   overflow: hidden;
   background: var(--lme-bg-base);
+}
+
+/* 启动流程未走完（项目门 / 扫描窗开着）：工作区整块不吃指针事件。
+   模态窗本体由 naive-ui Teleport 到 body，不在 .app-shell 内，不受影响。 */
+.app-shell.locked {
+  pointer-events: none;
 }
 
 /* ══ 工具条 ══ */
@@ -513,5 +549,35 @@ onUnmounted(() => window.removeEventListener('keydown', onGlobalKeydown, true))
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+/* ── 启动占位（启动流程未走完时取代工作台；正常情况下被模态遮罩盖住） ── */
+.boot-placeholder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--lme-gap-sm);
+  color: var(--lme-text-muted);
+}
+
+.bp-spinner {
+  display: inline-flex;
+  color: var(--lme-accent);
+  animation: lme-spin 1.1s linear infinite;
+}
+
+.bp-title {
+  margin: 0;
+  font-size: var(--lme-font-size-md);
+  font-weight: var(--lme-font-weight-medium);
+  color: var(--lme-text-secondary);
+}
+
+.bp-desc {
+  margin: 0;
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-muted);
 }
 </style>

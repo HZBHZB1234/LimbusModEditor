@@ -462,6 +462,14 @@ export interface SpineCatalogItem {
   bundlePresent: boolean
   /** 被多少个维基页面绑定（0 = 从未在界面出现过）。 */
   boundPageCount: number
+  /** 归属来源的中文说明（既有页面绑定 / 关联索引自动接入 / 未归类）。 */
+  source: string
+  /** 解析状态的机器可读值（parsed / likely / bundle-missing / no-skeleton / uncategorized / failed）。 */
+  parseStatus: string
+  /** 解析状态的中文说明。 */
+  parseStatusLabel: string
+  /** 归属的维基页面 id（点得进去；未归类时为空）。 */
+  ownerPageIds: string[]
 }
 
 export interface SpineCatalogResponse {
@@ -479,4 +487,14 @@ export interface SpineResolveResult {
   label: string | null
   /** 取不到时的中文原因（如实说，不造假）。 */
   reason: string | null
+  /** 归属来源（中文）。 */
+  source: string
+  /** 归属的维基页面 id（点得进去）。 */
+  ownerPageIds: string[]
+  /** 所在 bundle 此刻在不在本机。 */
+  bundlePresent: boolean
+  /** 解析状态（parsed / no-skeleton / bundle-missing / failed）。 */
+  parseStatus: string
+  /** 解析状态的中文说明。 */
+  parseStatusLabel: string
 }

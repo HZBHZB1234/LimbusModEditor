@@ -45,6 +45,11 @@ const visibleItems = computed(() =>
 
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
 
+/** 归属页面：明细回来后用明细的（更准），否则用名册的。 */
+const ownerLinks = computed(
+  () => resolved.value?.ownerPageIds ?? selected.value?.ownerPageIds ?? [],
+)
+
 async function loadCatalog() {
   loading.value = true
   error.value = null
@@ -76,6 +81,27 @@ function goToPage(next: number) {
   void loadCatalog()
 }
 
+/**
+ * 解析状态 → 标签配色。只影响观感，不改变任何口径：
+ * 「未命中」这类是**正确结果**（该 prefab 本来就不是 Spine），不是错误，所以用中性色。
+ */
+function statusTagType(status: string): 'default' | 'info' | 'warning' | 'error' | 'success' {
+  switch (status) {
+    case 'parsed':
+      return 'success'
+    case 'likely':
+      return 'info'
+    case 'bundle-missing':
+      return 'warning'
+    case 'no-skeleton':
+      return 'default'
+    case 'uncategorized':
+      return 'default'
+    default:
+      return 'error'
+  }
+}
+
 /** 点开一条：按需解三件套地址（后端缓存命中时会很快）。 */
 async function openItem(item: SpineCatalogItem) {
   selected.value = item
@@ -97,6 +123,11 @@ async function openItem(item: SpineCatalogItem) {
       skeletonFormat: null,
       label: null,
       reason: e instanceof Error ? e.message : String(e),
+      source: item.source,
+      ownerPageIds: item.ownerPageIds,
+      bundlePresent: item.bundlePresent,
+      parseStatus: 'failed',
+      parseStatusLabel: '取数失败',
     }
   } finally {
     resolving.value = false
@@ -174,11 +205,27 @@ onMounted(loadCatalog)
                 <NTag v-if="item.boundPageCount > 0" size="tiny" type="info" :bordered="false">
                   {{ item.boundPageCount }} 页
                 </NTag>
-                <NTag v-if="!item.bundlePresent" size="tiny" type="error" :bordered="false">
-                  bundle 缺失
+                <NTag
+                  size="tiny"
+                  :bordered="false"
+                  :type="statusTagType(item.parseStatus)"
+                >
+                  {{ item.parseStatusLabel }}
                 </NTag>
               </div>
               <div class="spine-item-path lme-mono">{{ item.refKey }}</div>
+              <div class="spine-item-source">
+                <span>{{ item.source }}</span>
+                <RouterLink
+                  v-for="owner in item.ownerPageIds"
+                  :key="owner"
+                  class="spine-item-link"
+                  :to="`/wiki/page/${owner}`"
+                  @click.stop
+                >
+                  去 {{ owner }}
+                </RouterLink>
+              </div>
             </li>
           </ul>
 
@@ -197,8 +244,31 @@ onMounted(loadCatalog)
             <div class="spine-preview-head">
               <span class="spine-preview-name">{{ selected.name }}</span>
               <NTag size="tiny" :bordered="false">{{ selected.group }}</NTag>
+              <NTag
+                size="tiny"
+                :bordered="false"
+                :type="statusTagType(resolved?.parseStatus ?? selected.parseStatus)"
+              >
+                {{ resolved?.parseStatusLabel ?? selected.parseStatusLabel }}
+              </NTag>
             </div>
             <div class="spine-preview-path lme-mono">{{ selected.refKey }}</div>
+
+            <div class="spine-preview-source">
+              <span class="spine-preview-source-label">来源</span>
+              <span>{{ resolved?.source ?? selected.source }}</span>
+            </div>
+            <div v-if="ownerLinks.length > 0" class="spine-preview-owners">
+              <span class="spine-preview-source-label">归属页面</span>
+              <RouterLink
+                v-for="owner in ownerLinks"
+                :key="owner"
+                class="spine-item-link"
+                :to="`/wiki/page/${owner}`"
+              >
+                {{ owner }}
+              </RouterLink>
+            </div>
 
             <div v-if="resolving" class="spine-preview-state">
               <NSpin size="small" /> 正在解三件套（要整读它所在的 bundle，可能要几秒）…
@@ -207,6 +277,14 @@ onMounted(loadCatalog)
             <NAlert v-else-if="resolved && !resolved.ok" type="warning" :bordered="false">
               <div class="spine-reason-title">这条取不到 Spine 三件套</div>
               <div class="spine-reason">{{ resolved.reason ?? '原因未知' }}</div>
+              <div v-if="!resolved.bundlePresent" class="spine-reason-hint">
+                它所在的 bundle 文件此刻不在本机（Unity 临时缓存被清）。
+                这不是代码能补的 —— 跑一次游戏或让平台重新下载后就会回来。
+              </div>
+              <div v-else class="spine-reason-hint">
+                该 prefab 的引用链里确实没有骨架与图集，它本来就不是 Spine 资源
+                （界面如实显示原因，不拿别的素材凑）。
+              </div>
             </NAlert>
 
             <template v-else-if="resolved?.ok">
@@ -363,6 +441,25 @@ onMounted(loadCatalog)
   white-space: nowrap;
 }
 
+.spine-item-source {
+  margin-top: 2px;
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-sm);
+  flex-wrap: wrap;
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-muted);
+}
+
+.spine-item-link {
+  color: var(--wiki-link);
+  text-decoration: none;
+}
+
+.spine-item-link:hover {
+  text-decoration: underline;
+}
+
 .spine-pager {
   display: flex;
   align-items: center;
@@ -409,6 +506,20 @@ onMounted(loadCatalog)
   word-break: break-all;
 }
 
+.spine-preview-source,
+.spine-preview-owners {
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-sm);
+  flex-wrap: wrap;
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-secondary);
+}
+
+.spine-preview-source-label {
+  color: var(--lme-text-muted);
+}
+
 .spine-preview-state {
   display: flex;
   align-items: center;
@@ -426,6 +537,12 @@ onMounted(loadCatalog)
 .spine-reason {
   font-size: var(--lme-font-size-sm);
   word-break: break-all;
+}
+
+.spine-reason-hint {
+  margin-top: var(--lme-gap-sm);
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-muted);
 }
 
 .spine-files {

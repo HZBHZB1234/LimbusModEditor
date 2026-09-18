@@ -1,23 +1,34 @@
 <script setup lang="ts">
 // 维基搜索结果页（与其它维基页统一：WikiShell 外壳 + Naive UI 呈现层）
-// IPC：wiki.search；深链：?q=（零改动）
+// IPC：wiki.search（方法名与参数语义零改动，仅以既有 offset/limit 做服务端分页）
+// 深链：?q=（零改动）
+// 后端能力：WikiPageQueryService.SearchEntries → SQL LIMIT/OFFSET + COUNT，返回 total（真分页）
 import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { NButton, NEmpty, NInput, NList, NListItem, NSpin, NTag } from 'naive-ui'
+import { NButton, NEmpty, NInput, NList, NListItem, NPagination, NSpin, NTag } from 'naive-ui'
 import { ipc } from '@/ipc'
 import WikiShell from '@/components/WikiShell.vue'
 import { WikiPageCategoryLabels } from '@/ipc/types'
-import type { WikiSearchResult, WikiPageCategory } from '@/ipc'
+import type { WikiSearchResult, WikiPageCategory, WikiSearchResponse } from '@/ipc'
 
 const route = useRoute()
 const router = useRouter()
+
+// 每页条数：原实现一次性 limit:200，改为分页后每页 20 条
+const PAGE_SIZE = 20
 
 const keyword = ref((route.query.q as string) || '')
 const input = ref(keyword.value)
 const results = ref<WikiSearchResult[]>([])
 const total = ref(0)
+const currentPage = ref(1)
 const loading = ref(false)
 const searched = ref(false)
+
+// 并发保护：仅最后一次请求可写入状态
+let generation = 0
+
+const totalPageCount = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
 
 const breadcrumbs = computed(() => [
   { label: '维基', route: '/wiki' },
@@ -28,34 +39,49 @@ function categoryLabel(category: WikiPageCategory): string {
   return WikiPageCategoryLabels[category] ?? category
 }
 
-async function doSearch() {
+async function doSearch(page = 1) {
   const q = keyword.value.trim()
   if (!q) return
+  const gen = ++generation
   loading.value = true
   try {
-    const result = await ipc.request<{ total: number; results: WikiSearchResult[] }>(
-      'wiki.search',
-      { keyword: q, offset: 0, limit: 200 },
-    )
+    const result = await ipc.request<WikiSearchResponse>('wiki.search', {
+      keyword: q,
+      // 服务端分页：offset 为已跳过条数，limit 为每页条数
+      offset: (page - 1) * PAGE_SIZE,
+      limit: PAGE_SIZE,
+    })
+    if (gen !== generation) return
     results.value = result.results
     total.value = result.total
+    currentPage.value = page
     searched.value = true
-    // 同步地址栏，刷新/分享时保留关键词
+    // 同步地址栏，刷新/分享时保留关键词（深链零改动）
     if ((route.query.q as string) !== q) {
       router.replace({ path: '/wiki/search', query: { q } })
     }
   } catch {
+    if (gen !== generation) return
     results.value = []
     total.value = 0
+    currentPage.value = 1
     searched.value = true
   } finally {
-    loading.value = false
+    if (gen === generation) loading.value = false
   }
 }
 
 function submit() {
   keyword.value = input.value
-  doSearch()
+  currentPage.value = 1
+  doSearch(1)
+}
+
+function goToPage(page: number) {
+  if (loading.value) return
+  if (page < 1 || page > totalPageCount.value) return
+  if (page === currentPage.value) return
+  doSearch(page)
 }
 
 function navigateToPage(id: string) {
@@ -69,13 +95,14 @@ watch(
     if (next && next !== keyword.value) {
       keyword.value = next
       input.value = next
-      doSearch()
+      currentPage.value = 1
+      doSearch(1)
     }
   },
 )
 
 // 首次进入：带 q 就直接搜；没带 q 展示空态等待输入
-if (keyword.value.trim()) doSearch()
+if (keyword.value.trim()) doSearch(1)
 </script>
 
 <template>
@@ -85,7 +112,11 @@ if (keyword.value.trim()) doSearch()
         <header class="search-header">
           <h1 class="page-title">搜索</h1>
           <p v-if="searched && !loading" class="results-info">
-            {{ total > 0 ? `找到 ${total} 个与「${keyword}」相关的页面` : `没有与「${keyword}」相关的页面` }}
+            {{
+              total > 0
+                ? `找到 ${total} 个与「${keyword}」相关的页面 · 第 ${currentPage} / ${totalPageCount} 页`
+                : `没有与「${keyword}」相关的页面`
+            }}
           </p>
         </header>
 
@@ -132,22 +163,53 @@ if (keyword.value.trim()) doSearch()
           </template>
         </NEmpty>
 
-        <NList v-else class="results-list" clickable hoverable>
-          <NListItem
-            v-for="r in results"
-            :key="r.pageId"
-            class="result-item"
-            @click="navigateToPage(r.pageId)"
-          >
-            <div class="result-top">
-              <span class="result-title">{{ r.title }}</span>
-              <NTag class="result-category" size="small" :bordered="false">
-                {{ categoryLabel(r.category) }}
-              </NTag>
-            </div>
-            <div v-if="r.snippet" class="result-snippet">{{ r.snippet }}</div>
-          </NListItem>
-        </NList>
+        <template v-else>
+          <NList class="results-list" clickable hoverable>
+            <NListItem
+              v-for="r in results"
+              :key="r.pageId"
+              class="result-item"
+              @click="navigateToPage(r.pageId)"
+            >
+              <div class="result-top">
+                <span class="result-title">{{ r.title }}</span>
+                <NTag class="result-category" size="small" :bordered="false">
+                  {{ categoryLabel(r.category) }}
+                </NTag>
+              </div>
+              <div v-if="r.snippet" class="result-snippet">{{ r.snippet }}</div>
+            </NListItem>
+          </NList>
+
+          <div v-if="totalPageCount > 1" class="pagination">
+            <NButton
+              class="page-btn"
+              size="small"
+              :disabled="currentPage <= 1 || loading"
+              @click="goToPage(currentPage - 1)"
+            >
+              ‹ 上一页
+            </NButton>
+            <NPagination
+              class="page-pager"
+              :page="currentPage"
+              :page-count="totalPageCount"
+              :page-slot="7"
+              size="small"
+              show-quick-jumper
+              @update:page="goToPage"
+            />
+            <NButton
+              class="page-btn"
+              size="small"
+              :disabled="currentPage >= totalPageCount || loading"
+              @click="goToPage(currentPage + 1)"
+            >
+              下一页 ›
+            </NButton>
+            <span class="page-info">共 {{ total }} 条 / 第 {{ currentPage }} 页</span>
+          </div>
+        </template>
       </div>
     </div>
   </WikiShell>
@@ -281,5 +343,23 @@ if (keyword.value.trim()) doSearch()
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/* ── 分页 ── */
+.pagination {
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-sm);
+  padding: var(--lme-gap-md) 0;
+  flex-wrap: wrap;
+}
+
+.page-pager {
+  margin-left: var(--lme-gap-xs);
+}
+
+.page-info {
+  font-size: var(--lme-font-size-sm);
+  color: var(--lme-text-muted);
 }
 </style>

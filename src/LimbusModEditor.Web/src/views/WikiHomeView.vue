@@ -208,14 +208,19 @@ onUnmounted(() => {
             <NInput
               v-model:value="searchKeyword"
               class="search-input"
-              size="medium"
+              size="small"
               placeholder="搜索维基页面、人格、异想体、关键词…"
               clearable
               @keyup.enter="performSearch"
             />
             <NTooltip placement="bottom" :show-arrow="false">
               <template #trigger>
-                <NButton type="primary" :disabled="!searchKeyword.trim()" @click="performSearch">
+                <NButton
+                  size="small"
+                  type="primary"
+                  :disabled="!searchKeyword.trim()"
+                  @click="performSearch"
+                >
                   搜索
                 </NButton>
               </template>
@@ -226,7 +231,13 @@ onUnmounted(() => {
           <div class="hero-generate">
             <NTooltip placement="bottom" :show-arrow="false">
               <template #trigger>
-                <NButton type="primary" ghost :disabled="isGenerating" @click="generatePages">
+                <NButton
+                  size="small"
+                  type="primary"
+                  ghost
+                  :disabled="isGenerating"
+                  @click="generatePages"
+                >
                   {{ isGenerating ? '正在生成…' : '生成页面' }}
                 </NButton>
               </template>

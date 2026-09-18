@@ -513,7 +513,7 @@ onMounted(() => {
                 @update:value="onFilterChange"
               />
 
-              <NButton size="tiny" tertiary @click="clearFilters">清除筛选</NButton>
+              <NButton size="small" tertiary @click="clearFilters">清除筛选</NButton>
             </div>
           </div>
         </template>

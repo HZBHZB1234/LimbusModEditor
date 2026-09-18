@@ -739,6 +739,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
                       v-model:value="editBuffer"
                       class="editor-textarea"
                       type="textarea"
+                      size="small"
                       :rows="12"
                     />
                     <div class="editor-actions">
@@ -846,6 +847,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
                     v-model:value="editBuffer"
                     class="editor-textarea"
                     type="textarea"
+                    size="small"
                     :rows="12"
                   />
                   <div class="editor-actions">

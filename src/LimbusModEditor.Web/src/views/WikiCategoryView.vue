@@ -230,6 +230,7 @@ onUnmounted(() => {
             <NInput
               v-model:value="searchText"
               class="search-input"
+              size="small"
               clearable
               :placeholder="`在「${categoryLabel}」中搜索页面…`"
               @input="onSearchInput"

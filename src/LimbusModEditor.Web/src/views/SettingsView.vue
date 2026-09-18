@@ -172,6 +172,7 @@ onMounted(async () => {
             <div class="directory-row">
               <NInput
                 class="directory-path"
+                size="small"
                 :value="dir.path"
                 :placeholder="dir.placeholder"
                 readonly
@@ -203,6 +204,7 @@ onMounted(async () => {
             <NInput
               class="meta-input"
               v-model:value="projectMeta.modName"
+              size="small"
               placeholder="输入模组名称"
             />
           </NFormItem>
@@ -210,6 +212,7 @@ onMounted(async () => {
             <NInput
               class="meta-input"
               v-model:value="projectMeta.author"
+              size="small"
               placeholder="输入作者名称"
             />
           </NFormItem>

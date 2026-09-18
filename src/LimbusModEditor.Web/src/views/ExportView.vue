@@ -295,6 +295,7 @@ onUnmounted(() => {
           >
             <NCheckbox
               class="slot-check"
+              size="small"
               :checked="slot.enabled"
               @update:checked="toggleSlot(slot.id)"
             />
@@ -316,6 +317,7 @@ onUnmounted(() => {
           >
             <NCheckbox
               class="group-check"
+              size="small"
               :checked="group.enabled"
               @update:checked="toggleGroup(group.id)"
             />

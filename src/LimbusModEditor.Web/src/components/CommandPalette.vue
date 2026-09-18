@@ -150,7 +150,7 @@ const emptyResults = computed(
         <NInput
           ref="inputRef"
           v-model:value="query"
-          size="large"
+          size="small"
           placeholder="搜索或跳转：工作台、维基分类…"
           @keydown="onKeydown"
         >

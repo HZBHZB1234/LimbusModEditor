@@ -51,6 +51,12 @@ public sealed record WikiGenerationResult(
     TimeSpan Elapsed,
     IReadOnlyList<WikiCategoryCount> Categories)
 {
+    /// <summary>
+    /// 本次「未绑定 Spine 自动接入」的结果；服务不可用 / 名册为空时为 null
+    /// （附加能力，缺了不影响页面生成）。
+    /// </summary>
+    public SpineWikiBindingService.SpineBindingResult? Spine { get; init; }
+
     /// <summary>中文摘要（状态栏/日志用）。</summary>
     public string Describe()
         => $"{Message} · 页面 {PageCount} · 分节 {SubPageCount} · 条目 {EntryCount} · 绑定 {BindingCount} · 用时 {Elapsed.TotalSeconds:0.0} 秒";
@@ -195,6 +201,9 @@ public sealed class WikiAutoGenerationService
         // ── ③ 剧情页 ──
         var storyPages = GenerateStoryPages(store, context, languageDirectory, engine, writeStats, progress, cancellationToken);
 
+        // ── ④ 未绑定 Spine 自动接入（方案 A：挂到既有页的「Spine 与动画」分节）──
+        var spine = AttachUnboundSpine(store, writeStats, progress, cancellationToken);
+
         watch.Stop();
         var categories = new List<WikiCategoryCount>();
         foreach (var category in RelationCategories.All)
@@ -207,6 +216,7 @@ public sealed class WikiAutoGenerationService
 
         var message = $"已生成 {entityPages + storyPages} 个页面（写入条目 {writeStats.Entries}，" +
                       $"保留修订 {writeStats.Revised}，无权威来源 {writeStats.Unknown}）";
+        if (spine is not null) message += $" · {spine.Describe()}";
         Log.Info("维基生成结束：{0} · 分节 {1} · 条目 {2} · 绑定 {3} · 用时 {4:0.0} 秒",
             message, store.ReadSubPageCount(), store.ReadEntryCount(), store.ReadBindingCount(),
             watch.Elapsed.TotalSeconds);
@@ -215,7 +225,57 @@ public sealed class WikiAutoGenerationService
         return new WikiGenerationResult(
             true, message, store.ReadPageCount(), store.ReadSubPageCount(), store.ReadEntryCount(),
             store.ReadBindingCount(), writeStats.Entries, writeStats.Revised, writeStats.Unknown,
-            watch.Elapsed, categories);
+            watch.Elapsed, categories) { Spine = spine };
+    }
+
+    /// <summary>
+    /// 「未绑定 Spine → 既有页」的接入（方案 A）。
+    ///
+    /// <para><b>为什么放在实体页/剧情页之后</b>：它挂的是<b>既有页面</b>，
+    /// 必须先有那些页面才谈得上挂上去。放在最后也保证它不会影响前面各步的计数口径。</para>
+    ///
+    /// <para><b>失败不影响整次生成</b>：Spine 接入是附加能力，索引库缺失 / 名册拿不到时
+    /// 记一条中文日志并返回 null，其余页面照常。</para>
+    /// </summary>
+    private SpineWikiBindingService.SpineBindingResult? AttachUnboundSpine(
+        WikiPageStore store,
+        WriteStats stats,
+        IProgress<WikiGenerationProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var gateway = SpineData.SpineDataGatewayFactory.Create(
+                Path.Combine(_env.CacheDirectory, Caching.WorkbenchCachePaths.UnityCacheIndexFileName));
+            var catalog = gateway.BrowseCatalogAsync(
+                new SpineData.SpineCatalogQuery(null, OnlyUnbound: true, Offset: 0, Limit: int.MaxValue),
+                cancellationToken).GetAwaiter().GetResult();
+
+            var entries = catalog.Items;
+            if (entries.Count == 0)
+            {
+                Log.Info("未绑定 Spine 接入：名册里没有未绑定挂点（或索引库不可用），跳过。");
+                return null;
+            }
+
+            var service = new SpineWikiBindingService(_env);
+            var result = service.Attach(store, entries, progress, cancellationToken);
+            stats.Entries += result.AttachedBindings;
+            stats.Revised += result.RevisedPreserved;
+            return result;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // 附加能力失败不该把整次生成判死：如实记因，其余页面已经落库。
+            Log.Warn(ex, "未绑定 Spine 自动接入失败（其余页面已正常生成，本次跳过）。");
+            progress?.Report(new WikiGenerationProgress("spine", 0, 0,
+                "未绑定 Spine 接入失败，本次跳过（其余页面已生成，详见 logs/current.log）。"));
+            return null;
+        }
     }
 
     /// <summary>写入计数（小类：避免把 ref 参数传进 lambda）。</summary>

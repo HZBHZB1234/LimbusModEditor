@@ -251,6 +251,41 @@ public sealed class RelationStore
         });
     }
 
+    /// <summary>
+    /// 反查的<b>批量</b>版本：一次把「资源键 → 对象 id 集合」整张反查索引读出来。
+    ///
+    /// <para><b>为什么要有它</b>：<see cref="ReadSubjectIdsByRef"/> 一次只查一个键，
+    /// 而「把几百个 Spine 挂点各自挂到哪些页面」这种批量场景逐键查就是几百次往返。
+    /// 这里一次读完整表（真实规模约 9 万行），调用方在内存里查。</para>
+    ///
+    /// <para>大小写：<c>ref_key</c> 在库里按原样存，本方法用
+    /// <see cref="StringComparer.OrdinalIgnoreCase"/> 建表 —— 容器路径的大小写
+    /// 不同来源（索引库 / 关联库）实测存在差异，逐字比较会漏配。</para>
+    /// </summary>
+    public IReadOnlyDictionary<string, IReadOnlyList<string>> ReadSubjectsByRefMap()
+    {
+        return _cache.Read(connection =>
+        {
+            var map = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            using var command = connection.CreateCommand();
+            command.CommandText = $"SELECT ref_key, subject_id FROM {SubjectsByRefTable} ORDER BY ref_key, subject_id";
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                if (reader.IsDBNull(0)) continue;
+                var key = reader.GetString(0);
+                if (!map.TryGetValue(key, out var list))
+                {
+                    list = [];
+                    map[key] = list;
+                }
+                list.Add(reader.GetString(1));
+            }
+            return (IReadOnlyDictionary<string, IReadOnlyList<string>>)map
+                .ToDictionary(x => x.Key, x => (IReadOnlyList<string>)x.Value, StringComparer.OrdinalIgnoreCase);
+        });
+    }
+
     /// <summary>对象数（诊断/测试用）。</summary>
     public int ReadSubjectCount()
         => _cache.Read(static connection => Count(connection, SubjectsTable));

@@ -461,8 +461,18 @@ public sealed class WikiPageStore
     /// <param name="Bindings">写入的资源绑定数。</param>
     /// <param name="RevisedPreserved">因 <c>source = revised</c> 而<b>跳过未覆盖</b>的条目数。</param>
     /// <param name="StaleSubPagesRemoved">本轮不再生成、且不含修订条目而删掉的二级页面数。</param>
+    /// <param name="SpineBindings">
+    /// 其中 <c>kind = 'Spine'</c> 的绑定数。
+    /// <para><b>为什么单独列</b>：<paramref name="Bindings"/> 是「该页全部绑定的重写总数」
+    /// （含既有的语音 / 图像 / 文本），拿它当「新接入的 Spine 数」会严重虚高
+    /// （实测某页 29 条语音绑定会被算进来）。要报「接入了多少 Spine」必须用这个口径。</para>
+    /// </param>
     public sealed record WikiGeneratedPageSave(
-        int SubPages, int Entries, int Bindings, int RevisedPreserved, int StaleSubPagesRemoved);
+        int SubPages, int Entries, int Bindings, int RevisedPreserved, int StaleSubPagesRemoved)
+    {
+        /// <summary>本次写入里 <c>kind = 'Spine'</c> 的绑定数（由 <see cref="SaveGeneratedPage"/> 填）。</summary>
+        public int SpineBindings { get; init; }
+    }
 
     /// <summary>
     /// 生成专用落库：写入一整棵页面子树（主页面 → 二级页面 → 条目 → 资源绑定）。
@@ -493,6 +503,7 @@ public sealed class WikiPageStore
             var subPageCount = 0;
             var entryCount = 0;
             var bindingCount = 0;
+            var spineBindingCount = 0;
             var revisedPreserved = 0;
             var keepSubPages = new List<string>(detail.SubPages.Count);
 
@@ -521,6 +532,8 @@ public sealed class WikiPageStore
                         SaveBindingInternal(connection, transaction, binding);
                         keepBindings.Add(binding.BindingId);
                         bindingCount++;
+                        if (string.Equals(binding.Kind, nameof(RelationKind.Spine), StringComparison.Ordinal))
+                            spineBindingCount++;
                     }
                     DeleteBindingsExcept(connection, transaction, entryDetail.Entry.EntryId, keepBindings);
                 }
@@ -531,7 +544,10 @@ public sealed class WikiPageStore
 
             // ③ 本轮不再生成的二级页面：含修订条目的保留，其余连同条目/绑定一起删
             var removed = DeleteStaleSubPages(connection, transaction, pageId, keepSubPages, existingSources);
-            result = new WikiGeneratedPageSave(subPageCount, entryCount, bindingCount, revisedPreserved, removed);
+            result = new WikiGeneratedPageSave(subPageCount, entryCount, bindingCount, revisedPreserved, removed)
+            {
+                SpineBindings = spineBindingCount,
+            };
         });
         return result;
     }

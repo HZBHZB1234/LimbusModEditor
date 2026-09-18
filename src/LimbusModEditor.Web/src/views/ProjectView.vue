@@ -4,6 +4,20 @@
 
 import { ref, onMounted } from 'vue'
 import { ipc } from '@/ipc'
+import {
+  NAlert,
+  NButton,
+  NCard,
+  NDescriptions,
+  NDescriptionsItem,
+  NEmpty,
+  NList,
+  NListItem,
+  useMessage,
+} from 'naive-ui'
+
+/** 轻量反馈（App.vue 的 NMessageProvider 已在位） */
+const message = useMessage()
 
 // ── 当前项目信息 ──
 interface CurrentProject {
@@ -55,8 +69,10 @@ async function newProject() {
   try {
     const result = await ipc.request<{ path: string }>('project.create', {})
     await loadProject(result.path)
+    message.success(`已新建项目：${result.path}`)
   } catch {
     // 暂未实现：新建项目失败
+    message.error('新建项目失败')
   }
 }
 
@@ -79,8 +95,10 @@ async function saveProject() {
   if (!currentProject.value) return
   try {
     await ipc.request('project.save', { projectFile: currentProject.value.path })
+    message.success(`项目已保存：${currentProject.value.name}`)
   } catch {
     // 暂未实现：保存项目失败
+    message.error('保存项目失败')
   }
 }
 
@@ -103,6 +121,7 @@ async function loadProject(path: string) {
     await loadRecentProjects()
   } catch (e: unknown) {
     errorMessage.value = e instanceof Error ? e.message : String(e)
+    message.error(`打开项目失败：${errorMessage.value}`)
   } finally {
     isLoading.value = false
   }
@@ -160,122 +179,137 @@ onMounted(async () => {
       <h2 class="project-title">项目</h2>
 
       <!-- 当前项目信息 -->
-      <section class="project-section">
-        <h3 class="section-title">当前项目</h3>
+      <NCard class="project-section" size="small" title="当前项目">
         <div v-if="currentProject" class="current-project">
-          <div class="project-info-grid">
-            <div class="info-item">
-              <span class="info-label">名称</span>
+          <NDescriptions
+            class="project-info-grid"
+            :column="2"
+            size="small"
+            label-placement="top"
+            bordered
+          >
+            <NDescriptionsItem label="名称">
               <span class="info-value">{{ currentProject.name }}</span>
-            </div>
-            <div class="info-item">
-              <span class="info-label">路径</span>
+            </NDescriptionsItem>
+            <NDescriptionsItem label="路径">
               <span class="info-value lme-mono">{{ currentProject.path }}</span>
-            </div>
-            <div class="info-item">
-              <span class="info-label">资源数量</span>
+            </NDescriptionsItem>
+            <NDescriptionsItem label="资源数量">
               <span class="info-value">{{ currentProject.assetCount.toLocaleString('zh-CN') }}</span>
-            </div>
-            <div class="info-item">
-              <span class="info-label">最后修改</span>
+            </NDescriptionsItem>
+            <NDescriptionsItem label="最后修改">
               <span class="info-value">{{ formatTime(currentProject.lastModified) }}</span>
-            </div>
-          </div>
+            </NDescriptionsItem>
+          </NDescriptions>
         </div>
         <div v-else class="no-project">
-          <p>未打开项目</p>
+          <NEmpty size="small" description="未打开项目">
+            <template #extra>
+              <span class="state-hint">用下方「打开项目」选择 .lme 文件，或「新建项目」</span>
+            </template>
+          </NEmpty>
         </div>
-      </section>
+      </NCard>
 
       <!-- 项目操作 -->
-      <section class="project-section">
-        <h3 class="section-title">项目操作</h3>
+      <NCard class="project-section" size="small" title="项目操作">
         <div class="project-actions">
-          <button class="btn btn-primary" @click="newProject">
+          <NButton class="btn btn-primary" type="primary" size="small" @click="newProject">
             📄 新建项目
-          </button>
-          <button class="btn btn-secondary" @click="openProject">
+          </NButton>
+          <NButton class="btn btn-secondary" size="small" @click="openProject">
             📂 打开项目
-          </button>
-          <button
+          </NButton>
+          <NButton
             class="btn btn-secondary"
+            size="small"
             :disabled="!currentProject"
             @click="saveProject"
           >
             💾 保存项目
-          </button>
+          </NButton>
         </div>
-        <div v-if="errorMessage" class="error-banner">
-          ⚠️ {{ errorMessage }}
-        </div>
-      </section>
+        <NAlert
+          v-if="errorMessage"
+          class="error-banner"
+          type="error"
+          :closable="false"
+          title="项目操作失败"
+        >
+          {{ errorMessage }}
+        </NAlert>
+      </NCard>
 
       <!-- 最近项目 -->
-      <section class="project-section">
-        <h3 class="section-title">最近项目</h3>
-        <div v-if="recentProjects.length > 0" class="recent-list">
-          <div
+      <NCard class="project-section" size="small" title="最近项目">
+        <NList v-if="recentProjects.length > 0" class="recent-list" hoverable clickable>
+          <NListItem
             v-for="project in recentProjects"
             :key="project.path"
             class="recent-item"
             @click="openRecentProject(project.path)"
           >
-            <span class="recent-name">{{ project.name }}</span>
-            <span class="recent-path lme-mono">{{ project.path }}</span>
-            <span class="recent-time">{{ formatTime(project.lastOpened) }}</span>
-          </div>
-        </div>
+            <div class="recent-row">
+              <span class="recent-name">{{ project.name }}</span>
+              <span class="recent-path lme-mono">{{ project.path }}</span>
+              <span class="recent-time">{{ formatTime(project.lastOpened) }}</span>
+            </div>
+          </NListItem>
+        </NList>
         <div v-else class="empty-state">
-          <p>暂无最近项目</p>
+          <NEmpty size="small" description="暂无最近项目" />
         </div>
-      </section>
+      </NCard>
 
       <!-- 项目来源 -->
-      <section class="project-section">
-        <h3 class="section-title">项目来源</h3>
-        <div v-if="projectSources.length > 0" class="source-list">
-          <div
+      <NCard class="project-section" size="small" title="项目来源">
+        <NList v-if="projectSources.length > 0" class="source-list">
+          <NListItem
             v-for="source in projectSources"
             :key="source.id"
             class="source-item"
           >
-            <span class="source-name">{{ source.name }}</span>
-            <span class="source-type">{{ source.type }}</span>
-            <span class="source-path lme-mono">{{ source.path }}</span>
-            <span class="source-count">{{ source.assetCount }} 项</span>
-          </div>
-        </div>
+            <div class="source-row">
+              <span class="source-name">{{ source.name }}</span>
+              <NTag class="source-type" size="small" :bordered="false">{{ source.type }}</NTag>
+              <span class="source-path lme-mono">{{ source.path }}</span>
+              <span class="source-count">{{ source.assetCount }} 项</span>
+            </div>
+          </NListItem>
+        </NList>
         <div v-else class="empty-state">
-          <p v-if="currentProject">暂无项目来源</p>
-          <p v-else>打开项目后查看来源列表</p>
+          <NEmpty
+            size="small"
+            :description="currentProject ? '暂无项目来源' : '打开项目后查看来源列表'"
+          />
         </div>
-      </section>
+      </NCard>
 
       <!-- 编辑历史 -->
-      <section class="project-section">
-        <h3 class="section-title">编辑历史</h3>
-        <div v-if="editHistory.length > 0" class="history-list">
-          <div
+      <NCard class="project-section" size="small" title="编辑历史">
+        <NList v-if="editHistory.length > 0" class="history-list">
+          <NListItem
             v-for="item in editHistory"
             :key="item.id"
             class="history-item"
           >
-            <span class="history-time lme-mono">{{ formatTime(item.timestamp) }}</span>
-            <span
-              class="history-type"
-              :style="{ color: historyTypeColor(item.type) }"
-            >
-              {{ historyTypeLabel(item.type) }}
-            </span>
-            <span class="history-asset">{{ item.assetName }}</span>
-            <span class="history-detail">{{ item.detail }}</span>
-          </div>
-        </div>
+            <div class="history-row">
+              <span class="history-time lme-mono">{{ formatTime(item.timestamp) }}</span>
+              <span class="history-type" :style="{ color: historyTypeColor(item.type) }">
+                {{ historyTypeLabel(item.type) }}
+              </span>
+              <span class="history-asset">{{ item.assetName }}</span>
+              <span class="history-detail">{{ item.detail }}</span>
+            </div>
+          </NListItem>
+        </NList>
         <div v-else class="empty-state">
-          <p v-if="currentProject">暂无编辑历史</p>
-          <p v-else>打开项目后查看编辑历史</p>
+          <NEmpty
+            size="small"
+            :description="currentProject ? '暂无编辑历史' : '打开项目后查看编辑历史'"
+          />
         </div>
-      </section>
+      </NCard>
     </div>
   </div>
 </template>
@@ -302,15 +336,9 @@ onMounted(async () => {
   color: var(--lme-text-primary);
 }
 
-/* ── 分区 ── */
+/* ── 分区（NCard 容器，内边距由卡片给定） ── */
 .project-section {
-  display: flex;
-  flex-direction: column;
-  gap: var(--lme-gap-md);
-  padding: var(--lme-gap-lg);
-  background: var(--lme-bg-panel);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-md);
+  display: block;
 }
 
 .section-title {
@@ -327,20 +355,7 @@ onMounted(async () => {
 }
 
 .project-info-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: var(--lme-gap-md);
-}
-
-.info-item {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.info-label {
-  font-size: var(--lme-font-size-xs);
-  color: var(--lme-text-muted);
+  width: 100%;
 }
 
 .info-value {
@@ -408,23 +423,19 @@ onMounted(async () => {
 
 /* ── 最近项目 ── */
 .recent-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--lme-gap-xs);
+  margin: calc(-1 * var(--lme-gap-sm)) 0;
 }
 
 .recent-item {
+  padding: 0;
+  cursor: pointer;
+}
+
+.recent-row {
   display: flex;
   align-items: center;
   gap: var(--lme-gap-md);
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  border-radius: var(--lme-radius-sm);
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.recent-item:hover {
-  background: var(--lme-bg-hover);
+  width: 100%;
 }
 
 .recent-name {
@@ -452,18 +463,18 @@ onMounted(async () => {
 
 /* ── 来源列表 ── */
 .source-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--lme-gap-xs);
+  margin: calc(-1 * var(--lme-gap-sm)) 0;
 }
 
 .source-item {
+  padding: 0;
+}
+
+.source-row {
   display: flex;
   align-items: center;
   gap: var(--lme-gap-md);
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  border-radius: var(--lme-radius-sm);
-  background: var(--lme-bg-elevated);
+  width: 100%;
 }
 
 .source-name {
@@ -474,13 +485,9 @@ onMounted(async () => {
 }
 
 .source-type {
-  font-size: var(--lme-font-size-xs);
-  color: var(--lme-accent);
-  padding: 1px 6px;
-  background: var(--lme-accent-muted);
-  border-radius: var(--lme-radius-sm);
   min-width: 60px;
   text-align: center;
+  flex-shrink: 0;
 }
 
 .source-path {
@@ -501,20 +508,20 @@ onMounted(async () => {
 
 /* ── 编辑历史 ── */
 .history-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--lme-gap-xs);
   max-height: 400px;
   overflow-y: auto;
+  margin: calc(-1 * var(--lme-gap-sm)) 0;
 }
 
 .history-item {
+  padding: 0;
+}
+
+.history-row {
   display: flex;
   align-items: center;
   gap: var(--lme-gap-md);
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  border-radius: var(--lme-radius-sm);
-  background: var(--lme-bg-elevated);
+  width: 100%;
 }
 
 .history-time {
@@ -529,8 +536,7 @@ onMounted(async () => {
   font-weight: 500;
   min-width: 70px;
   text-align: center;
-  padding: 1px 6px;
-  border-radius: var(--lme-radius-sm);
+  flex-shrink: 0;
 }
 
 .history-asset {

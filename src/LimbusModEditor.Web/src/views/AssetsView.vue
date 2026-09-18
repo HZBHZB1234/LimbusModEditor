@@ -1,7 +1,7 @@
 <script setup lang="ts">
-// 资源工作台竖切片（W1 前端一半）
+// 资源工作台竖切片（W1 前端一半）—— v2 样板重做（ui-redesign r1）
 // 对应 WPF 旧界面 AssetsWorkbenchPage
-// 差异说明见文件底部注释
+// 能力清单与差异说明见文件底部注释；本重做只动模板与样式，数据链路（catalog/preview/编辑 IPC）一行未改
 
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -103,6 +103,14 @@ function stateLabel(state: string): string {
   }
   return map[state] ?? state
 }
+
+// ── 空态 / 初次加载（v2 新增展示态，不发请求） ──
+const isEmpty = computed(
+  () => !catalog.loading && !catalog.error && catalog.items.length === 0,
+)
+const isInitialLoading = computed(
+  () => catalog.loading && catalog.items.length === 0,
+)
 
 // ═══════════ 按容器路径定位（维基「去编辑」深链）═══════════
 
@@ -333,31 +341,36 @@ const listHeight = ref(600)
   <div class="assets-view">
     <!-- 中栏：搜索 + 筛选 + 浏览 -->
     <div class="browser-column">
+      <!-- 加载进度条（顶部细条，替代整屏遮罩的常规路径） -->
+      <div v-if="catalog.loading" class="loading-bar" aria-hidden="true" />
+
       <!-- 搜索筛选栏 -->
       <SearchFilters
         :model-value="catalog.query"
         @search="onSearch"
       />
 
-      <!-- 视图切换 -->
+      <!-- 视图切换 + 计数 + 性能 -->
       <div class="view-toggle-row">
-        <button
-          class="view-toggle-btn"
-          :class="{ active: viewMode === 'list' }"
-          @click="viewMode = 'list'"
-        >
-          ☰ 列表
-        </button>
-        <button
-          class="view-toggle-btn"
-          :class="{ active: viewMode === 'tree' }"
-          @click="viewMode = 'tree'"
-        >
-          🗂 目录树
-        </button>
+        <div class="segmented" role="tablist">
+          <button
+            class="segmented-btn"
+            :class="{ active: viewMode === 'list' }"
+            @click="viewMode = 'list'"
+          >
+            ☰ 列表
+          </button>
+          <button
+            class="segmented-btn"
+            :class="{ active: viewMode === 'tree' }"
+            @click="viewMode = 'tree'"
+          >
+            🗂 目录树
+          </button>
+        </div>
 
         <span class="result-count" v-if="!catalog.loading">
-          共 {{ catalog.totalCount.toLocaleString('zh-CN') }} 条命中
+          共 <strong>{{ catalog.totalCount.toLocaleString('zh-CN') }}</strong> 条命中
         </span>
 
         <button
@@ -370,10 +383,18 @@ const listHeight = ref(600)
       </div>
 
       <!-- 列表视图 -->
-      <div v-if="viewMode === 'list'" class="list-container">
+      <div v-if="viewMode === 'list'" class="list-container" :class="{ dimmed: catalog.loading }">
+        <div class="list-header">
+          <span class="col-index">#</span>
+          <span class="col-type">类型</span>
+          <span class="col-name">名称</span>
+          <span class="col-size">大小</span>
+          <span class="col-state">状态</span>
+        </div>
+
         <VirtualList
           :items="catalog.items"
-          :item-height="28"
+          :item-height="30"
           :height="listHeight"
           :overscan="8"
         >
@@ -385,11 +406,9 @@ const listHeight = ref(600)
               @dblclick="onSelectAsset(item.assetId)"
             >
               <span class="row-index lme-mono">{{ index + 1 + catalog.offset }}</span>
-              <span
-                class="row-type"
-                :style="{ color: typeColor(item.type) }"
-              >
-                {{ item.type }}
+              <span class="row-type">
+                <span class="type-dot" :style="{ background: typeColor(item.type) }" />
+                <span class="type-name" :style="{ color: typeColor(item.type) }">{{ item.type }}</span>
               </span>
               <span class="row-name lme-ellipsis" :title="item.logicalPath">
                 {{ item.logicalPath.split('/').pop() || item.logicalPath }}
@@ -423,15 +442,23 @@ const listHeight = ref(600)
         @select="onSelectAsset"
       />
 
-      <!-- 加载态 -->
-      <div v-if="catalog.loading" class="loading-overlay">
-        <span class="loading-spinner">⏳</span>
-        <span>查询中…</span>
+      <!-- 初次加载态 -->
+      <div v-if="isInitialLoading" class="state-block">
+        <span class="state-icon spinner">⏳</span>
+        <span class="state-text">正在查询资源目录…</span>
+      </div>
+
+      <!-- 空态 -->
+      <div v-else-if="isEmpty && viewMode === 'list'" class="state-block">
+        <span class="state-icon">🗄</span>
+        <span class="state-text">没有命中的资源</span>
+        <span class="state-hint">换个关键词，或在上方「清除筛选」恢复默认视图</span>
       </div>
 
       <!-- 错误态 -->
       <div v-if="catalog.error" class="error-banner">
-        ⚠️ {{ catalog.error }}
+        <span class="error-banner-icon">⚠️</span>
+        <span>{{ catalog.error }}</span>
       </div>
     </div>
 
@@ -440,10 +467,10 @@ const listHeight = ref(600)
 
     <!-- 预览列 -->
     <div class="preview-column" :style="{ width: uiState.previewColumnWidth + 'px' }">
-      <!-- 替换入口：选中一条资源后可用 -->
-      <div class="replace-bar">
+      <!-- 编辑操作组：选中一条资源后可用 -->
+      <div class="edit-actions">
         <button
-          class="replace-btn"
+          class="action-btn primary"
           :disabled="!catalog.selectedAsset || replaceBusy"
           :title="catalog.selectedAsset ? catalog.selectedAsset.logicalPath : '先选中一条资源'"
           @click="onReplaceAsset"
@@ -451,7 +478,7 @@ const listHeight = ref(600)
           {{ replaceBusy ? '替换中…' : '替换…' }}
         </button>
         <button
-          class="replace-btn"
+          class="action-btn"
           :disabled="batchBusy || replaceBusy"
           title="选一个目录，按文件名批量登记替换（已有替换标记的资源默认不覆盖）"
           @click="onBatchReplace"
@@ -459,20 +486,22 @@ const listHeight = ref(600)
           {{ batchBusy ? '批量替换中…' : '批量替换…' }}
         </button>
         <button
-          class="replace-btn"
+          class="action-btn"
           :disabled="!catalog.selectedAsset || clearBusy || replaceBusy"
           :title="catalog.selectedAsset ? `撤销「${catalog.selectedAsset.logicalPath}」的编辑` : '先选中一条资源'"
           @click="onClearEdits"
         >
           {{ clearBusy ? '撤销中…' : '撤销编辑' }}
         </button>
-        <span
-          v-if="replaceMessage"
-          class="replace-message"
-          :class="{ failed: replaceFailed }"
-        >
-          {{ replaceMessage }}
-        </span>
+      </div>
+
+      <!-- 操作结果（成功中性 / 失败红） -->
+      <div
+        v-if="replaceMessage"
+        class="action-message"
+        :class="{ failed: replaceFailed }"
+      >
+        {{ replaceMessage }}
       </div>
 
       <!-- 批量替换的跳过原因（后端逐条给，照原样列出来） -->
@@ -483,14 +512,21 @@ const listHeight = ref(600)
       <PreviewPane :asset="catalog.selectedAsset" />
 
       <!-- 关联对象：只读列表，数据来自 relation.describe -->
-      <div v-if="catalog.selectedAsset" class="related-subjects">
+      <div v-if="catalog.selectedAsset" class="related-card">
         <div class="related-title">关联对象</div>
         <ul class="related-list">
-          <li v-for="s in relatedSubjects" :key="s.subjectId">
-            {{ s.displayName }}（{{ s.categoryLabel }}） · {{ s.kindLabel }} · {{ s.display }}
-            <RouterLink v-if="s.pageId" :to="`/wiki/page/${s.pageId}`">打开维基页</RouterLink>
+          <li v-for="s in relatedSubjects" :key="s.subjectId" class="related-item">
+            <div class="related-item-main">
+              <span class="related-item-name">{{ s.displayName }}</span>
+              <span class="related-item-cat">{{ s.categoryLabel }}</span>
+              <span class="related-item-kind">{{ s.kindLabel }}</span>
+            </div>
+            <div class="related-item-display lme-mono">{{ s.display }}</div>
+            <RouterLink v-if="s.pageId" class="related-item-link" :to="`/wiki/page/${s.pageId}`">
+              打开维基页 →
+            </RouterLink>
           </li>
-          <li v-if="relatedSubjects.length === 0">未找到关联对象</li>
+          <li v-if="relatedSubjects.length === 0" class="related-empty">未找到关联对象</li>
         </ul>
         <div v-if="relatedInfo" class="related-info">{{ relatedInfo }}</div>
       </div>
@@ -535,6 +571,7 @@ const listHeight = ref(600)
   height: 100%;
   overflow: hidden;
   position: relative;
+  background: var(--lme-bg-base);
 }
 
 .browser-column {
@@ -543,47 +580,105 @@ const listHeight = ref(600)
   flex-direction: column;
   min-width: 0;
   overflow: hidden;
+  position: relative;
 }
 
+/* ── 加载进度条（顶部细条） ── */
+.loading-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  overflow: hidden;
+  z-index: var(--lme-z-raised);
+  background: var(--lme-progressbar-bg);
+}
+
+.loading-bar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  border-radius: var(--lme-radius-full);
+  background: var(--lme-progressbar-fill);
+  animation: loading-slide 1s var(--lme-ease-standard) infinite;
+}
+
+@keyframes loading-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(350%);
+  }
+}
+
+/* ── 视图切换行 ── */
 .view-toggle-row {
   display: flex;
   align-items: center;
-  gap: var(--lme-gap-sm);
+  gap: var(--lme-gap-md);
   padding: var(--lme-gap-sm) var(--lme-gap-md);
   border-bottom: 1px solid var(--lme-border);
 }
 
-.view-toggle-btn {
-  padding: 3px 12px;
-  background: var(--lme-bg-elevated);
+.segmented {
+  display: inline-flex;
   border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
+  border-radius: var(--lme-radius-md);
+  overflow: hidden;
+}
+
+.segmented-btn {
+  padding: 4px 14px;
+  background: var(--lme-bg-panel);
+  border: none;
   color: var(--lme-text-secondary);
   cursor: pointer;
   font-size: var(--lme-font-size-sm);
-  transition: all 0.15s;
+  font-family: var(--lme-font-family);
+  transition: background var(--lme-dur-fast) var(--lme-ease-standard),
+    color var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
-.view-toggle-btn.active {
-  background: var(--lme-accent-muted);
-  border-color: var(--lme-accent);
+.segmented-btn + .segmented-btn {
+  border-left: 1px solid var(--lme-border);
+}
+
+.segmented-btn:hover {
+  background: var(--lme-bg-hover);
   color: var(--lme-text-primary);
+}
+
+.segmented-btn.active {
+  background: var(--lme-accent-muted);
+  color: var(--lme-text-primary);
+  font-weight: var(--lme-font-weight-medium);
 }
 
 .result-count {
   font-size: var(--lme-font-size-sm);
   color: var(--lme-text-muted);
-  margin-left: auto;
+  margin-right: auto;
+}
+
+.result-count strong {
+  color: var(--lme-text-primary);
+  font-weight: var(--lme-font-weight-semibold);
 }
 
 .perf-toggle {
-  padding: 2px 8px;
-  background: var(--lme-bg-elevated);
+  padding: 3px 10px;
+  background: none;
   border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
+  border-radius: var(--lme-radius-md);
   color: var(--lme-text-muted);
   cursor: pointer;
   font-size: var(--lme-font-size-xs);
+  font-family: var(--lme-font-family);
+  transition: color var(--lme-dur-fast) var(--lme-ease-standard),
+    border-color var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
 .perf-toggle.active {
@@ -591,13 +686,39 @@ const listHeight = ref(600)
   color: var(--lme-warning);
 }
 
+/* ── 列表 ── */
 .list-container {
   flex: 1;
   display: flex;
   flex-direction: column;
   overflow: hidden;
   min-height: 0;
+  position: relative;
+  transition: opacity var(--lme-dur-base) var(--lme-ease-standard);
 }
+
+.list-container.dimmed {
+  opacity: 0.55;
+}
+
+.list-header {
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-sm);
+  padding: 0 var(--lme-gap-md);
+  height: 28px;
+  border-bottom: 1px solid var(--lme-border);
+  background: var(--lme-bg-panel);
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-muted);
+  user-select: none;
+}
+
+.col-index { width: 48px; text-align: right; flex-shrink: 0; }
+.col-type { width: 110px; flex-shrink: 0; }
+.col-name { flex: 1; min-width: 0; }
+.col-size { width: 72px; text-align: right; flex-shrink: 0; }
+.col-state { width: 64px; text-align: center; flex-shrink: 0; }
 
 /* ── 资产行 ── */
 .asset-row {
@@ -606,8 +727,9 @@ const listHeight = ref(600)
   gap: var(--lme-gap-sm);
   padding: 0 var(--lme-gap-md);
   cursor: pointer;
-  border-left: 3px solid transparent;
-  transition: background 0.1s;
+  border-left: 2px solid transparent;
+  border-bottom: 1px solid var(--lme-row-divider);
+  transition: background var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
 .asset-row:hover {
@@ -628,10 +750,27 @@ const listHeight = ref(600)
 }
 
 .row-type {
-  width: 90px;
-  font-size: var(--lme-font-size-xs);
+  width: 110px;
   flex-shrink: 0;
-  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.type-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--lme-radius-full);
+  flex-shrink: 0;
+}
+
+.type-name {
+  font-size: var(--lme-font-size-xs);
+  font-weight: var(--lme-font-weight-medium);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .row-name {
@@ -650,11 +789,11 @@ const listHeight = ref(600)
 }
 
 .row-state {
-  width: 56px;
+  width: 64px;
   font-size: var(--lme-font-size-xs);
   text-align: center;
-  padding: 1px 4px;
-  border-radius: var(--lme-radius-sm);
+  padding: 1px 6px;
+  border-radius: var(--lme-radius-full);
   flex-shrink: 0;
 }
 
@@ -674,12 +813,64 @@ const listHeight = ref(600)
   background: var(--lme-state-deleted-bg);
 }
 
+/* ── 空态 / 初次加载 ── */
+.state-block {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--lme-gap-sm);
+  color: var(--lme-text-muted);
+  pointer-events: none;
+}
+
+.state-icon {
+  font-size: 36px;
+  opacity: 0.7;
+}
+
+.state-icon.spinner {
+  animation: state-spin 1.4s linear infinite;
+  display: inline-block;
+}
+
+@keyframes state-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.state-text {
+  font-size: var(--lme-font-size-md);
+  color: var(--lme-text-secondary);
+}
+
+.state-hint {
+  font-size: var(--lme-font-size-sm);
+  color: var(--lme-text-muted);
+}
+
+/* ── 错误态 ── */
+.error-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-sm);
+  margin: var(--lme-gap-md);
+  padding: var(--lme-gap-sm) var(--lme-gap-md);
+  background: var(--lme-error-banner-bg);
+  border: 1px solid var(--lme-error);
+  border-radius: var(--lme-radius-md);
+  color: var(--lme-error);
+  font-size: var(--lme-font-size-sm);
+}
+
 /* ── 分隔条 ── */
 .column-splitter {
-  width: 6px;
+  width: 1px;
   flex-shrink: 0;
   background: var(--lme-border);
-  cursor: col-resize;
 }
 
 /* ── 预览列 ── */
@@ -692,8 +883,8 @@ const listHeight = ref(600)
   min-width: 260px;
 }
 
-/* ── 替换入口 ── */
-.replace-bar {
+/* ── 编辑操作组 ── */
+.edit-actions {
   display: flex;
   align-items: center;
   gap: var(--lme-gap-sm);
@@ -701,91 +892,154 @@ const listHeight = ref(600)
   border-bottom: 1px solid var(--lme-border);
 }
 
-.replace-btn {
-  padding: 3px 12px;
+.action-btn {
+  padding: 5px 14px;
   background: var(--lme-bg-elevated);
   border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
+  border-radius: var(--lme-radius-md);
   color: var(--lme-text-secondary);
   cursor: pointer;
   font-size: var(--lme-font-size-sm);
+  font-family: var(--lme-font-family);
   flex-shrink: 0;
+  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard),
+    color var(--lme-dur-fast) var(--lme-ease-standard),
+    background var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
-.replace-btn:disabled {
-  opacity: 0.5;
+.action-btn:hover:not(:disabled) {
+  border-color: var(--lme-accent);
+  color: var(--lme-text-primary);
+}
+
+.action-btn.primary {
+  background: var(--lme-accent-muted);
+  border-color: var(--lme-accent);
+  color: var(--lme-text-primary);
+  font-weight: var(--lme-font-weight-medium);
+}
+
+.action-btn.primary:hover:not(:disabled) {
+  background: var(--lme-accent);
+}
+
+.action-btn:disabled {
+  opacity: 0.45;
   cursor: not-allowed;
 }
 
-.replace-message {
+.action-message {
+  padding: var(--lme-gap-xs) var(--lme-gap-md);
   font-size: var(--lme-font-size-xs);
-  color: var(--lme-text-muted);
+  color: var(--lme-success);
+  border-bottom: 1px solid var(--lme-border);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.replace-message.failed {
+.action-message.failed {
   color: var(--lme-error);
 }
 
 /* ── 批量替换的跳过原因 ── */
 .batch-warnings {
   margin: 0;
-  padding: 4px 12px 6px 28px;
+  padding: var(--lme-gap-xs) var(--lme-gap-md) var(--lme-gap-sm) 28px;
   border-bottom: 1px solid var(--lme-border);
   font-size: var(--lme-font-size-xs);
   color: var(--lme-text-secondary);
-  line-height: 1.6;
+  line-height: var(--lme-line-height-relaxed);
   max-height: 120px;
   overflow-y: auto;
 }
 
-/* ── 关联对象 ── */
-.related-subjects {
-  padding: 8px 12px;
-  border-top: 1px solid var(--lme-border);
+/* ── 关联对象卡 ── */
+.related-card {
+  margin: var(--lme-gap-md);
+  padding: var(--lme-gap-md);
+  background: var(--lme-bg-elevated);
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-lg);
   overflow-y: auto;
 }
 
 .related-title {
-  font-size: 12px;
-  font-weight: 600;
-  margin-bottom: 4px;
+  font-size: var(--lme-font-size-sm);
+  font-weight: var(--lme-font-weight-semibold);
+  color: var(--lme-text-primary);
+  margin-bottom: var(--lme-gap-sm);
+  padding-bottom: var(--lme-gap-xs);
+  border-bottom: 1px solid var(--lme-border);
 }
 
 .related-list {
+  list-style: none;
   margin: 0;
-  padding-left: 18px;
-  font-size: 12px;
-  line-height: 1.6;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--lme-gap-sm);
+}
+
+.related-item {
+  padding: var(--lme-gap-sm);
+  background: var(--lme-bg-panel);
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-md);
+}
+
+.related-item-main {
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-sm);
+  flex-wrap: wrap;
+}
+
+.related-item-name {
+  font-size: var(--lme-font-size-sm);
+  font-weight: var(--lme-font-weight-medium);
+  color: var(--lme-text-primary);
+}
+
+.related-item-cat,
+.related-item-kind {
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-muted);
+  padding: 0 6px;
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-full);
+}
+
+.related-item-display {
+  margin-top: var(--lme-gap-xs);
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-secondary);
+  word-break: break-all;
+}
+
+.related-item-link {
+  display: inline-block;
+  margin-top: var(--lme-gap-xs);
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-accent-hover);
+  text-decoration: none;
+}
+
+.related-item-link:hover {
+  text-decoration: underline;
+}
+
+.related-empty {
+  font-size: var(--lme-font-size-sm);
+  color: var(--lme-text-muted);
 }
 
 .related-info {
-  margin-top: 4px;
-  font-size: 11px;
-  color: var(--lme-text-secondary, #888);
-}
-
-/* ── 加载态 ── */
-.loading-overlay {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--lme-gap-sm);
-  background: var(--lme-overlay-bg);
+  margin-top: var(--lme-gap-sm);
+  font-size: var(--lme-font-size-xs);
   color: var(--lme-text-secondary);
-  z-index: 10;
-}
-
-.error-banner {
-  padding: var(--lme-gap-md);
-  background: var(--lme-error-banner-bg);
-  border: 1px solid var(--lme-error);
-  color: var(--lme-error);
-  font-size: var(--lme-font-size-sm);
+  line-height: var(--lme-line-height-normal);
 }
 
 /* ── 性能面板 ── */
@@ -796,10 +1050,10 @@ const listHeight = ref(600)
   width: 320px;
   max-height: 280px;
   background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-md);
-  box-shadow: var(--lme-shadow-lg);
-  z-index: 20;
+  border: 1px solid var(--lme-border-strong);
+  border-radius: var(--lme-radius-lg);
+  box-shadow: var(--lme-shadow-xl);
+  z-index: var(--lme-z-raised);
   overflow: auto;
 }
 
@@ -810,7 +1064,7 @@ const listHeight = ref(600)
   padding: var(--lme-gap-sm) var(--lme-gap-md);
   border-bottom: 1px solid var(--lme-border);
   font-size: var(--lme-font-size-sm);
-  font-weight: 600;
+  font-weight: var(--lme-font-weight-semibold);
 }
 
 .perf-panel-header button {
@@ -836,7 +1090,7 @@ const listHeight = ref(600)
 
 .perf-table th {
   color: var(--lme-text-muted);
-  font-weight: 500;
+  font-weight: var(--lme-font-weight-medium);
 }
 
 .perf-table td {
@@ -857,34 +1111,26 @@ const listHeight = ref(600)
 <!--
   ── 与 WPF 旧界面 AssetsWorkbenchPage 的能力差异说明 ──
 
-  等价能力（已保真）：
-  - 搜索框 + 250ms 防抖 + 按名称/路径/中文搜索
+  等价能力（已保真；v2 重做只动模板/样式，数据链路未改）：
+  - 搜索框 + 250ms 防抖 + 按名称/路径/中文搜索（含 v2 的内嵌清空钮）
   - 类型筛选下拉（与旧界面同选项）
   - 排序下拉（名称/大小/类型/修改在前）
   - 「仅容器内资源」复选框（默认勾选，hasContainerEntry=true）
   - 「显示静态数据表」复选框（默认不显示）
-  - 列表/目录树双视图切换
+  - 列表/目录树双视图切换（v2 分段控件样式）
   - 服务端分页（200 条/页）+ 页码条（首页/上一页/下一页/末页/跳转）
   - 选中资产 → 预览面板
   - 预览面板：图像/文本/元数据/未知类型（不空白）
-  - 虚拟滚动（可视窗口 + 预取 overscan=8）
+  - 虚拟滚动（可视窗口 + 预取 overscan=8，行高 28→30，仅视觉调整）
+  - 替换…/批量替换…/撤销编辑（dialog.openFile + replacePayload /
+    dialog.folderPick + batchReplace / clearEdits，均带结果反馈与刷新）
+  - 关联对象面板（relation.describe，只读 + 维基深链）
+  - 按容器路径定位（/assets?container=…，维基「去编辑」深链）
+  - 性能实测面板（W1 验证用）
 
-  差异（有意为之的改进）：
-  - ❌ 旧界面：DataGrid 虚拟化（回收行，但行高固定、不支持可变行高）
-  - ✅ 新界面：自研 VirtualList（通用、可控 overscan、预取窗口）
-  - ❌ 旧界面：关联资源区（反查「这个资源属于哪些对象」）
-  - ⏳ 新界面：W2 全量迁移时补上（需 relation.describe IPC 方法）
-  - ❌ 旧界面：替换/批处理/撤销/编辑文本/Unity 字段编辑
-  - ⏳ 新界面：已补「替换…」（dialog.openFile + asset.edit.replacePayload + 刷新预览）、
-    「批量替换…」（dialog.folderPick + asset.edit.batchReplace，结果显示「替换 N 条 / 跳过 M 条」
-    并列出后端逐条给的跳过原因）、「撤销编辑」（asset.edit.clearEdits + 刷新编辑标记与预览）；
-    编辑文本/Unity 字段编辑留 W2（需对应 IPC 入口）
-  - ❌ 旧界面：Spine 动画预览按钮
-  - ⏳ 新接口：W2 全量迁移时改为前端 spine-ts 就地播放
-  - ❌ 旧界面：右键菜单（替换/编辑文本/字段编辑/撤销/复制路径）
-  - ⏳ 新界面：W2 补上
-  - ✅ 新增：性能实测面板（W1 验证用，W2 可保留或移除）
-  - ✅ 新增：列宽钳制 260-2000（通过 uiState）
-
-  备注：本竖切片聚焦「浏览/预览」闭环，编辑操作留 W2。
+  v2 新增展示态（不发请求、不改数据链路）：
+  - 顶部细进度条替代整屏遮罩（首次加载保留居中指示 + 空态插画）
+  - 列表空态（含操作建议）
+  - 表头（# / 类型 / 名称 / 大小 / 状态）与类型色点、状态胶囊
+  - 操作结果按成功/失败分色（原先是同一行灰字）
 -->

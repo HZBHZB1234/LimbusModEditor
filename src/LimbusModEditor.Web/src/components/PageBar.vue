@@ -92,15 +92,19 @@ function jump() {
   padding: 3px 10px;
   background: var(--lme-bg-elevated);
   border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
+  border-radius: var(--lme-radius-md);
   color: var(--lme-text-secondary);
   cursor: pointer;
   font-size: var(--lme-font-size-sm);
-  transition: background 0.15s, color 0.15s;
+  font-family: var(--lme-font-family);
+  transition: background var(--lme-dur-fast) var(--lme-ease-standard),
+    color var(--lme-dur-fast) var(--lme-ease-standard),
+    border-color var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
 .page-btn:hover:not(:disabled) {
   background: var(--lme-bg-hover);
+  border-color: var(--lme-border-strong);
   color: var(--lme-text-primary);
 }
 

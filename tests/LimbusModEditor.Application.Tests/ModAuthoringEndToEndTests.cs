@@ -54,7 +54,7 @@ public sealed class ModAuthoringEndToEndTests : IDisposable
 
     private sealed record ReplacePayload(bool Ok, string StoredPath, long Size);
 
-    private sealed record ExportPatchPayload(bool Ok, int EditedFiles, int PatchedFiles);
+    private sealed record ExportPatchPayload(bool Ok, int EditedFiles, int PatchedFiles, string OutputPath);
 
     public ModAuthoringEndToEndTests(ITestOutputHelper output)
     {
@@ -225,14 +225,22 @@ public sealed class ModAuthoringEndToEndTests : IDisposable
         Assert.Contains(patchPayload.Applied, a => a == firstKey.KeyPath);
 
         // 4b：文本工作台自己的出口（与「导出」是两条路，用来定位改动丢在哪一段）。
+        // 判据（P1）：targetDirectory 是<b>目录</b> —— 产物必须是该目录里的补丁文件，
+        // 且内容真的是 LCTA 的 patchs 文档（含步骤 4 改的那个键）。
         var patchDir = Path.Combine(_root, "langpatch");
         var exported = await Call("lang.exportPatch", new LangExportPatchRequest(string.Empty, patchDir));
         Assert.True(exported.Ok, exported.Error?.Message);
         var exportPayload = Payload<ExportPatchPayload>(exported);
+        var patchText = File.Exists(exportPayload.OutputPath) ? File.ReadAllText(exportPayload.OutputPath) : string.Empty;
         Step("4b lang.exportPatch",
             $"ok={exportPayload.Ok} 编辑文件={exportPayload.EditedFiles} 有差异={exportPayload.PatchedFiles} " +
-            $"产物={patchDir}（当文件看：存在={File.Exists(patchDir)}，{SizeOf(patchDir):N0} 字节）" +
-            "——注意：targetDirectory 被当成「文件路径」写了，产物不是目录里的补丁文件");
+            $"目录存在={Directory.Exists(patchDir)} 产物={exportPayload.OutputPath}（{SizeOf(exportPayload.OutputPath):N0} 字节）" +
+            $"含 patchs={patchText.Contains("\"patchs\"")} 含改后值={patchText.Contains(newValue)}");
+        Assert.True(Directory.Exists(patchDir), "targetDirectory 应当被当成目录用");
+        Assert.True(File.Exists(exportPayload.OutputPath), $"目录里应该有补丁文件：{exportPayload.OutputPath}");
+        Assert.Equal(exportPayload.PatchedFiles, exportPayload.EditedFiles); // 步骤 4 那一条改动必须有差异
+        Assert.Contains("\"patchs\"", patchText);
+        Assert.Contains(newValue, patchText);   // 改后的值真的进了补丁
 
         // ── 步骤 5：静态表编辑（先取真实记录，再走既有编辑接口）────────────
         var tables = await Call("static.tableList", new StaticTableListRequest(0, 5));

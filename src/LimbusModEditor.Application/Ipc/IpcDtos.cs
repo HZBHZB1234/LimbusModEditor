@@ -467,6 +467,13 @@ public sealed record LangReadEntryRequest(string Language, string RelativePath, 
 public sealed record LangReadEntryResponse(string? Value);
 
 public sealed record LangEditEntryRequest(string Language, string RelativePath, string KeyPath, string Value);
+/// <summary>lang.exportPatch 请求载荷。</summary>
+/// <param name="Language">语言（空/缺省 = 活动语言）。</param>
+/// <param name="TargetDirectory">
+/// 补丁要写到哪个<b>目录</b>（不存在就创建）。文件名由网关定：固定 <c>langpatch.json</c>
+/// （此前它被当成「文件路径」直接写了，产物是一个没有扩展名的文件）。真正落地的完整路径
+/// 在响应的 <c>outputPath</c> 里给出，调用方不用自己拼。
+/// </param>
 public sealed record LangExportPatchRequest(string Language, string TargetDirectory);
 
 /// <summary>lang.fileEntries 请求载荷：一个 lang 文件的<b>键值分页</b>（不一次全量返回）。</summary>

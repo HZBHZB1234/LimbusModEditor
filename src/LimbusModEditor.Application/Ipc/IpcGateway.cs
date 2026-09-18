@@ -31,6 +31,12 @@ public static class IpcGatewayConstants
 {
     /// <summary>默认页大小（WEB-IPC-CONTRACT §2.1 统一分页）。</summary>
     public const int DefaultPageSize = 200;
+
+    /// <summary>
+    /// lang.exportPatch 在 <c>targetDirectory</c> 里用的补丁文件名（字段本意是目录，
+    /// 所以文件名由网关定，完整路径从响应的 <c>outputPath</c> 取）。
+    /// </summary>
+    public const string LangPatchFileName = "langpatch.json";
 }
 
 /// <summary>
@@ -1342,11 +1348,30 @@ public sealed partial class IpcGateway
             req.RelativePath, outcome.Applied, outcome.Missing, outcome.Rejected, info));
     }
 
+    /// <summary>
+    /// lang.exportPatch：把文本工作台的编辑集导成一份 LCTA <c>patchs</c> 文档。
+    ///
+    /// <para><b>P1 修的正是这里</b>：请求字段叫 <c>targetDirectory</c>，此前却原样交给
+    /// <see cref="LangTextWorkbenchService.ExportPatch"/>（它吃的是<b>文件</b>路径），
+    /// 于是产物是一个叫「langpatch」的裸文件，而不是目录里的补丁文件。现在按字段本意当目录用：
+    /// 目录不存在就建，文件名固定 <c>langpatch.json</c>，完整路径由响应带回。</para>
+    /// </summary>
     private IpcResponse HandleLangExportPatch(IpcRequest request)
     {
         var req = DeserializePayload<LangExportPatchRequest>(request);
-        var report = _langText.ExportPatch(req.TargetDirectory);
-        return IpcResponse.Success(request.Id, new { ok = true, editedFiles = report.EditedFileCount, patchedFiles = report.PatchedFileCount });
+        if (string.IsNullOrWhiteSpace(req.TargetDirectory))
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "缺少导出目录：targetDirectory 不能为空。");
+
+        var directory = Path.GetFullPath(req.TargetDirectory);
+        var outputPath = Path.Combine(directory, IpcGatewayConstants.LangPatchFileName);
+        var report = _langText.ExportPatch(outputPath);
+        return IpcResponse.Success(request.Id, new
+        {
+            ok = true,
+            editedFiles = report.EditedFileCount,
+            patchedFiles = report.PatchedFileCount,
+            outputPath = report.OutputPath,
+        });
     }
 
     // ── 静态数据工作台 ────────────────────────────────────────────

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 音频工作台（Bank 浏览 / 预览 / 导出）
 // 对应 WPF 旧界面的 AudioWorkbenchPage
-// 布局：三列（浏览 | 分隔条 | 预览），与 AssetsView 一致
+// 布局：页头工具栏 + 三栏面板（银行 | 采样 | 试听与详情），与 StaticView 同一套设计语言
 
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -416,291 +416,725 @@ onMounted(() => {
   }
   performSearch()
 })
-
-// ── 虚拟列表高度 ──────────────────────────────────────────────
-
-const bankListHeight = ref(600)
-const sampleListHeight = ref(400)
 </script>
 
 <template>
   <div class="bank-view">
-    <!-- ═══════════════════════════════════════════════════════════ -->
-    <!-- 中栏：搜索 + 筛选 + 浏览                                 -->
-    <!-- ═══════════════════════════════════════════════════════════ -->
-    <div class="browser-column">
-      <!-- 搜索筛选栏 -->
-      <div class="search-filters">
-        <!-- 搜索框 -->
-        <div class="filter-row">
-          <input
-            v-model="query.text"
-            class="search-input"
-            type="text"
-            placeholder="搜索银行路径或采样名称（支持中文）"
-            @input="onSearchInput"
-          />
-        </div>
+    <!-- 顶部细进度条：银行列表或采样列表加载时显示（替代整屏遮罩） -->
+    <div v-if="bankLoading || sampleLoading" class="loading-bar" aria-hidden="true" />
 
-        <!-- 筛选下拉 -->
-        <div class="filter-row">
-          <label class="filter-label">类型</label>
-          <select v-model="query.bankType" class="filter-select" @change="onFilterChange">
-            <option v-for="opt in bankTypeOptions" :key="opt.value" :value="opt.value">
-              {{ opt.label }}
-            </option>
-          </select>
-
-          <label class="filter-label">排序</label>
-          <select v-model="query.sort" class="filter-select" @change="onFilterChange">
-            <option v-for="opt in sortOptions" :key="opt.value" :value="opt.value">
-              {{ opt.label }}
-            </option>
-          </select>
-
-          <button class="filter-clear-btn" @click="clearFilters">清除筛选</button>
-
-          <span class="result-count" v-if="!bankLoading">
-            共 {{ bankTotalCount.toLocaleString('zh-CN') }} 个银行
+    <!-- 页头工具栏 -->
+    <header class="page-toolbar">
+      <div class="toolbar-leading">
+        <span class="toolbar-icon">🎵</span>
+        <div class="toolbar-titles">
+          <h1 class="toolbar-name">音频工作台</h1>
+          <span class="toolbar-sub" v-if="selectedBank">
+            <span class="toolbar-bank lme-ellipsis">{{ selectedBank.name }}</span>
+            <span class="toolbar-dot">·</span>
+            {{ selectedBank.sampleCount.toLocaleString('zh-CN') }} 个采样
+            <span class="toolbar-dot">·</span>
+            {{ formatSize(selectedBank.totalSize) }}
           </span>
+          <span class="toolbar-sub" v-else>从左侧选择一个音频银行</span>
         </div>
       </div>
 
-      <!-- 银行列表容器 -->
-      <div class="bank-list-container">
-        <!-- 空状态：无数据 -->
-        <div v-if="!hasBankData && !bankLoading && !bankError" class="empty-state">
-          <div class="empty-icon">🎵</div>
-          <div class="empty-title">暂无音频银行数据</div>
-          <div class="empty-desc">
-            尚未建立音频银行索引。请先运行「启动扫描」建立资源索引，
-            或检查项目目录中是否存在 FSB 音频文件。
+      <div class="toolbar-actions">
+        <span class="result-count" v-if="!bankLoading">
+          共 <strong>{{ bankTotalCount.toLocaleString('zh-CN') }}</strong> 个银行
+        </span>
+        <button
+          class="action-btn"
+          title="导出为 .rebank 格式（需先选中一个银行）"
+          @click="exportRebank"
+        >
+          📤 导出 .rebank
+        </button>
+      </div>
+    </header>
+
+    <!-- 银行列表错误态 -->
+    <div v-if="bankError" class="error-banner">
+      <span class="error-banner-icon">⚠️</span>
+      <span>{{ bankError }}</span>
+    </div>
+
+    <!-- 三栏：银行 | 采样 | 试听与详情 -->
+    <div class="workbench-body">
+      <!-- ── 左：银行列表 ── -->
+      <section class="panel panel-banks">
+        <div class="panel-head">
+          <div class="panel-search">
+            <span class="panel-search-icon">🔍</span>
+            <input
+              v-model="query.text"
+              class="search-input"
+              type="text"
+              placeholder="搜索银行路径或采样名称（支持中文）"
+              @input="onSearchInput"
+            />
+            <button
+              v-if="query.text"
+              class="search-clear"
+              title="清空搜索"
+              @click="query.text = ''; onSearchInput()"
+            >
+              ✕
+            </button>
+          </div>
+
+          <div class="filter-row">
+            <label class="filter-label">类型</label>
+            <select v-model="query.bankType" class="filter-select" @change="onFilterChange">
+              <option v-for="opt in bankTypeOptions" :key="opt.value" :value="opt.value">
+                {{ opt.label }}
+              </option>
+            </select>
+
+            <label class="filter-label">排序</label>
+            <select v-model="query.sort" class="filter-select" @change="onFilterChange">
+              <option v-for="opt in sortOptions" :key="opt.value" :value="opt.value">
+                {{ opt.label }}
+              </option>
+            </select>
+
+            <button class="action-btn small" @click="clearFilters">清除筛选</button>
           </div>
         </div>
 
-        <!-- 银行虚拟列表 -->
-        <VirtualList
-          v-else
-          :items="bankList"
-          :item-height="40"
-          :height="bankListHeight"
-          :overscan="8"
-        >
-          <template #default="{ item, index }">
-            <div
-              class="bank-row"
-              :class="{ selected: item.bankId === selectedBankId }"
-              @click="selectBank(item.bankId)"
-            >
-              <span class="row-index lme-mono">{{ index + 1 + bankOffset }}</span>
-              <span class="row-type-badge" :style="{ color: bankTypeColor(item.bankType) }">
-                {{ bankTypeLabel(item.bankType) }}
-              </span>
-              <span class="row-name lme-ellipsis" :title="item.path">
-                {{ item.name }}
-              </span>
-              <span class="row-count lme-mono">{{ item.sampleCount }} 采样</span>
-              <span class="row-fsb lme-mono" :title="item.fsbInfo">{{ item.fsbInfo }}</span>
-            </div>
-          </template>
-        </VirtualList>
+        <div class="panel-body">
+          <VirtualList
+            v-if="hasBankData"
+            :items="bankList"
+            :item-height="30"
+            :overscan="8"
+            grow
+          >
+            <template #default="{ item, index }">
+              <div
+                class="bank-row"
+                :class="{ selected: item.bankId === selectedBankId }"
+                :title="item.path"
+                @click="selectBank(item.bankId)"
+              >
+                <span class="row-index lme-mono">{{ index + 1 + bankOffset }}</span>
+                <span class="row-type-badge" :style="{ color: bankTypeColor(item.bankType) }">
+                  {{ bankTypeLabel(item.bankType) }}
+                </span>
+                <span class="row-name lme-ellipsis">{{ item.name }}</span>
+                <span class="row-count lme-mono">{{ item.sampleCount }} 采样</span>
+                <span v-if="item.fsbInfo" class="row-fsb lme-mono" :title="item.fsbInfo">{{ item.fsbInfo }}</span>
+              </div>
+            </template>
+          </VirtualList>
 
-        <!-- 页码条 -->
-        <PageBar
-          :current-page="currentPage"
-          :page-count="pageCount"
-          :total-count="bankTotalCount"
-          :query-ms="lastBankQueryMs"
-          :loading="bankLoading"
-          @go-to="onGoToPage"
-        />
-      </div>
+          <!-- 初次加载态 -->
+          <div v-else-if="bankLoading" class="state-block">
+            <span class="state-icon spinner">⏳</span>
+            <span class="state-text">正在读取音频银行…</span>
+          </div>
 
-      <!-- 加载态 -->
-      <div v-if="bankLoading" class="loading-overlay">
-        <span class="loading-spinner">⏳</span>
-        <span>加载音频银行…</span>
-      </div>
+          <!-- 空态 -->
+          <div v-else-if="!bankError" class="state-block">
+            <span class="state-icon">🎵</span>
+            <span class="state-text">暂无音频银行数据</span>
+            <span class="state-hint">
+              尚未建立音频银行索引。请先运行「启动扫描」建立资源索引，
+              或检查项目目录中是否存在 FSB 音频文件。
+            </span>
+          </div>
+        </div>
 
-      <!-- 错误态 -->
-      <div v-if="bankError" class="error-banner">
-        ⚠️ {{ bankError }}
-      </div>
-    </div>
+        <div class="panel-foot">
+          <PageBar
+            :current-page="currentPage"
+            :page-count="pageCount"
+            :total-count="bankTotalCount"
+            :query-ms="lastBankQueryMs"
+            :loading="bankLoading"
+            @go-to="onGoToPage"
+          />
+        </div>
+      </section>
 
-    <!-- ═══════════════════════════════════════════════════════════ -->
-    <!-- 分隔条                                                   -->
-    <!-- ═══════════════════════════════════════════════════════════ -->
-    <div
-      class="column-splitter"
-      :class="{ dragging: splitterDragging }"
-      @mousedown="onSplitterMouseDown"
-    />
+      <!-- ── 中：采样列表 ── -->
+      <section class="panel panel-samples">
+        <div class="panel-head compact">
+          <div class="panel-title">
+            <span class="panel-title-text">采样列表</span>
+            <span class="panel-badge lme-mono">
+              {{ sampleList.length.toLocaleString('zh-CN') }}
+            </span>
+          </div>
 
-    <!-- ═══════════════════════════════════════════════════════════ -->
-    <!-- 预览 / 编辑列                                            -->
-    <!-- ═══════════════════════════════════════════════════════════ -->
-    <div class="preview-column" :style="{ width: uiState.previewColumnWidth + 'px' }">
-      <!-- 银行详情头部 -->
-      <div class="bank-detail-header" v-if="selectedBank">
-        <div class="detail-title-row">
-          <span class="detail-name lme-ellipsis" :title="selectedBank.path">
+          <span class="panel-bank lme-ellipsis" v-if="selectedBank" :title="selectedBank.path">
             {{ selectedBank.name }}
           </span>
-          <button class="export-btn" @click="exportRebank" title="导出为 .rebank 格式">
-            📤 导出
-          </button>
         </div>
-        <div class="detail-meta">
-          <span class="meta-tag type-tag" :style="{ color: bankTypeColor(selectedBank.bankType) }">
+
+        <div class="panel-body">
+          <!-- 采样加载错误 -->
+          <div v-if="sampleError" class="error-banner inline">
+            <span class="error-banner-icon">⚠️</span>
+            <span>{{ sampleError }}</span>
+          </div>
+
+          <!-- 采样列表表头 -->
+          <div class="sample-table-header" v-if="sampleList.length > 0">
+            <span class="col col-name">采样名称</span>
+            <span class="col col-codec">编码</span>
+            <span class="col col-duration">时长</span>
+            <span class="col col-size">大小</span>
+            <span class="col col-channels">声道</span>
+            <span class="col col-rate">采样率</span>
+          </div>
+
+          <VirtualList
+            v-if="sampleList.length > 0"
+            :items="sampleList"
+            :item-height="30"
+            :overscan="6"
+            grow
+          >
+            <template #default="{ item }">
+              <div
+                class="sample-row"
+                :class="{ selected: item.sampleId === selectedSampleId }"
+                :title="item.name"
+                @click="selectSample(item)"
+              >
+                <span class="col col-name lme-ellipsis">{{ item.name }}</span>
+                <span class="col col-codec lme-mono">{{ item.codec }}</span>
+                <span class="col col-duration lme-mono">{{ formatDuration(item.duration) }}</span>
+                <span class="col col-size lme-mono">{{ formatSize(item.size) }}</span>
+                <span class="col col-channels lme-mono">{{ item.channels }}ch</span>
+                <span class="col col-rate lme-mono">{{ item.sampleRate }} Hz</span>
+              </div>
+            </template>
+          </VirtualList>
+
+          <!-- 采样加载态 -->
+          <div v-else-if="sampleLoading" class="state-block">
+            <span class="state-icon spinner">⏳</span>
+            <span class="state-text">正在读取采样列表…</span>
+          </div>
+
+          <!-- 采样空态 -->
+          <div v-else class="state-block">
+            <span class="state-icon">🔇</span>
+            <span class="state-text">{{ selectedBank ? '该银行暂无采样数据' : '未选择银行' }}</span>
+            <span class="state-hint" v-if="!selectedBank">先在左侧选一个音频银行</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── 分隔条（拖拽调整试听列宽，写回 uiState.previewColumnWidth） ── -->
+      <div
+        class="column-splitter"
+        :class="{ dragging: splitterDragging }"
+        title="拖拽调整试听列宽"
+        @mousedown="onSplitterMouseDown"
+      />
+
+      <!-- ── 右：试听区 + 银行详情 ── -->
+      <section class="panel panel-player" :style="{ width: uiState.previewColumnWidth + 'px' }">
+        <div class="panel-head compact">
+          <div class="panel-title">
+            <span class="panel-title-text">试听</span>
+            <span class="panel-badge lme-mono">
+              {{ selectedSample ? selectedSample.codec : '—' }}
+            </span>
+          </div>
+
+          <span
+            class="panel-type"
+            v-if="selectedBank"
+            :style="{ color: bankTypeColor(selectedBank.bankType) }"
+          >
             {{ bankTypeLabel(selectedBank.bankType) }}
           </span>
-          <span class="meta-tag count-tag">
-            {{ selectedBank.sampleCount }} 个采样
-          </span>
-          <span class="meta-tag size-tag">
-            {{ formatSize(selectedBank.totalSize) }}
-          </span>
-          <span class="meta-tag path-tag lme-mono" :title="selectedBank.path">
-            {{ selectedBank.path }}
-          </span>
-        </div>
-        <div class="detail-fsb lme-mono" :title="selectedBank.fsbInfo">
-          FSB: {{ selectedBank.fsbInfo }}
-        </div>
-      </div>
-
-      <!-- 采样列表 -->
-      <div class="sample-section">
-        <div class="sample-section-header">
-          <span class="section-title">采样列表</span>
-          <span class="section-count lme-mono" v-if="sampleList.length > 0">
-            {{ sampleList.length }} 项
-          </span>
         </div>
 
-        <!-- 采样列表表头 -->
-        <div class="sample-table-header" v-if="sampleList.length > 0">
-          <span class="col col-name">采样名称</span>
-          <span class="col col-codec">编码</span>
-          <span class="col col-duration">时长</span>
-          <span class="col col-size">大小</span>
-          <span class="col col-channels">声道</span>
-          <span class="col col-rate">采样率</span>
-        </div>
-
-        <!-- 采样列表空状态 -->
-        <div v-if="!sampleLoading && sampleList.length === 0 && selectedBank" class="sample-empty">
-          <span class="empty-icon">🔇</span>
-          <span>该银行暂无采样数据</span>
-        </div>
-
-        <!-- 采样加载错误 -->
-        <div v-if="sampleError" class="sample-error">
-          ⚠️ {{ sampleError }}
-        </div>
-
-        <!-- 采样虚拟列表 -->
-        <VirtualList
-          v-if="sampleList.length > 0"
-          :items="sampleList"
-          :item-height="28"
-          :height="sampleListHeight"
-          :overscan="6"
-        >
-          <template #default="{ item }">
-            <div
-              class="sample-row"
-              :class="{ selected: item.sampleId === selectedSampleId }"
-              @click="selectSample(item)"
-            >
-              <span class="col col-name lme-ellipsis" :title="item.name">
-                {{ item.name }}
-              </span>
-              <span class="col col-codec lme-mono">{{ item.codec }}</span>
-              <span class="col col-duration lme-mono">{{ formatDuration(item.duration) }}</span>
-              <span class="col col-size lme-mono">{{ formatSize(item.size) }}</span>
-              <span class="col col-channels lme-mono">{{ item.channels }}ch</span>
-              <span class="col col-rate lme-mono">{{ item.sampleRate }} Hz</span>
+        <div class="panel-body">
+          <!-- 播放器卡：当前样本名 / 轨道底纹 / 原生播放器 / 元信息 -->
+          <div class="player-card">
+            <div class="player-head">
+              <div class="player-titles">
+                <span class="player-name lme-ellipsis" :title="selectedSample ? selectedSample.name : ''">
+                  {{ selectedSample ? selectedSample.name : '未选择采样' }}
+                </span>
+                <span class="player-sub lme-ellipsis" v-if="selectedBank" :title="selectedBank.path">
+                  {{ selectedBank.name }}
+                </span>
+              </div>
             </div>
-          </template>
-        </VirtualList>
 
-        <!-- 采样加载态 -->
-        <div v-if="sampleLoading" class="sample-loading">
-          <span class="loading-spinner">⏳</span>
-          <span>加载采样列表…</span>
-        </div>
-      </div>
+            <!-- 轨道底纹（纯装饰，不表示真实波形/进度） -->
+            <div class="player-track" aria-hidden="true" />
 
-      <!-- 音频预览播放器 -->
-      <div class="audio-preview-section">
-        <div class="preview-section-header">
-          <span class="section-title">音频预览</span>
-          <span class="section-sample-name lme-ellipsis" v-if="selectedSample" :title="selectedSample.name">
-            {{ selectedSample.name }}
-          </span>
-        </div>
+            <div class="player-controls">
+              <!-- 有预览 URL：原生播放器（controls/preload/src 三属性与 data 处理链路未改） -->
+              <div v-if="audioPreviewUrl" class="audio-player-container">
+                <audio
+                  class="audio-player"
+                  controls
+                  preload="auto"
+                  :src="audioPreviewUrl"
+                >
+                  浏览器不支持音频播放
+                </audio>
+              </div>
 
-        <!-- 有预览 URL -->
-        <div v-if="audioPreviewUrl" class="audio-player-container">
-          <audio
-            class="audio-player"
-            controls
-            preload="auto"
-            :src="audioPreviewUrl"
-          >
-            浏览器不支持音频播放
-          </audio>
-        </div>
+              <!-- 未实现提示（后端明确回 unsupported 才显示） -->
+              <div
+                v-else-if="selectedSample && !sampleLoading && audioPreviewUnsupported"
+                class="state-block inline"
+              >
+                <span class="state-icon">🔇</span>
+                <span class="state-text">音频预览暂未实现</span>
+                <span class="state-hint">
+                  后端 bank.preview 返回 unsupported：该样本暂无法解码（需 FMOD 链路）
+                </span>
+              </div>
 
-        <!-- 未实现提示 -->
-        <div
-          v-else-if="selectedSample && !sampleLoading && audioPreviewUnsupported"
-          class="audio-unimplemented"
-        >
-          <span class="empty-icon">🔇</span>
-          <span>音频预览暂未实现</span>
-          <span class="unimplemented-hint">
-            后端 bank.preview 返回 unsupported：该样本暂无法解码（需 FMOD 链路）
-          </span>
-        </div>
+              <!-- 未选中采样 -->
+              <div v-else class="state-block inline">
+                <span class="state-icon">🎧</span>
+                <span class="state-text">请选择一个采样以预览</span>
+                <span class="state-hint">点击中间列表里的任意一行</span>
+              </div>
+            </div>
 
-        <!-- 未选中采样 -->
-        <div v-else class="audio-empty">
-          <span class="empty-icon">🎧</span>
-          <span>请选择一个采样以预览</span>
+            <!-- 当前样本元信息 -->
+            <dl class="player-meta" v-if="selectedSample">
+              <div class="meta-item">
+                <dt class="meta-label">编码</dt>
+                <dd class="meta-value lme-mono">{{ selectedSample.codec }}</dd>
+              </div>
+              <div class="meta-item">
+                <dt class="meta-label">时长</dt>
+                <dd class="meta-value lme-mono">{{ formatDuration(selectedSample.duration) }}</dd>
+              </div>
+              <div class="meta-item">
+                <dt class="meta-label">声道</dt>
+                <dd class="meta-value lme-mono">{{ selectedSample.channels }}ch</dd>
+              </div>
+              <div class="meta-item">
+                <dt class="meta-label">采样率</dt>
+                <dd class="meta-value lme-mono">{{ selectedSample.sampleRate }} Hz</dd>
+              </div>
+              <div class="meta-item">
+                <dt class="meta-label">大小</dt>
+                <dd class="meta-value lme-mono">{{ formatSize(selectedSample.size) }}</dd>
+              </div>
+              <div class="meta-item">
+                <dt class="meta-label">所属银行</dt>
+                <dd class="meta-value lme-mono lme-ellipsis" :title="selectedSample.bankId">
+                  {{ selectedSample.bankId }}
+                </dd>
+              </div>
+            </dl>
+          </div>
+
+          <!-- 银行详情 -->
+          <div class="bank-detail" v-if="selectedBank">
+            <div class="detail-title">银行详情</div>
+
+            <div class="detail-grid">
+              <div class="detail-row">
+                <span class="detail-label">类型</span>
+                <span
+                  class="detail-value"
+                  :style="{ color: bankTypeColor(selectedBank.bankType) }"
+                >
+                  {{ bankTypeLabel(selectedBank.bankType) }}
+                </span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">采样数</span>
+                <span class="detail-value lme-mono">
+                  {{ selectedBank.sampleCount.toLocaleString('zh-CN') }}
+                </span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">大小</span>
+                <span class="detail-value lme-mono">{{ formatSize(selectedBank.totalSize) }}</span>
+              </div>
+            </div>
+
+            <div class="detail-row column">
+              <span class="detail-label">路径</span>
+              <span class="detail-value path lme-mono" :title="selectedBank.path">
+                {{ selectedBank.path }}
+              </span>
+            </div>
+
+            <div class="detail-row column" v-if="selectedBank.fsbInfo">
+              <span class="detail-label">FSB</span>
+              <span class="detail-value path lme-mono" :title="selectedBank.fsbInfo">
+                {{ selectedBank.fsbInfo }}
+              </span>
+            </div>
+          </div>
+
+          <div v-else class="state-block">
+            <span class="state-icon">🎵</span>
+            <span class="state-text">未选择银行</span>
+            <span class="state-hint">选中后这里显示试听与银行详情</span>
+          </div>
         </div>
-      </div>
+      </section>
     </div>
   </div>
 </template>
 
 <style scoped>
-/* ── 根容器 ── */
 .bank-view {
   display: flex;
+  flex-direction: column;
   height: 100%;
   overflow: hidden;
   position: relative;
+  background: var(--lme-bg-base);
 }
 
-/* ── 浏览列 ── */
-.browser-column {
-  flex: 1;
+/* ── 顶部细进度条 ── */
+.loading-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  overflow: hidden;
+  z-index: var(--lme-z-raised);
+  background: var(--lme-progressbar-bg);
+}
+
+.loading-bar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  border-radius: var(--lme-radius-full);
+  background: var(--lme-progressbar-fill);
+  animation: loading-slide 1s var(--lme-ease-standard) infinite;
+}
+
+@keyframes loading-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(350%);
+  }
+}
+
+/* ── 页头工具栏 ── */
+.page-toolbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-lg);
+  padding: var(--lme-gap-sm) var(--lme-gap-lg);
+  background: var(--lme-bg-panel);
+  border-bottom: 1px solid var(--lme-border);
+}
+
+.toolbar-leading {
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-sm);
+  min-width: 0;
+}
+
+.toolbar-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--lme-radius-md);
+  background: var(--lme-bg-elevated);
+  border: 1px solid var(--lme-border);
+  font-size: var(--lme-font-size-md);
+  flex-shrink: 0;
+}
+
+.toolbar-titles {
   display: flex;
   flex-direction: column;
   min-width: 0;
+}
+
+.toolbar-name {
+  margin: 0;
+  font-size: var(--lme-font-size-lg);
+  font-weight: var(--lme-font-weight-semibold);
+  line-height: var(--lme-line-height-tight);
+  color: var(--lme-text-primary);
+}
+
+.toolbar-sub {
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-xs);
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toolbar-bank {
+  max-width: 320px;
+  color: var(--lme-text-secondary);
+}
+
+.toolbar-dot {
+  color: var(--lme-text-disabled);
+}
+
+.toolbar-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-md);
+  flex-shrink: 0;
+}
+
+.result-count {
+  font-size: var(--lme-font-size-sm);
+  color: var(--lme-text-muted);
+}
+
+.result-count strong {
+  color: var(--lme-text-primary);
+  font-weight: var(--lme-font-weight-semibold);
+}
+
+/* ── 按钮 ── */
+.action-btn {
+  padding: 5px 14px;
+  background: var(--lme-bg-elevated);
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-md);
+  color: var(--lme-text-secondary);
+  cursor: pointer;
+  font-size: var(--lme-font-size-sm);
+  font-family: var(--lme-font-family);
+  flex-shrink: 0;
+  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard),
+    color var(--lme-dur-fast) var(--lme-ease-standard),
+    background var(--lme-dur-fast) var(--lme-ease-standard);
+}
+
+.action-btn:hover {
+  border-color: var(--lme-accent);
+  color: var(--lme-text-primary);
+}
+
+.action-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--lme-shadow-focus);
+}
+
+.action-btn.small {
+  padding: 3px 10px;
+  font-size: var(--lme-font-size-xs);
+}
+
+/* ── 错误态 ── */
+.error-banner {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-sm);
+  margin: var(--lme-gap-md) var(--lme-gap-lg) 0;
+  padding: var(--lme-gap-sm) var(--lme-gap-md);
+  background: var(--lme-error-banner-bg);
+  border: 1px solid var(--lme-error);
+  border-radius: var(--lme-radius-md);
+  color: var(--lme-error);
+  font-size: var(--lme-font-size-sm);
+}
+
+.error-banner.inline {
+  margin: var(--lme-gap-sm) var(--lme-gap-md);
+}
+
+/* ── 三栏栅格 ── */
+.workbench-body {
+  flex: 1;
+  display: flex;
+  gap: var(--lme-gap-md);
+  padding: var(--lme-gap-md) var(--lme-gap-lg) var(--lme-gap-lg);
+  min-height: 0;
   overflow: hidden;
 }
 
-/* ── 搜索筛选栏 ── */
-.search-filters {
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--lme-bg-panel);
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-lg);
+  overflow: hidden;
+}
+
+.panel-banks {
+  flex: 0 0 320px;
+}
+
+.panel-samples {
+  flex: 1;
+}
+
+.panel-player {
+  flex-shrink: 0;
+}
+
+@media (max-width: 1180px) {
+  .panel-banks {
+    flex-basis: 260px;
+  }
+}
+
+.panel-head {
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
   gap: var(--lme-gap-sm);
-  padding: var(--lme-gap-md);
+  padding: var(--lme-gap-sm) var(--lme-gap-md);
   border-bottom: 1px solid var(--lme-border);
+  background: var(--lme-bg-elevated);
+}
+
+.panel-head.compact {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--lme-gap-sm);
+  height: 38px;
+  padding: 0 var(--lme-gap-sm) 0 var(--lme-gap-md);
+}
+
+.panel-title {
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-sm);
+  min-width: 0;
+}
+
+.panel-title-text {
+  font-size: var(--lme-font-size-sm);
+  font-weight: var(--lme-font-weight-semibold);
+  color: var(--lme-text-secondary);
+  white-space: nowrap;
+}
+
+.panel-badge {
+  padding: 1px 8px;
+  background: var(--lme-bg-base);
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-full);
+  color: var(--lme-text-muted);
+  font-size: var(--lme-font-size-xs);
+  flex-shrink: 0;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.panel-bank {
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-muted);
+  max-width: 45%;
+}
+
+.panel-type {
+  font-size: var(--lme-font-size-xs);
+  font-weight: var(--lme-font-weight-medium);
+  flex-shrink: 0;
+}
+
+.panel-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  position: relative;
+}
+
+.panel-foot {
+  flex-shrink: 0;
+  border-top: 1px solid var(--lme-border);
+  background: var(--lme-bg-elevated);
+}
+
+/* ── 搜索框 / 筛选 ── */
+.panel-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.panel-search-icon {
+  position: absolute;
+  left: 8px;
+  font-size: var(--lme-font-size-sm);
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.search-input {
+  width: 100%;
+  padding: 5px 26px;
+  background: var(--lme-bg-input);
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-md);
+  color: var(--lme-text-primary);
+  font-size: var(--lme-font-size-sm);
+  font-family: var(--lme-font-family);
+  transition: border-color var(--lme-dur-fast) var(--lme-ease-standard),
+    box-shadow var(--lme-dur-fast) var(--lme-ease-standard);
+}
+
+.search-input::placeholder {
+  color: var(--lme-text-disabled);
+}
+
+.search-input:focus {
+  outline: none;
+  border-color: var(--lme-accent);
+  box-shadow: var(--lme-shadow-focus);
+}
+
+.search-clear {
+  position: absolute;
+  right: 6px;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--lme-bg-elevated);
+  border: none;
+  border-radius: var(--lme-radius-full);
+  color: var(--lme-text-muted);
+  font-size: 9px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.search-clear:hover {
+  color: var(--lme-text-primary);
+  background: var(--lme-bg-hover);
 }
 
 .filter-row {
@@ -710,35 +1144,27 @@ const sampleListHeight = ref(400)
   flex-wrap: wrap;
 }
 
-.search-input {
-  flex: 1;
-  min-width: 200px;
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  background: var(--lme-bg-input);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
-  color: var(--lme-text-primary);
-  font-size: var(--lme-font-size-md);
-  font-family: var(--lme-font-family);
-}
-
-.search-input:focus {
-  outline: none;
-  border-color: var(--lme-accent);
-}
-
 .filter-label {
-  font-size: var(--lme-font-size-sm);
+  font-size: var(--lme-font-size-xs);
   color: var(--lme-text-muted);
+  flex-shrink: 0;
 }
 
 .filter-select {
-  padding: var(--lme-gap-xs) var(--lme-gap-sm);
+  flex: 1;
+  min-width: 88px;
+  padding: 3px var(--lme-gap-sm);
   background: var(--lme-bg-input);
   border: 1px solid var(--lme-border);
   border-radius: var(--lme-radius-sm);
   color: var(--lme-text-primary);
-  font-size: var(--lme-font-size-sm);
+  font-size: var(--lme-font-size-xs);
+  font-family: var(--lme-font-family);
+  cursor: pointer;
+}
+
+.filter-select:hover {
+  border-color: var(--lme-border-strong);
 }
 
 .filter-select:focus {
@@ -746,50 +1172,26 @@ const sampleListHeight = ref(400)
   border-color: var(--lme-accent);
 }
 
-.filter-clear-btn {
-  padding: var(--lme-gap-xs) var(--lme-gap-md);
-  background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
-  color: var(--lme-text-secondary);
-  cursor: pointer;
-  font-size: var(--lme-font-size-sm);
-  transition: background 0.15s, color 0.15s;
-}
-
-.filter-clear-btn:hover {
-  background: var(--lme-bg-hover);
-  color: var(--lme-text-primary);
-}
-
-.result-count {
-  font-size: var(--lme-font-size-sm);
-  color: var(--lme-text-muted);
-  margin-left: auto;
-}
-
-/* ── 银行列表容器 ── */
-.bank-list-container {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  min-height: 0;
-}
-
 /* ── 银行行 ── */
 .bank-row {
   display: flex;
   align-items: center;
   gap: var(--lme-gap-sm);
+  height: 30px;
   padding: 0 var(--lme-gap-md);
   cursor: pointer;
-  border-left: 3px solid transparent;
-  transition: background 0.1s;
+  border-left: 2px solid transparent;
+  border-bottom: 1px solid var(--lme-row-divider);
+  transition: background var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
 .bank-row:hover {
   background: var(--lme-bg-hover);
+}
+
+.bank-row:focus-visible {
+  outline: none;
+  box-shadow: var(--lme-shadow-focus);
 }
 
 .bank-row.selected {
@@ -798,7 +1200,7 @@ const sampleListHeight = ref(400)
 }
 
 .row-index {
-  width: 48px;
+  width: 36px;
   text-align: right;
   color: var(--lme-text-muted);
   font-size: var(--lme-font-size-xs);
@@ -806,15 +1208,18 @@ const sampleListHeight = ref(400)
 }
 
 .row-type-badge {
-  width: 72px;
+  width: 54px;
   font-size: var(--lme-font-size-xs);
   flex-shrink: 0;
-  font-weight: 600;
+  font-weight: var(--lme-font-weight-semibold);
   text-align: center;
-  padding: 2px 4px;
-  border-radius: var(--lme-radius-sm);
+  padding: 1px 4px;
+  border-radius: var(--lme-radius-full);
   background: var(--lme-bg-elevated);
   border: 1px solid var(--lme-border);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .row-name {
@@ -824,8 +1229,12 @@ const sampleListHeight = ref(400)
   min-width: 0;
 }
 
+.bank-row.selected .row-name {
+  font-weight: var(--lme-font-weight-medium);
+}
+
 .row-count {
-  width: 72px;
+  width: 56px;
   text-align: right;
   color: var(--lme-text-muted);
   font-size: var(--lme-font-size-xs);
@@ -833,9 +1242,9 @@ const sampleListHeight = ref(400)
 }
 
 .row-fsb {
-  width: 120px;
+  max-width: 80px;
   text-align: right;
-  color: var(--lme-text-muted);
+  color: var(--lme-text-disabled);
   font-size: var(--lme-font-size-xs);
   flex-shrink: 0;
   overflow: hidden;
@@ -843,141 +1252,7 @@ const sampleListHeight = ref(400)
   white-space: nowrap;
 }
 
-/* ── 分隔条 ── */
-.column-splitter {
-  width: 6px;
-  flex-shrink: 0;
-  background: var(--lme-border);
-  cursor: col-resize;
-  transition: background 0.15s;
-}
-
-.column-splitter:hover,
-.column-splitter.dragging {
-  background: var(--lme-accent);
-}
-
-/* ── 预览列 ── */
-.preview-column {
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  background: var(--lme-bg-panel);
-  min-width: 260px;
-}
-
-/* ── 银行详情头部 ── */
-.bank-detail-header {
-  display: flex;
-  flex-direction: column;
-  gap: var(--lme-gap-sm);
-  padding: var(--lme-gap-md);
-  border-bottom: 1px solid var(--lme-border);
-}
-
-.detail-title-row {
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-sm);
-}
-
-.detail-name {
-  flex: 1;
-  font-size: var(--lme-font-size-md);
-  font-weight: 600;
-  color: var(--lme-text-primary);
-  min-width: 0;
-}
-
-.export-btn {
-  padding: 4px 12px;
-  background: var(--lme-accent-muted);
-  border: 1px solid var(--lme-accent);
-  border-radius: var(--lme-radius-sm);
-  color: var(--lme-text-primary);
-  cursor: pointer;
-  font-size: var(--lme-font-size-sm);
-  white-space: nowrap;
-  transition: background 0.15s;
-}
-
-.export-btn:hover {
-  background: var(--lme-accent);
-}
-
-.detail-meta {
-  display: flex;
-  gap: var(--lme-gap-xs);
-  flex-wrap: wrap;
-}
-
-.meta-tag {
-  padding: 2px 6px;
-  border-radius: var(--lme-radius-sm);
-  font-size: var(--lme-font-size-xs);
-  background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
-}
-
-.count-tag {
-  color: var(--lme-text-secondary);
-}
-
-.size-tag {
-  color: var(--lme-text-muted);
-}
-
-.path-tag {
-  color: var(--lme-text-muted);
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.detail-fsb {
-  font-size: var(--lme-font-size-xs);
-  color: var(--lme-text-muted);
-  padding: var(--lme-gap-xs) var(--lme-gap-sm);
-  background: var(--lme-bg-input);
-  border-radius: var(--lme-radius-sm);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* ── 采样区域 ── */
-.sample-section {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  min-height: 0;
-  border-bottom: 1px solid var(--lme-border);
-}
-
-.sample-section-header {
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-sm);
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  border-bottom: 1px solid var(--lme-border);
-}
-
-.section-title {
-  font-size: var(--lme-font-size-sm);
-  font-weight: 600;
-  color: var(--lme-text-secondary);
-}
-
-.section-count {
-  font-size: var(--lme-font-size-xs);
-  color: var(--lme-text-muted);
-  margin-left: auto;
-}
-
-/* ── 采样表头 ── */
+/* ── 采样列表 ── */
 .sample-table-header {
   display: flex;
   align-items: center;
@@ -992,7 +1267,7 @@ const sampleListHeight = ref(400)
 .sample-table-header .col {
   font-size: var(--lme-font-size-xs);
   color: var(--lme-text-muted);
-  font-weight: 600;
+  font-weight: var(--lme-font-weight-semibold);
 }
 
 .col-name {
@@ -1025,23 +1300,30 @@ const sampleListHeight = ref(400)
   text-align: right;
 }
 
-/* ── 采样行 ── */
 .sample-row {
   display: flex;
   align-items: center;
+  height: 30px;
   padding: 0 var(--lme-gap-md);
   gap: var(--lme-gap-sm);
   cursor: pointer;
-  border-left: 3px solid transparent;
-  transition: background 0.1s;
+  border-left: 2px solid transparent;
+  border-bottom: 1px solid var(--lme-row-divider);
+  transition: background var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
 .sample-row:hover {
   background: var(--lme-bg-hover);
 }
 
+.sample-row:focus-visible {
+  outline: none;
+  box-shadow: var(--lme-shadow-focus);
+}
+
+/* 已载入播放器的那一行：用音频播放底色区分（选中 = 已载入待播） */
 .sample-row.selected {
-  background: var(--lme-bg-selected);
+  background: var(--wiki-audio-playing-bg);
   border-left-color: var(--lme-type-audio);
 }
 
@@ -1062,142 +1344,233 @@ const sampleListHeight = ref(400)
   font-size: var(--lme-font-size-xs);
 }
 
-.sample-empty,
-.sample-error,
-.sample-loading {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--lme-gap-sm);
-  flex: 1;
-  color: var(--lme-text-muted);
-  padding: var(--lme-gap-xl);
-  text-align: center;
+/* ── 分隔条 ── */
+.column-splitter {
+  flex: 0 0 4px;
+  border-radius: var(--lme-radius-full);
+  background: var(--lme-border);
+  cursor: col-resize;
+  transition: background var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
-.sample-error {
-  color: var(--lme-error);
+.column-splitter:hover,
+.column-splitter.dragging {
+  background: var(--lme-accent);
 }
 
-.sample-loading {
-  flex-direction: row;
-}
-
-/* ── 音频预览区域 ── */
-.audio-preview-section {
-  display: flex;
-  flex-direction: column;
-  gap: var(--lme-gap-sm);
-  padding: var(--lme-gap-md);
-  border-top: 1px solid var(--lme-border);
+/* ── 试听区 ── */
+.player-card {
   flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--lme-gap-sm);
+  margin: var(--lme-gap-md);
+  padding: var(--lme-gap-md);
+  background: var(--lme-bg-elevated);
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-lg);
 }
 
-.preview-section-header {
+.player-head {
   display: flex;
   align-items: center;
   gap: var(--lme-gap-sm);
+  min-width: 0;
 }
 
-.section-sample-name {
+.player-titles {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.player-name {
+  font-size: var(--lme-font-size-md);
+  font-weight: var(--lme-font-weight-semibold);
+  color: var(--lme-text-primary);
+  line-height: var(--lme-line-height-tight);
+}
+
+.player-sub {
   font-size: var(--lme-font-size-xs);
   color: var(--lme-text-muted);
-  margin-left: auto;
-  max-width: 200px;
+}
+
+/* 轨道底纹：中性装饰条，不表示真实波形或播放进度 */
+.player-track {
+  height: 6px;
+  border-radius: var(--lme-radius-full);
+  background: repeating-linear-gradient(
+    to right,
+    var(--lme-border-strong) 0,
+    var(--lme-border-strong) 2px,
+    transparent 2px,
+    transparent 6px
+  );
+  opacity: 0.6;
+}
+
+.player-controls {
+  display: flex;
+  flex-direction: column;
 }
 
 .audio-player-container {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: var(--lme-gap-sm);
+  padding: var(--lme-gap-xs);
   background: var(--lme-bg-input);
-  border-radius: var(--lme-radius-sm);
+  border-radius: var(--lme-radius-md);
   border: 1px solid var(--lme-border);
 }
 
 .audio-player {
   width: 100%;
-  height: 36px;
+  height: 34px;
 }
 
 .audio-player::-webkit-media-controls-panel {
   background: var(--lme-bg-input);
 }
 
-.audio-unimplemented,
-.audio-empty {
+/* ── 样本元信息 ── */
+.player-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--lme-gap-xs) var(--lme-gap-md);
+  margin: 0;
+  padding-top: var(--lme-gap-sm);
+  border-top: 1px solid var(--lme-border);
+}
+
+.meta-item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--lme-gap-xs);
+  min-width: 0;
+}
+
+.meta-label {
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-muted);
+  flex-shrink: 0;
+}
+
+.meta-value {
+  margin: 0;
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-secondary);
+  min-width: 0;
+}
+
+/* ── 银行详情 ── */
+.bank-detail {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--lme-gap-sm);
+  margin: 0 var(--lme-gap-md) var(--lme-gap-md);
+  padding: var(--lme-gap-md);
+  background: var(--lme-bg-elevated);
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-lg);
+}
+
+.detail-title {
+  font-size: var(--lme-font-size-sm);
+  font-weight: var(--lme-font-weight-semibold);
+  color: var(--lme-text-primary);
+  padding-bottom: var(--lme-gap-xs);
+  border-bottom: 1px solid var(--lme-border);
+}
+
+.detail-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--lme-gap-xs) var(--lme-gap-md);
+}
+
+.detail-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--lme-gap-xs);
+  min-width: 0;
+}
+
+.detail-row.column {
+  flex-direction: column;
+  gap: 2px;
+}
+
+.detail-label {
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-muted);
+  flex-shrink: 0;
+}
+
+.detail-value {
+  font-size: var(--lme-font-size-sm);
+  color: var(--lme-text-secondary);
+  min-width: 0;
+}
+
+.detail-value.path {
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-muted);
+  padding: 2px var(--lme-gap-sm);
+  background: var(--lme-bg-input);
+  border-radius: var(--lme-radius-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  width: 100%;
+}
+
+/* ── 空态 / 加载态 ── */
+.state-block {
+  flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: var(--lme-gap-xs);
-  padding: var(--lme-gap-lg);
+  gap: var(--lme-gap-sm);
+  padding: var(--lme-gap-xl) var(--lme-gap-md);
   color: var(--lme-text-muted);
   text-align: center;
 }
 
-.unimplemented-hint {
+.state-block.inline {
+  flex: 0 0 auto;
+  padding: var(--lme-gap-lg) var(--lme-gap-md);
+}
+
+.state-icon {
+  font-size: 28px;
+  opacity: 0.7;
+}
+
+.state-icon.spinner {
+  animation: state-spin 1.4s linear infinite;
+  display: inline-block;
+}
+
+@keyframes state-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.state-text {
+  font-size: var(--lme-font-size-sm);
+  color: var(--lme-text-secondary);
+}
+
+.state-hint {
   font-size: var(--lme-font-size-xs);
   color: var(--lme-text-disabled);
-  margin-top: var(--lme-gap-xs);
-}
-
-/* ── 空状态 ── */
-.empty-state {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--lme-gap-sm);
-  flex: 1;
-  padding: var(--lme-gap-xl);
-  text-align: center;
-}
-
-.empty-icon {
-  font-size: 32px;
-  margin-bottom: var(--lme-gap-sm);
-}
-
-.empty-title {
-  font-size: var(--lme-font-size-md);
-  font-weight: 600;
-  color: var(--lme-text-secondary);
-}
-
-.empty-desc {
-  font-size: var(--lme-font-size-sm);
-  color: var(--lme-text-muted);
-  max-width: 320px;
-  line-height: 1.6;
-}
-
-/* ── 加载态 ── */
-.loading-overlay {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--lme-gap-sm);
-  background: var(--lme-overlay-bg);
-  color: var(--lme-text-secondary);
-  z-index: 10;
-  font-size: var(--lme-font-size-sm);
-}
-
-.loading-spinner {
-  font-size: var(--lme-font-size-lg);
-}
-
-/* ── 错误态 ── */
-.error-banner {
-  padding: var(--lme-gap-md);
-  background: var(--lme-error-banner-bg);
-  border: 1px solid var(--lme-error);
-  color: var(--lme-error);
-  font-size: var(--lme-font-size-sm);
+  line-height: var(--lme-line-height-relaxed);
+  max-width: 280px;
 }
 </style>

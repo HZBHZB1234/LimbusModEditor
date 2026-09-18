@@ -161,5 +161,18 @@ public sealed class WikiMediaResolverBatchTests : IDisposable
         public Task<IReadOnlyList<SpineSetInfo>> FindByFolderPrefixAsync(
             string folderPrefix, CancellationToken cancellationToken = default)
             => Task.FromResult<IReadOnlyList<SpineSetInfo>>([]);
+
+        public Task<SpineCatalogPage> BrowseCatalogAsync(
+            SpineCatalogQuery query, CancellationToken cancellationToken = default)
+            => Task.FromResult(new SpineCatalogPage(0, []));
+
+        public Task<SpineCatalogResult> BrowseCatalogWithSummaryAsync(
+            SpineCatalogQuery query, CancellationToken cancellationToken = default)
+            => Task.FromResult(new SpineCatalogResult(new SpineCatalogSummary(0, 0, 0, 0), new SpineCatalogPage(0, [])));
+
+        public Task<SpineCatalogSummary> SummarizeCatalogAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult(new SpineCatalogSummary(0, 0, 0, 0));
+
+        public void InvalidateCache() { }
     }
 }

@@ -6,6 +6,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useCatalogStore } from '@/stores/catalog'
+import { usePreviewStore } from '@/stores/preview'
 import { useUiStateStore } from '@/stores/uiState'
 import { ipc } from '@/ipc'
 import type { AssetSearchQuery, RelationSubject } from '@/ipc'
@@ -16,6 +17,7 @@ import PageBar from '@/components/PageBar.vue'
 import ContainerTree from '@/components/ContainerTree.vue'
 
 const catalog = useCatalogStore()
+const previewStore = usePreviewStore()
 const uiState = useUiStateStore()
 const route = useRoute()
 const router = useRouter()
@@ -180,6 +182,56 @@ watch(
   },
 )
 
+// ═══════════ 替换资源（asset.edit.replacePayload）════════════
+
+const replaceBusy = ref(false)
+/** 空 = 没做过；否则是一行中文结果（成功记替换文件，失败记后端 error.message） */
+const replaceMessage = ref('')
+const replaceFailed = ref(false)
+
+/**
+ * 选一个文件 → 登记为当前资源的替换 → 立刻刷新（本页重拉 + 预览重拉）。
+ *
+ * assetId 传 logicalPath：后端（be6ef81）两种口径都收，而本页列表行的稳定键就是它
+ * （AssetId 每次回灌都可能变，用它做选中键会丢选中）。
+ */
+async function onReplaceAsset() {
+  const asset = catalog.selectedAsset
+  if (!asset || replaceBusy.value) return
+  const logicalPath = asset.logicalPath
+
+  replaceBusy.value = true
+  replaceMessage.value = ''
+  replaceFailed.value = false
+  try {
+    // 宿主原生对话框：filters 是 Win32 过滤串（见 docs/WEB-IPC-CONTRACT.md）
+    const picked = await ipc.request<{ path?: string }>('dialog.openFile', {
+      title: `替换资源：${logicalPath.split('/').pop() || logicalPath}`,
+      filters: '所有文件 (*.*)|*.*',
+    })
+    if (!picked?.path) return // 用户取消，不算失败
+
+    await ipc.request('asset.edit.replacePayload', {
+      assetId: logicalPath,
+      replacementPath: picked.path,
+    })
+
+    // 刷新：本页重拉（列表行的 editState 由后端按项目态给出「已修改」）+ 预览重拉
+    await catalog.fetchPage(catalog.offset)
+    const refreshed = catalog.items.find((a) => a.logicalPath === logicalPath)
+    if (refreshed) {
+      catalog.selectAsset(refreshed.assetId)
+      await previewStore.loadPreview(refreshed.assetId)
+    }
+    replaceMessage.value = `已替换：${picked.path}`
+  } catch (e: unknown) {
+    replaceFailed.value = true
+    replaceMessage.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    replaceBusy.value = false
+  }
+}
+
 // 虚拟列表高度自适应
 const listHeight = ref(600)
 </script>
@@ -295,6 +347,25 @@ const listHeight = ref(600)
 
     <!-- 预览列 -->
     <div class="preview-column" :style="{ width: uiState.previewColumnWidth + 'px' }">
+      <!-- 替换入口：选中一条资源后可用 -->
+      <div class="replace-bar">
+        <button
+          class="replace-btn"
+          :disabled="!catalog.selectedAsset || replaceBusy"
+          :title="catalog.selectedAsset ? catalog.selectedAsset.logicalPath : '先选中一条资源'"
+          @click="onReplaceAsset"
+        >
+          {{ replaceBusy ? '替换中…' : '替换…' }}
+        </button>
+        <span
+          v-if="replaceMessage"
+          class="replace-message"
+          :class="{ failed: replaceFailed }"
+        >
+          {{ replaceMessage }}
+        </span>
+      </div>
+
       <PreviewPane :asset="catalog.selectedAsset" />
 
       <!-- 关联对象：只读列表，数据来自 relation.describe -->
@@ -507,6 +578,43 @@ const listHeight = ref(600)
   min-width: 260px;
 }
 
+/* ── 替换入口 ── */
+.replace-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-sm);
+  padding: var(--lme-gap-sm) var(--lme-gap-md);
+  border-bottom: 1px solid var(--lme-border);
+}
+
+.replace-btn {
+  padding: 3px 12px;
+  background: var(--lme-bg-elevated);
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-sm);
+  color: var(--lme-text-secondary);
+  cursor: pointer;
+  font-size: var(--lme-font-size-sm);
+  flex-shrink: 0;
+}
+
+.replace-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.replace-message {
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.replace-message.failed {
+  color: var(--lme-error);
+}
+
 /* ── 关联对象 ── */
 .related-subjects {
   padding: 8px 12px;
@@ -641,7 +749,8 @@ const listHeight = ref(600)
   - ❌ 旧界面：关联资源区（反查「这个资源属于哪些对象」）
   - ⏳ 新界面：W2 全量迁移时补上（需 relation.describe IPC 方法）
   - ❌ 旧界面：替换/批处理/撤销/编辑文本/Unity 字段编辑
-  - ⏳ 新界面：W2 全量迁移时补上（需 asset.edit.* IPC 方法）
+  - ⏳ 新界面：已补「替换…」（dialog.openFile + asset.edit.replacePayload + 刷新预览）；
+    批处理/撤销/编辑文本/Unity 字段编辑留 W2（需对应 IPC 入口）
   - ❌ 旧界面：Spine 动画预览按钮
   - ⏳ 新接口：W2 全量迁移时改为前端 spine-ts 就地播放
   - ❌ 旧界面：右键菜单（替换/编辑文本/字段编辑/撤销/复制路径）

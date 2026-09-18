@@ -1,3 +1,4 @@
+using LimbusModEditor.Application.Caching;
 using LimbusModEditor.Application.Relations;
 using LimbusModEditor.Application.SpineData;
 
@@ -36,6 +37,45 @@ public sealed class SpineCatalogRulesTests
     [InlineData("Assets/Resources_moved/Story/CG/Ep9_3/StorySpine_Sinclair.png")]
     public void Existing_spine_locations_still_pass_the_rule(string entry)
         => Assert.True(RelationDisplayRules.IsSpinePath(entry), $"{entry} 是既有支持的位置，不能被回归掉");
+
+    // ── 名册按容器路径去重（真实数据回归）──────────────────────────
+
+    /// <summary>
+    /// 同一个 prefab 路径可能出现在**多个 bundle** 里。名册必须按容器路径去重，
+    /// 否则「挂点总数」会虚高近一倍：实测 920 个不同路径对应 **1637** 行，
+    /// 按 <c>(路径, bundle 路径)</c> 两列 DISTINCT 会让概览报 1637 而不是 920，
+    /// 未绑定数从真实的 798 虚报成 818。
+    ///
+    /// <para>这是真实数据回归：没有索引库时直接跳过，CI 保持绿。</para>
+    /// </summary>
+    [Fact]
+    public async Task Catalog_counts_each_container_path_exactly_once()
+    {
+        var dbPath = Path.Combine(RepoRoot(), "artifacts", "publish-win-x64", "cache",
+            WorkbenchCachePaths.UnityCacheIndexFileName);
+        if (!File.Exists(dbPath)) return;   // 没有真实数据：跳过
+
+        var gateway = SpineDataGatewayFactory.Create(dbPath);
+        var page = await gateway.BrowseCatalogAsync(
+            new SpineCatalogQuery(null, OnlyUnbound: false, Offset: 0, Limit: int.MaxValue));
+
+        var refKeys = page.Items.Select(i => i.RefKey).ToList();
+        Assert.Equal(refKeys.Count, refKeys.Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        Assert.Equal(page.Items.Count, page.Total);
+
+        var summary = await gateway.SummarizeCatalogAsync();
+        Assert.Equal(page.Total, summary.Total);
+        Assert.Equal(summary.Total - summary.Bound, summary.Unbound);
+    }
+
+    /// <summary>仓库根目录（从测试程序集位置往上找到含 slnx 的那一层）。</summary>
+    private static string RepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "LimbusModEditor.slnx")))
+            dir = dir.Parent;
+        return dir?.FullName ?? AppContext.BaseDirectory;
+    }
 
     [Theory]
     // SD 目录里只有 .prefab 才是挂点：同目录的图/音频不是

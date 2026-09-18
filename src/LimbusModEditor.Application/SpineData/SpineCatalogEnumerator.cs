@@ -147,31 +147,47 @@ internal sealed class SpineCatalogEnumerator
     /// </summary>
     private List<SpineCatalogEntry> LoadEntries(IReadOnlyDictionary<string, int> boundCounts)
     {
-        var list = new List<SpineCatalogEntry>();
-        using var connection = new SqliteConnection($"Data Source={_dbPath};Mode=ReadOnly");
-        connection.Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = @"
-            SELECT DISTINCT a.container_entry, b.data_path
-            FROM assets a
-            JOIN bundles b ON a.bundle_id = b.id
-            WHERE a.container_entry LIKE $illust OR a.container_entry LIKE $sd
-            ORDER BY a.container_entry";
-        command.Parameters.AddWithValue("$illust", "%/SpineIllustPrefab/%.prefab");
-        command.Parameters.AddWithValue("$sd", "%/Prefab/SD/%.prefab");
-
-        using var reader = command.ExecuteReader();
-        while (reader.Read())
+        // 按「容器路径」去重，**不能**按 (容器路径, bundle 路径) 去重：
+        // 同一个 prefab 路径可能出现在多个 bundle 里（实测 920 个不同路径对应 1637 行，
+        // 683 个路径出现不止一次），按两列 DISTINCT 会让名册与概览计数虚高近一倍
+        // （实测概览会报「挂点 1637」而不是 920）。
+        var byPath = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        using (var connection = new SqliteConnection($"Data Source={_dbPath};Mode=ReadOnly"))
         {
-            var entry = reader.GetString(0);
-            var bundlePath = reader.IsDBNull(1) ? string.Empty : reader.GetString(1);
-            if (!RelationDisplayRules.IsSpinePath(entry)) continue; // 与取数预检同源，名册不能比取数更宽
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = @"
+                SELECT a.container_entry, b.data_path
+                FROM assets a
+                JOIN bundles b ON a.bundle_id = b.id
+                WHERE a.container_entry LIKE $illust OR a.container_entry LIKE $sd";
+            command.Parameters.AddWithValue("$illust", "%/SpineIllustPrefab/%.prefab");
+            command.Parameters.AddWithValue("$sd", "%/Prefab/SD/%.prefab");
+
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                var entry = reader.GetString(0);
+                if (!RelationDisplayRules.IsSpinePath(entry)) continue; // 与取数预检同源，名册不能比取数更宽
+                var bundlePath = reader.IsDBNull(1) ? string.Empty : reader.GetString(1);
+                var present = BundlePresent(bundlePath);
+                // 同名多份时：任一份的 bundle 还在本机就算「在」，不能因为先读到缺失的那份就判死。
+                if (byPath.TryGetValue(entry, out var known))
+                    byPath[entry] = known || present;
+                else
+                    byPath[entry] = present;
+            }
+        }
+
+        var list = new List<SpineCatalogEntry>(byPath.Count);
+        foreach (var (entry, bundlePresent) in byPath.OrderBy(x => x.Key, StringComparer.Ordinal))
+        {
             list.Add(new SpineCatalogEntry(
                 entry,
                 NameOf(entry),
                 SpinePathRules.FolderOf(entry),
                 SpineCatalogGroups.Of(entry),
-                BundlePresent(bundlePath),
+                bundlePresent,
                 boundCounts.TryGetValue(entry, out var n) ? n : 0));
         }
         return list;

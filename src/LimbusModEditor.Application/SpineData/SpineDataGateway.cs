@@ -15,12 +15,46 @@ internal sealed class SpineDataGateway : ISpineDataGateway, IDisposable
     private static readonly Logger Log = LogManager.GetCurrentClassLogger();
     private readonly SpineAssetLocator _locator;
     private readonly SpineAssetEnumerator _enumerator;
+    private readonly SpineCatalogEnumerator _catalog;
+    private readonly string _dbPath;
     private readonly AssetsToolsBackend _backend = new();
+
+    /// <summary>按 refKey 的结果缓存（见 <see cref="SpineResultCache"/> 里的取舍说明）。</summary>
+    private readonly SpineResultCache _cache = new();
 
     public SpineDataGateway(string dbPath)
     {
+        _dbPath = dbPath;
         _locator = new SpineAssetLocator(dbPath);
         _enumerator = new SpineAssetEnumerator(dbPath);
+        _catalog = new SpineCatalogEnumerator(dbPath);
+    }
+
+    /// <summary>缓存诊断（日志/报告用）。</summary>
+    public string DescribeCache() => _cache.Describe();
+
+    public void InvalidateCache() => _cache.Clear();
+
+    public Task<SpineCatalogPage> BrowseCatalogAsync(
+        SpineCatalogQuery query, CancellationToken cancellationToken = default)
+        => Task.Run(() => _catalog.Query(query, RelationDbPath()), cancellationToken);
+
+    public Task<SpineCatalogResult> BrowseCatalogWithSummaryAsync(
+        SpineCatalogQuery query, CancellationToken cancellationToken = default)
+        => Task.Run(() => _catalog.QueryWithSummary(query, RelationDbPath()), cancellationToken);
+
+    public Task<SpineCatalogSummary> SummarizeCatalogAsync(CancellationToken cancellationToken = default)
+        => Task.Run(() => _catalog.Summarize(RelationDbPath()), cancellationToken);
+
+    /// <summary>
+    /// 绑定表所在库：与索引库同目录的 <c>relation-index.db</c>。索引库不在默认位置
+    /// （测试/CLI 显式传路径）时按同目录推，推不到就让名册按「全部未绑定」处理（降级不抛）。
+    /// </summary>
+    private string? RelationDbPath()
+    {
+        var directory = Path.GetDirectoryName(_dbPath);
+        if (string.IsNullOrWhiteSpace(directory)) return null;
+        return Path.Combine(directory, Caching.WorkbenchCachePaths.RelationIndexFileName);
     }
 
     public async Task<(SpineRawData? Data, string? Error)> GetSpineDataAsync(
@@ -39,14 +73,46 @@ internal sealed class SpineDataGateway : ISpineDataGateway, IDisposable
         if (!SpinePathRules.IsSpinePath(containerEntry))
             return (null, $"路径 \"{containerEntry}\" 不是 Spine 资源。");
 
+        // 缓存命中就走人 —— **在这之前不能做任何索引查询**：
+        // FindSiblings 是按目录前缀扫 assets（同目录行数可能上千），实测约 1s，
+        // 放在缓存查询之前等于「缓存只省下解包钱、把索引钱照付」，命中也就不快了。
+        if (_cache.TryGet(containerEntry, out var cachedData, out var cachedError))
+            return (cachedData, cachedError);
+
+        // 未命中才查一次「这条路径落在哪个 bundle」，作为失败记录「bundle 之后出现了
+        // 就作废重试」的凭据（见 SpineResultCache.TryGet）。
+        var probe = ProbeBundlePath(containerEntry);
         try
         {
-            return await Task.Run(() => LoadSpineData(containerEntry, cancellationToken), cancellationToken);
+            var result = await Task.Run(() => LoadSpineData(containerEntry, cancellationToken), cancellationToken);
+            _cache.Set(containerEntry, probe, result.Data, result.Error);
+            return result;
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or NotSupportedException)
         {
             Log.Warn(ex, "获取 Spine 数据失败：{0}", containerEntry);
-            return (null, $"获取 Spine 数据失败：{ex.Message}");
+            var error = $"获取 Spine 数据失败：{ex.Message}";
+            _cache.Set(containerEntry, probe, null, error);
+            return (null, error);
+        }
+    }
+
+    /// <summary>
+    /// 这条容器路径落在哪个 bundle 文件上（只做一次轻量索引查询，不解包）。
+    /// 用作缓存的「失败记录是否该作废」的凭据：bundle 之前不在、现在在了就重试。
+    /// </summary>
+    private string? ProbeBundlePath(string containerEntry)
+    {
+        try
+        {
+            var siblings = _locator.FindSiblings(containerEntry);
+            var self = SelfRows(containerEntry, siblings).FirstOrDefault() ?? siblings.FirstOrDefault();
+            return self?.BundleDataPath;
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "查 bundle 路径失败（不影响取数，只是缓存凭据缺失）：{0}", containerEntry);
+            return null;
         }
     }
 
@@ -77,9 +143,10 @@ internal sealed class SpineDataGateway : ISpineDataGateway, IDisposable
 
         // SpinalIllustPrefab 这类 prefab：同目录什么都没有，三件套藏在它的引用链里
         // —— 先看引用链，失败再走「同目录三件套」的老路（两条路都不成立才报错）。
-        if (SelfEntry(containerEntry, siblings) is { } prefab)
+        var selfRows = SelfRows(containerEntry, siblings);
+        if (selfRows.Count > 0)
         {
-            var viaChain = FollowPrefabChain(prefab);
+            var viaChain = FollowPrefabChain(selfRows);
             if (viaChain.Data is not null) return viaChain;
         }
 
@@ -157,6 +224,35 @@ internal sealed class SpineDataGateway : ISpineDataGateway, IDisposable
             string.Equals(s.ContainerEntry, containerEntry, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
+    /// 请求的这一条在索引库里的<b>全部</b>行，按「最像 prefab 根节点」的顺序排好。
+    ///
+    /// <para><b>为什么必须取全部行</b>：同一个容器路径在真实索引库里会出现<b>两行</b>——
+    /// 一行 <c>type_id=1</c>（Unity <c>GameObject</c>，序列化正文很小，是 prefab 的真根节点），
+    /// 一行 <c>type_id=43</c>（<c>PrefabImporter</c>，正文里存的是导入设置，<b>不是</b> prefab 的
+    /// 对象图）。实测：<c>Prefab/SD/**</c> 下 818 个 type-1 行对应 696 个 type-43 行，
+    /// 其中 <b>682 个路径同时有两行</b>（分布大致各半：339 + 338 + 5）。
+    /// 老实现只取「第一行」，于是大约一半的 SD prefab 会先在 type-43 那一行上走引用链、
+    /// 走不通就报「引用链里没有骨架与图集」——<b>而它旁边的 type-1 行本来是能解开的</b>
+    /// （实测 <c>10103_Yisang_SwordGroupAppearance.prefab</c>：type-43 行解不出、type-1 行能解出
+    /// 骨架 <c>Yisang_blade_idle</c> 24348 字节 + 图集 592 字节 + 1 页纹理）。</para>
+    ///
+    /// <para><c>SpineIllustPrefab</c> 那批（123 行）<b>只有 type-1</b>，所以从来没暴露这个问题 ——
+    /// 这也解释了为什么「页面绑定口径」看起来是通的，而「全库口径」大面积报解不出。</para>
+    ///
+    /// <para>排序：<c>type_id=1</c> 优先（真根节点），其余按索引顺序兜底；
+    /// 逐个试，任一个解开就算成功 —— 不猜测，只多用一次机会。</para>
+    /// </summary>
+    private static IReadOnlyList<SpineAssetInfo> SelfRows(
+        string containerEntry, IReadOnlyList<SpineAssetInfo> siblings)
+    {
+        var rows = siblings
+            .Where(s => string.Equals(s.ContainerEntry, containerEntry, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (rows.Count <= 1) return rows;
+        return rows.OrderByDescending(r => r.TypeId == 1).ToList();
+    }
+
+    /// <summary>
     /// 第二条取数路径：<b>prefab 引用链</b>。
     ///
     /// <para>为什么需要它：维基里 134 条 Spine 绑定指向的是
@@ -167,7 +263,22 @@ internal sealed class SpineDataGateway : ISpineDataGateway, IDisposable
     ///
     /// <para>取出来的一律按<b>正文</b>判定是不是真的骨架 / 图集（判据见
     /// <see cref="SpinePrefabChainResolver"/>），纹不出来就返回 null，交给同目录那条路继续报错。</para>
+    ///
+    /// <para><b>逐个候选行试</b>：同一路径在索引库里可能有多行（见 <see cref="SelfRows"/>），
+    /// 其中只有 <c>type_id=1</c>（GameObject）那一行是 prefab 的真根节点。全部试一遍，
+    /// 任一个解开就用它 —— 不猜测谁是根，只是不放弃本来就能解开的那一行。</para>
     /// </summary>
+    private (SpineRawData? Data, string? Error) FollowPrefabChain(IReadOnlyList<SpineAssetInfo> prefabRows)
+    {
+        foreach (var prefab in prefabRows)
+        {
+            var (data, error) = FollowPrefabChain(prefab);
+            if (data is not null) return (data, null);
+            if (error is not null) return (null, error);
+        }
+        return (null, null); // 都不是能解的 prefab：交给同目录那条路径的原报错
+    }
+
     private (SpineRawData? Data, string? Error) FollowPrefabChain(SpineAssetInfo prefab)
     {
         var entry = prefab.ContainerEntry;

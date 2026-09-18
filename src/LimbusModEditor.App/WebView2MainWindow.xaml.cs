@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using LimbusModEditor.Application.AppConfig;
 using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Application.Catalog;
+using LimbusModEditor.Application.Caching;
 using LimbusModEditor.Application.Ipc;
 using LimbusModEditor.Application.Scanning;
 using LimbusModEditor.Application.SpineData;
@@ -116,7 +117,11 @@ public partial class WebView2MainWindow : Wpf.Ui.Controls.FluentWindow, IDisposa
             _store = InitializeIndexStore();
             var catalog = new AssetCatalog(_store, EmptyAssetStateSource.Instance);
             var projectState = new ProjectState();
-            var spineData = new SpineDataGateway(Path.Combine(AppEnvironment.Current.CacheDirectory, "spine-data.db"));
+            // SpineDataGateway 查的是 assets/bundles/strings 三张表（见 SpineAssetLocator），
+            // 库名必须是 unity-cache-index.db；写成 spine-data.db 会得到一个没有表的空库，
+            // 于是任何 Spine 资源都查不到（维基 Spine 绑定长期 0 覆盖的真实原因之一）。
+            var spineData = new SpineDataGateway(Path.Combine(
+                AppEnvironment.Current.CacheDirectory, WorkbenchCachePaths.UnityCacheIndexFileName));
             var bankStore = new BankIndexStore(AppEnvironment.Current.CacheDirectory);
             var bankIndex = new BankIndexService(bankStore);
             var langText = new LangTextWorkbenchService();

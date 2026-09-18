@@ -3,6 +3,7 @@ using System.Text.Json;
 using LimbusModEditor.Application.AppConfig;
 using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Application.Catalog;
+using LimbusModEditor.Application.Caching;
 using LimbusModEditor.Application.Ipc;
 using LimbusModEditor.Application.Scanning;
 using LimbusModEditor.Application.SpineData;
@@ -56,7 +57,7 @@ internal static class WikiExportIpcCommand
         var store = UnityCacheSqliteIndexStore.ForCacheDirectory(environment.CacheDirectory);
         var catalog = new AssetCatalog(store, EmptyAssetStateSource.Instance);
         var spineData = SpineDataGatewayFactory.Create(
-            Path.Combine(environment.CacheDirectory, "spine-data.db"));
+            Path.Combine(environment.CacheDirectory, WorkbenchCachePaths.UnityCacheIndexFileName));
         var bankIndex = new BankIndexService(new BankIndexStore(environment.CacheDirectory));
         var langText = new LangTextWorkbenchService();
         var staticIndex = new StaticIndexService(new StaticTableIndexStore(environment.CacheDirectory));

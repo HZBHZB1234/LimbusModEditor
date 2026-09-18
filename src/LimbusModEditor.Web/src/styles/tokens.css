@@ -204,6 +204,81 @@
   --wiki-result-snippet: var(--lme-text-secondary);
   --wiki-thumb-bg: var(--lme-bg-elevated);          /* 缩略图/封面中性占位底 */
   --wiki-thumb-icon: var(--lme-text-disabled);
+
+  /* ════════════════════════════════════════════════════════════
+     v2 设计令牌（ui-redesign r1）—— 排版 / 间距 / 圆角 / 海拔 / 动效
+     ════════════════════════════════════════════════════════════ */
+
+  /* ── 排版比例：桌面 13px 基准，1.25 比率向上 ── */
+  --lme-font-size-2xl: 22px;
+  --lme-font-size-3xl: 28px;
+  --lme-line-height-tight: 1.25;    /* 标题 */
+  --lme-line-height-normal: 1.5;    /* 正文 */
+  --lme-line-height-relaxed: 1.7;   /* 说明/帮助文本 */
+  --lme-font-weight-regular: 400;
+  --lme-font-weight-medium: 500;
+  --lme-font-weight-semibold: 600;
+  --lme-font-weight-bold: 700;
+  --lme-tracking-caps: 0.5px;       /* 全大写小标签的字距 */
+
+  /* ── 间距刻度补充（原有 xs~xl 保留） ── */
+  --lme-gap-2xl: 32px;
+  --lme-gap-3xl: 48px;
+
+  /* ── 圆角补充 ── */
+  --lme-radius-xl: 12px;
+  --lme-radius-full: 999px;
+
+  /* ── 海拔（阴影）补充：面板浮层与聚焦环 ── */
+  --lme-shadow-xl: 0 8px 32px rgba(0, 0, 0, 0.55);
+  --lme-shadow-focus: 0 0 0 2px rgba(124, 111, 247, 0.35);
+  --lme-overlay-scrim: rgba(12, 12, 20, 0.6);
+
+  /* ── 动效时长与缓动 ── */
+  --lme-dur-fast: 120ms;
+  --lme-dur-base: 180ms;
+  --lme-dur-slow: 280ms;
+  --lme-ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --lme-ease-emphasized: cubic-bezier(0.3, 0, 0, 1);
+
+  /* ── 外壳：顶部命令栏 ── */
+  --lme-topbar-height: 46px;
+  --lme-topbar-bg: #17171f;
+  --lme-topbar-border: rgba(0, 0, 0, 0.45);
+  --lme-topbar-text: var(--lme-text-secondary);
+  --lme-topbar-icon-hover-bg: var(--lme-bg-hover);
+  --lme-brand-mark-bg: var(--lme-accent);
+  --lme-brand-mark-text: #ffffff;
+  --lme-cmdbar-bg: var(--lme-bg-input);
+  --lme-cmdbar-border: var(--lme-border-strong);
+  --lme-cmdbar-placeholder: var(--lme-text-muted);
+  --lme-cmdbar-kbd-bg: var(--lme-bg-elevated);
+  --lme-cmdbar-kbd-border: var(--lme-border);
+  --lme-cmdbar-kbd-text: var(--lme-text-muted);
+
+  /* ── 外壳：工作区 tab 条 ── */
+  --lme-tabbar-height: 38px;
+  --lme-tabbar-bg: var(--lme-bg-panel);
+  --lme-tabbar-border: var(--lme-border);
+  --lme-tab-text: var(--lme-text-secondary);
+  --lme-tab-text-hover: var(--lme-text-primary);
+  --lme-tab-hover-bg: var(--lme-bg-hover);
+  --lme-tab-active-text: var(--lme-text-primary);
+  --lme-tab-active-underline: var(--lme-accent);
+  --lme-tab-active-underline-wiki: var(--wiki-accent); /* 维基工作区激活时用金色 */
+
+  /* ── 命令面板（Ctrl+K） ── */
+  --lme-palette-scrim: var(--lme-overlay-scrim);
+  --lme-palette-bg: var(--lme-bg-elevated);
+  --lme-palette-border: var(--lme-border-strong);
+  --lme-palette-option-hover: var(--lme-bg-hover);
+  --lme-palette-option-active: var(--lme-bg-selected);
+  --lme-palette-group-text: var(--lme-text-muted);
+
+  /* ── 列表行质感 ── */
+  --lme-row-divider: rgba(255, 255, 255, 0.04);
+  --lme-progressbar-bg: var(--lme-bg-input);
+  --lme-progressbar-fill: var(--lme-accent);
 }
 
 /* ── 全局基础 ── */

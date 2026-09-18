@@ -422,6 +422,68 @@ function onRawJsonInput() {
   }
 }
 
+// ── 保存记录（static.editRecord + static.readRecord 读回）──────────
+
+const saving = ref(false)
+const saveMessage = ref('')
+const saveFailed = ref(false)
+
+/**
+ * 保存当前记录的改动。
+ *
+ * 编辑形态选「整条记录的 JSON 文本」而不是逐字段：后端 `static.editRecord` 的语义是
+ * **用请求里的 json 整条替换该行**（`ReplaceRow`），按字段改最终也要拼回整行 JSON，
+ * 中间多一层「字段 ↔ 行」的转换就多一处失真（类型、嵌套、键顺序）。
+ *
+ * 保存后立即用 `static.readRecord` 读回覆盖预览：后端读的是「编辑集优先」的当前值，
+ * 所以读到的就是改后内容（不是官方原文）。
+ */
+async function onSaveRecord() {
+  const table = selectedTable.value
+  const record = selectedRecord.value
+  if (!table || !record || saving.value) return
+
+  // 前端先判一次合法性：后端也会判（给中文错误），这里挡掉省一次往返。
+  try {
+    JSON.parse(rawJsonText.value)
+  } catch (e) {
+    parseError.value = e instanceof Error ? e.message : String(e)
+    return
+  }
+  parseError.value = null
+
+  saving.value = true
+  saveMessage.value = ''
+  saveFailed.value = false
+  try {
+    await ipc.request('static.editRecord', {
+      tableId: table.tableId,
+      recordId: record.key,
+      json: rawJsonText.value,
+    })
+
+    const reread = await ipc.request<{ json?: string }>('static.readRecord', {
+      tableId: table.tableId,
+      recordId: record.key,
+    })
+    const fresh = reread?.json ?? ''
+    record.jsonContent = fresh
+    record.editState = 'Modified'
+    rawJsonText.value = fresh
+    try {
+      rootNode.value = buildTree(JSON.parse(fresh), '(root)', '$')
+    } catch {
+      rootNode.value = null // 读回的不是合法 JSON：树视图留空，原始文本里照实显示
+    }
+    saveMessage.value = '已保存（该改动会随导出写进 .staticmod）'
+  } catch (e: unknown) {
+    saveFailed.value = true
+    saveMessage.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    saving.value = false
+  }
+}
+
 // ── Diff 视图 ─────────────────────────────────────────────
 
 function onToggleDiff() {
@@ -686,6 +748,23 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
             />
             <div v-if="parseError" class="parse-error">
               ⚠️ {{ parseError }}
+            </div>
+            <!-- 记录编辑入口：改完直接保存，保存后用 static.readRecord 读回覆盖上面 -->
+            <div class="save-bar">
+              <button
+                class="save-btn"
+                :disabled="!selectedRecord || saving"
+                @click="onSaveRecord"
+              >
+                {{ saving ? '保存中…' : '💾 保存修改' }}
+              </button>
+              <span
+                v-if="saveMessage"
+                class="save-message"
+                :class="{ failed: saveFailed }"
+              >
+                {{ saveMessage }}
+              </span>
             </div>
           </div>
 
@@ -1146,6 +1225,43 @@ const sortOptions: { value: StaticSortKind; label: string }[] = [
   flex-direction: column;
   overflow: hidden;
   padding: var(--lme-gap-sm);
+}
+
+/* ── 保存记录 ── */
+.save-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-sm);
+  padding-top: var(--lme-gap-sm);
+  flex-shrink: 0;
+}
+
+.save-btn {
+  padding: 3px 12px;
+  background: var(--lme-bg-elevated);
+  border: 1px solid var(--lme-border);
+  border-radius: var(--lme-radius-sm);
+  color: var(--lme-text-secondary);
+  cursor: pointer;
+  font-size: var(--lme-font-size-sm);
+  flex-shrink: 0;
+}
+
+.save-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.save-message {
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.save-message.failed {
+  color: var(--lme-error);
 }
 
 .raw-textarea {

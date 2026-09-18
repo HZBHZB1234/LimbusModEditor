@@ -5,6 +5,18 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ipc } from '@/ipc'
 import type { ProgressPayload } from '@/ipc'
+import {
+  NAlert,
+  NButton,
+  NCard,
+  NCheckbox,
+  NEmpty,
+  NProgress,
+  useMessage,
+} from 'naive-ui'
+
+/** 轻量反馈（App.vue 的 NMessageProvider 已在位） */
+const message = useMessage()
 
 // ── 导出槽位定义 ──
 interface ExportSlot {
@@ -186,8 +198,10 @@ async function startExport() {
     // 后端只回 root + 槽位数量，没有逐条清单：报告列表留空，不编造
     exportReport.value = []
     exportComplete.value = true
+    message.success(`导出完成：${result.root}（${result.slots} 个槽位）`)
   } catch (e: unknown) {
     exportError.value = e instanceof Error ? e.message : String(e)
+    message.error(`导出失败：${exportError.value}`)
   } finally {
     isExporting.value = false
   }
@@ -242,6 +256,7 @@ onUnmounted(() => {
         <span class="column-subtitle">源格式 → 目标兼容性</span>
       </div>
 
+      <!-- 兼容性矩阵：源格式 × 目标格式（✓/✗） -->
       <div class="matrix-container">
         <table class="matrix-table">
           <thead>
@@ -268,44 +283,45 @@ onUnmounted(() => {
         </table>
       </div>
 
+      <!-- 导出槽位：NCheckbox 只承载勾选态，切换仍走原 toggleSlot -->
       <div class="slot-section">
         <h4>导出槽位</h4>
         <div class="slot-list">
-          <label
+          <div
             v-for="slot in exportSlots"
             :key="slot.id"
             class="slot-item"
             :class="{ enabled: slot.enabled }"
           >
-            <input
-              type="checkbox"
+            <NCheckbox
+              class="slot-check"
               :checked="slot.enabled"
-              @change="toggleSlot(slot.id)"
+              @update:checked="toggleSlot(slot.id)"
             />
             <span class="slot-label">{{ slot.label }}</span>
             <span class="slot-ext lme-mono">{{ slot.ext }}</span>
             <span class="slot-desc">{{ slot.description }}</span>
-          </label>
+          </div>
         </div>
       </div>
 
       <div class="group-section">
         <h4>导出分组</h4>
         <div class="group-list">
-          <label
+          <div
             v-for="group in exportGroups"
             :key="group.id"
             class="group-item"
             :class="{ enabled: group.enabled }"
           >
-            <input
-              type="checkbox"
+            <NCheckbox
+              class="group-check"
               :checked="group.enabled"
-              @change="toggleGroup(group.id)"
+              @update:checked="toggleGroup(group.id)"
             />
             <span class="group-label lme-mono">{{ group.label }}</span>
             <span class="group-desc">{{ group.description }}</span>
-          </label>
+          </div>
         </div>
       </div>
     </div>
@@ -316,8 +332,7 @@ onUnmounted(() => {
     <!-- 右栏：预览 / 分析 / 进度 / 报告 -->
     <div class="preview-column">
       <!-- 导出预览 -->
-      <div class="preview-section">
-        <h3>导出预览</h3>
+      <NCard class="preview-section" size="small" title="导出预览">
         <div class="preview-grid">
           <div class="preview-item">
             <span class="preview-value">{{ exportPreview.groups }}</span>
@@ -336,68 +351,94 @@ onUnmounted(() => {
             <span class="preview-label">预计大小</span>
           </div>
         </div>
-      </div>
+      </NCard>
 
       <!-- 导出顾问分析 -->
-      <div class="advisor-section">
-        <h3>导出顾问</h3>
+      <NCard class="advisor-section" size="small" title="导出顾问">
         <div class="advisor-list">
-          <div
+          <NAlert
             v-for="(item, i) in advisorItems"
             :key="i"
             class="advisor-item"
             :class="'advisor-' + item.level"
+            :type="item.level === 'info' ? 'info' : item.level === 'warning' ? 'warning' : 'error'"
+            :title="item.message"
+            :bordered="false"
           >
-            <span class="advisor-icon">
-              {{ item.level === 'info' ? 'ℹ' : item.level === 'warning' ? '⚠' : '✗' }}
-            </span>
-            <div class="advisor-content">
-              <div class="advisor-message">{{ item.message }}</div>
-              <div class="advisor-reasoning">{{ item.reasoning }}</div>
-            </div>
-          </div>
+            {{ item.reasoning }}
+          </NAlert>
           <div v-if="advisorItems.length === 0" class="advisor-empty">
-            暂无分析建议
+            <NEmpty size="small" description="暂无分析建议" />
           </div>
         </div>
-      </div>
+      </NCard>
 
-      <!-- 进度条 -->
-      <div v-if="isExporting || exportComplete" class="progress-section">
-        <h3>导出进度</h3>
-        <div class="progress-bar-container">
-          <div class="progress-bar" :style="{ width: progressPercent + '%' }" />
-        </div>
-        <div class="progress-info">
-          <span v-if="progress" class="progress-message">{{ progress.message }}</span>
-          <span class="progress-percent lme-mono">{{ progressPercent }}%</span>
-        </div>
+      <!-- 导出操作：开始 / 取消（IPC 调用点未变） -->
+      <NCard class="progress-section" size="small" title="导出操作">
         <div class="progress-actions">
-          <button
+          <NButton
             v-if="isExporting"
             class="btn btn-danger"
+            type="error"
+            size="small"
             @click="cancelExport"
           >
             取消导出
-          </button>
-          <button
-            v-if="!isExporting && !exportComplete"
+          </NButton>
+          <NButton
+            v-else-if="!exportComplete"
             class="btn btn-primary"
+            type="primary"
+            size="small"
             @click="startExport"
           >
             开始导出
-          </button>
+          </NButton>
+          <NButton
+            v-else
+            class="btn btn-secondary"
+            size="small"
+            @click="startExport"
+          >
+            再次导出
+          </NButton>
         </div>
-      </div>
+
+        <!-- 进度条 -->
+        <div v-if="isExporting || exportComplete" class="progress-block">
+          <NProgress
+            class="progress-bar-container"
+            type="line"
+            :percentage="progressPercent"
+            :height="8"
+            :show-indicator="false"
+            :border-radius="4"
+          />
+          <div class="progress-info">
+            <span v-if="progress" class="progress-message">{{ progress.message }}</span>
+            <span class="progress-percent lme-mono">{{ progressPercent }}%</span>
+          </div>
+        </div>
+      </NCard>
 
       <!-- 错误提示 -->
-      <div v-if="exportError" class="error-banner">
-        ⚠️ 导出失败：{{ exportError }}
-      </div>
+      <NAlert
+        v-if="exportError"
+        class="error-banner"
+        type="error"
+        :closable="false"
+        title="导出失败"
+      >
+        {{ exportError }}
+      </NAlert>
 
       <!-- 导出报告 -->
-      <div v-if="exportComplete && exportReport.length > 0" class="report-section">
-        <h3>导出报告</h3>
+      <NCard
+        v-if="exportComplete && exportReport.length > 0"
+        class="report-section"
+        size="small"
+        title="导出报告"
+      >
         <div class="report-summary">
           <span class="report-stat">
             <span class="stat-value" style="color: var(--lme-success)">{{ exportReport.filter((r) => r.status === '已应用').length }}</span>
@@ -429,16 +470,22 @@ onUnmounted(() => {
             <span class="report-detail">{{ item.detail }}</span>
           </div>
         </div>
-        <div class="report-actions">
-          <button class="btn btn-primary" @click="openOutputLocation">
-            📂 打开输出目录
-          </button>
-        </div>
-      </div>
+        <template #action>
+          <div class="report-actions">
+            <NButton class="btn btn-primary" type="primary" size="small" @click="openOutputLocation">
+              📂 打开输出目录
+            </NButton>
+          </div>
+        </template>
+      </NCard>
 
       <!-- 空状态 -->
       <div v-if="!isExporting && !exportComplete && !exportError" class="empty-state">
-        <p>配置导出选项后点击「开始导出」</p>
+        <NEmpty size="small" description="配置导出选项后点击「开始导出」">
+          <template #extra>
+            <span class="state-hint">左侧勾选导出槽位与分组，导出方向由宿主目录对话框决定</span>
+          </template>
+        </NEmpty>
       </div>
     </div>
   </div>
@@ -571,9 +618,9 @@ onUnmounted(() => {
   border-color: var(--lme-accent-muted);
 }
 
-.slot-item input,
-.group-item input {
-  accent-color: var(--lme-accent);
+.slot-check,
+.group-check {
+  flex-shrink: 0;
 }
 
 .slot-label,
@@ -720,18 +767,16 @@ onUnmounted(() => {
   padding: var(--lme-gap-lg);
 }
 
-/* ── 进度条 ── */
-.progress-bar-container {
-  height: 8px;
-  background: var(--lme-bg-input);
-  border-radius: var(--lme-radius-sm);
-  overflow: hidden;
+/* ── 进度条（NProgress，尺寸由属性给定） ── */
+.progress-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lme-gap-sm);
+  margin-top: var(--lme-gap-md);
 }
 
-.progress-bar {
-  height: 100%;
-  background: var(--lme-accent);
-  transition: width 0.3s ease;
+.progress-bar-container {
+  width: 100%;
 }
 
 .progress-info {

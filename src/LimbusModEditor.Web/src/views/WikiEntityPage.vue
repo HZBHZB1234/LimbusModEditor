@@ -3,11 +3,11 @@
  * WikiEntityPage — 通用实体页面（人格 / E.G.O / 饰品 / 敌人 / 异想体 / 播报员）
  *
  * 布局对照 docs/WIKI-PREVIEW-UPGRADE-SPEC.md §4.1 与 docs/img/wiki-personality-page.png：
- *   左栏 WikiToc（编号 + 吸顶） | 主区（引言 → 分节 Tab → 媒体） | 右栏 WikiInfoboxCard
+ *   左栏 WikiToc（编号 + 吸顶 + 当前项高亮） | 主区（引言 → 分节 Tab → 媒体） | 右栏 WikiInfoboxCard
  * 剧情类（category === 'story'）走 WikiStoryView 专用布局（见模板分派处说明）。
  */
 
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ipc } from '@/ipc'
 import WikiShell from '@/components/WikiShell.vue'
@@ -221,6 +221,55 @@ const toc = computed<TocItem[]>(() => {
   if (page.value?.toc?.length) return page.value.toc
   return (page.value?.sections ?? []).map((s) => ({ id: s.id, title: s.title, level: 1 }))
 })
+
+// ═══════════════ 目录当前项联动（滚动 → TOC 高亮）═══════════════
+
+/** 当前视口顶部最近的分节 id，传给 WikiToc 的 activeId 做高亮 */
+const activeSectionId = ref('')
+
+/** 不在当前 Tab 面板 / 已被 display:none 的分节不参与判定 */
+function spyable(id: string): HTMLElement | null {
+  const el = document.getElementById(id)
+  if (!el || el.offsetParent === null) return null
+  return el
+}
+
+function updateActiveSection() {
+  if (!page.value || isStory.value) return
+  const root = document.querySelector('.wiki-slot')
+  if (!root) return
+  const rootTop = root.getBoundingClientRect().top
+  let current = ''
+  for (const item of toc.value) {
+    const el = spyable(item.id)
+    if (!el) continue
+    // 以「分节标题滚过视口顶部以下 120px」为界取最后一个越界者
+    if (el.getBoundingClientRect().top - rootTop <= 120) current = item.id
+    else break
+  }
+  activeSectionId.value = current
+}
+
+let spyEl: Element | null = null
+let spyRaf = 0
+
+function onSpyScroll() {
+  cancelAnimationFrame(spyRaf)
+  spyRaf = requestAnimationFrame(updateActiveSection)
+}
+
+onMounted(() => {
+  spyEl = document.querySelector('.wiki-slot')
+  spyEl?.addEventListener('scroll', onSpyScroll, { passive: true })
+})
+
+onUnmounted(() => {
+  spyEl?.removeEventListener('scroll', onSpyScroll)
+  cancelAnimationFrame(spyRaf)
+})
+
+// 页面数据或激活 Tab 变化后，可见分节集合会变，重算一次当前项
+watch([page, activeTab], () => requestAnimationFrame(updateActiveSection))
 
 // ═══════════════ 分节条目（后端 section.entries[]）═══════════════
 
@@ -512,16 +561,19 @@ function formatFieldValue(field: { value: string; type: string }): string {
     @search="handleSearch"
   >
     <div class="wiki-entity-page">
+      <!-- 顶部细进度条（与首页 / 资源工作台同一套加载语言） -->
+      <div v-if="loading" class="loading-bar" aria-hidden="true" />
+
       <!-- 加载状态 -->
-      <div v-if="loading" class="page-state">
-        <div class="state-spinner">⏳</div>
-        <span>加载页面内容…</span>
+      <div v-if="loading" class="page-state state-block">
+        <span class="state-icon state-spinner">⏳</span>
+        <span class="state-text">加载页面内容…</span>
       </div>
 
       <!-- 错误状态 -->
-      <div v-else-if="error" class="page-state page-error">
-        <div class="state-icon">⚠️</div>
-        <span>{{ error }}</span>
+      <div v-else-if="error" class="error-banner page-error">
+        <span class="state-icon">⚠️</span>
+        <span class="error-text">{{ error }}</span>
         <button class="retry-btn" @click="loadPage">重试</button>
       </div>
 
@@ -535,7 +587,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
 
       <!-- 实体页内容 -->
       <template v-else-if="page">
-        <!-- 标题区 -->
+        <!-- 标题区：金色大标题 + 副题 + 元信息，下缘分隔线 -->
         <header class="page-header">
           <h1 class="page-title">{{ page.title }}</h1>
           <p v-if="page.subtitle" class="page-subtitle">{{ page.subtitle }}</p>
@@ -551,11 +603,12 @@ function formatFieldValue(field: { value: string; type: string }): string {
         <WikiNoticeBox v-if="noticeText" :text="noticeText" icon="ℹ️" />
 
         <div class="page-body">
-          <!-- 左栏：编号目录（吸顶 + 回到顶部） -->
+          <!-- 左栏：编号目录（吸顶 + 当前项高亮 + 回到顶部） -->
           <WikiToc
             v-if="toc.length > 0"
             class="page-toc"
             :items="toc"
+            :active-id="activeSectionId"
             show-back-to-top
             @select="scrollToSection"
             @back-top="scrollToTop"
@@ -768,7 +821,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
             <WikiGallery v-if="gallery.length > 0" :images="gallery" title="画廊" />
           </main>
 
-          <!-- 右栏：信息框 -->
+          <!-- 右栏：信息框 + 相关页面 -->
           <aside class="page-aside">
             <WikiInfoboxCard
               v-if="infoboxCard"
@@ -786,7 +839,9 @@ function formatFieldValue(field: { value: string; type: string }): string {
                   v-for="related in relatedPages"
                   :key="related.id"
                   class="related-item"
+                  tabindex="0"
                   @click="navigateToRelated(related)"
+                  @keydown.enter.prevent="navigateToRelated(related)"
                 >
                   <span class="related-item-title">{{ related.title }}</span>
                   <span class="related-item-cat">
@@ -805,23 +860,49 @@ function formatFieldValue(field: { value: string; type: string }): string {
 <style scoped>
 /* ═══════════════ 根容器 ═══════════════ */
 .wiki-entity-page {
-  padding: var(--lme-gap-lg) var(--lme-gap-xl);
-  max-width: 1440px;
+  position: relative;
+  padding: var(--lme-gap-xl) var(--lme-gap-2xl) var(--lme-gap-3xl);
 }
 
-/* ═══════════════ 状态 ═══════════════ */
-.page-state {
+/* ═══════════════ 状态：顶部细进度条 / state-block / error-banner ═══════════════ */
+.loading-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  overflow: hidden;
+  z-index: var(--lme-z-raised);
+  background: var(--lme-progressbar-bg);
+}
+
+.loading-bar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  border-radius: var(--lme-radius-full);
+  background: var(--wiki-accent);
+  animation: loading-slide 1s var(--lme-ease-standard) infinite;
+}
+
+@keyframes loading-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(350%);
+  }
+}
+
+.page-state.state-block {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: var(--lme-gap-md);
-  padding: var(--lme-gap-xl) 0;
-  font-size: var(--lme-font-size-md);
+  gap: var(--lme-gap-sm);
+  padding: var(--lme-gap-3xl) var(--lme-gap-md);
   color: var(--lme-text-muted);
-}
-
-.page-error {
-  color: var(--lme-error);
+  font-size: var(--lme-font-size-md);
 }
 
 .state-spinner {
@@ -831,21 +912,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
 
 .state-icon {
   font-size: 32px;
-}
-
-.retry-btn {
-  padding: var(--lme-gap-sm) var(--lme-gap-lg);
-  background: var(--lme-accent);
-  border: none;
-  border-radius: var(--lme-radius-md);
-  color: var(--wiki-infobox-header-text);
-  font-size: var(--lme-font-size-sm);
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.retry-btn:hover {
-  background: var(--lme-accent-hover);
+  line-height: 1;
 }
 
 @keyframes spin {
@@ -853,16 +920,53 @@ function formatFieldValue(field: { value: string; type: string }): string {
   to { transform: rotate(360deg); }
 }
 
-/* ═══════════════ 标题区 ═══════════════ */
+.error-banner.page-error {
+  display: flex;
+  align-items: center;
+  gap: var(--lme-gap-sm);
+  padding: var(--lme-gap-sm) var(--lme-gap-md);
+  background: var(--lme-error-banner-bg);
+  border: 1px solid var(--lme-error);
+  border-radius: var(--lme-radius-md);
+  color: var(--lme-error);
+  font-size: var(--lme-font-size-sm);
+}
+
+.error-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.retry-btn {
+  flex-shrink: 0;
+  padding: var(--lme-gap-xs) var(--lme-gap-lg);
+  background: var(--wiki-accent);
+  border: none;
+  border-radius: var(--lme-radius-md);
+  color: var(--wiki-infobox-header-text);
+  font-size: var(--lme-font-size-sm);
+  font-weight: var(--lme-font-weight-semibold);
+  cursor: pointer;
+  transition: background var(--lme-dur-fast) var(--lme-ease-standard);
+}
+
+.retry-btn:hover {
+  background: var(--wiki-accent-strong);
+}
+
+/* ═══════════════ 标题区：金标题 + 分隔线 ═══════════════ */
 .page-header {
-  margin-bottom: var(--lme-gap-lg);
+  max-width: var(--wiki-content-max-width);
+  margin: 0 auto var(--lme-gap-xl);
+  padding-bottom: var(--lme-gap-md);
+  border-bottom: 1px solid var(--wiki-section-head-border);
 }
 
 .page-title {
   margin: 0;
   font-size: var(--wiki-title-size);
   line-height: var(--wiki-title-line);
-  font-weight: 700;
+  font-weight: var(--lme-font-weight-bold);
   color: var(--wiki-title);
 }
 
@@ -884,7 +988,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
   padding: 2px 10px;
   border-radius: var(--wiki-chip-radius);
   font-size: var(--lme-font-size-xs);
-  font-weight: 600;
+  font-weight: var(--lme-font-weight-semibold);
   background: var(--wiki-chip-bg);
   border: 1px solid var(--wiki-chip-border);
   color: var(--wiki-chip-text);
@@ -899,49 +1003,83 @@ function formatFieldValue(field: { value: string; type: string }): string {
   color: var(--lme-text-muted);
 }
 
-/* ═══════════════ 主体栅格：目录 | 主区 | 信息框（主区:信息框 ≈ 7:3） ═══════════════ */
+/* ═══════════════ 主体栅格：目录 | 主区 | 信息框 ═══════════════
+   不再整页定宽：栅格本身 max-width 居中；信息框列用 minmax(260px, 320px)
+   弹性收缩，正文列 minmax(0,1fr) 永不被挤爆。 */
 .page-body {
   display: grid;
-  grid-template-columns: auto minmax(0, 7fr) minmax(0, 3fr);
-  gap: var(--lme-gap-xl);
+  grid-template-columns: var(--wiki-toc-width) minmax(0, 1fr) minmax(var(--wiki-aside-min), var(--wiki-aside-max));
+  grid-template-areas: 'toc main aside';
+  gap: var(--lme-gap-2xl);
   align-items: start;
+  max-width: var(--wiki-page-max-width);
+  margin-inline: auto;
 }
 
 .page-toc {
-  grid-column: 1;
+  grid-area: toc;
 }
 
 .page-main {
-  grid-column: 2;
+  grid-area: main;
   min-width: 0;
+  max-width: var(--wiki-content-max-width);
 }
 
 .page-aside {
-  grid-column: 3;
+  grid-area: aside;
   display: flex;
   flex-direction: column;
   gap: var(--lme-gap-lg);
+  min-width: 0;
 }
 
-/* 窄屏：右栏下沉到主区下方，目录移到主区上方 */
-@media (max-width: 1024px) {
+/* 中窄屏：信息框下沉到正文下方，目录保持左栏吸顶 */
+@media (max-width: 1280px) {
+  .page-body {
+    grid-template-columns: var(--wiki-toc-width) minmax(0, 1fr);
+    grid-template-areas:
+      'toc main'
+      'toc aside';
+  }
+}
+
+/* 窄屏（<1100px）：单列上下堆叠，目录变为页内静态块 */
+@media (max-width: 1100px) {
   .page-body {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      'toc'
+      'main'
+      'aside';
   }
-  .page-toc,
-  .page-main,
-  .page-aside {
-    grid-column: 1;
+
+  .page-body > .page-toc {
+    position: static;
+    width: auto;
+    max-height: none;
+    padding: 0 0 var(--lme-gap-md);
   }
 }
 
-/* ═══════════════ 分节 ═══════════════ */
+/* ═══════════════ 信息框（右栏卡片）：宽度交给栅格，补 zebra / hover ═══════════════ */
+.page-aside :deep(.wiki-infobox) {
+  width: 100%;
+  box-shadow: var(--lme-shadow-sm);
+}
+
+.page-aside :deep(.wiki-infobox-fields tr:nth-child(even)) {
+  background: var(--wiki-infobox-zebra-bg);
+}
+
+.page-aside :deep(.wiki-infobox-fields tr:hover) {
+  background: var(--wiki-infobox-row-hover);
+}
+
+/* ═══════════════ 分节：维基式开放式排版（金标题 + 下缘分隔线） ═══════════════ */
 .wiki-section {
-  margin-bottom: var(--lme-gap-lg);
-  background: var(--lme-bg-panel);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-md);
-  overflow: hidden;
+  margin: 0 0 var(--lme-gap-2xl);
+  scroll-margin-top: var(--lme-gap-sm);
 }
 
 .section-title {
@@ -949,13 +1087,12 @@ function formatFieldValue(field: { value: string; type: string }): string {
   align-items: center;
   justify-content: space-between;
   gap: var(--lme-gap-md);
-  margin: 0;
-  padding: var(--lme-gap-md) var(--lme-gap-lg);
-  font-size: var(--lme-font-size-lg);
-  font-weight: 600;
+  margin: 0 0 var(--lme-gap-md);
+  padding-bottom: var(--lme-gap-sm);
+  font-size: var(--lme-font-size-xl);
+  font-weight: var(--lme-font-weight-bold);
   color: var(--wiki-section-title);
-  border-bottom: 1px solid var(--lme-border);
-  background: var(--lme-bg-elevated);
+  border-bottom: 1px solid var(--wiki-section-head-border);
 }
 
 .section-title-text {
@@ -977,13 +1114,13 @@ function formatFieldValue(field: { value: string; type: string }): string {
   color: var(--lme-text-muted);
   cursor: pointer;
   font-size: var(--lme-font-size-xs);
-  transition: all 0.15s;
+  transition: all var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
 .action-btn:hover {
   background: var(--lme-bg-hover);
-  color: var(--lme-text-primary);
-  border-color: var(--lme-border-strong);
+  color: var(--wiki-accent);
+  border-color: var(--wiki-accent-dim);
 }
 
 .wiki-section.collapsed .section-content {
@@ -991,16 +1128,16 @@ function formatFieldValue(field: { value: string; type: string }): string {
 }
 
 .section-content {
-  padding: var(--lme-gap-lg);
+  padding: 0 0 var(--lme-gap-md);
   font-size: var(--lme-font-size-md);
   color: var(--wiki-body-text);
-  line-height: 1.8;
+  line-height: var(--lme-line-height-relaxed);
   white-space: pre-wrap;
 }
 
 /* 编辑器 */
 .section-editor {
-  padding: var(--lme-gap-md);
+  padding: 0 0 var(--lme-gap-md);
 }
 
 .editor-textarea {
@@ -1008,12 +1145,12 @@ function formatFieldValue(field: { value: string; type: string }): string {
   min-height: 200px;
   padding: var(--lme-gap-md);
   background: var(--lme-bg-input);
-  border: 1px solid var(--lme-accent);
+  border: 1px solid var(--wiki-accent-dim);
   border-radius: var(--lme-radius-md);
   color: var(--lme-text-primary);
   font-family: var(--lme-font-mono);
   font-size: var(--lme-font-size-sm);
-  line-height: 1.6;
+  line-height: var(--lme-line-height-normal);
   resize: vertical;
   outline: none;
 }
@@ -1032,7 +1169,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
   color: var(--wiki-infobox-header-text);
   font-size: var(--lme-font-size-sm);
   cursor: pointer;
-  transition: opacity 0.15s;
+  transition: opacity var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
 .editor-save:hover {
@@ -1047,7 +1184,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
   color: var(--lme-text-secondary);
   font-size: var(--lme-font-size-sm);
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
 .editor-cancel:hover {
@@ -1060,12 +1197,12 @@ function formatFieldValue(field: { value: string; type: string }): string {
   display: flex;
   flex-direction: column;
   gap: var(--lme-gap-md);
-  padding: 0 var(--lme-gap-lg) var(--lme-gap-md);
+  padding: 0 0 var(--lme-gap-md);
 }
 
 .entry-item {
   padding-left: var(--lme-gap-md);
-  border-left: 2px solid var(--lme-border);
+  border-left: 2px solid var(--wiki-accent-dim);
 }
 
 .entry-head {
@@ -1078,7 +1215,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
 .entry-title {
   margin: 0;
   font-size: var(--lme-font-size-md);
-  font-weight: 600;
+  font-weight: var(--lme-font-weight-semibold);
   color: var(--wiki-entry-title);
 }
 
@@ -1086,19 +1223,19 @@ function formatFieldValue(field: { value: string; type: string }): string {
   margin-top: var(--lme-gap-xs);
   font-size: var(--lme-font-size-md);
   color: var(--wiki-body-text);
-  line-height: 1.8;
+  line-height: var(--lme-line-height-relaxed);
   white-space: pre-wrap;
   word-break: break-word;
 }
 
 /* ═══════════════ 关联资源列表 ═══════════════ */
 .binding-list {
-  padding: 0 var(--lme-gap-lg) var(--lme-gap-lg);
+  padding: 0 0 var(--lme-gap-md);
 }
 
 .binding-list-title {
   font-size: var(--lme-font-size-sm);
-  font-weight: 600;
+  font-weight: var(--lme-font-weight-semibold);
   color: var(--lme-text-secondary);
   margin-bottom: var(--lme-gap-xs);
 }
@@ -1140,11 +1277,12 @@ function formatFieldValue(field: { value: string; type: string }): string {
   color: var(--wiki-link);
   font-size: var(--lme-font-size-xs);
   cursor: pointer;
+  transition: all var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
 .binding-edit-btn:hover {
   background: var(--lme-bg-hover);
-  border-color: var(--lme-accent);
+  border-color: var(--wiki-accent);
 }
 
 /* ═══════════════ 相关页面 ═══════════════ */
@@ -1157,7 +1295,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
 
 .related-title {
   font-size: var(--lme-font-size-sm);
-  font-weight: 600;
+  font-weight: var(--lme-font-weight-semibold);
   color: var(--lme-text-secondary);
   margin-bottom: var(--lme-gap-sm);
 }
@@ -1178,7 +1316,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
   padding: var(--lme-gap-sm);
   border-radius: var(--lme-radius-sm);
   cursor: pointer;
-  transition: background 0.12s;
+  transition: background var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
 .related-item:hover {
@@ -1193,5 +1331,17 @@ function formatFieldValue(field: { value: string; type: string }): string {
 .related-item-cat {
   font-size: var(--lme-font-size-xs);
   color: var(--lme-text-muted);
+}
+
+/* ═══════════════ 焦点可访问性 ═══════════════ */
+.action-btn:focus-visible,
+.retry-btn:focus-visible,
+.editor-save:focus-visible,
+.editor-cancel:focus-visible,
+.binding-edit-btn:focus-visible,
+.related-item:focus-visible,
+.page-toc :deep(.wiki-toc-link):focus-visible {
+  outline: none;
+  box-shadow: var(--lme-shadow-focus);
 }
 </style>

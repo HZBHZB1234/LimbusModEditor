@@ -205,6 +205,13 @@
   --wiki-thumb-bg: var(--lme-bg-elevated);          /* 缩略图/封面中性占位底 */
   --wiki-thumb-icon: var(--lme-text-disabled);
 
+  /* ── 维基：实体页响应式栅格（ui-redesign r2 追加） ── */
+  --wiki-page-max-width: 1360px;                    /* 实体页三栏栅格整体最大宽度 */
+  --wiki-aside-min: 260px;                          /* 信息框列最小宽 */
+  --wiki-aside-max: 320px;                          /* 信息框列最大宽 */
+  --wiki-infobox-zebra-bg: rgba(255, 255, 255, 0.03); /* 信息框字段行 zebra 底 */
+  --wiki-infobox-row-hover: rgba(230, 182, 70, 0.08); /* 信息框字段行 hover 底 */
+
   /* ════════════════════════════════════════════════════════════
      v2 设计令牌（ui-redesign r1）—— 排版 / 间距 / 圆角 / 海拔 / 动效
      ════════════════════════════════════════════════════════════ */

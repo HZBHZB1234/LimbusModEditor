@@ -12,6 +12,10 @@ x86/
 node_modules/
 dist/
 
+# AI 工具的工作目录（WorkBuddy 等会在仓库根落 .workbuddy* 记忆/状态文件）
+.workbuddy/
+.workbuddy-ai/
+
 # Publish artifacts
 artifacts/
 

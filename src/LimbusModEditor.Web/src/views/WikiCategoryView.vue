@@ -2,10 +2,12 @@
 // 维基分类页面（WikiCategoryView）
 // 分类索引视图：标题+描述、搜索筛选、网格/列表、分页
 // 数据来源：ipc.request('wiki.categoryIndex', { category })
-// 布局：WikiShell 包裹
+// 布局：WikiShell 包裹；呈现层使用 Naive UI（ui-redesign r5，维基区主色为金）
+// IPC 与深链（?category）零改动。
 
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { NAlert, NButton, NCard, NEmpty, NInput, NPagination, NSelect, NSpin, NTag } from 'naive-ui'
 import { ipc } from '@/ipc'
 import WikiShell from '@/components/WikiShell.vue'
 import type {
@@ -102,16 +104,12 @@ const paginatedPages = computed(() => {
   return filteredPages.value.slice(start, start + pageSize)
 })
 
-// 分页页码列表（最多显示 7 个）
-const pageNumbers = computed(() => {
-  const total = totalPageCount.value
-  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1)
-
-  const current = currentPage.value
-  if (current <= 4) return [1, 2, 3, 4, 5, -1, total]
-  if (current >= total - 3) return [1, -1, total - 4, total - 3, total - 2, total - 1, total]
-  return [1, -1, current - 1, current, current + 1, -2, total]
-})
+// 排序下拉选项（NSelect 用；文案与原 <option> 逐字一致）
+const sortOptions = [
+  { label: '默认排序', value: 'default' },
+  { label: '名称升序', value: 'title' },
+  { label: '名称降序', value: 'titleDesc' },
+]
 
 // ── 方法 ──
 
@@ -218,55 +216,64 @@ onUnmounted(() => {
         </header>
 
         <!-- ── 错误提示 ── -->
-        <div v-if="errorMessage" class="error-banner">
-          ⚠️ {{ errorMessage }}
-        </div>
+        <NAlert
+          v-if="errorMessage"
+          class="error-banner"
+          type="error"
+          :bordered="false"
+          :title="errorMessage"
+        />
 
         <!-- ── 工具栏：搜索 + 排序 + 视图切换 ── -->
         <div class="toolbar">
           <div class="toolbar-search">
-            <input
-              v-model="searchText"
+            <NInput
+              v-model:value="searchText"
               class="search-input"
-              type="text"
+              clearable
               :placeholder="`在「${categoryLabel}」中搜索页面…`"
               @input="onSearchInput"
             />
           </div>
           <div class="toolbar-controls">
             <label class="control-label">排序</label>
-            <select v-model="sortKind" class="control-select">
-              <option value="default">默认排序</option>
-              <option value="title">名称升序</option>
-              <option value="titleDesc">名称降序</option>
-            </select>
+            <NSelect
+              v-model:value="sortKind"
+              class="control-select"
+              size="small"
+              :options="sortOptions"
+            />
             <div class="view-toggle">
-              <button
+              <NButton
                 class="toggle-btn"
                 :class="{ active: viewMode === 'grid' }"
+                :type="viewMode === 'grid' ? 'primary' : 'default'"
+                size="small"
                 title="网格视图"
                 @click="viewMode = 'grid'"
               >
                 ▦
-              </button>
-              <button
+              </NButton>
+              <NButton
                 class="toggle-btn"
                 :class="{ active: viewMode === 'list' }"
+                :type="viewMode === 'list' ? 'primary' : 'default'"
+                size="small"
                 title="列表视图"
                 @click="viewMode = 'list'"
               >
                 ☰
-              </button>
+              </NButton>
             </div>
           </div>
         </div>
 
-        <!-- ── 加载中 ── -->
+        <!-- ── 结果统计（对齐灰机措辞） ── -->
         <div v-if="isLoading" class="loading-state">
+          <NSpin size="small" />
           <span>加载分类数据中…</span>
         </div>
 
-        <!-- ── 结果统计（对齐灰机措辞） ── -->
         <div v-else class="results-info">
           <span v-if="searchText.trim()">
             找到 <strong>{{ totalPages }}</strong> 个匹配页面
@@ -281,39 +288,46 @@ onUnmounted(() => {
 
         <!-- ── 网格视图 ── -->
         <div v-if="!isLoading && viewMode === 'grid'" class="page-grid">
-          <div
+          <NCard
             v-for="page in paginatedPages"
             :key="page.id"
             class="page-card"
+            size="small"
+            hoverable
+            content-style="padding: 0;"
             @click="navigateToPage(page.id)"
           >
-            <div class="page-thumb">
-              <img
-                v-if="page.thumbnailUrl"
-                :src="page.thumbnailUrl"
-                :alt="page.title"
-                class="thumb-img"
-              />
-              <div v-else class="thumb-placeholder">
-                <span class="thumb-icon">📄</span>
+            <template #cover>
+              <div class="page-thumb">
+                <img
+                  v-if="page.thumbnailUrl"
+                  :src="page.thumbnailUrl"
+                  :alt="page.title"
+                  class="thumb-img"
+                />
+                <div v-else class="thumb-placeholder">
+                  <span class="thumb-icon">📄</span>
+                </div>
               </div>
-            </div>
+            </template>
             <div class="page-info">
               <span class="page-title">{{ page.title }}</span>
               <span v-if="page.subtitle" class="page-subtitle">{{ page.subtitle }}</span>
             </div>
-          </div>
+          </NCard>
 
           <!-- 空状态 -->
-          <div v-if="paginatedPages.length === 0" class="empty-state">
-            <div class="empty-icon">📭</div>
-            <div class="empty-title">
-              {{ searchText.trim() ? '未找到匹配页面' : '该分类暂无页面' }}
-            </div>
-            <div class="empty-desc">
-              {{ searchText.trim() ? '尝试调整搜索关键词' : '可从此处开始创建新页面' }}
-            </div>
-          </div>
+          <NEmpty
+            v-if="paginatedPages.length === 0"
+            class="empty-state"
+            :description="searchText.trim() ? '未找到匹配页面' : '该分类暂无页面'"
+          >
+            <template #extra>
+              <span class="empty-desc">
+                {{ searchText.trim() ? '尝试调整搜索关键词' : '可从此处开始创建新页面' }}
+              </span>
+            </template>
+          </NEmpty>
         </div>
 
         <!-- ── 列表视图 ── -->
@@ -347,57 +361,46 @@ onUnmounted(() => {
 
           <!-- 空状态 -->
           <div v-if="paginatedPages.length === 0" class="empty-state-list">
-            <p>{{ searchText.trim() ? '未找到匹配页面' : '该分类暂无页面' }}</p>
+            <NEmpty :description="searchText.trim() ? '未找到匹配页面' : '该分类暂无页面'" />
           </div>
         </div>
 
         <!-- ── 分页 ── -->
-        <nav v-if="!isLoading && totalPageCount > 1" class="pagination">
-          <button
+        <div v-if="!isLoading && totalPageCount > 1" class="pagination">
+          <NButton
             class="page-btn"
+            size="small"
             :disabled="currentPage <= 1"
             @click="goToPage(currentPage - 1)"
           >
             ‹ 上一页
-          </button>
-          <button
+          </NButton>
+          <NButton
             class="page-btn"
+            size="small"
             :disabled="currentPage <= 1"
             @click="goToFirstPage"
           >
             首页
-          </button>
-          <template v-for="(p, idx) in pageNumbers" :key="idx">
-            <span v-if="p < 0" class="page-ellipsis">…</span>
-            <button
-              v-else
-              class="page-num"
-              :class="{ active: p === currentPage }"
-              @click="goToPage(p)"
-            >
-              {{ p }}
-            </button>
-          </template>
-          <button
+          </NButton>
+          <NPagination
+            class="page-pager"
+            :page="currentPage"
+            :page-count="totalPageCount"
+            :page-slot="7"
+            size="small"
+            show-quick-jumper
+            @update:page="goToPage"
+          />
+          <NButton
             class="page-btn"
+            size="small"
             :disabled="currentPage >= totalPageCount"
             @click="goToPage(currentPage + 1)"
           >
             下一页 ›
-          </button>
-          <span class="page-jump">
-            跳至
-            <input
-              type="number"
-              min="1"
-              :max="totalPageCount"
-              class="jump-input"
-              :value="currentPage"
-              @keyup.enter="(e: KeyboardEvent) => goToPage(Number((e.target as HTMLInputElement).value))"
-            />
-            / {{ totalPageCount }} 页
-          </span>
-        </nav>
+          </NButton>
+        </div>
       </div>
     </div>
   </WikiShell>
@@ -472,18 +475,6 @@ onUnmounted(() => {
 
 .search-input {
   width: 100%;
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  background: var(--lme-bg-input);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
-  color: var(--lme-text-primary);
-  font-size: var(--lme-font-size-md);
-  font-family: var(--lme-font-family);
-}
-
-.search-input:focus {
-  outline: none;
-  border-color: var(--lme-accent);
 }
 
 .toolbar-controls {
@@ -498,12 +489,7 @@ onUnmounted(() => {
 }
 
 .control-select {
-  padding: var(--lme-gap-xs) var(--lme-gap-sm);
-  background: var(--lme-bg-input);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
-  color: var(--lme-text-primary);
-  font-size: var(--lme-font-size-sm);
+  width: 130px;
 }
 
 .view-toggle {
@@ -511,37 +497,12 @@ onUnmounted(() => {
   gap: 2px;
 }
 
-.toggle-btn {
-  width: 32px;
-  height: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
-  color: var(--lme-text-muted);
-  cursor: pointer;
-  font-size: var(--lme-font-size-md);
-  transition: all 0.15s;
-}
-
-.toggle-btn:hover {
-  background: var(--lme-bg-hover);
-  color: var(--lme-text-primary);
-}
-
-.toggle-btn.active {
-  background: var(--wiki-tab-active-bg);
-  border-color: var(--wiki-tab-active-border);
-  color: var(--wiki-tab-active-text);
-}
-
 /* ── 加载状态 ── */
 .loading-state {
   display: flex;
   align-items: center;
   justify-content: center;
+  gap: var(--lme-gap-sm);
   padding: var(--lme-gap-xl);
   color: var(--lme-text-muted);
   font-size: var(--lme-font-size-md);
@@ -572,18 +533,15 @@ onUnmounted(() => {
 .page-card {
   display: flex;
   flex-direction: column;
-  background: var(--wiki-card-bg);
-  border: 1px solid var(--wiki-card-border);
-  border-radius: var(--lme-radius-md);
   overflow: hidden;
   cursor: pointer;
-  transition: border-color 0.15s, background 0.15s, transform 0.15s;
 }
 
+/* NCard 自带卡面/描边/圆角（主题由 tokens 派生）；此处只补悬浮色与维基卡皮肤变量 */
 .page-card:hover {
   border-color: var(--wiki-card-hover-border);
   background: var(--wiki-card-hover-bg);
-  transform: translateY(-1px);
+  transform: translateY(var(--wiki-card-lift));
 }
 
 .page-thumb {
@@ -747,17 +705,6 @@ onUnmounted(() => {
   text-align: center;
 }
 
-.empty-icon {
-  font-size: 48px;
-  margin-bottom: var(--lme-gap-sm);
-}
-
-.empty-title {
-  font-size: var(--lme-font-size-md);
-  font-weight: 600;
-  color: var(--lme-text-secondary);
-}
-
 .empty-desc {
   font-size: var(--lme-font-size-sm);
   color: var(--lme-text-muted);
@@ -778,89 +725,13 @@ onUnmounted(() => {
 .pagination {
   display: flex;
   align-items: center;
-  gap: var(--lme-gap-xs);
+  gap: var(--lme-gap-sm);
   padding: var(--lme-gap-md) 0;
   flex-wrap: wrap;
 }
 
-.page-btn {
-  padding: var(--lme-gap-xs) var(--lme-gap-md);
-  background: var(--lme-bg-panel);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
-  color: var(--lme-text-secondary);
-  cursor: pointer;
-  font-size: var(--lme-font-size-sm);
-  transition: all 0.15s;
-}
-
-.page-btn:hover:not(:disabled) {
-  background: var(--lme-bg-hover);
-  color: var(--lme-text-primary);
-}
-
-.page-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.page-num {
-  min-width: 32px;
-  height: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--lme-bg-panel);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
-  color: var(--lme-text-secondary);
-  cursor: pointer;
-  font-size: var(--lme-font-size-sm);
-  transition: all 0.15s;
-}
-
-.page-num:hover {
-  background: var(--lme-bg-hover);
-  color: var(--lme-text-primary);
-}
-
-.page-num.active {
-  background: var(--lme-accent);
-  border-color: var(--lme-accent);
-  color: var(--lme-text-primary);
-  font-weight: 600;
-}
-
-.page-ellipsis {
-  color: var(--lme-text-muted);
-  padding: 0 var(--lme-gap-xs);
-  font-size: var(--lme-font-size-sm);
-}
-
-.page-jump {
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-xs);
-  font-size: var(--lme-font-size-sm);
-  color: var(--lme-text-muted);
-  margin-left: var(--lme-gap-md);
-}
-
-.jump-input {
-  width: 48px;
-  padding: 2px var(--lme-gap-xs);
-  background: var(--lme-bg-input);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
-  color: var(--lme-text-primary);
-  font-size: var(--lme-font-size-sm);
-  text-align: center;
-  font-family: var(--lme-font-mono);
-}
-
-.jump-input:focus {
-  outline: none;
-  border-color: var(--lme-accent);
+.page-pager {
+  margin-left: var(--lme-gap-xs);
 }
 
 /* ── 响应式 ── */

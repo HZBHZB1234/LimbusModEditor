@@ -10,13 +10,24 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ipc } from '@/ipc'
+import {
+  NAlert,
+  NButton,
+  NCard,
+  NEmpty,
+  NInput,
+  NSpin,
+  NTabs,
+  NTabPane,
+  NTag,
+  useMessage,
+} from 'naive-ui'
 import WikiShell from '@/components/WikiShell.vue'
 import WikiToc from '@/components/wiki/WikiToc.vue'
 import WikiInfoboxCard from '@/components/wiki/WikiInfoboxCard.vue'
 import WikiQuoteBlock from '@/components/wiki/WikiQuoteBlock.vue'
 import WikiNoticeBox from '@/components/wiki/WikiNoticeBox.vue'
 import WikiChipList from '@/components/wiki/WikiChipList.vue'
-import WikiTabGroup from '@/components/wiki/WikiTabGroup.vue'
 import WikiAudioPlayer from '@/components/wiki/WikiAudioPlayer.vue'
 import WikiGallery from '@/components/wiki/WikiGallery.vue'
 import WikiSpineViewer from '@/components/wiki/WikiSpineViewer.vue'
@@ -42,6 +53,9 @@ import { WikiPageCategoryLabels } from '@/ipc/types'
 
 const route = useRoute()
 const router = useRouter()
+
+/** 轻提示（外壳已在 NMessageProvider 内挂载本页） */
+const message = useMessage()
 
 // ═══════════════ 页面数据 ═══════════════
 
@@ -199,10 +213,6 @@ const sectionGroups = computed<SectionGroup[]>(() => {
 /** 只有推导出了语义分组才用 Tab；否则平铺 */
 const useTabs = computed(() => sectionGroups.value.some((g) => g.key !== 'other'))
 
-const tabs = computed(() =>
-  sectionGroups.value.map((g) => ({ key: g.key, label: g.label, badge: g.sections.length })),
-)
-
 const activeTab = ref('')
 
 watch(
@@ -214,6 +224,45 @@ watch(
   },
   { immediate: true },
 )
+
+/**
+ * NTabs 的 value 类型是 string | number（库签名），这里收敛成 string 后再写回。
+ * （不直接用 v-model:value，避免 number 落进 Ref<string>）
+ */
+function onTabChange(key: string | number) {
+  activeTab.value = String(key)
+}
+
+/**
+ * 库 NTabs 的 tab 不是可聚焦控件、也不带键盘导航；
+ * 这里用 tabProps 补 role/tabindex 并在容器上补回 ← → Home End（原 WikiTabGroup 行为）。
+ */
+function onTabsKeydown(e: KeyboardEvent) {
+  const keys = sectionGroups.value.map((g) => g.key)
+  if (keys.length === 0) return
+  const index = keys.indexOf(activeTab.value)
+  let next = index
+  if (e.key === 'ArrowLeft') next = (index - 1 + keys.length) % keys.length
+  else if (e.key === 'ArrowRight') next = (index + 1) % keys.length
+  else if (e.key === 'Home') next = 0
+  else if (e.key === 'End') next = keys.length - 1
+  else return
+  e.preventDefault()
+  activeTab.value = keys[next]
+  requestAnimationFrame(() => {
+    document.querySelector<HTMLElement>(`.wiki-tab[data-name="${keys[next]}"]`)?.focus()
+  })
+}
+
+/** 分节 Tab 的可访问性属性（roving tabindex），库 tab 元素靠 tabProps 挂载 */
+function tabPropsOf(key: string) {
+  return {
+    class: 'wiki-tab',
+    role: 'tab',
+    tabindex: key === activeTab.value ? 0 : -1,
+    'aria-selected': key === activeTab.value,
+  }
+}
 
 // ═══════════════ 目录 ═══════════════
 
@@ -510,6 +559,7 @@ function saveEdit(section: WikiSection) {
       section.content = editBuffer.value
       editingSection.value = null
       editBuffer.value = ''
+      message.success('分节内容已保存')
     })
     .catch(() => {
       error.value = '保存失败，请重试'
@@ -566,16 +616,15 @@ function formatFieldValue(field: { value: string; type: string }): string {
 
       <!-- 加载状态 -->
       <div v-if="loading" class="page-state state-block">
-        <span class="state-icon state-spinner">⏳</span>
+        <NSpin size="medium" />
         <span class="state-text">加载页面内容…</span>
       </div>
 
       <!-- 错误状态 -->
-      <div v-else-if="error" class="error-banner page-error">
-        <span class="state-icon">⚠️</span>
-        <span class="error-text">{{ error }}</span>
-        <button class="retry-btn" @click="loadPage">重试</button>
-      </div>
+      <NAlert v-else-if="error" type="error" class="page-error">
+        <template #header>{{ error }}</template>
+        <NButton size="small" type="primary" @click="loadPage">重试</NButton>
+      </NAlert>
 
       <!--
         剧情类走专用视图（WikiStoryView）。
@@ -592,7 +641,8 @@ function formatFieldValue(field: { value: string; type: string }): string {
           <h1 class="page-title">{{ page.title }}</h1>
           <p v-if="page.subtitle" class="page-subtitle">{{ page.subtitle }}</p>
           <div class="page-meta">
-            <span v-if="categoryLabel" class="meta-category">{{ categoryLabel }}</span>
+            <!-- type="primary" 在维基工作区即金色（库主题主色取 --wiki-accent） -->
+            <NTag v-if="categoryLabel" size="small" type="primary">{{ categoryLabel }}</NTag>
             <WikiChipList v-if="tags.length > 0" :items="tags" class="page-meta-tags" />
             <span v-if="page.lastModified" class="meta-date">
               最后修改：{{ page.lastModified }}
@@ -624,8 +674,25 @@ function formatFieldValue(field: { value: string; type: string }): string {
             />
 
             <!-- 分节：可推导语义则用 Tab 分组，否则按原顺序平铺 -->
-            <WikiTabGroup v-if="useTabs" v-model:active="activeTab" :tabs="tabs">
-              <template v-for="group in sectionGroups" :key="group.key" #[group.key]>
+            <NTabs
+              v-if="useTabs"
+              class="wiki-tabs"
+              type="segment"
+              size="small"
+              :value="activeTab"
+              @update:value="onTabChange"
+              @keydown="onTabsKeydown"
+            >
+              <NTabPane
+                v-for="group in sectionGroups"
+                :key="group.key"
+                :name="group.key"
+                :tab-props="tabPropsOf(group.key)"
+              >
+                <template #tab>
+                  <span class="wiki-tab-label">{{ group.label }}</span>
+                  <span class="wiki-tab-badge">{{ group.sections.length }}</span>
+                </template>
                 <section
                   v-for="section in group.sections"
                   :key="section.id"
@@ -640,22 +707,24 @@ function formatFieldValue(field: { value: string; type: string }): string {
                       v-if="sourceMap[section.id]"
                       v-bind="sourceMap[section.id]"
                     />
-                      <button
+                      <NButton
                         v-if="section.collapsible"
-                        class="action-btn"
+                        size="tiny"
+                        text
                         :title="isSectionCollapsed(section) ? '展开' : '折叠'"
                         @click="toggleSection(section.id)"
                       >
                         {{ isSectionCollapsed(section) ? '展开' : '折叠' }}
-                      </button>
-                      <button
+                      </NButton>
+                      <NButton
                         v-if="section.editable"
-                        class="action-btn"
+                        size="tiny"
+                        text
                         title="编辑"
                         @click="startEdit(section)"
                       >
                         编辑
-                      </button>
+                      </NButton>
                     </span>
                   </h2>
 
@@ -666,10 +735,15 @@ function formatFieldValue(field: { value: string; type: string }): string {
 
                   <!-- 编辑模式 -->
                   <div v-else class="section-editor">
-                    <textarea v-model="editBuffer" class="editor-textarea" rows="12" />
+                    <NInput
+                      v-model:value="editBuffer"
+                      class="editor-textarea"
+                      type="textarea"
+                      :rows="12"
+                    />
                     <div class="editor-actions">
-                      <button class="editor-save" @click="saveEdit(section)">保存</button>
-                      <button class="editor-cancel" @click="cancelEdit">取消</button>
+                      <NButton size="small" type="primary" @click="saveEdit(section)">保存</NButton>
+                      <NButton size="small" @click="cancelEdit">取消</NButton>
                     </div>
                   </div>
 
@@ -708,20 +782,24 @@ function formatFieldValue(field: { value: string; type: string }): string {
                       <li v-for="b in otherBindingsOf(section)" :key="b.refKey" class="binding-item">
                         <span class="binding-kind">{{ b.kind }}</span>
                         <span class="binding-display">{{ b.display }}</span>
-                        <RouterLink
+                        <!-- 深链目标与原来一致（/assets /text /static /bank），只是按钮走库组件 -->
+                        <NButton
                           v-if="editTargetOf(b)"
+                          size="tiny"
+                          text
+                          type="primary"
                           class="binding-edit-btn"
                           :title="editTargetTitle(b)"
-                          :to="editTargetOf(b)!"
+                          @click="router.push(editTargetOf(b)!)"
                         >
                           去编辑
-                        </RouterLink>
+                        </NButton>
                       </li>
                     </ul>
                   </div>
                 </section>
-              </template>
-            </WikiTabGroup>
+              </NTabPane>
+            </NTabs>
 
             <template v-else>
               <section
@@ -738,22 +816,24 @@ function formatFieldValue(field: { value: string; type: string }): string {
                       v-if="sourceMap[section.id]"
                       v-bind="sourceMap[section.id]"
                     />
-                    <button
+                    <NButton
                       v-if="section.collapsible"
-                      class="action-btn"
+                      size="tiny"
+                      text
                       :title="isSectionCollapsed(section) ? '展开' : '折叠'"
                       @click="toggleSection(section.id)"
                     >
                       {{ isSectionCollapsed(section) ? '展开' : '折叠' }}
-                    </button>
-                    <button
+                    </NButton>
+                    <NButton
                       v-if="section.editable"
-                      class="action-btn"
+                      size="tiny"
+                      text
                       title="编辑"
                       @click="startEdit(section)"
                     >
                       编辑
-                    </button>
+                    </NButton>
                   </span>
                 </h2>
 
@@ -762,10 +842,15 @@ function formatFieldValue(field: { value: string; type: string }): string {
                 </div>
 
                 <div v-else class="section-editor">
-                  <textarea v-model="editBuffer" class="editor-textarea" rows="12" />
+                  <NInput
+                    v-model:value="editBuffer"
+                    class="editor-textarea"
+                    type="textarea"
+                    :rows="12"
+                  />
                   <div class="editor-actions">
-                    <button class="editor-save" @click="saveEdit(section)">保存</button>
-                    <button class="editor-cancel" @click="cancelEdit">取消</button>
+                    <NButton size="small" type="primary" @click="saveEdit(section)">保存</NButton>
+                    <NButton size="small" @click="cancelEdit">取消</NButton>
                   </div>
                 </div>
 
@@ -803,14 +888,18 @@ function formatFieldValue(field: { value: string; type: string }): string {
                     <li v-for="b in otherBindingsOf(section)" :key="b.refKey" class="binding-item">
                       <span class="binding-kind">{{ b.kind }}</span>
                       <span class="binding-display">{{ b.display }}</span>
-                      <RouterLink
+                      <!-- 深链目标与原来一致（/assets /text /static /bank），只是按钮走库组件 -->
+                      <NButton
                         v-if="editTargetOf(b)"
+                        size="tiny"
+                        text
+                        type="primary"
                         class="binding-edit-btn"
                         :title="editTargetTitle(b)"
-                        :to="editTargetOf(b)!"
+                        @click="router.push(editTargetOf(b)!)"
                       >
                         去编辑
-                      </RouterLink>
+                      </NButton>
                     </li>
                   </ul>
                 </div>
@@ -823,17 +912,28 @@ function formatFieldValue(field: { value: string; type: string }): string {
 
           <!-- 右栏：信息框 + 相关页面 -->
           <aside class="page-aside">
-            <WikiInfoboxCard
+            <!-- 信息框容器走库 NCard；黄底标题栏 / 字段行配色仍由 --wiki-* tokens 决定 -->
+            <NCard
               v-if="infoboxCard"
-              :title="infoboxCard.title"
-              :subtitle="infoboxCard.subtitle"
-              :image-url="infoboxCard.imageUrl"
-              :fields="infoboxCard.fields"
-              :tags="tags"
-            />
+              size="small"
+              class="page-infobox-card"
+              :content-style="{ padding: 0 }"
+            >
+              <WikiInfoboxCard
+                :title="infoboxCard.title"
+                :subtitle="infoboxCard.subtitle"
+                :image-url="infoboxCard.imageUrl"
+                :fields="infoboxCard.fields"
+                :tags="tags"
+              />
+            </NCard>
 
-            <div v-if="relatedPages.length > 0" class="related-pages">
-              <div class="related-title">相关页面</div>
+            <NCard
+              v-if="relatedPages.length > 0"
+              size="small"
+              title="相关页面"
+              class="page-related-card"
+            >
               <ul class="related-list">
                 <li
                   v-for="related in relatedPages"
@@ -849,10 +949,15 @@ function formatFieldValue(field: { value: string; type: string }): string {
                   </span>
                 </li>
               </ul>
-            </div>
+            </NCard>
           </aside>
         </div>
       </template>
+
+      <!-- 空态：既无数据也无错误（页面不存在等） -->
+      <div v-else class="state-block page-empty">
+        <NEmpty description="当前没有可展示的页面内容" />
+      </div>
     </div>
   </WikiShell>
 </template>
@@ -864,7 +969,7 @@ function formatFieldValue(field: { value: string; type: string }): string {
   padding: var(--lme-gap-xl) var(--lme-gap-2xl) var(--lme-gap-3xl);
 }
 
-/* ═══════════════ 状态：顶部细进度条 / state-block / error-banner ═══════════════ */
+/* ═══════════════ 状态：顶部细进度条 / state-block / NAlert 错误条 ═══════════════ */
 .loading-bar {
   position: absolute;
   top: 0;
@@ -899,59 +1004,24 @@ function formatFieldValue(field: { value: string; type: string }): string {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: var(--lme-gap-sm);
+  gap: var(--lme-gap-md);
   padding: var(--lme-gap-3xl) var(--lme-gap-md);
   color: var(--lme-text-muted);
   font-size: var(--lme-font-size-md);
 }
 
-.state-spinner {
-  font-size: 32px;
-  animation: spin 2s linear infinite;
-}
-
-.state-icon {
-  font-size: 32px;
-  line-height: 1;
-}
-
-@keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
-}
-
-.error-banner.page-error {
-  display: flex;
-  align-items: center;
-  gap: var(--lme-gap-sm);
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  background: var(--lme-error-banner-bg);
-  border: 1px solid var(--lme-error);
-  border-radius: var(--lme-radius-md);
-  color: var(--lme-error);
+.state-text {
   font-size: var(--lme-font-size-sm);
 }
 
-.error-text {
-  flex: 1;
-  min-width: 0;
+/* 错误提示条：库 NAlert（配色走库主题的 --lme-error），只补下缘间距 */
+.page-error {
+  margin-bottom: var(--lme-gap-lg);
 }
 
-.retry-btn {
-  flex-shrink: 0;
-  padding: var(--lme-gap-xs) var(--lme-gap-lg);
-  background: var(--wiki-accent);
-  border: none;
-  border-radius: var(--lme-radius-md);
-  color: var(--wiki-infobox-header-text);
-  font-size: var(--lme-font-size-sm);
-  font-weight: var(--lme-font-weight-semibold);
-  cursor: pointer;
-  transition: background var(--lme-dur-fast) var(--lme-ease-standard);
-}
-
-.retry-btn:hover {
-  background: var(--wiki-accent-strong);
+/* 空态：库 NEmpty */
+.page-empty.state-block {
+  padding: var(--lme-gap-3xl) var(--lme-gap-md);
 }
 
 /* ═══════════════ 标题区：金标题 + 分隔线 ═══════════════ */
@@ -982,16 +1052,6 @@ function formatFieldValue(field: { value: string; type: string }): string {
   gap: var(--lme-gap-md);
   margin-top: var(--lme-gap-sm);
   flex-wrap: wrap;
-}
-
-.meta-category {
-  padding: 2px 10px;
-  border-radius: var(--wiki-chip-radius);
-  font-size: var(--lme-font-size-xs);
-  font-weight: var(--lme-font-weight-semibold);
-  background: var(--wiki-chip-bg);
-  border: 1px solid var(--wiki-chip-border);
-  color: var(--wiki-chip-text);
 }
 
 .page-meta-tags {
@@ -1062,10 +1122,17 @@ function formatFieldValue(field: { value: string; type: string }): string {
   }
 }
 
-/* ═══════════════ 信息框（右栏卡片）：宽度交给栅格，补 zebra / hover ═══════════════ */
+/* ═══════════════ 信息框（右栏 NCard 容器）：宽度交给栅格，补 zebra / hover ═══════════════ */
+.page-infobox-card {
+  overflow: hidden;
+}
+
 .page-aside :deep(.wiki-infobox) {
   width: 100%;
-  box-shadow: var(--lme-shadow-sm);
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .page-aside :deep(.wiki-infobox-fields tr:nth-child(even)) {
@@ -1074,6 +1141,29 @@ function formatFieldValue(field: { value: string; type: string }): string {
 
 .page-aside :deep(.wiki-infobox-fields tr:hover) {
   background: var(--wiki-infobox-row-hover);
+}
+
+/* ═══════════════ 分节 Tab（库 NTabs segment；.wiki-tab 由 tabProps 挂在库 tab 上） ═══════════════ */
+.wiki-tabs {
+  margin: var(--lme-gap-xl) 0;
+}
+
+.wiki-tab-label {
+  font-size: var(--lme-font-size-md);
+}
+
+.wiki-tab-badge {
+  padding: 0 var(--lme-gap-xs);
+  background: var(--wiki-chip-bg);
+  border: 1px solid var(--wiki-chip-border);
+  border-radius: var(--wiki-chip-radius);
+  color: var(--wiki-chip-text);
+  font-size: var(--lme-font-size-xs);
+  font-weight: var(--lme-font-weight-regular);
+}
+
+.wiki-tabs :deep(.n-tab-pane) {
+  padding: 0;
 }
 
 /* ═══════════════ 分节：维基式开放式排版（金标题 + 下缘分隔线） ═══════════════ */
@@ -1106,21 +1196,13 @@ function formatFieldValue(field: { value: string; type: string }): string {
   gap: var(--lme-gap-sm);
 }
 
-.action-btn {
-  padding: 2px 10px;
-  background: var(--lme-bg-panel);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
+/* 分节操作（库 NButton text）：hover 收金色，与维基强调色一致 */
+.section-actions :deep(.n-button) {
   color: var(--lme-text-muted);
-  cursor: pointer;
-  font-size: var(--lme-font-size-xs);
-  transition: all var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
-.action-btn:hover {
-  background: var(--lme-bg-hover);
+.section-actions :deep(.n-button:hover) {
   color: var(--wiki-accent);
-  border-color: var(--wiki-accent-dim);
 }
 
 .wiki-section.collapsed .section-content {
@@ -1140,56 +1222,17 @@ function formatFieldValue(field: { value: string; type: string }): string {
   padding: 0 0 var(--lme-gap-md);
 }
 
-.editor-textarea {
-  width: 100%;
-  min-height: 200px;
-  padding: var(--lme-gap-md);
-  background: var(--lme-bg-input);
-  border: 1px solid var(--wiki-accent-dim);
-  border-radius: var(--lme-radius-md);
-  color: var(--lme-text-primary);
+/* 编辑器：库 NInput(textarea)，底色/边框走库主题，只补等宽字体 */
+.editor-textarea :deep(.n-input__textarea-el) {
   font-family: var(--lme-font-mono);
   font-size: var(--lme-font-size-sm);
   line-height: var(--lme-line-height-normal);
-  resize: vertical;
-  outline: none;
 }
 
 .editor-actions {
   display: flex;
   gap: var(--lme-gap-sm);
   margin-top: var(--lme-gap-md);
-}
-
-.editor-save {
-  padding: var(--lme-gap-sm) var(--lme-gap-lg);
-  background: var(--lme-success);
-  border: none;
-  border-radius: var(--lme-radius-md);
-  color: var(--wiki-infobox-header-text);
-  font-size: var(--lme-font-size-sm);
-  cursor: pointer;
-  transition: opacity var(--lme-dur-fast) var(--lme-ease-standard);
-}
-
-.editor-save:hover {
-  opacity: 0.85;
-}
-
-.editor-cancel {
-  padding: var(--lme-gap-sm) var(--lme-gap-lg);
-  background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-md);
-  color: var(--lme-text-secondary);
-  font-size: var(--lme-font-size-sm);
-  cursor: pointer;
-  transition: all var(--lme-dur-fast) var(--lme-ease-standard);
-}
-
-.editor-cancel:hover {
-  background: var(--lme-bg-hover);
-  color: var(--lme-text-primary);
 }
 
 /* ═══════════════ 分节条目 ═══════════════ */
@@ -1267,37 +1310,14 @@ function formatFieldValue(field: { value: string; type: string }): string {
   word-break: break-all;
 }
 
+/* 「去编辑」：库 NButton text-primary（维基区即金色） */
 .binding-edit-btn {
   flex-shrink: 0;
-  text-decoration: none;
-  padding: 1px 8px;
-  background: var(--lme-bg-elevated);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
-  color: var(--wiki-link);
-  font-size: var(--lme-font-size-xs);
-  cursor: pointer;
-  transition: all var(--lme-dur-fast) var(--lme-ease-standard);
 }
 
-.binding-edit-btn:hover {
-  background: var(--lme-bg-hover);
-  border-color: var(--wiki-accent);
-}
-
-/* ═══════════════ 相关页面 ═══════════════ */
-.related-pages {
-  background: var(--lme-bg-panel);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-md);
-  padding: var(--lme-gap-md);
-}
-
-.related-title {
-  font-size: var(--lme-font-size-sm);
-  font-weight: var(--lme-font-weight-semibold);
-  color: var(--lme-text-secondary);
-  margin-bottom: var(--lme-gap-sm);
+/* ═══════════════ 相关页面（右栏 NCard） ═══════════════ */
+.page-related-card :deep(.n-card__content) {
+  padding: var(--lme-gap-sm);
 }
 
 .related-list {
@@ -1333,15 +1353,15 @@ function formatFieldValue(field: { value: string; type: string }): string {
   color: var(--lme-text-muted);
 }
 
-/* ═══════════════ 焦点可访问性 ═══════════════ */
-.action-btn:focus-visible,
-.retry-btn:focus-visible,
-.editor-save:focus-visible,
-.editor-cancel:focus-visible,
-.binding-edit-btn:focus-visible,
+/* ═══════════════ 焦点可访问性（聚焦环一律金色，不用紫） ═══════════════ */
+.page-header :deep(.n-button:focus-visible),
+.page-main :deep(.n-button:focus-visible),
+.page-aside :deep(.n-button:focus-visible),
+.page-error :deep(.n-button:focus-visible),
+.wiki-tab:focus-visible,
 .related-item:focus-visible,
 .page-toc :deep(.wiki-toc-link):focus-visible {
   outline: none;
-  box-shadow: var(--lme-shadow-focus);
+  box-shadow: var(--wiki-focus-ring);
 }
 </style>

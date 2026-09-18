@@ -290,7 +290,7 @@ public sealed class WikiMediaResolver
                 return await ResolveAudioAsync(deepLink, refKey!, cancellationToken).ConfigureAwait(false);
             // Spine：<c>Prefab 容器路径 → ISpineDataGateway 三件套</c>（同目录才有意义）。
             if (string.Equals(kind, SpineKind, StringComparison.OrdinalIgnoreCase))
-                return await ResolveSpineAsync(refKey!, cancellationToken).ConfigureAwait(false);
+                return await ResolveSpineMediaAsync(refKey!, cancellationToken).ConfigureAwait(false);
             if (!string.Equals(kind, ImageKind, StringComparison.OrdinalIgnoreCase))
                 return WikiMediaResolution.None;
             // 解码是 CPU/IO 密集的同步活，丢到线程池：IPC 跑在 WebView2 的消息线程上，
@@ -373,6 +373,10 @@ public sealed class WikiMediaResolver
 
     // ── Spine：Prefab 容器路径 → 骨架 / 图集 / 纹理 ──────────────────
 
+    /// <summary>把一条 Spine 绑定解成三件套地址。</summary>
+    public Task<WikiMediaResolution> ResolveSpineAsync(string refKey, CancellationToken cancellationToken = default)
+        => ResolveSpineMediaAsync(refKey, cancellationToken);
+
     /// <summary>
     /// 把一条 Spine 绑定解成三件套地址。
     ///
@@ -382,7 +386,7 @@ public sealed class WikiMediaResolver
     /// 索引里同目录常常只有 .prefab（骨架在某个没被缓存的 bundle 里），
     /// 这时三件套全 null，前端显示「无可用地址」是<b>正确结果</b>，不能编造。</para>
     /// </summary>
-    private async Task<WikiMediaResolution> ResolveSpineAsync(string refKey, CancellationToken cancellationToken)
+    private async Task<WikiMediaResolution> ResolveSpineMediaAsync(string refKey, CancellationToken cancellationToken)
     {
         if (SpineData is null) return WikiMediaResolution.None;
         var (data, error) = await SpineData.GetSpineDataByPathAsync(refKey, cancellationToken)

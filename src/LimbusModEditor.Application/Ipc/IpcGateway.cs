@@ -242,6 +242,8 @@ public sealed partial class IpcGateway
             // ── 2.4 Spine（服务已迁移至 SpineData，见 t24）──────────────
             "spine.locate" => await HandleSpineLocateAsync(request),
             "spine.export" => await HandleSpineExportAsync(request),
+            "spine.catalog" => await HandleSpineCatalogAsync(request),
+            "spine.resolve" => await HandleSpineResolveAsync(request),
 
             // ── 2.5 关联与精确跳转 ────────────────────────────────────────
             "relation.reveal" => HandleRelationReveal(request),
@@ -643,6 +645,83 @@ public sealed partial class IpcGateway
             written.Add(assetId);
         }
         return IpcResponse.Success(request.Id, new SpineExportResponse(written, skipped));
+    }
+
+    /// <summary>
+    /// <c>spine.catalog</c>：<b>只列名册，一个 bundle 都不解</b>。
+    ///
+    /// <para>全库有几百个 Spine 挂点（<c>SpineIllustPrefab</c> + 战斗用的 <c>Prefab/SD/**</c>），
+    /// 其中绝大多数从没被任何维基页面绑定过 —— 也就是用户在界面上<b>从来没见过它们</b>。
+    /// 解一套实测平均 2.1 s（主因是整读一个大 bundle），一次性解完要几十分钟，
+    /// 所以这里只做索引查询（毫秒级）把名册列出来；具体某一条能不能解开、
+    /// 三件套地址是什么，交给 <c>spine.resolve</c> <b>按需</b>取。</para>
+    /// </summary>
+    private async Task<IpcResponse> HandleSpineCatalogAsync(IpcRequest request)
+    {
+        var req = DeserializePayload<SpineCatalogRequest>(request);
+        var query = new SpineData.SpineCatalogQuery(req.Keyword, req.OnlyUnbound, req.Offset, req.Limit);
+        // 概览与明细共用同一次扫描（名册要扫 127 万行，分两次调用就付两遍开销）。
+        var result = await _spineData.BrowseCatalogWithSummaryAsync(query);
+        var summary = result.Summary;
+        var page = result.Page;
+        return IpcResponse.Success(request.Id, new SpineCatalogResponse(
+            new SpineCatalogSummaryDto(summary.Total, summary.Bound, summary.Unbound, summary.BundleMissing),
+            page.Total,
+            page.Items.Select(i => new SpineCatalogItemDto(
+                i.RefKey, i.Name, i.Group, i.BundlePresent, i.BoundPageCount)).ToList()));
+    }
+
+    /// <summary>
+    /// <c>spine.resolve</c>：按 refKey 取一条的三件套地址（<b>按需</b>，带网关侧的结果缓存）。
+    ///
+    /// <para>复用维基那条 <see cref="WikiMediaResolver.ResolveSpineAsync"/>，落盘到同一个
+    /// <c>wwwroot/data/wiki</c> 并经同一个 <c>lme.data</c> 虚拟主机出地址 ——
+    /// 前端因此能用<b>同一个</b> <c>WikiSpineViewer</c>/<c>SpineRenderer</c> 渲染，
+    /// 不必为浏览页另写一套。</para>
+    ///
+    /// <para><b>取不到时如实给中文原因</b>（如「引用链里没有骨架与图集」「bundle 不在本机」），
+    /// 不给半个地址、不拿别的素材凑。</para>
+    /// </summary>
+    private async Task<IpcResponse> HandleSpineResolveAsync(IpcRequest request)
+    {
+        var req = DeserializePayload<SpineResolveRequest>(request);
+        if (string.IsNullOrWhiteSpace(req.RefKey))
+            return IpcResponse.Success(request.Id,
+                new SpineResolveResponse(false, null, null, null, null, null, "缺少容器路径（refKey）。"));
+
+        var resolution = await _wikiMedia.ResolveSpineAsync(req.RefKey);
+        var skeletonUrl = resolution.SkeletonUrl;
+        var atlasUrl = resolution.AtlasUrl;
+        if (skeletonUrl is null || atlasUrl is null)
+        {
+            // 摸清真实原因：是路径不对、bundle 不在、还是引用链里确实没有骨架。
+            var (data, error) = await _spineData.GetSpineDataByPathAsync(req.RefKey);
+            var reason = error ?? (data is null
+                ? "这条路径没能解出 Spine 三件套（引用链里没有骨架与图集）。"
+                : "三件套已取到，但地址没能落地（详见 logs/current.log）。");
+            return IpcResponse.Success(request.Id,
+                new SpineResolveResponse(false, null, null, null, null, data?.Label, reason));
+        }
+
+        return IpcResponse.Success(request.Id, new SpineResolveResponse(
+            true,
+            skeletonUrl,
+            atlasUrl,
+            resolution.TextureUrls,
+            skeletonUrl.EndsWith(".skel", StringComparison.OrdinalIgnoreCase) ? "binary" : "json",
+            SpineDisplayNameOf(req.RefKey),
+            null));
+    }
+
+    /// <summary>名册/预览要显示的名字：容器路径的文件名去掉 <c>.prefab</c> 扩展名。</summary>
+    private static string SpineDisplayNameOf(string refKey)
+    {
+        var normalized = refKey.Replace('\\', '/');
+        var slash = normalized.LastIndexOf('/');
+        var name = slash < 0 ? normalized : normalized[(slash + 1)..];
+        return name.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase)
+            ? name[..^".prefab".Length]
+            : name;
     }
 
     // ── 2.5 关联与精确跳转 ──────────────────────────────────────────

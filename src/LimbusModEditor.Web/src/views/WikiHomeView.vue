@@ -6,7 +6,7 @@
 
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { NAlert, NButton, NCard, NEmpty, NInput, NProgress, NSpin, NTag } from 'naive-ui'
+import { NAlert, NButton, NCard, NEmpty, NInput, NProgress, NSpin, NTag, NTooltip } from 'naive-ui'
 import { ipc } from '@/ipc'
 import WikiShell from '@/components/WikiShell.vue'
 import type {
@@ -208,19 +208,30 @@ onUnmounted(() => {
             <NInput
               v-model:value="searchKeyword"
               class="search-input"
+              size="medium"
               placeholder="搜索维基页面、人格、异想体、关键词…"
               clearable
               @keyup.enter="performSearch"
             />
-            <NButton type="primary" :disabled="!searchKeyword.trim()" @click="performSearch">
-              搜索
-            </NButton>
+            <NTooltip placement="bottom" :show-arrow="false">
+              <template #trigger>
+                <NButton type="primary" :disabled="!searchKeyword.trim()" @click="performSearch">
+                  搜索
+                </NButton>
+              </template>
+              搜索维基页面
+            </NTooltip>
           </div>
           <!-- 生成入口：维基页是派生内容，按需生成（说明见脚本区注释） -->
           <div class="hero-generate">
-            <NButton type="primary" ghost :disabled="isGenerating" @click="generatePages">
-              {{ isGenerating ? '正在生成…' : '生成页面' }}
-            </NButton>
+            <NTooltip placement="bottom" :show-arrow="false">
+              <template #trigger>
+                <NButton type="primary" ghost :disabled="isGenerating" @click="generatePages">
+                  {{ isGenerating ? '正在生成…' : '生成页面' }}
+                </NButton>
+              </template>
+              {{ isGenerating ? '正在扫描本地资源生成维基页面' : '生成或刷新维基页面（首次耗时较长）' }}
+            </NTooltip>
             <span v-if="generateStatus" class="generate-hint">
               {{
                 generateStatus.ready
@@ -728,11 +739,12 @@ onUnmounted(() => {
 }
 
 /* ── 可达性：键盘焦点 ── */
+.stat-card:focus-visible,
 .category-card.n-card:focus-visible,
 .recent-item:focus-visible,
 .featured-item:focus-visible {
   outline: none;
-  box-shadow: var(--lme-shadow-focus);
+  box-shadow: var(--wiki-focus-ring);
 }
 
 /* ── 响应式 ── */

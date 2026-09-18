@@ -2,6 +2,7 @@ using System.Text.Json;
 using LimbusModEditor.Application.AppConfig;
 using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Application.Catalog;
+using LimbusModEditor.Application.Debugging;
 using LimbusModEditor.Application.Ipc;
 using LimbusModEditor.Application.Projects;
 using LimbusModEditor.Application.Scanning;
@@ -36,6 +37,7 @@ public sealed class ModAuthoringEndToEndTests : IDisposable
     private readonly ITestOutputHelper _output;
     private readonly ProjectState _state = new();
     private readonly IpcGateway _gateway;
+    private readonly List<IpcEvent> _events = [];
     private int _step;
 
     // 项目态覆盖：让 catalog 看到「当前打开的项目里有什么」（真实 App 里就是 ProjectAssetStateSource）。
@@ -76,6 +78,8 @@ public sealed class ModAuthoringEndToEndTests : IDisposable
             new StaticIndexService(new StaticTableIndexStore(staticCacheDir)),
             environment: new AppEnvironment(_root),
             cacheDirectory: _root);
+        // 收集 IPC 事件（scan.run 的 progress 从这里取）：与真实宿主一样挂 EventSink。
+        _gateway.EventSink = e => _events.Add(e);
     }
 
     public void Dispose()
@@ -105,11 +109,38 @@ public sealed class ModAuthoringEndToEndTests : IDisposable
             $"子目录 sources={Directory.Exists(Path.Combine(createDir, "sources"))}");
         Assert.True(File.Exists(createdPayload.Path));
 
-        // ── 步骤 1b：打开真实项目（新建的空项目里没有资源，IPC 层也没有「扫描入库」入口）──
+        // ── 步骤 1b：scan.run —— 新建项目自己把游戏资源扫进来（本轮新增的 IPC 入口）──
+        // 判据：新建（空）项目 → 调一次扫描 → 项目里真的有资源，且 catalog.query 能查到。
+        var sampleCache = BuildCacheSample();
+        Assert.NotNull(sampleCache); // 本机没有 Unity 缓存就没法证明这一段（不跳过、不造假）
+
+        var scan = await Call("scan.run", new ScanRunRequest("assets", "e2e-scan", sampleCache, null));
+        Assert.True(scan.Ok, scan.Error?.Message);
+        var scanPayload = Payload<ScanRunResponse>(scan);
+        var progressEvents = _events.Count(e => e.Method == "progress");
+        Step("1b scan.run（新建项目 → 扫描入库）",
+            $"ok=真 scope={scanPayload.Scope} 状态={scanPayload.Status} bundle={scanPayload.BundleCount} " +
+            $"项目资源数={scanPayload.AssetCount} 用时={scanPayload.ElapsedSeconds:0.0}s " +
+            $"缓存目录={scanPayload.CacheDirectory} 步骤={string.Join("；", scanPayload.Steps.Select(s => $"{s.Label}={s.Status}"))} " +
+            $"进度事件={progressEvents} 条");
+        Assert.True(scanPayload.AssetCount > 0, "扫描后新项目里应该有资源");
+        Assert.True(progressEvents > 0, "扫描应报 progress 事件");
+
+        // ── 步骤 1c：新建项目 + 扫描后 catalog.query 就能查到资源（不再依赖打开现成项目）──
+        var queriedFresh = await Call("catalog.query", new CatalogQueryRequest(new AssetSearchQuery(), 0, 5));
+        Assert.True(queriedFresh.Ok, queriedFresh.Error?.Message);
+        var freshPage = Payload<CatalogQueryResponse>(queriedFresh);
+        Step("1c catalog.query（新建项目，扫描后）",
+            $"命中={freshPage.TotalCount} 本页={freshPage.Items.Count} " +
+            $"首条={freshPage.Items.FirstOrDefault()?.LogicalPath}");
+        Assert.True(freshPage.TotalCount > 0, "新建项目扫描后 catalog.query 应能查到资源");
+
+        // ── 步骤 1d：换成真实项目 —— 后面几步要它里面记的<b>真实游戏目录</b>
+        // （lang 文件、静态 bundle 都在那儿；新建项目没有，scan.run 只认覆盖参数、不写入项目字段）。
         var opened = await Call("project.open", new ProjectOpenRequest(projectCopy));
         Assert.True(opened.Ok, opened.Error?.Message);
         var openPayload = Payload<OpenPayload>(opened);
-        Step("1b project.open（真实项目副本）",
+        Step("1d project.open（真实项目副本）",
             $"ok={openPayload.Ok} 名称={openPayload.Name} 资源数={openPayload.AssetCount}");
         var project = _state.Project!;
         Assert.True(openPayload.AssetCount > 0, "真实项目里应该有资源");
@@ -423,6 +454,39 @@ public sealed class ModAuthoringEndToEndTests : IDisposable
         var target = Path.Combine(directory, "MyMod.lmeproj");
         File.Copy(source, target, true);
         return target;
+    }
+
+    /// <summary>
+    /// 从本机<b>真实</b> Unity 缓存（只读）复制几条真实缓存条目到临时目录，作为 <c>scan.run</c> 的
+    /// 扫描对象。为什么不能用合成缓存：像 <c>StartupScanServiceTests</c> 那样写几字节 <c>__data</c>
+    /// 只能证明「扫过了」（会记成「无法解析的 bundle」），本步骤要证明的是
+    /// 「新建项目扫描后<b>真的有资源</b>」。为什么只复制几条：整份缓存有 1481 个外层目录，
+    /// 全扫进临时项目既慢又没必要。
+    /// </summary>
+    /// <returns>样本缓存根目录；本机没有 Unity 缓存时返回 null（调用方据此硬失败，不跳过、不造假）。</returns>
+    private string? BuildCacheSample(int entryCount = 8)
+    {
+        var realRoot = UnityCacheLocator.CanonicalCacheRoot();
+        if (realRoot is null) return null;
+
+        var sample = Path.Combine(_root, "cache-sample");
+        var copied = 0;
+        foreach (var outer in Directory.EnumerateDirectories(realRoot))
+        {
+            foreach (var inner in Directory.EnumerateDirectories(outer))
+            {
+                var data = Path.Combine(inner, "__data");
+                if (!File.Exists(data)) continue;
+                // 太大的条目不搬（复制耗时）；太小的多半不是 bundle（解析不出资源）。
+                var size = new FileInfo(data).Length;
+                if (size < 64 * 1024 || size > 32L * 1024 * 1024) continue;
+                var target = Path.Combine(sample, Path.GetFileName(outer), Path.GetFileName(inner), "__data");
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                File.Copy(data, target, true);
+                if (++copied >= entryCount) return sample;
+            }
+        }
+        return copied > 0 ? sample : null;
     }
 
     /// <summary>写一张真的 PNG（不是空文件也不是假头）：写前校验会真解一次。</summary>

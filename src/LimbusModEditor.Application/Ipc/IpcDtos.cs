@@ -314,6 +314,50 @@ public sealed record ProjectRecentResponse(
     IReadOnlyList<ProjectRecentItem> Projects,
     string Info);
 
+/// <summary>
+/// scan.run 请求载荷：触发既有启动扫描，把游戏资源登记进<b>当前项目</b>。
+/// </summary>
+/// <param name="Scope">
+/// <c>assets</c>（默认，只扫游戏资源 → 项目资产）/ <c>all</c>（资源 + 音频/静态/文本/关联四个索引）。
+/// </param>
+/// <param name="OperationId">进度事件的操作号（缺省 <c>scan-&lt;请求号&gt;</c>）；<c>cancel</c> 按它取消。</param>
+/// <param name="UnityCacheDirectory">
+/// 可选覆盖：不传时走既有解析链（共享配置 → 项目字段 → 本机规范缓存根）。
+/// 传了就以它为准（冒烟/设置页要扫指定缓存时用）。
+/// </param>
+/// <param name="GameDirectory">可选覆盖：游戏目录（vanilla 基线判据；不传就不做该判定）。</param>
+public sealed record ScanRunRequest(
+    string? Scope = null,
+    string? OperationId = null,
+    string? UnityCacheDirectory = null,
+    string? GameDirectory = null);
+
+/// <summary>scan.run 响应里的一个步骤（与 <c>StartupScanStepResult</c> 一一对应）。</summary>
+public sealed record ScanStepDto(
+    string Key,
+    string Label,
+    string Status,
+    string Detail,
+    double ElapsedSeconds);
+
+/// <summary>
+/// scan.run 响应载荷。<paramref name="Status"/> 取 <c>Scanned</c> / <c>AlreadyFresh</c> /
+/// <c>Skipped</c> / <c>Failed</c>（原样来自既有扫描，不改写）。
+/// </summary>
+/// <param name="BundleCount">扫到的缓存条目（bundle）数；该步骤没给计数时为 0。</param>
+/// <param name="AssetCount">扫描后项目里的资源数（<b>实测</b>，不是估计）。</param>
+/// <param name="CacheDirectory">本次实际使用的 Unity 缓存目录（回退/覆盖后到底扫了哪儿，照实给）。</param>
+public sealed record ScanRunResponse(
+    string Scope,
+    string Status,
+    string Detail,
+    int BundleCount,
+    int AssetCount,
+    double ElapsedSeconds,
+    string CacheDirectory,
+    IReadOnlyList<ScanStepDto> Steps,
+    string? Info = null);
+
 /// <summary>export.plan 请求载荷。</summary>
 public sealed record ExportPlanRequest;
 

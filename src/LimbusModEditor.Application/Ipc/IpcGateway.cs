@@ -6,6 +6,7 @@ using System.Text.Json.Nodes;
 using LimbusModEditor.Application.AppConfig;
 using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Application.Build;
+using LimbusModEditor.Application.Caching;
 using LimbusModEditor.Application.Catalog;
 using LimbusModEditor.Application.Debugging;
 using LimbusModEditor.Application.Projects;
@@ -99,6 +100,9 @@ public sealed partial class IpcGateway
     private readonly StaticIndexService _staticIndex;
     private readonly WikiMediaResolver _wikiMedia;
     private readonly RelationQueryService _relations;
+    // 游戏资源扫描（Unity 缓存 → 项目资产 / 资源索引库）：整个网关共用一份实例，
+    // 免得两个实例同时写同一个 unity-cache-index.db（服务注释里点明的坑）。
+    private readonly UnityCacheScanService _cacheScan;
     private readonly string _cacheDirectory;
     private readonly AppEnvironment _environment;
 
@@ -160,6 +164,8 @@ public sealed partial class IpcGateway
         _wikiMedia = new WikiMediaResolver(_catalog, _bankIndex, _spineData, _bankAudio);
         // 关联图是派生缓存（cache/relation-index.db），目录沿用 AppEnvironment，不新造路径。
         _relations = relations ?? new RelationQueryService(new RelationStore(_cacheDirectory));
+        _cacheScan = new UnityCacheScanService(
+            Path.Combine(_cacheDirectory, WorkbenchCachePaths.UnityCacheIndexFileName));
     }
 
     /// <summary>处理一条来自页面的请求 JSON，返回响应 JSON（async 贯通）。</summary>
@@ -241,6 +247,8 @@ public sealed partial class IpcGateway
             "project.create" => await HandleProjectCreateAsync(request),
             "project.recent" => HandleProjectRecent(request),
             "project.save" => await HandleProjectSaveAsync(request),
+            // 扫描入库：新建项目后把它接出到 IPC（此前只有宿主启动时才扫，项目里一条资源都没有）。
+            "scan.run" => await HandleScanRunAsync(request),
             "export.plan" => HandleExportPlan(request),
             "export.run" => await HandleExportRunAsync(request),
 
@@ -807,6 +815,135 @@ public sealed partial class IpcGateway
 
         await _projects.SaveAsync(project, projectFile);
         return IpcResponse.Success(request.Id, new { ok = true });
+    }
+
+    /// <summary>
+    /// scan.run：触发<b>既有</b>启动扫描服务，把游戏资源登记进当前项目
+    /// （P0-4：此前扫描只在宿主启动时跑，<c>project.create</c> 出来的新项目一条资源都没有，
+    /// 而 IPC 层没有任何入口能补上这一步）。
+    ///
+    /// <para>扫描逻辑一处不重写：只把 <see cref="StartupScanService"/> 的现有入口
+    /// （<c>ScanUnityAssetsStepAsync</c> / <c>ScanAllAsync</c>）接出来，
+    /// 并把它的 <see cref="StartupScanProgress"/> 转成契约里的 <c>progress</c> 事件。</para>
+    ///
+    /// <para>前提不成立一律中文失败：没开项目 / 只支持 assets 与 all 两种范围 /
+    /// 缓存目录定位不到（项目字段 → 共享配置 → 本机规范缓存根都没有）。</para>
+    /// </summary>
+    private async Task<IpcResponse> HandleScanRunAsync(IpcRequest request)
+    {
+        var req = DeserializePayload<ScanRunRequest>(request);
+        var project = _projectState.Project;
+        if (project is null)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery,
+                "请先打开或新建项目：扫描要把游戏资源登记进当前项目。");
+
+        var scope = string.IsNullOrWhiteSpace(req.Scope) ? "assets" : req.Scope!.Trim().ToLowerInvariant();
+        if (scope is not ("assets" or "all"))
+            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery,
+                $"未知的扫描范围：{req.Scope}（只支持 assets = 只扫游戏资源，all = 游戏资源 + 三个工作台索引）");
+
+        var (scan, cacheDirectory) = CreateScanService(project, req.UnityCacheDirectory, req.GameDirectory);
+        if (cacheDirectory is null)
+            return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound,
+                "未找到 Unity 缓存目录：项目字段、共享配置与本机规范缓存根（AppData/LocalLow/Unity/ProjectMoon_LimbusCompany）"
+                + "都不存在。先启动一次游戏生成缓存，或在「设置」页指定缓存目录。");
+
+        var operationId = string.IsNullOrWhiteSpace(req.OperationId) ? "scan-" + request.Id : req.OperationId!;
+        var cancellationToken = CancellationTokenStore.Register(operationId);
+        var watch = Stopwatch.StartNew();
+
+        void Emit(string label, string detail) => EventSink?.Invoke(IpcEvent.Create("progress",
+            IpcJson.SerializePayload(new ProgressPayload(operationId, label, 0, 0, detail))));
+
+        // 节流：逐 bundle 的上报能到每秒上万条，按契约 §8-5「中间 ≥200ms」聚合；
+        // 首条（开始）与末条（收尾补发）必达。
+        string? lastLabel = null;
+        string? lastDetail = null;
+        var stopwatch = Stopwatch.StartNew();
+        long lastSent = -1;
+        var progress = new Progress<StartupScanProgress>(p =>
+        {
+            lastLabel = p.Label;
+            lastDetail = p.Detail;
+            var elapsed = stopwatch.ElapsedMilliseconds;
+            if (lastSent >= 0 && elapsed - lastSent < 200) return;
+            lastSent = elapsed;
+            Emit(p.Label, p.Detail);
+        });
+        Emit("扫描", "开始");
+
+        try
+        {
+            IReadOnlyList<StartupScanStepResult> steps = scope == "all"
+                ? (await scan.ScanAllAsync(project, progress, cancellationToken).ConfigureAwait(false)).Steps
+                : [await scan.ScanUnityAssetsStepAsync(project, progress, cancellationToken).ConfigureAwait(false)];
+
+            if (lastLabel is not null) Emit(lastLabel, lastDetail ?? string.Empty);
+
+            var assetStep = steps.FirstOrDefault(s => s.Key == StartupScanService.UnityAssetsStep) ?? steps[0];
+            // 跳过/失败对调用方就是「没扫成」：照实给中文原因，不回一个「成功但什么都没变」。
+            if (assetStep.Status is StartupScanStepStatus.Skipped or StartupScanStepStatus.Failed)
+                return IpcResponse.Failure(request.Id, IpcErrorCode.NotFound,
+                    $"{assetStep.Label}：{assetStep.Detail}（缓存目录={cacheDirectory}）");
+
+            watch.Stop();
+            var info = steps.Count > 1 ? string.Join("；", steps.Select(s => $"{s.Label}={s.Status}")) : null;
+            return IpcResponse.Success(request.Id, new ScanRunResponse(
+                scope, assetStep.Status.ToString(), assetStep.Detail,
+                assetStep.RowCount ?? 0,
+                project.Assets.Count, watch.Elapsed.TotalSeconds, cacheDirectory,
+                steps.Select(s => new ScanStepDto(s.Key, s.Label, s.Status.ToString(), s.Detail,
+                    s.Elapsed.TotalSeconds)).ToList(), info));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // 扫描服务本身已经逐步隔离失败；走到这里是它没兜住的（如缓存目录被拔掉）。
+            Log.Error(ex, "scan.run 失败：scope={0} · cache={1}", scope, cacheDirectory);
+            return IpcResponse.Failure(request.Id, IpcErrorCode.Internal, "扫描失败：" + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// 组装扫描服务，并给出本次真正使用的缓存目录（回退/覆盖后到底扫哪儿，照实给）。
+    /// 目录解析顺序与静态表那条回退一致：显式覆盖 → 共享配置 → 项目字段 → 本机规范缓存根。
+    /// </summary>
+    /// <returns>缓存目录为 null = 一处也没定位到（调用方给中文 NotFound）。</returns>
+    private (StartupScanService Service, string? CacheDirectory) CreateScanService(
+        ModProject project, string? cacheOverride, string? gameOverride)
+    {
+        var cacheDirectory = FirstExisting(cacheOverride,
+            _environment.EffectiveUnityCacheDirectory(project), UnityCacheLocator.CanonicalCacheRoot());
+        var gameDirectory = FirstExisting(gameOverride, _environment.EffectiveGameDirectory(project));
+
+        // 覆盖/回退改变了生效目录时，复制一份环境给它 —— 扫描服务自己按
+        // AppEnvironment 解析目录，改共享配置对象本身会污染全局（其它实例同一份）。
+        AppEnvironment env = _environment;
+        var config = _environment.Config;
+        var changed = !SamePath(config.UnityCacheDirectory, cacheDirectory)
+                      || !SamePath(config.GameDirectory, gameDirectory);
+        if (changed)
+        {
+            env = new AppEnvironment(_environment.BaseDirectory);
+            env.Config.UnityCacheDirectory = cacheDirectory;
+            env.Config.GameDirectory = gameDirectory;
+        }
+        // StartupScanService 无状态，按次构造即可（它内部只认 env + 共用的扫描实例）。
+        return (new StartupScanService(env, _cacheScan), cacheDirectory);
+
+        static bool SamePath(string? a, string? b) =>
+            string.IsNullOrWhiteSpace(a) && string.IsNullOrWhiteSpace(b)
+            || string.Equals(a ?? string.Empty, b ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>取第一个「非空且目录存在」的候选；一个都没有就返回 null（不猜、不造）。</summary>
+    private static string? FirstExisting(params string?[] candidates)
+    {
+        foreach (var candidate in candidates)
+        {
+            if (string.IsNullOrWhiteSpace(candidate)) continue;
+            if (Directory.Exists(candidate)) return candidate;
+        }
+        return null;
     }
 
     private IpcResponse HandleExportPlan(IpcRequest request)

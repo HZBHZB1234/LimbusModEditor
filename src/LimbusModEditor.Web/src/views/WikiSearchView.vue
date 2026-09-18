@@ -1,7 +1,9 @@
 <script setup lang="ts">
-// 维基搜索结果页（与其它维基页统一：WikiShell 外壳 + 同一套标题/输入框/空态样式）
+// 维基搜索结果页（与其它维基页统一：WikiShell 外壳 + Naive UI 呈现层）
+// IPC：wiki.search；深链：?q=（零改动）
 import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { NButton, NEmpty, NInput, NList, NListItem, NSpin, NTag } from 'naive-ui'
 import { ipc } from '@/ipc'
 import WikiShell from '@/components/WikiShell.vue'
 import { WikiPageCategoryLabels } from '@/ipc/types'
@@ -88,32 +90,50 @@ if (keyword.value.trim()) doSearch()
         </header>
 
         <div class="search-box">
-          <input
-            v-model="input"
+          <NInput
+            v-model:value="input"
             class="search-input"
-            type="text"
             placeholder="搜索维基页面…"
+            clearable
             @keyup.enter="submit"
           />
-          <button class="search-btn" :disabled="!input.trim() || loading" @click="submit">
+          <NButton
+            class="search-btn"
+            type="primary"
+            :disabled="!input.trim() || loading"
+            @click="submit"
+          >
             搜索
-          </button>
+          </NButton>
         </div>
 
-        <div v-if="loading" class="loading-state">搜索中…</div>
-
-        <div v-else-if="!keyword.trim()" class="empty-state">
-          <div class="empty-title">输入关键词开始搜索</div>
-          <div class="empty-desc">支持页面标题与内容匹配</div>
+        <div v-if="loading" class="loading-state">
+          <NSpin size="small" />
+          <span>搜索中…</span>
         </div>
 
-        <div v-else-if="results.length === 0" class="empty-state">
-          <div class="empty-title">未找到匹配页面</div>
-          <div class="empty-desc">尝试调整搜索关键词</div>
-        </div>
+        <NEmpty
+          v-else-if="!keyword.trim()"
+          class="empty-state"
+          description="输入关键词开始搜索"
+        >
+          <template #extra>
+            <span class="empty-desc">支持页面标题与内容匹配</span>
+          </template>
+        </NEmpty>
 
-        <div v-else class="results-list">
-          <div
+        <NEmpty
+          v-else-if="results.length === 0"
+          class="empty-state"
+          description="未找到匹配页面"
+        >
+          <template #extra>
+            <span class="empty-desc">尝试调整搜索关键词</span>
+          </template>
+        </NEmpty>
+
+        <NList v-else class="results-list" clickable hoverable>
+          <NListItem
             v-for="r in results"
             :key="r.pageId"
             class="result-item"
@@ -121,11 +141,13 @@ if (keyword.value.trim()) doSearch()
           >
             <div class="result-top">
               <span class="result-title">{{ r.title }}</span>
-              <span class="result-category">{{ categoryLabel(r.category) }}</span>
+              <NTag class="result-category" size="small" :bordered="false">
+                {{ categoryLabel(r.category) }}
+              </NTag>
             </div>
             <div v-if="r.snippet" class="result-snippet">{{ r.snippet }}</div>
-          </div>
-        </div>
+          </NListItem>
+        </NList>
       </div>
     </div>
   </WikiShell>
@@ -176,63 +198,24 @@ if (keyword.value.trim()) doSearch()
 
 .search-input {
   flex: 1;
-  padding: var(--lme-gap-sm) var(--lme-gap-md);
-  background: var(--lme-bg-input);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-sm);
-  color: var(--lme-text-primary);
-  font-size: var(--lme-font-size-md);
-  font-family: var(--lme-font-family);
-}
-
-.search-input:focus {
-  outline: none;
-  border-color: var(--wiki-accent);
 }
 
 .search-btn {
-  padding: var(--lme-gap-sm) var(--lme-gap-lg);
-  background: var(--wiki-accent);
-  border: 1px solid var(--wiki-accent);
-  border-radius: var(--lme-radius-sm);
-  color: var(--wiki-chip-active-text);
-  cursor: pointer;
-  font-size: var(--lme-font-size-sm);
   white-space: nowrap;
-  transition: background 0.15s;
-}
-
-.search-btn:hover:not(:disabled) {
-  background: var(--wiki-accent-strong);
-}
-
-.search-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
 }
 
 .loading-state {
   display: flex;
   align-items: center;
   justify-content: center;
+  gap: var(--lme-gap-sm);
   padding: var(--lme-gap-xl);
   color: var(--lme-text-muted);
   font-size: var(--lme-font-size-md);
 }
 
 .empty-state {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--lme-gap-sm);
   padding: var(--lme-gap-xl);
-  text-align: center;
-}
-
-.empty-title {
-  font-size: var(--lme-font-size-md);
-  font-weight: 600;
-  color: var(--lme-text-secondary);
 }
 
 .empty-desc {
@@ -241,9 +224,7 @@ if (keyword.value.trim()) doSearch()
 }
 
 .results-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--lme-gap-sm);
+  background: transparent;
 }
 
 .result-item {
@@ -283,14 +264,14 @@ if (keyword.value.trim()) doSearch()
   text-decoration: underline;
 }
 
+/* 分类胶囊：NTag 套 wiki-chip 皮肤（金色系，禁紫） */
 .result-category {
+  flex-shrink: 0;
   font-size: var(--lme-font-size-xs);
   color: var(--wiki-chip-text);
-  padding: 1px 8px;
   background: var(--wiki-chip-bg);
   border: 1px solid var(--wiki-chip-border);
   border-radius: var(--wiki-chip-radius);
-  flex-shrink: 0;
 }
 
 .result-snippet {

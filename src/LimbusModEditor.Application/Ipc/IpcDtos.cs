@@ -276,13 +276,72 @@ public sealed record SpineLocateResponse(
 /// <summary>Spine 三件套 URL。</summary>
 public sealed record SpineFiles(string? Skeleton, string? Atlas, IReadOnlyList<string> Pages);
 
-/// <summary>spine.export 请求载荷。</summary>
-public sealed record SpineExportRequest(IReadOnlyList<string> AssetIds, string TargetDirectory);
+/// <summary>
+/// spine.export 请求载荷：把 <paramref name="AssetIds"/> 里的每个 refKey（容器路径，
+/// 与 <c>spine.catalog</c> 的 <c>refKey</c> 同口径）解析出的 Spine 三件套导出到
+/// <paramref name="TargetDirectory"/>，每条写一个以骨架名命名的子目录。
+///
+/// <para><b>新增字段一律可选</b>（既有调用方只传两个字段照常工作）：
+/// <paramref name="Overwrite"/> 覆盖策略、<paramref name="OperationId"/> 供
+/// <c>cancel</c> 中断（不传则本次导出不可单独取消）。</para>
+/// </summary>
+/// <param name="AssetIds">refKey 列表（容器路径）。</param>
+/// <param name="TargetDirectory">导出根目录（由前端的文件夹选择器给定）。</param>
+/// <param name="Overwrite">是否覆盖同名文件；<c>false</c>（默认）时跳过并如实列在 skippedFiles 里。</param>
+/// <param name="OperationId">操作 id，用于 <c>cancel</c> 与 <c>progress</c> 事件。</param>
+public sealed record SpineExportRequest(
+    IReadOnlyList<string> AssetIds,
+    string TargetDirectory,
+    bool Overwrite = false,
+    string? OperationId = null);
 
-/// <summary>spine.export 响应载荷。</summary>
+/// <summary>
+/// spine.export 响应载荷。
+///
+/// <para><b>既有字段保持不变</b>：<paramref name="Written"/> 仍是「成功导出的 refKey 列表」，
+/// <paramref name="Skipped"/> 仍是「refKey：中文原因」的一行式清单。新增的都是<b>附加</b>信息，
+/// 老前端不读也不受影响。</para>
+/// </summary>
+/// <param name="Written">成功导出的 refKey（顺序与请求一致）。</param>
+/// <param name="Skipped">失败/未导出的「refKey：中文原因」清单。</param>
+/// <param name="OutputDirectory">导出根目录（绝对路径）。</param>
+/// <param name="Files">逐文件清单（相对路径 + 字节数，含文件角色）。</param>
+/// <param name="Items">逐条明细（成功与失败都在里面，批量时不中断整批的证据）。</param>
+/// <param name="Overwrite">本次采用的覆盖策略（回显）。</param>
+/// <param name="Info">一句话中文汇总。</param>
+/// <param name="Cancelled">是否被取消。</param>
 public sealed record SpineExportResponse(
     IReadOnlyList<string> Written,
-    IReadOnlyList<string> Skipped);
+    IReadOnlyList<string> Skipped,
+    string? OutputDirectory = null,
+    IReadOnlyList<SpineExportedFileDto>? Files = null,
+    IReadOnlyList<SpineExportItemDto>? Items = null,
+    string? Overwrite = null,
+    string? Info = null,
+    bool Cancelled = false);
+
+/// <summary>导出到磁盘的一个文件（相对导出目录的路径 + 字节数）。</summary>
+/// <param name="Path">相对导出根目录的路径（<c>/</c> 分隔）。</param>
+/// <param name="Role">角色：<c>skeleton</c> / <c>atlas</c> / <c>texture</c>。</param>
+/// <param name="Bytes">落盘字节数。</param>
+public sealed record SpineExportedFileDto(string Path, string Role, long Bytes);
+
+/// <summary>一条挂点的导出明细。</summary>
+/// <param name="RefKey">容器路径。</param>
+/// <param name="Name">骨架名（子目录名）。</param>
+/// <param name="Ok">这一条是否成功。</param>
+/// <param name="OutputDirectory">这一条自己的输出目录。</param>
+/// <param name="Files">这条写出的文件。</param>
+/// <param name="SkippedFiles">被「不覆盖」策略跳过的相对路径。</param>
+/// <param name="Reason">失败时的中文原因。</param>
+public sealed record SpineExportItemDto(
+    string RefKey,
+    string Name,
+    bool Ok,
+    string? OutputDirectory,
+    IReadOnlyList<SpineExportedFileDto> Files,
+    IReadOnlyList<string> SkippedFiles,
+    string? Reason);
 
 // ── 2.4b Spine 全库浏览（只读）──────────────────────────────────
 

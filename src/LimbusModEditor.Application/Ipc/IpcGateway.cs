@@ -624,27 +624,84 @@ public sealed partial class IpcGateway
         return IpcResponse.Success(request.Id, new SpineLocateResponse(data.Label, files, data.AvailablePages));
     }
 
+    /// <summary>
+    /// <c>spine.export</c>：把 refKey 解析出的 Spine 三件套<b>真正写到磁盘</b>
+    /// （此前是 TODO：只把 refKey 记进 <c>written</c>，一个字节都没落盘）。
+    ///
+    /// <para><b>语义（方案 A：单条为主，批量是同一个循环）</b>：请求给一个 <c>targetDirectory</c>
+    /// 与若干 <c>refKey</c>，每条在目标目录下落一个<b>以骨架名为名的子目录</b>：
+    /// <c>&lt;骨架名&gt;.json</c> / <c>&lt;骨架名&gt;.atlas.txt</c> / <c>&lt;页名&gt;.png</c>
+    /// （纹理页按图集 <c>materials</c> 顺序命名，如 <c>back.png</c>）。这正是 Spine 运行时
+    /// 期望的磁盘形态，用户拿到即可直接用于模组制作。</para>
+    ///
+    /// <para><b>复用而非重写</b>：三件套解析一律走 <see cref="ISpineDataGateway"/>（含 prefab
+    /// 引用链与按 refKey 的结果缓存），落盘一律走 <see cref="AtomicOutput"/>（临时文件 + 移动）。</para>
+    ///
+    /// <para><b>不造假</b>：取不到就带中文原因记一条失败，<b>不写空文件凑数</b>；
+    /// 逐条失败<b>不中断整批</b>；不覆盖已有文件（除非请求显式要求覆盖）。</para>
+    ///
+    /// <para><b>可中断 + 有进度</b>：走 <c>cancel</c> 那条既有的取消通道
+    /// （<see cref="CancellationTokenStore"/>），并按契约 §4 推 <c>progress</c> 事件。</para>
+    /// </summary>
     private async Task<IpcResponse> HandleSpineExportAsync(IpcRequest request)
     {
         var req = DeserializePayload<SpineExportRequest>(request);
-        var project = _projectState.Project;
-        if (project is null)
-            return IpcResponse.Failure(request.Id, IpcErrorCode.InvalidQuery, "请先打开项目");
 
-        var written = new List<string>();
-        var skipped = new List<string>();
-        foreach (var assetId in req.AssetIds)
+        // 不给操作 id 时不注册取消令牌：本次导出就不可单独取消，返回后立刻释放，不漏令牌。
+        var operationId = string.IsNullOrWhiteSpace(req.OperationId) ? null : req.OperationId!;
+        var cancellationToken = operationId is null
+            ? CancellationToken.None
+            : CancellationTokenStore.Register(operationId);
+        try
         {
-            var (data, error) = await _spineData.GetSpineDataByPathAsync(assetId);
-            if (data is null)
-            {
-                skipped.Add($"{assetId}：{error ?? "未找到"}");
-                continue;
-            }
-            // TODO: 写盘到 req.TargetDirectory（需 AtomicOutput 纪律）
-            written.Add(assetId);
+            var exporter = new SpineExportService(_spineData);
+            var overwrite = req.Overwrite ? SpineExportOverwrite.Overwrite : SpineExportOverwrite.Skip;
+            var result = await exporter.ExportAsync(
+                req.AssetIds ?? [],
+                req.TargetDirectory,
+                overwrite,
+                CreateSpineExportProgressSink(operationId),
+                cancellationToken);
+
+            var files = result.Items.SelectMany(i => i.Files).ToList();
+            return IpcResponse.Success(request.Id, new SpineExportResponse(
+                result.Items.Where(i => i.Ok).Select(i => i.RefKey).ToList(),
+                result.Items.Where(i => !i.Ok).Select(i => $"{i.RefKey}：{i.Reason}").ToList(),
+                result.OutputDirectory,
+                files.Select(f => new SpineExportedFileDto(f.RelativePath, f.Role, f.Bytes)).ToList(),
+                result.Items.Select(i => new SpineExportItemDto(
+                    i.RefKey, i.Name, i.Ok, i.OutputDirectory,
+                    i.Files.Select(f => new SpineExportedFileDto(f.RelativePath, f.Role, f.Bytes)).ToList(),
+                    i.SkippedFiles, i.Reason)).ToList(),
+                result.Overwrite,
+                result.Info,
+                result.Cancelled));
         }
-        return IpcResponse.Success(request.Id, new SpineExportResponse(written, skipped));
+        finally
+        {
+            if (operationId is not null) CancellationTokenStore.Complete(operationId);
+        }
+    }
+
+    /// <summary>
+    /// 把导出进度转成契约 §4 的 <c>progress</c> 事件（与维基生成同一个 200 ms 节流口径：
+    /// 首条与末条必达）。<paramref name="operationId"/> 为空时不推事件（没有 id 前端也关联不上）。
+    /// </summary>
+    private IProgress<SpineExportProgress>? CreateSpineExportProgressSink(string? operationId)
+    {
+        if (operationId is null) return null;
+        var stopwatch = Stopwatch.StartNew();
+        long lastSent = -1;
+        return new Progress<SpineExportProgress>(step =>
+        {
+            var isEdge = step.Current <= 1 || step.Current >= step.Total;
+            var elapsed = stopwatch.ElapsedMilliseconds;
+            if (!isEdge && lastSent >= 0 && elapsed - lastSent < 200) return;
+            lastSent = elapsed;
+            EventSink?.Invoke(IpcEvent.Create("progress", IpcJson.SerializePayload(
+                new ProgressPayload(operationId, "spine-export", step.Current, step.Total,
+                    $"{step.Message}（{step.Current}/{step.Total}）{SpineDisplayNameOf(step.RefKey)}"))));
+        });
     }
 
     /// <summary>

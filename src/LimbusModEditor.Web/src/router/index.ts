@@ -68,6 +68,12 @@ const router = createRouter({
       name: 'wiki-search',
       component: () => import('@/views/WikiSearchView.vue'),
     },
+    {
+      // Spine 总览：只读浏览全库 Spine 挂点（含从未被任何维基页面绑定的战斗用 Spine）
+      path: '/wiki/spine',
+      name: 'wiki-spine',
+      component: () => import('@/views/WikiSpineBrowserView.vue'),
+    },
     // ── 组件库自检（不进工作区 tab，仅用于验证主题映射是否正确） ──
     {
       path: '/lib-check',

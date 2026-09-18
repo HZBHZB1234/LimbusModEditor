@@ -40,4 +40,9 @@ export type {
   WikiCategoryCount,
   WikiGenerateResponse,
   WikiGenerateStatusResponse,
+  // Spine 全库浏览
+  SpineCatalogSummary,
+  SpineCatalogItem,
+  SpineCatalogResponse,
+  SpineResolveResult,
 } from './types'

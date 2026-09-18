@@ -31,6 +31,8 @@ const categoryNav = [
   { key: 'item', label: '物品', icon: '🎒', route: '/wiki/category/item' },
   { key: 'mechanism', label: '机制', icon: '⚙️', route: '/wiki/category/mechanism' },
   { key: 'keyword', label: '关键词', icon: '🔑', route: '/wiki/category/keyword' },
+  // Spine 总览：全库 Spine 挂点（含从未被页面绑定、界面上从来见不到的那批）
+  { key: 'spine', label: 'Spine 总览', icon: '🦴', route: '/wiki/spine' },
 ]
 
 const sidebarCollapsed = ref(false)

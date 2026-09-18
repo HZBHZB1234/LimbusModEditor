@@ -440,3 +440,43 @@ export interface BreadcrumbItem {
   label: string
   route: string
 }
+
+// ── Spine 全库浏览（spine.catalog / spine.resolve）──────────
+// 名册只列「有哪些 Spine 挂点」，不解素材（解一套实测平均 2.1s，几百套一次解不可接受）；
+// 某一条的三件套地址由 spine.resolve 按需取，取不到给中文 reason（不造假地址）。
+
+export interface SpineCatalogSummary {
+  total: number
+  bound: number
+  unbound: number
+  /** 其中 bundle 文件此刻不在本机的（Unity 缓存被清，非代码可补）。 */
+  bundleMissing: number
+}
+
+export interface SpineCatalogItem {
+  /** 容器路径，取数键（拿它调 spine.resolve）。 */
+  refKey: string
+  name: string
+  /** 中文归类：人格立绘 / 敌方单位 / 异想体 / 人格(战斗) / E.G.O / 战斗其它。 */
+  group: string
+  bundlePresent: boolean
+  /** 被多少个维基页面绑定（0 = 从未在界面出现过）。 */
+  boundPageCount: number
+}
+
+export interface SpineCatalogResponse {
+  summary: SpineCatalogSummary
+  total: number
+  items: SpineCatalogItem[]
+}
+
+export interface SpineResolveResult {
+  ok: boolean
+  skeletonUrl: string | null
+  atlasUrl: string | null
+  textureUrls: Record<string, string> | null
+  skeletonFormat: string | null
+  label: string | null
+  /** 取不到时的中文原因（如实说，不造假）。 */
+  reason: string | null
+}

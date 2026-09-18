@@ -16,10 +16,11 @@
 > （明暗双主题 + 5 套强调色可切换）、lucide 图标体系替换全部 emoji、VS Code 式外壳
 > （工具条 + 左侧活动栏 + 页面 + 底部状态栏）、全局状态 store 与状态栏、`PageHeader`/`StateBlock`
 > 指引组件；WPF 外壳色板同步为前端默认深色令牌。
-> **约束**：IPC 方法名/载荷字段/调用时序与路由深链参数**零改动**（已逐文件机械核对）。
+> **约束**：IPC 方法名/载荷字段/调用时序与路由深链参数**零改动** —— 2026-09-19 已由
+> `IpcMethodContractTests` 契约门复跑确认。
 > 规范见 [`docs/UI-DESIGN-SYSTEM.md`](UI-DESIGN-SYSTEM.md)。
-> 本轮前端门禁：`npm run type-check` **0 错**、`npm run build` **成功**；
-> 后端 `dotnet build` 因本机 NuGet 环境故障**未能复跑**（详见 §6.4），C# 侧改动待可用环境验证。
+> 门禁（2026-09-19 复跑）：`dotnet build` 0 警告 0 错误、`dotnet test` **1045 项全绿**、
+> 前端 `npm run type-check` 0 错 / `npm run build` 成功。
 
 > 接手入口文档：先读本文，再读 `docs/CODE-STRUCTURE.md`（结构与不变量）与
 > `docs/PROJECT-INDEX.md`（逐文件功能索引），最后按需查 `docs/USAGE.md`（用户手册）、
@@ -51,21 +52,27 @@ native Spine 工程与 `Application/Spine/` 的解析层已删除（全仓 0 命
 
 ## 2. 验证基线（每次改动前后都要跑）
 
-```text
+```powershell
+$env:OS = "Windows_NT"   # 必需：否则 Directory.Build.props 推导不出 RuntimeIdentifier，见 §6.4
 dotnet build LimbusModEditor.slnx --no-restore --nologo
 dotnet test  LimbusModEditor.slnx --no-build --nologo
-dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r win-x64 --self-contained false -o artifacts/publish-win-x64 --no-restore
 npm --prefix src/LimbusModEditor.Web run build      # 前端（必须在 publish 之前；缺失时 PublishFrontend Target 直接报错）
+dotnet publish src/LimbusModEditor.App/LimbusModEditor.App.csproj -c Release -r win-x64 --self-contained false -o artifacts/publish-win-x64 --no-restore
 ```
 
 **2026-09-17（重构交付轮）实测：864 项全绿 = Domain 94 + Format 74 + Application 696；四条命令（build / test / npm build / publish）退出码均为 0。**
 命令与逐项输出见 [`docs/FINAL-DELIVERY.md`](FINAL-DELIVERY.md) §2。
 
-**2026-09-18（UI 重构轮）实测：前端 `npm run type-check` 0 错、`npm run build` 成功（21.0s，含 `copy-licenses`）；`dotnet build` / `dotnet test` 因本机 NuGet 环境故障未能复跑（见 §6.4），本轮 C# 侧改动待可用环境验证。**
+**2026-09-19 实测（补上 `OS` 环境变量后，根因与解法见 §6.4）：`dotnet build LimbusModEditor.slnx` 0 警告 0 错误（1 分 31 秒，15 个项目）；
+`dotnet test` **1045 项全绿 = Domain 94 + Format 74 + Application 877，0 失败**（1 分 19 秒）。
+其中 `IpcMethodContractTests` 已单独复跑通过 —— UI 重构轮的「IPC 契约零改动」由**契约门本身**确认，不再只依赖文本比对。**
+**2026-09-18（UI 重构轮）实测：前端 `npm run type-check` 0 错、`npm run build` 成功（21.0s，含 `copy-licenses`）。**
 
 **2026-09-13 实测：642 个测试全绿（74 Format + 568 Domain），本机真实数据门控测试全部真跑。**
 
-测试基线的历史轨迹（参考）：168 → 205 → 218 → 223 → 228 → 231 → 256 → 274 → 334 → 476 → 528 → 549 → 562 → 573 → 610 → 611 → 625 → 634 → 642 → 746（WPF 时代口径）→ 733 → **864**。
+测试基线的历史轨迹（参考）：168 → 205 → 218 → 223 → 228 → 231 → 256 → 274 → 334 → 476 → 528 → 549 → 562 → 573 → 610 → 611 → 625 → 634 → 642 → 746（WPF 时代口径）→ 733 → 864 → **1045**。
+
+> 864 → 1045 的 +181 来自 2026-09-17 之后的提交（未逐条溯源）；口径以本节最新实测为准。
 
 > 口径提醒：**869 / Application 701** 是 `docs/AUDIT-2026-R2.md` 审查当时的记录值，
 > 交付轮复测为 **864 / 696**（差 5 例），该文 §8 已加勘误。**以本节实测为准。**
@@ -294,25 +301,49 @@ npm --prefix src/LimbusModEditor.Web run build      # 前端（必须在 publish
   **教训**：仓库文本文件只通过 read/edit/write 工具修改（本项目铁律 §3-6），
   pwsh/脚本只用于 build / test / git / publish 与**只读**查询；派生数据（如行数表）也要用工具逐条改。
 
-### 6.4 本机 NuGet 环境故障（2026-09-18 发现，未修复）
+### 6.4 构建报 NETSDK1060 的真实原因：`OS` 环境变量缺失（2026-09-19 定位并解决）
 
-`dotnet build` / `dotnet restore` 在本机对**任何**项目都失败：
+**症状**：`dotnet build` 报 15 个
 
 ```text
 error NETSDK1060: 读取资产文件时出错: 加载锁定文件"…/obj/project.assets.json"时出现错误:
 Value cannot be null. (Parameter 'path1')
-NuGet.targets(782,5): error : Value cannot be null. (Parameter 'path1')
 ```
 
-**已排除仓库因素**：在临时目录新建一个只有 `<TargetFramework>net8.0</TargetFramework>` 的最小 `.csproj`，
-`dotnet restore` 同样报错。已尝试且**全部无效**：显式写 `~/.nuget/NuGet/NuGet.Config`、
-`unset NUGET_PACKAGES`、`/p:RestoreFallbackFolders=` 与 `/p:RestorePackagesPath=`。
-`~/.nuget/packages` 内已有 38 个包，`obj/*.nuget.g.props` 的 `NuGetPackageRoot` 也正常。
+失败点是 `Microsoft.PackageDependencyResolution.targets(266,5)` 的 `ResolvePackageAssets` 任务。
 
-**影响**：本轮及以后在**本机**无法编译/测试后端，`dotnet test` 的 IPC 契约门（`IpcMethodContractTests`）跑不了。
-**替代验证**（2026-09-18 UI 重构轮采用）：用脚本对每个改动文件做**新旧机械对比** ——
-`ipc.request/send/on` 的方法名集合、载荷顶层键名集合、路由 query/params 键名集合，三者均零差异。
-**结论**：环境问题，与仓库代码无关；换机器或修复 NuGet 安装后需重跑 §2 四条命令。
+**根因**：`Directory.Build.props` 用
+
+```xml
+<RuntimeIdentifier Condition="'$(OS)' == 'Windows_NT'">win-x64</RuntimeIdentifier>
+```
+
+推导 RID。MSBuild 的保留属性 `OS` 取自同名**环境变量**；当调用方 shell 里 `OS` 未设置时
+（本机实测 `OS=[]`、`OSTYPE=cygwin`）条件不成立 → `RuntimeIdentifier` 为空 →
+`ResolvePackageAssets` 解析 assets 时崩溃。报错文本酷似「NuGet 装坏了」，极易误判。
+
+**确认方式**（三步都做过）：
+1. `dotnet msbuild <proj> -getProperty:RuntimeIdentifier` 返回空；
+2. `-v:diag` 日志里**没有** `RuntimeIdentifier = win-x64` 的赋值，`ResolvePackageAssets` 的任务参数列表中该参数缺席；
+3. 显式 `-p:RuntimeIdentifier=win-x64` 做**单项目**构建立刻成功。
+
+**解法**：构建前在会话里补上该环境变量即可（不改仓库、不动系统设置）：
+
+```powershell
+$env:OS = "Windows_NT"
+dotnet build LimbusModEditor.slnx --no-restore --nologo
+```
+
+**注意**：`-p:RuntimeIdentifier=win-x64` 只适用于**单项目**；解决方案（`.slnx`）会报
+`NETSDK1134 不支持使用特定 RuntimeIdentifier 生成解决方案`。
+
+**2026-09-19 实测**（补 `OS` 后）：`dotnet build LimbusModEditor.slnx` **0 警告 0 错误（1 分 31 秒）**，
+15 个项目全部通过 —— 其中含 UI 重构轮改动的 `LimbusModEditor.App`（WPF，net8.0-windows/win-x64），
+即那三个 C# 文件**现已确认可编译**。
+
+**遗留建议（未实施）**：`Directory.Build.props` 里凡是用 `$(OS)` 这类环境变量派生的保留属性做条件，
+都会随调用方 shell 而静默失效。更稳的写法是 `$([MSBuild]::IsOSPlatform('Windows'))`（基于运行时判定），
+在 Windows 上与原条件完全等价、且不依赖环境变量。
 
 ---
 

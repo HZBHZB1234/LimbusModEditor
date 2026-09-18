@@ -193,4 +193,7 @@ status.notify('warning', '游戏目录未设置，本次扫描已跳过')
 
 - `src/LimbusModEditor.App/Themes/WorkbenchStyles.xaml`（443 行）是已删除的 WPF 工作台页面遗留的样式字典，当前无任何引用，仅在 `App.xaml` 里被合并加载。属于死代码，清理需单独评估。
 - `docs/UI-REDESIGN-SPEC.md` 与 `docs/HANDOFF-UI-REDESIGN.md` 是本次改造**之前**的规格与交接记录，其中的外壳方案（顶部命令栏 + 工作区 Tab）已被本次取代，仅作历史参考。
-- 后端（`dotnet build`）在本机当前环境下无法还原 NuGet 包（`NuGet.targets(782,5): Value cannot be null. (Parameter 'path1')`，全新最小项目同样复现），属环境问题；C# 侧改动需在可用环境中重新验证。
+- 后端构建前须补 `OS` 环境变量（`$env:OS = "Windows_NT"`），否则 `Directory.Build.props` 推导不出
+  `RuntimeIdentifier`，`dotnet build` 会报 `NETSDK1060 … Value cannot be null (Parameter 'path1')`。
+  根因与解法见 `docs/STATUS.md` §6.4。**2026-09-19 复跑：`dotnet build` 0 警告 0 错误、
+  `dotnet test` 1045 项全绿、`IpcMethodContractTests` 单独通过。**

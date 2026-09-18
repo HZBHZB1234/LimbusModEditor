@@ -896,6 +896,13 @@ public sealed class AssetsToolsBackend : IDisposable
         return ReadSerializedObject(instance, serializedFileName, pathId);
     }
 
+    /// <summary>
+    /// 开一个<b>只读 bundle 会话</b>：一次解包，按需缓存 SerializedFile。
+    /// 需要「同一个 bundle 里连读多个对象」时用（例如顺着 prefab 的引用链找 Spine 三件套），
+    /// 比逐个对象各自重新解包快一个数量级。
+    /// </summary>
+    public BundleObjectReader CreateBundleSession(string bundlePath) => new(bundlePath);
+
     /// <summary>单个 bundle 的只读会话。一次解包，按需缓存 SerializedFile；不跨写入复用，不可并发使用。</summary>
     public sealed class BundleObjectReader(string bundlePath) : IDisposable
     {
@@ -906,6 +913,45 @@ public sealed class AssetsToolsBackend : IDisposable
         public int BundleLoadCount { get; private set; }
 
         public UnityBundleSerializedObject Read(string serializedFileName, long pathId)
+        {
+            return ReadSerializedObject(Ensure(serializedFileName), serializedFileName, pathId);
+        }
+
+        /// <summary>
+        /// 读一个对象引用的全部 PPtr 字段（<b>同一个 bundle 会话内</b>，不会每次重新解包 bundle）。
+        ///  Spine 三件套就藏在 prefab 的引用链里，按它逐跳走才取得到（那些对象没有容器路径，
+        /// 按名字在索引库里是查不到的）。
+        /// </summary>
+        public IReadOnlyList<UnityObjectReference> ReadReferences(string serializedFileName, long pathId)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            var instance = Ensure(serializedFileName);
+            return CollectReferencesOf(_manager, instance, pathId);
+        }
+
+        /// <summary>读 TextAsset（class 49）的名字与正文。语义与
+        /// <see cref="AssetsToolsBackend.ReadBundleTextAsset"/> 一致，只是复用本会话（不解第二次包）。</summary>
+        public UnityTextAsset ReadTextAsset(string serializedFileName, long pathId)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            var instance = Ensure(serializedFileName);
+            var info = instance.file.GetAssetInfo(pathId)
+                ?? throw new KeyNotFoundException($"SerializedFile 中不存在 Path ID: {pathId}");
+            var fields = _manager.GetBaseField(instance, info, AssetReadFlags.None);
+            return ReadTextAssetFields(serializedFileName, pathId, fields);
+        }
+
+        /// <summary>该对象在 SerializedFile 里的 class id（28 = Texture2D、49 = TextAsset…）。</summary>
+        public int ClassIdOf(string serializedFileName, long pathId)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            var instance = Ensure(serializedFileName);
+            var info = instance.file.GetAssetInfo(pathId)
+                ?? throw new KeyNotFoundException($"SerializedFile 中不存在 Path ID: {pathId}");
+            return info.GetTypeId(instance.file);
+        }
+
+        private AssetsFileInstance Ensure(string serializedFileName)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             ArgumentException.ThrowIfNullOrWhiteSpace(serializedFileName);
@@ -924,7 +970,7 @@ public sealed class AssetsToolsBackend : IDisposable
                     ?? throw new InvalidDataException($"无法读取 SerializedFile: {serializedFileName}");
                 _files.Add(serializedFileName, instance);
             }
-            return ReadSerializedObject(instance, serializedFileName, pathId);
+            return instance;
         }
 
         public void Dispose()
@@ -1195,6 +1241,13 @@ public sealed class AssetsToolsBackend : IDisposable
         if (Log.IsTraceEnabled) Log.Trace("读取 TextAsset：{0}::{1} pathId={2}", bundlePath, serializedFileName, pathId);
         var (_, file, info) = LoadBundleObject(bundlePath, serializedFileName, pathId, UnityClassId.TextAsset);
         var fields = _manager.GetBaseField(file, info, AssetReadFlags.None);
+        return ReadTextAssetFields(serializedFileName, pathId, fields);
+    }
+
+    /// <summary>从一个已经解好的 TextAsset 字段树里取名字与正文（<see cref="ReadBundleTextAsset"/>
+    /// 与 bundle 会话复用同一份实现，避免两处对 m_Script 形态的判断漂移）。</summary>
+    private static UnityTextAsset ReadTextAssetFields(string serializedFileName, long pathId, AssetTypeValueField fields)
+    {
         var name = FindField(fields, "m_Name", "name")?.AsString ?? string.Empty;
         var script = FindField(fields, "m_Script", "script")
             ?? throw new InvalidDataException($"TextAsset 缺少 m_Script 字段（Path {pathId}），拒绝猜测内容。");
@@ -1206,9 +1259,22 @@ public sealed class AssetsToolsBackend : IDisposable
                 $"TextAsset.m_Script 的序列化类型 {script.Value.ValueType} 不在已验证范围（string / byteArray）内（Path {pathId}）。")
         };
         if (data.Length == 0) throw new InvalidDataException($"TextAsset 正文为空（Path {pathId}，名称 {name}）。");
-        Log.Debug("读取 TextAsset 完成：{0}::{1} pathId={2}，名称 {3}，正文 {4} 字节，序列化形态 {5}",
-            bundlePath, serializedFileName, pathId, name, data.Length, script.Value.ValueType);
+        Log.Debug("读取 TextAsset 完成：{0} pathId={1}，名称 {2}，正文 {3} 字节，序列化形态 {4}",
+            serializedFileName, pathId, name, data.Length, script.Value.ValueType);
         return new UnityTextAsset(serializedFileName, pathId, name, data);
+    }
+
+    /// <summary>读一个对象的全部 PPtr 字段（<see cref="ReadBundleObjectReferences"/> 的会话版：
+    /// SessionFile 已经解好，不再重复加载 bundle）。</summary>
+    private static IReadOnlyList<UnityObjectReference> CollectReferencesOf(
+        AssetsManager manager, AssetsFileInstance file, long pathId)
+    {
+        var info = file.file.GetAssetInfo(pathId)
+            ?? throw new KeyNotFoundException($"SerializedFile 中不存在 Path ID: {pathId}");
+        var fields = manager.GetBaseField(file, info, AssetReadFlags.None);
+        var result = new List<UnityObjectReference>();
+        CollectReferences(fields, fields.FieldName, result);
+        return result;
     }
 
     /// <summary>Sprite 合成预览（plan-01）：读 Sprite 的 m_Rect /

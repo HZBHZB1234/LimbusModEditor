@@ -22,6 +22,15 @@
 > 门禁（2026-09-19 复跑）：`dotnet build` 0 警告 0 错误、`dotnet test` **1045 项全绿**、
 > 前端 `npm run type-check` 0 错 / `npm run build` 成功。
 
+> **2026-09-19（启动流程轮）**：按用户要求新增两条启动期行为 ——
+> **① 启动即自动路径定位（`config.autoDetect`）+ 自动扫描（`scan.run` scope=all），扫描走模态窗口；
+> ② 启动后强制要求打开或新建项目**（不可关闭的项目门，未选定前工作区不挂载）。
+> 实现**全在前端**（`stores/startup.ts` + `components/ProjectGateDialog.vue` +
+> `components/StartupScanDialog.vue` + `App.vue`），宿主 `App/` 未改，IPC 方法名/载荷/时序零改动；
+> 顺带修复 `SettingsView.autoConfigure` 的键名不匹配（探测结果此前永远填不进来）。
+> 流程与顺序约束见 `docs/CODE-STRUCTURE.md` §5.0，逐文件登记见 `docs/PROJECT-INDEX.md` §17。
+> 前端门禁：`npm run type-check` 0 错、`npm run build` 成功（2026-09-19 实测）。
+
 > 接手入口文档：先读本文，再读 `docs/CODE-STRUCTURE.md`（结构与不变量）与
 > `docs/PROJECT-INDEX.md`（逐文件功能索引），最后按需查 `docs/USAGE.md`（用户手册）、
 > `docs/REALDATA-VERIFY.md`（真实数据验证证据）、`docs/REVIEW.md`（自审与风险）、
@@ -336,6 +345,23 @@ dotnet build LimbusModEditor.slnx --no-restore --nologo
 
 **注意**：`-p:RuntimeIdentifier=win-x64` 只适用于**单项目**；解决方案（`.slnx`）会报
 `NETSDK1134 不支持使用特定 RuntimeIdentifier 生成解决方案`。
+
+**补充（2026-09-19，bash 会话实测）**：报错不止 `OS` 一个诱因。**环境被裁剪过的 shell**
+（`OS` / `APPDATA` / `ProgramData` / `ProgramFiles` 全为空）下，`dotnet restore` 同样会报
+`Value cannot be null. (Parameter 'path1')`（`NuGet.targets` 的 RestoreTask —— NuGet 要读
+`%APPDATA%\NuGet\NuGet.Config`），此时**解决方案 15 个项目全红**，比只缺 `OS` 时更彻底。
+一条不漏地补上即可（实测有效）：
+
+```bash
+export OS=Windows_NT
+export APPDATA='C:\Users\tester\AppData\Roaming'
+export ProgramData='C:\ProgramData'
+export ProgramFiles='C:\Program Files'
+dotnet build LimbusModEditor.slnx --nologo && dotnet test LimbusModEditor.slnx --no-build --nologo
+```
+
+同一环境下另两条限制（与仓库无关）：`dotnet msbuild …` 会被安全策略当 LOLBin 拒绝执行；
+`npm run build` 的 vite `emptyDir(dist)` 会触发批量删除守卫，需要放开沙箱才能跑完。
 
 **2026-09-19 实测**（补 `OS` 后）：`dotnet build LimbusModEditor.slnx` **0 警告 0 错误（1 分 31 秒）**，
 15 个项目全部通过 —— 其中含 UI 重构轮改动的 `LimbusModEditor.App`（WPF，net8.0-windows/win-x64），

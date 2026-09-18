@@ -14,23 +14,26 @@ Spine runtime were deleted. See
 
 ## Current workflow (three steps, zero configuration)
 
-1. **Launch** — the editor resumes your last project or opens a welcome dialog
-   (new project / open project / recent projects). A contextual hint bar always
-   shows the next action; with no project open, a full-screen guide covers the
-   workspace.
-2. **Create or open a project** — the new-mod wizard only asks for a mod name
-   (project defaults to `<程序目录>/projects/<name>`). Game directory, Unity
-   cache, mods directory and FMOD DLLs are auto-discovered and stored as
-   **shared settings in the program directory**
-   (`config/shared-config.json`) — every project reuses them; values from old
-   `.lmeproj` files migrate into the shared config on first open (empty slots
-   only, manual values are never overwritten).
-3. **Scan** — every start runs an automatic scan (status bar shows live per-step progress):
-   the four cache databases (`cache/unity-cache-index.db`, `bank-index.db`,
+1. **Launch** — the editor locates the game directory, Unity cache, mods
+   directory and FMOD DLLs automatically (`config.autoDetect`) and stores them as
+   **shared settings in the program directory** (`config/shared-config.json`) —
+   every project reuses them; values from old `.lmeproj` files migrate into the
+   shared config on first open (empty slots only, manual values are never
+   overwritten). A directory that cannot be found is reported as "未找到"
+   instead of being guessed.
+2. **Open or create a project (mandatory)** — a **non-dismissible** gate asks for
+   a project: create one (a mod name is all it takes; the project defaults to
+   `<程序目录>/projects/<name>`), open an existing `.lmeproj`, continue the last
+   project, or pick one from the recent list. Until a project is active the
+   workspace is not mounted at all, so the editor cannot be used without one.
+3. **Scan** — starts automatically as soon as the project is active, in a
+   **modal progress window** (six steps, live per-step state, elapsed time,
+   cancel / retry / skip). The four source cache databases (`cache/unity-cache-index.db`, `bank-index.db`,
    `static-tables.db`, `text-index.db`) are created/repaired first, then the editor
    indexes every Unity cache bundle (`<outer>/<inner>/__data`) in reference mode (no
    files are copied) with a persistent incremental SQLite index, then refreshes the
-   audio / static-table / lang-text indexes. Each step really enumerates the disk but
+   audio / static-table / lang-text indexes, then derives the relation index. Each step
+   really enumerates the disk but
    only re-parses files whose signature changed (hot start is seconds); a missing
    prerequisite (no game directory yet) only skips that step. Damaged/unknown bundles
    are reported as per-entry diagnostics instead of aborting the scan. Scanned

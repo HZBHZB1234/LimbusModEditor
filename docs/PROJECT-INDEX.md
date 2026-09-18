@@ -882,6 +882,9 @@
 | 目录定位到错误位置 | `Debugging/*Locator.cs` | `AppConfig/AppEnvironment.cs`（优先级与迁移） |
 | CLI 行为 | `Cli/Program.cs` | `Build/ModExportService.cs`、`Assets/ModImportService.cs` |
 | 界面颜色/样式不一致 | `App/Themes/Theme.xaml`、`WorkbenchStyles.xaml` | 页面内是否有硬编码色值（应清零） |
+| **启动时没自动定位目录 / 没自动扫描 / 扫描没有模态窗** | `src/LimbusModEditor.Web/src/stores/startup.ts`（三步编排） | `components/ProjectGateDialog.vue`、`components/StartupScanDialog.vue`、`Application/Scanning/StartupScanService.cs`、`docs/CODE-STRUCTURE.md` §5.0 |
+| **没选项目就能进工作台（「强制」失效）** | `stores/startup.ts` 的 `blocking` + `App.vue` 的 `.locked` / `router-view` 的 `v-if` | 两个模态的 `closable` / `mask-closable` / `close-on-esc` 是否被改回 true |
+| **自动探测的目录填不进设置页** | `views/SettingsView.vue` 的 `autoConfigure`（必须经 `CONFIG_KEYS` 映射，返回的是共享配置键名） | `Application/Ipc/IpcGateway.cs` 的 `HandleConfigAutoDetect`（`config.autoDetect`） |
 
 ---
 
@@ -1002,3 +1005,38 @@
 > **交付环境实测（2026-09-17）**：`wiki-pages.db` 在仓库与 `artifacts/publish-win-x64/cache/` 下**均不存在**
 > （`Get-ChildItem -Recurse -Filter wiki-pages.db` 无输出），因此本机启动后 14 类页面均为空——
 > 这是 §16.2 接线缺口 G-01 的直接后果，不是渲染 bug。
+
+---
+
+## §17 启动流程（WebView2 时代，2026-09-19 新增）
+
+> 需求（用户原话）：**① 启动软件时自动进行路径定位并自动进行扫描，扫描需要有相关模态窗口；
+> ② 启动软件后强制要求打开或新建一个项目后再开始。**
+> 编排**全在前端**，宿主（`src/LimbusModEditor.App/`）**未做任何改动**，也只调用**既有** IPC 方法
+> （无新增方法名、无载荷字段变更；`IpcMethodContractTests` 契约门照旧覆盖）。
+> 流程与理由见 `docs/CODE-STRUCTURE.md` §5.0。
+
+### §17.1 前端文件（`src/LimbusModEditor.Web/src/`）
+
+| 位置 | 文件 | 功能 |
+|---|---|---|
+| `stores/` | `startup.ts` | **启动编排唯一入口**：`phase`（idle → locating → project → scanning → done）；路径定位 `config.autoDetect`；最近项目 `project.recent` + `config.read('lastProjectFile')`；项目激活 `project.create` / `project.open` / `dialog.openFile`；自动扫描 `scan.run(scope=all)`（`operationId = 'scan'`）；取消 `cancel`。对外暴露 `blocking` / `gateOpen` / `scanOpen` / `stepRows` / `activeStepKey` / `locatedCount` / `hasCacheDirectory` |
+| `components/` | `ProjectGateDialog.vue` | **强制项目门（不可关闭）**：路径定位四行结果 + ① 新建 ② 打开（含「继续上次项目」）③ 最近项目；失败就地给中文原因，不关窗 |
+| `components/` | `StartupScanDialog.vue` | **扫描模态窗**：六步骤状态表 + 当前阶段/明细 + 进度条 + 耗时 + 「取消扫描 / 重试扫描 / 跳过并进入工作台」；成功后 2.5 秒自动进工作台 |
+| `App.vue` | — | 挂载两个模态 + 调 `startup.start()`；`startup.blocking` 期间：`.locked`（不吃指针事件）、全局快捷键短路、**`router-view` 不挂载**（工作台在扫描结束后才首次挂载，首屏即扫完的数据） |
+| `views/` | `SettingsView.vue` | **顺手修复**：`config.autoDetect` 返回的是**共享配置键名**（`gameDirectory` / `unityCacheDirectory` / `modDirectory` / `fmodLibraryDirectory`），此前用 `dir.key`（`gameDir` / `cacheDir` …）直取 ⇒ 探测结果永远填不进来；现经 `CONFIG_KEYS` 映射 |
+
+### §17.2 复用的后端能力（无新增）
+
+| IPC 方法 | 处理器 | 本次用途 |
+|---|---|---|
+| `config.autoDetect` | `IpcGateway.HandleConfigAutoDetect` | 启动路径定位（`AppEnvironment.ApplyAutoConfigure`：只填空位，手动值永不被覆盖） |
+| `config.read` | `HandleConfigRead` | 读 `lastProjectFile`（只读展示，用户点「继续」才打开） |
+| `project.recent` / `project.create` / `project.open` | `HandleProjectRecent` / `HandleProjectCreateAsync` / `HandleProjectOpenAsync` | 项目门三个入口 |
+| `dialog.openFile` | 宿主 `NativeBridgeService.HandleDialog` | 选 `.lmeproj` 文件 |
+| `scan.run` | `HandleScanRunAsync` | 自动扫描（六步骤：缓存库 → 游戏资源 → 音频索引 → 静态数据表 → lang 文本 → 资源关联） |
+| `cancel` | `HandleCancel` | 取消扫描（协作式取消） |
+
+> **顺序约束（别改成「先扫描后选项目」）**：`scan.run` 要求「必须有当前项目」——网关在没有
+> 当前项目时直接回 `invalid-query`「请先打开或新建项目」。因此启动顺序固定为
+> **定位 → 选项目 → 扫描**；「自动」体现在扫描不需要用户点任何按钮，而不是不需要项目。

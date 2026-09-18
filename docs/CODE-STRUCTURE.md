@@ -21,9 +21,11 @@
 >
 > 本文书写于 **WPF 时代**，其中**描述旧 WPF 界面外壳与页面层的章节已不再是当前实现**，
 > 保留仅为存档决策上下文。**已按重构后事实同步**：§1（总览）、§2（分层/依赖表/新增服务）、
-> §3（目录地图的界面与 Spine 两行）、§6（不变量与新增两条）、§10（命令与基线）。
+> §3（目录地图的界面与 Spine 两行）、§5.0（**2026-09-19 新增：WebView2 时代启动流程**）、
+> §6（不变量与新增两条）、§10（命令与基线）。
 > **仍为 WPF 时代原文、不可按字面执行**：§4（三列页面模型 / `MainWindow.xaml` / `WorkbenchPages/` 五页）、
-> §5（启动与导出流程中的 `MainWindow.*` 调用点）、§7（部分落盘说明）、§8（症状定位表里的 `App/WorkbenchPages/*`
+> §5.1（启动扫描里的 `MainWindow.*` 调用点；步骤内容仍准确，编排已迁到前端）、§7（部分落盘说明）、
+> §8（症状定位表里的 `App/WorkbenchPages/*`
 > 与 `Application/Spine/*` 路径）、§9（含 `SpineRuntime` 的边界条目）。
 > 这些章节指向的文件**已被删除**（22 个 UI 单元 + Spine native 工程，见 `docs/ARCH-WEBVIEW2-VUE.md` §7）。
 > 当前的界面外壳与运行流程请读：`docs/ARCH-WEBVIEW2-VUE.md` + `docs/WEB-IPC-CONTRACT.md` +
@@ -205,7 +207,38 @@ Windows 下默认 `RuntimeIdentifier=win-x64`、`CopyLocalLockFileAssemblies=tru
 
 ## 5. 核心运行流程
 
-### 5.1 启动 → 扫描（每次启动都跑）
+### 5.0 启动流程（2026-09-19 新增，**WebView2 时代以此为准**）
+
+启动编排**全在前端**（`src/LimbusModEditor.Web/src/stores/startup.ts`），宿主不做任何
+启动期磁盘动作。三步固定顺序：
+
+```
+App.vue onMounted
+  └─ startup.start()                       stores/startup.ts（幂等，phase 是唯一事实来源）
+       ├─ ① locating  自动路径定位 = config.autoDetect（游戏 / 缓存 / 模组 / FMOD 四个目录）
+       ├─ ② project   **强制项目门**（components/ProjectGateDialog.vue，不可关闭）
+       │     新建 project.create / 打开 project.open / 最近 project.recent
+       │     门开着时：工作区 `.locked`（pointer-events:none）+ 全局快捷键短路
+       └─ ③ scanning  自动扫描 = scan.run(scope=all)（components/StartupScanDialog.vue，模态）
+             └─ 六个步骤：缓存库 → 游戏资源 → 音频索引 → 静态数据表 → lang 文本 → 资源关联
+       → done：工作台挂载（router-view 在此之前是 v-if 掉的）
+```
+
+为什么扫描排在项目**之后**：`scan.run` 的契约前提就是「必须有当前项目」
+（网关无项目时直接回 `invalid-query` 中文错误），所以「自动扫描」只能在项目确定后触发。
+
+| 要点 | 落点 | 说明 |
+|---|---|---|
+| 启动期工作区不可用 | `App.vue`（`.locked` + `router-view` 的 `v-if`） | 「强制先选项目」的硬锁；同时让各页在**扫描结束后**才挂载 → 首屏就是扫完的数据，不需要跨页失效通知 |
+| 扫描模态不可关 | `components/StartupScanDialog.vue` | 扫描中只能「取消扫描」（`ipc.cancel`，协作式取消）；成功 2.5s 后自动进工作台；失败停在窗里给「重试 / 跳过并进入工作台」 |
+| 进度可见 | `progress` 事件（`operationId = 'scan'`） | 与「项目」页的「重新扫描游戏资源」共用同一条活动，状态栏不会出现两条 |
+| 失败不静默 | `stores/startup.ts` | 定位失败 / 扫描失败都记中文原因；无缓存目录时门里提前警告 |
+
+### 5.1 启动 → 扫描（WPF 时代原文，保留为历史）
+
+> ⚠️ 以下代码路径（`MainWindow` / `StartupScanDialog` / `ShowPage`）**已随 WPF 页面层删除**，
+> 只剩「扫描六个步骤的内容与顺序」这部分仍然准确（今天的实现见 §5.0 与
+> `Application/Scanning/StartupScanService.cs`）。
 
 **2026-09-14 资源库 v2**：`unity-cache-index.db` 的 `user_version=2`；`bundles.id`
 为整数键，`strings` 去重容器名/基线文字，`assets` 以 `(bundle_id,bundle_index)` 为
@@ -467,7 +500,7 @@ catalog 用固定 16 字节键集合做一次线性扫描；Carra 差异比较�
 | 出口建议文案/自动分析 | `Application/Build/ExportAdvisor.cs` | `App/ModExportReportWindow.cs` |
 | 调试应用写盘/还原/冲突 | `Application/Debugging/ModApplyService.cs`、`StaticModApplyService.cs` | `DebugApplyService.cs`、`GameLaunchService.cs` |
 | 目录自动发现（游戏/缓存/模组/FMOD） | `Application/Debugging/GameDirectoryLocator.cs`、`UnityCacheLocator.cs`、`ModDirectoryLocator.cs` + `AppConfig/AppEnvironment.cs` | `App/WorkbenchPages/SettingsPage.cs` |
-| 启动变慢 / 弹窗时序 | `App/MainWindow.xaml.cs`（`Loaded` 路径）、`App/StartupTrace.cs`、`Application/Scanning/StartupScanService.cs` | `StartupScanDialog.cs` |
+| **启动流程 / 自动定位 / 自动扫描 / 强制选项目** | **`src/LimbusModEditor.Web/src/stores/startup.ts`**（三步编排，唯一入口）+ `components/ProjectGateDialog.vue` + `components/StartupScanDialog.vue` | `App.vue`（`.locked` 与 `router-view` 的 `v-if`）、`Application/Scanning/StartupScanService.cs`（六个步骤本体）、§5.0 |
 | 项目文件变大 / 打开慢 | `Application/Projects/ProjectService.cs`（`SkipReferenceAssetsConverter`、回灌） | `Domain/Projects/ModProject.cs` |
 | CLI 行为 | `src/LimbusModEditor.Cli/Program.cs` | `Application/Build/ModExportService.cs`、`Assets/ModImportService.cs` |
 | **导出/调试卡住界面、无法中断** | `App/MainWindow.xaml.cs`（`ExportMod_Click`/`DebugMod_Click`/`PrepareExportPlanAsync` 的 `Task.Run` 与令牌） | `Build/UnityBundleBuildService.cs`（必须自己切线程池）、`Build/ThrottledProgress.cs`、`App/ExportProgressWindow.cs`、不变量 §6-17~19 |

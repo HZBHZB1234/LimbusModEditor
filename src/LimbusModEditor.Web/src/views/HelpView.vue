@@ -3,6 +3,7 @@
 // 嵌入式中文教程内容 + 外部链接
 
 import { ref } from 'vue'
+import { NCard, NCollapse, NCollapseItem, NTag } from 'naive-ui'
 
 // ── 教程章节 ──
 interface HelpSection {
@@ -110,6 +111,12 @@ function openLink(url: string) {
   // 暂未实现：打开外部链接
   window.open(url, '_blank')
 }
+
+/** 目录锚点跳转：保持原生 a[href="#id"] 语义 */
+function scrollToSection(id: string) {
+  const el = document.getElementById(id)
+  if (el) el.scrollIntoView({ behavior: 'smooth' })
+}
 </script>
 
 <template>
@@ -127,42 +134,46 @@ function openLink(url: string) {
           :key="section.id"
           :href="'#' + section.id"
           class="nav-link"
+          @click.prevent="scrollToSection(section.id)"
         >
           {{ section.icon }} {{ section.title }}
         </a>
       </nav>
 
-      <!-- 教程章节 -->
+      <!-- 教程章节：NCollapse 折叠文档式排版（锚点 id 挂在卡片上，深链可用） -->
       <div class="help-content">
-        <section
+        <NCard
           v-for="section in sections"
-          :key="section.id"
           :id="section.id"
+          :key="section.id"
           class="help-section"
+          size="small"
         >
-          <h3 class="section-title">
-            <span class="section-icon">{{ section.icon }}</span>
-            {{ section.title }}
-          </h3>
-          <div class="section-body">
-            <p
-              v-for="(paragraph, i) in section.content"
-              :key="i"
-              class="section-paragraph"
-              :class="{ 'paragraph-empty': paragraph === '' }"
-            >
-              {{ paragraph || '\u00A0' }}
-            </p>
-          </div>
-        </section>
+          <NCollapse :default-expanded-names="[section.id]" :trigger-areas="['main', 'arrow']">
+            <NCollapseItem :name="section.id">
+              <template #header>
+                <h3 class="section-title">
+                  <span class="section-icon">{{ section.icon }}</span>
+                  {{ section.title }}
+                </h3>
+              </template>
+              <div class="section-body">
+                <p
+                  v-for="(paragraph, i) in section.content"
+                  :key="i"
+                  class="section-paragraph"
+                  :class="{ 'paragraph-empty': paragraph === '' }"
+                >
+                  {{ paragraph || '\u00A0' }}
+                </p>
+              </div>
+            </NCollapseItem>
+          </NCollapse>
+        </NCard>
       </div>
 
       <!-- 外部链接 -->
-      <section class="help-section external-section">
-        <h3 class="section-title">
-          <span class="section-icon">🔗</span>
-          外部链接
-        </h3>
+      <NCard class="help-section external-section" size="small" title="🔗 外部链接">
         <div class="external-list">
           <a
             v-for="link in externalLinks"
@@ -171,12 +182,14 @@ function openLink(url: string) {
             class="external-link"
             @click.prevent="openLink(link.url)"
           >
-            <span class="link-label">{{ link.label }}</span>
+            <span class="link-head">
+              <span class="link-label">{{ link.label }}</span>
+              <NTag class="link-tag" size="small" :bordered="false">{{ link.description }}</NTag>
+            </span>
             <span class="link-url lme-mono">{{ link.url }}</span>
-            <span class="link-desc">{{ link.description }}</span>
           </a>
         </div>
-      </section>
+      </NCard>
 
       <!-- 页脚 -->
       <footer class="help-footer">
@@ -252,17 +265,11 @@ function openLink(url: string) {
 .help-content {
   display: flex;
   flex-direction: column;
-  gap: var(--lme-gap-xl);
+  gap: var(--lme-gap-lg);
 }
 
+/* 面板外观由 NCard 承担，此处只保留锚点滚动留白 */
 .help-section {
-  display: flex;
-  flex-direction: column;
-  gap: var(--lme-gap-md);
-  padding: var(--lme-gap-lg);
-  background: var(--lme-bg-panel);
-  border: 1px solid var(--lme-border);
-  border-radius: var(--lme-radius-md);
   scroll-margin-top: var(--lme-gap-lg);
 }
 
@@ -297,10 +304,6 @@ function openLink(url: string) {
 }
 
 /* ── 外部链接 ── */
-.external-section {
-  background: var(--lme-bg-elevated);
-}
-
 .external-list {
   display: flex;
   flex-direction: column;
@@ -312,7 +315,7 @@ function openLink(url: string) {
   flex-direction: column;
   gap: 2px;
   padding: var(--lme-gap-md);
-  background: var(--lme-bg-panel);
+  background: var(--lme-bg-input);
   border: 1px solid var(--lme-border);
   border-radius: var(--lme-radius-sm);
   text-decoration: none;
@@ -324,19 +327,25 @@ function openLink(url: string) {
   background: var(--lme-bg-hover);
 }
 
+.link-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--lme-gap-sm);
+}
+
 .link-label {
   font-size: var(--lme-font-size-md);
   color: var(--lme-accent);
   font-weight: 500;
 }
 
-.link-url {
-  font-size: var(--lme-font-size-sm);
-  color: var(--lme-text-muted);
+.link-tag {
+  flex-shrink: 0;
 }
 
-.link-desc {
-  font-size: var(--lme-font-size-xs);
+.link-url {
+  font-size: var(--lme-font-size-sm);
   color: var(--lme-text-muted);
 }
 

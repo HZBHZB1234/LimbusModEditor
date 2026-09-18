@@ -74,6 +74,12 @@ try
             Environment.ExitCode = await SpineBrowseIpcCommand.RunAsync(
                 args[1], int.TryParse(args[2], out var browseCount) ? browseCount : 8, args[3]);
             break;
+        case "spine-attach":
+            Environment.ExitCode = await SpineAttachCommand.RunAsync(
+                Environment.GetEnvironmentVariable("LME_BASE"),
+                args.Length >= 2 ? args[1] : null,
+                args.Length >= 3 ? args[2] : null);
+            break;
         case "logs":
             Console.WriteLine(logging.CurrentFile ?? logging.Describe());
             break;

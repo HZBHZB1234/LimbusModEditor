@@ -306,12 +306,20 @@ public sealed record SpineCatalogSummaryDto(int Total, int Bound, int Unbound, i
 /// <param name="Group">中文归类（人格立绘 / 敌方单位 / 异想体 / 人格(战斗) / E.G.O / 战斗其它）。</param>
 /// <param name="BundlePresent">所在 bundle 此刻在不在本机。</param>
 /// <param name="BoundPageCount">被多少个维基页面绑定（0 = 从未在界面出现过）。</param>
+/// <param name="Source">归属来源的中文说明（「已被 N 个页面绑定」/「由关联索引自动接入」/「未归类」）。</param>
+/// <param name="ParseStatus">解析状态的机器可读值：<c>parsed</c> / <c>likely</c> / <c>bundle-missing</c> / <c>uncategorized</c>。</param>
+/// <param name="ParseStatusLabel">解析状态的中文说明（与 <paramref name="ParseStatus"/> 一一对应）。</param>
+/// <param name="OwnerPageIds">归属的维基页面 id（点得进去；未归类时为空）。</param>
 public sealed record SpineCatalogItemDto(
     string RefKey,
     string Name,
     string Group,
     bool BundlePresent,
-    int BoundPageCount);
+    int BoundPageCount,
+    string Source,
+    string ParseStatus,
+    string ParseStatusLabel,
+    IReadOnlyList<string> OwnerPageIds);
 
 /// <summary><c>spine.catalog</c> 响应载荷（分页）。</summary>
 public sealed record SpineCatalogResponse(
@@ -333,6 +341,11 @@ public sealed record SpineResolveRequest(string RefKey);
 /// <param name="SkeletonFormat"><c>json</c> 或 <c>binary</c>。</param>
 /// <param name="Label">显示标签。</param>
 /// <param name="Reason">取不到时的中文原因（如实说，不造假）。</param>
+/// <param name="Source">这一条的归属来源（中文，来自关联索引反查）。</param>
+/// <param name="OwnerPageIds">归属的维基页面 id（点得进去）。</param>
+/// <param name="BundlePresent">它所在的 bundle 文件此刻在不在本机（不在 = Unity 缓存被清，非代码可补）。</param>
+/// <param name="ParseStatus">解析状态：<c>parsed</c>（已解析出三件套）/ <c>no-skeleton</c>（引用链里确实没有骨架与图集，本来就不是 Spine）/ <c>bundle-missing</c>（bundle 不在本机）/ <c>failed</c>（其它失败）。</param>
+/// <param name="ParseStatusLabel">解析状态的中文说明。</param>
 public sealed record SpineResolveResponse(
     bool Ok,
     string? SkeletonUrl,
@@ -340,7 +353,12 @@ public sealed record SpineResolveResponse(
     IReadOnlyDictionary<string, string>? TextureUrls,
     string? SkeletonFormat,
     string? Label,
-    string? Reason);
+    string? Reason,
+    string Source,
+    IReadOnlyList<string> OwnerPageIds,
+    bool BundlePresent,
+    string ParseStatus,
+    string ParseStatusLabel);
 
 // ── 2.6 项目 / 导出 ──────────────────────────────────────────────
 

@@ -664,11 +664,50 @@ public sealed partial class IpcGateway
         var result = await _spineData.BrowseCatalogWithSummaryAsync(query);
         var summary = result.Summary;
         var page = result.Page;
+
+        // 归属：一次读完整张反查索引（既有分析器产出的权威归属），供「来源 / 状态 / 点进去」用。
+        var owners = ReadSpineOwnersByRef();
+
         return IpcResponse.Success(request.Id, new SpineCatalogResponse(
             new SpineCatalogSummaryDto(summary.Total, summary.Bound, summary.Unbound, summary.BundleMissing),
             page.Total,
-            page.Items.Select(i => new SpineCatalogItemDto(
-                i.RefKey, i.Name, i.Group, i.BundlePresent, i.BoundPageCount)).ToList()));
+            page.Items.Select(i =>
+            {
+                var ownerPageIds = owners.TryGetValue(i.RefKey, out var list) ? list : (IReadOnlyList<string>)[];
+                var status = SpineData.SpineStatusRules.CatalogStatus(i.BundlePresent, ownerPageIds.Count);
+                return new SpineCatalogItemDto(
+                    i.RefKey, i.Name, i.Group, i.BundlePresent, i.BoundPageCount,
+                    SpineData.SpineStatusRules.Source(i.BundlePresent, i.BoundPageCount, ownerPageIds.Count),
+                    status, SpineData.SpineStatusRules.Label(status), ownerPageIds);
+            }).ToList()));
+    }
+
+    /// <summary>
+    /// 「Spine 挂点 → 归属的维基页面 id」反查（<c>subjects_by_ref</c> 是既有分析器从 links
+    /// 派生的<b>权威</b>归属，不是现推的）。只在维基里真有这个页面时才返回它 ——
+    /// 否则前端会给出一个点进去 404 的链接。
+    /// </summary>
+    private IReadOnlyDictionary<string, IReadOnlyList<string>> ReadSpineOwnersByRef()
+    {
+        try
+        {
+            var existing = new HashSet<string>(
+                new WikiPageStore(_cacheDirectory).ReadPages().Select(p => p.PageId), StringComparer.Ordinal);
+            var map = new RelationStore(_cacheDirectory).ReadSubjectsByRefMap();
+            var result = new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var (refKey, owners) in map)
+            {
+                var pages = owners.Where(existing.Contains).ToList();
+                if (pages.Count > 0) result[refKey] = pages;
+            }
+            return result;
+        }
+        catch (Exception ex)
+        {
+            // 归属只是列表上的附加信息，读不到不影响名册本身 —— 降级为「无归属」。
+            Log.Warn(ex, "读取 Spine 归属反查失败（名册仍可用，来源按未归类显示）。");
+            return new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase);
+        }
     }
 
     /// <summary>
@@ -687,7 +726,15 @@ public sealed partial class IpcGateway
         var req = DeserializePayload<SpineResolveRequest>(request);
         if (string.IsNullOrWhiteSpace(req.RefKey))
             return IpcResponse.Success(request.Id,
-                new SpineResolveResponse(false, null, null, null, null, null, "缺少容器路径（refKey）。"));
+                new SpineResolveResponse(false, null, null, null, null, null, "缺少容器路径（refKey）。",
+                    string.Empty, [], false, SpineData.SpineStatusRules.Failed,
+                    SpineData.SpineStatusRules.Label(SpineData.SpineStatusRules.Failed)));
+
+        // 来源 / 归属与 bundle 状态：与名册同一份判据，避免「列表说可解析、点进去说取不到」。
+        var owners = ReadSpineOwnersByRef();
+        var ownerPageIds = owners.TryGetValue(req.RefKey, out var list) ? list : (IReadOnlyList<string>)[];
+        var bundlePresent = BundleFilePresent(req.RefKey);
+        var source = SpineData.SpineStatusRules.Source(bundlePresent, 0, ownerPageIds.Count);
 
         var resolution = await _wikiMedia.ResolveSpineAsync(req.RefKey);
         var skeletonUrl = resolution.SkeletonUrl;
@@ -699,8 +746,10 @@ public sealed partial class IpcGateway
             var reason = error ?? (data is null
                 ? "这条路径没能解出 Spine 三件套（引用链里没有骨架与图集）。"
                 : "三件套已取到，但地址没能落地（详见 logs/current.log）。");
+            var status = SpineData.SpineStatusRules.ResolveStatus(false, bundlePresent, reason);
             return IpcResponse.Success(request.Id,
-                new SpineResolveResponse(false, null, null, null, null, data?.Label, reason));
+                new SpineResolveResponse(false, null, null, null, null, data?.Label, reason,
+                    source, ownerPageIds, bundlePresent, status, SpineData.SpineStatusRules.Label(status)));
         }
 
         return IpcResponse.Success(request.Id, new SpineResolveResponse(
@@ -710,7 +759,33 @@ public sealed partial class IpcGateway
             resolution.TextureUrls,
             skeletonUrl.EndsWith(".skel", StringComparison.OrdinalIgnoreCase) ? "binary" : "json",
             SpineDisplayNameOf(req.RefKey),
-            null));
+            null,
+            source,
+            ownerPageIds,
+            bundlePresent,
+            SpineData.SpineStatusRules.Parsed,
+            SpineData.SpineStatusRules.Label(SpineData.SpineStatusRules.Parsed)));
+    }
+
+    /// <summary>
+    /// 这条 Spine 挂点所在的 bundle 文件此刻在不在本机（Unity 缓存被清 = 不在）。
+    /// 查索引库的 <c>bundles.data_path</c>；查不到一律按「不在」算（不假装在）。
+    /// </summary>
+    private bool BundleFilePresent(string refKey)
+    {
+        try
+        {
+            foreach (var asset in _catalog.FindByContainerEntry(refKey))
+            {
+                var path = asset.SourcePath;
+                if (!string.IsNullOrWhiteSpace(path) && File.Exists(path)) return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "探测 Spine bundle 是否存在失败（按不在本机处理）：{0}", refKey);
+        }
+        return false;
     }
 
     /// <summary>名册/预览要显示的名字：容器路径的文件名去掉 <c>.prefab</c> 扩展名。</summary>

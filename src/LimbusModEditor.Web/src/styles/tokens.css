@@ -190,6 +190,14 @@
   --wiki-card-hover-bg: var(--lme-bg-hover);
   --wiki-cat-empty-text: var(--lme-text-disabled);  /* "本地无来源" */
   --wiki-section-head-border: var(--wiki-accent-dim); /* 区块标题分隔线 */
+  /* ui-redesign r3 追加（首页库组件化时的尺寸/时长令牌） */
+  --wiki-loadingbar-height: 2px;                    /* 顶部细进度条高度 */
+  --wiki-loadingbar-cycle: 1s;                      /* 顶部细进度条动画周期 */
+  --wiki-hero-accent-line-height: 3px;              /* 横幅顶部金色装饰线高度 */
+  --wiki-stat-col-min: 150px;                       /* 统计卡栅格最小列宽 */
+  --wiki-category-col-min: 220px;                   /* 分类卡栅格最小列宽 */
+  --wiki-recent-time-min: 140px;                    /* 最近编辑时间列最小宽 */
+  --wiki-card-lift: -2px;                           /* 卡片悬浮上浮位移 */
 
   /* ── 维基：外壳（侧栏导航 + 面包屑 + 侧栏搜索框） ── */
   --wiki-nav-active-bg: rgba(230, 182, 70, 0.12);
@@ -211,6 +219,9 @@
   --wiki-aside-max: 320px;                          /* 信息框列最大宽 */
   --wiki-infobox-zebra-bg: rgba(255, 255, 255, 0.03); /* 信息框字段行 zebra 底 */
   --wiki-infobox-row-hover: rgba(230, 182, 70, 0.08); /* 信息框字段行 hover 底 */
+
+  /* ── 维基：实体页库组件化（ui-redesign r3 追加） ── */
+  --wiki-focus-ring: 0 0 0 2px rgba(230, 182, 70, 0.35); /* 维基区聚焦环（金，不用紫） */
 
   /* ════════════════════════════════════════════════════════════
      v2 设计令牌（ui-redesign r1）—— 排版 / 间距 / 圆角 / 海拔 / 动效

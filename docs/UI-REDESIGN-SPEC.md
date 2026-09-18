@@ -446,20 +446,42 @@
 
 ### 5.2 依赖取舍
 
+> **本节结论已更新（r1 起）**：需求方明确「**要求引入组件库**」。据此最终**引入 Naive UI**；
+> 主题在运行时从 `tokens.css` 派生（已落地 `src/theme/naiveTheme.ts`，**零色值字面量**），
+> 并提供 `/lib-check` 自检页（`src/views/LibCheckView.vue`）做库组件在暗色 + tokens 主题下的回归验证。
+> 「设计色只能来自 `tokens.css`」铁律**未被违反**：库不携带自有色板，所有色值仍由 tokens 单一供给。
+
 | 方案 | 体积（量级，以本地构建产物为准） | 主题化代价 | 结论 |
 | --- | --- | --- | --- |
-| **纯 CSS 栅格 + 自研组件（CSS 变量主题）** | **0 KB**（全部走 `tokens.css`） | 无（变量即主题） | ✅ **推荐** |
+| **Naive UI（按需引入）** | 组件按需分包（构建产物实际以 `npm run build` 为准） | **低**：`themeOverrides` 在运行时由 tokens 派生，无需引入第二套色板 | ✅ **已采用**（`94cb2e6`）；前提是**只用 `themeOverrides` 映射、禁止出现色值字面量** |
+| **纯 CSS 栅格 + 自研组件（CSS 变量主题）** | **0 KB**（全部走 `tokens.css`） | 无（变量即主题） | ⚠️ 仅保留给维基区少量「壳 + 态」型组件（如 `WikiNoticeBox`），不再作为总体路线 |
 | `@vueuse/core`（按需引入） | tree-shaking 后通常几 KB～十几 KB | 无 | ✅ **可选**：`useElementSize`（修虚拟列表写死高度）、`onKeyStroke`（命令面板）、`useVirtualList`（替换自研 VirtualList 待评估） |
-| headless 组件（`@headlessui/vue` / `radix-vue`） | 每个组件约几 KB，合计数十 KB | 需覆写样式以接入 tokens | ⚠️ 可选但非必需：本项目组件形态简单，自研成本低于适配成本 |
+| headless 组件（`@headlessui/vue` / `radix-vue`） | 每个组件约几 KB，合计数十 KB | 需覆写样式以接入 tokens | ❌ 不再考虑：既然已采用 Naive UI，再叠一层 headless 只会增加适配成本 |
 | 图标集 `lucide-vue-next` | 单图标 <1 KB（tree-shaking） | 无 | ⚠️ 延后（P3） |
-| **完整 UI 库（Element Plus / Naive UI / Vuetify）** | 完整引入通常 **数百 KB～1 MB+**（gzip 后仍百 KB 级） | **高**：自带设计语言与 Sass 变量，与「设计色只在 `tokens.css`」铁律冲突，需大量覆写 | ❌ **不建议** |
-| CSS 框架（Tailwind / Bootstrap） | Tailwind 产物约 5–15 KB（ purge 后）；Bootstrap 约 20–30 KB | 中：Tailwind 需把 tokens 映射到 config；Bootstrap 自带组件观感与维基风格冲突 | ❌ 不建议（Tailwind 会与 tokens.css 双轨并行，违反单一色源铁律） |
+| CSS 框架（Tailwind / Bootstrap） | Tailwind 产物约 5–15 KB（purge 后）；Bootstrap 约 20–30 KB | 中：Tailwind 需把 tokens 映射到 config；Bootstrap 自带组件观感与维基风格冲突 | ❌ 不建议（Tailwind 会与 tokens.css 双轨并行，违反单一色源铁律） |
 
-**明确建议**：**不引入任何 UI 组件库**。
-理由（三条，可验证）：
-1. **铁律约束**：设计色只能在 `tokens.css`，而所有主流 UI 库都自带设计令牌与默认色，接入后必然出现第二套色源（Element Plus 的 `--el-color-*`、Naive 的 `themeOverrides`）。
-2. **宿主约束**：这是 WebView2 桌面应用，需求方明确要求内存与启动速度；现有依赖仅 vue/pinia/vue-router/spine-webgl，`index-*.js` 当前 gzip 45 KB，引入完整库会使主包量级翻倍（公开资料量级，**实际以本地 `npm run build` 产物为准**）。
-3. **收益不足**：本规格列出的 18 个组件中，14 个是「壳 + 态」型（Card/EmptyState/Chip/Toolbar…），自研每个 30–80 行；真正复杂的只有 `DataTable`（虚拟滚动 + 列管理）与 `SplitPane`，两者均可基于现有 `VirtualList` 增量实现。
+**主题映射示例**（`src/theme/naiveTheme.ts` 的实际做法：运行时读 `getComputedStyle(:root)` 的变量计算值，
+再喂给 `GlobalThemeOverrides`；库需要可解析的 hex/rgba 才能算派生色，故**不能直接传 `var(...)` 字符串**；
+token 缺失时该键跳过、回落库自带暗色，**绝不在 TS 里另起一套色值**）：
+
+```
+tokens.css 变量            →  Naive UI 主题字段
+--lme-bg-base              →  common.baseColor / common.bodyColor
+--lme-bg-panel             →  common.cardColor / Card.color / DataTable.tdColor
+--lme-bg-elevated          →  common.modalColor / common.popoverColor / DataTable.thColor
+--lme-bg-input             →  common.inputColor / Input.color
+--lme-text-primary         →  common.textColorBase / common.textColor1
+--lme-text-secondary       →  common.textColor2
+--lme-text-muted           →  common.textColor3 / Empty.textColor / placeholderColor
+--lme-border               →  common.borderColor / common.dividerColor
+--lme-accent（工作台紫）    →  common.primaryColor（维基区传 --wiki-accent 换成金）
+--lme-radius-md            →  common.borderRadius
+--lme-font-size-md         →  common.fontSize / common.fontSizeMedium
+--lme-shadow-md            →  common.boxShadow2
+```
+
+**接入红线（三条）**：① 只通过 `themeOverrides` 映射，组件内**不得出现色值字面量**；
+② 主色分区域注入（工作台紫 / 维基金），不由库决定；③ 新增 token 时同步补映射，缺失即回落库默认。
 
 ---
 

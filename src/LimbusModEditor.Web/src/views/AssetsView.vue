@@ -232,6 +232,99 @@ async function onReplaceAsset() {
   }
 }
 
+// ═══════════ 批量替换（asset.edit.batchReplace）════════════
+
+const batchBusy = ref(false)
+/** 后端逐条给的跳过原因（warnings：没有同名资源 / 已有替换标记未覆盖 / 文件名不匹配…） */
+const batchWarnings = ref<string[]>([])
+
+/**
+ * 选一个<b>源目录</b> → 按文件名匹配项目里的资源批量登记替换。
+ * 载荷按后端 `AssetEditBatchReplaceRequest`：`{ sourceDirectory, namePattern?, onlyUnreplaced? }`。
+ */
+async function onBatchReplace() {
+  if (batchBusy.value) return
+
+  batchBusy.value = true
+  replaceMessage.value = ''
+  replaceFailed.value = false
+  batchWarnings.value = []
+  try {
+    // 宿主原生目录对话框（见 docs/WEB-IPC-CONTRACT.md）
+    const picked = await ipc.request<{ path?: string }>('dialog.folderPick', {
+      title: '选择替换资源所在的目录（按文件名匹配项目里的资源）',
+    })
+    if (!picked?.path) return // 用户取消，不算失败
+
+    const res = await ipc.request<{
+      replaced?: number
+      skipped?: number
+      warnings?: string[]
+      info?: string
+    }>('asset.edit.batchReplace', {
+      sourceDirectory: picked.path,
+      onlyUnreplaced: true,
+    })
+
+    replaceMessage.value =
+      `替换 ${res?.replaced ?? 0} 条 / 跳过 ${res?.skipped ?? 0} 条` +
+      (res?.info ? ` · ${res.info}` : '')
+    batchWarnings.value = res?.warnings ?? []
+
+    // 刷新：本页重拉（列表行「已修改」由后端按项目态给出）+ 预览重拉
+    await catalog.fetchPage(catalog.offset)
+    const selected = catalog.selectedAssetId
+    if (selected) await previewStore.loadPreview(selected)
+  } catch (e: unknown) {
+    replaceFailed.value = true
+    replaceMessage.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    batchBusy.value = false
+  }
+}
+
+// ═══════════ 撤销编辑（asset.edit.clearEdits）════════════
+
+const clearBusy = ref(false)
+
+/**
+ * 撤销当前选中资源的全部编辑（替换 / Unity 字段 / Sprite），并同步清掉项目编辑清单里的记录。
+ * 载荷按后端 `AssetEditClearEditsRequest`：`{ assetId }`（传 logicalPath，与单条替换同口径）。
+ */
+async function onClearEdits() {
+  const asset = catalog.selectedAsset
+  if (!asset || clearBusy.value) return
+  const logicalPath = asset.logicalPath
+
+  clearBusy.value = true
+  replaceMessage.value = ''
+  replaceFailed.value = false
+  batchWarnings.value = []
+  try {
+    const res = await ipc.request<{
+      clearedCount?: number
+      remainingEdits?: number
+      info?: string
+    }>('asset.edit.clearEdits', { assetId: logicalPath })
+
+    replaceMessage.value =
+      res?.info ?? `已清掉 ${res?.clearedCount ?? 0} 条，剩余 ${res?.remainingEdits ?? 0} 条`
+
+    // 刷新：本页重拉（编辑标记回到「未修改」）+ 预览重拉（回到原版）
+    await catalog.fetchPage(catalog.offset)
+    const refreshed = catalog.items.find((a) => a.logicalPath === logicalPath)
+    if (refreshed) {
+      catalog.selectAsset(refreshed.assetId)
+      await previewStore.loadPreview(refreshed.assetId)
+    }
+  } catch (e: unknown) {
+    replaceFailed.value = true
+    replaceMessage.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    clearBusy.value = false
+  }
+}
+
 // 虚拟列表高度自适应
 const listHeight = ref(600)
 </script>
@@ -357,6 +450,22 @@ const listHeight = ref(600)
         >
           {{ replaceBusy ? '替换中…' : '替换…' }}
         </button>
+        <button
+          class="replace-btn"
+          :disabled="batchBusy || replaceBusy"
+          title="选一个目录，按文件名批量登记替换（已有替换标记的资源默认不覆盖）"
+          @click="onBatchReplace"
+        >
+          {{ batchBusy ? '批量替换中…' : '批量替换…' }}
+        </button>
+        <button
+          class="replace-btn"
+          :disabled="!catalog.selectedAsset || clearBusy || replaceBusy"
+          :title="catalog.selectedAsset ? `撤销「${catalog.selectedAsset.logicalPath}」的编辑` : '先选中一条资源'"
+          @click="onClearEdits"
+        >
+          {{ clearBusy ? '撤销中…' : '撤销编辑' }}
+        </button>
         <span
           v-if="replaceMessage"
           class="replace-message"
@@ -365,6 +474,11 @@ const listHeight = ref(600)
           {{ replaceMessage }}
         </span>
       </div>
+
+      <!-- 批量替换的跳过原因（后端逐条给，照原样列出来） -->
+      <ul v-if="batchWarnings.length > 0" class="batch-warnings">
+        <li v-for="(w, i) in batchWarnings" :key="i">{{ w }}</li>
+      </ul>
 
       <PreviewPane :asset="catalog.selectedAsset" />
 
@@ -615,6 +729,18 @@ const listHeight = ref(600)
   color: var(--lme-error);
 }
 
+/* ── 批量替换的跳过原因 ── */
+.batch-warnings {
+  margin: 0;
+  padding: 4px 12px 6px 28px;
+  border-bottom: 1px solid var(--lme-border);
+  font-size: var(--lme-font-size-xs);
+  color: var(--lme-text-secondary);
+  line-height: 1.6;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
 /* ── 关联对象 ── */
 .related-subjects {
   padding: 8px 12px;
@@ -749,8 +875,10 @@ const listHeight = ref(600)
   - ❌ 旧界面：关联资源区（反查「这个资源属于哪些对象」）
   - ⏳ 新界面：W2 全量迁移时补上（需 relation.describe IPC 方法）
   - ❌ 旧界面：替换/批处理/撤销/编辑文本/Unity 字段编辑
-  - ⏳ 新界面：已补「替换…」（dialog.openFile + asset.edit.replacePayload + 刷新预览）；
-    批处理/撤销/编辑文本/Unity 字段编辑留 W2（需对应 IPC 入口）
+  - ⏳ 新界面：已补「替换…」（dialog.openFile + asset.edit.replacePayload + 刷新预览）、
+    「批量替换…」（dialog.folderPick + asset.edit.batchReplace，结果显示「替换 N 条 / 跳过 M 条」
+    并列出后端逐条给的跳过原因）、「撤销编辑」（asset.edit.clearEdits + 刷新编辑标记与预览）；
+    编辑文本/Unity 字段编辑留 W2（需对应 IPC 入口）
   - ❌ 旧界面：Spine 动画预览按钮
   - ⏳ 新接口：W2 全量迁移时改为前端 spine-ts 就地播放
   - ❌ 旧界面：右键菜单（替换/编辑文本/字段编辑/撤销/复制路径）

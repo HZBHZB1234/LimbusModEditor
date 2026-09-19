@@ -140,6 +140,37 @@ public sealed class SpineResultCacheTests
         cache.Set("a.prefab", null, Sample(), null);
         cache.Clear();
         Assert.False(cache.TryGet("a.prefab", out _, out _));
+        Assert.Equal(0, cache.RetainedBytes);
+    }
+
+    [Fact]
+    public void Payload_budget_evicts_the_least_recently_used_entry_including_mixed_case_hits()
+    {
+        var cache = new SpineResultCache(2500);
+        var sample = Sample() with { SkeletonBytes = new byte[1000] };
+        cache.Set("A", null, sample, null);
+        cache.Set("B", null, sample, null);
+        Assert.True(cache.TryGet("a", out _, out _));
+        cache.Set("C", null, sample, null);
+        Assert.True(cache.TryGet("A", out _, out _));
+        Assert.False(cache.TryGet("B", out _, out _));
+        Assert.True(cache.TryGet("C", out _, out _));
+        Assert.InRange(cache.RetainedBytes, 2000, 2500);
+    }
+
+    [Fact]
+    public void Oversized_results_are_not_retained_and_replacements_release_the_old_payload()
+    {
+        var cache = new SpineResultCache(2500);
+        cache.Set("A", null, Sample(), null);
+        var before = cache.RetainedBytes;
+        cache.Set("B", null, Sample() with { PageBytes = new Dictionary<string, byte[]> { ["large"] = new byte[3000] } }, null);
+        Assert.Equal(before, cache.RetainedBytes);
+        Assert.True(cache.TryGet("A", out _, out _));
+        Assert.False(cache.TryGet("B", out _, out _));
+        cache.Set("a", null, Sample() with { SkeletonBytes = new byte[3000] }, null);
+        Assert.Equal(0, cache.RetainedBytes);
+        Assert.False(cache.TryGet("A", out _, out _));
     }
 
     [Fact]

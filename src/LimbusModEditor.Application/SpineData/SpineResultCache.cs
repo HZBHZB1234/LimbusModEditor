@@ -15,12 +15,12 @@ namespace LimbusModEditor.Application.SpineData;
 /// 把它丢掉等于让「取不到」的场景反复付费。</para>
 ///
 /// <para><b>缓存的键带上「素材是否还在」</b>：键是 <c>refKey</c>，但<b>失败结果额外记录
-/// 当时 bundle 文件的存在性与最后写入时间</b>；bundle 之前不在、现在出现了（用户跑了一次游戏、
+/// 当时 bundle 文件的存在性</b>；bundle 之前不在、现在出现了（用户跑了一次游戏、
 /// Unity 缓存被补回来）时，那条失败记录立即失效并重试 —— 否则「补上缓存后仍显示取不到」
 /// 会变成一个要点重启才能自愈的幽灵。</para>
 ///
 /// <para><b>内存封顶</b>：每条结果是骨架字节 + 图集文本 + 预解码 PNG（单套可达几 MB），
-/// 因此用 LRU 上限封顶，<b>不</b>让「浏览全库 700 套」把进程撑爆。
+/// 因此同时限制 64 条与 64 MiB 负载（不含对象头与调用方持有的结果）。
 /// 超限时按「最久未用」淘汰。</para>
 /// </summary>
 internal sealed class SpineResultCache
@@ -29,6 +29,17 @@ internal sealed class SpineResultCache
 
     /// <summary>最多缓存几条结果。700 套全浏览时也不会把内存吃穿。</summary>
     private const int MaxEntries = 64;
+    private readonly long _maxBytes;
+    private long _retainedBytes;
+
+    public SpineResultCache(long maxBytes = 64L * 1024 * 1024)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(maxBytes);
+        _maxBytes = maxBytes;
+    }
+
+    /// <summary>缓存持有的骨架、纹理及文本负载字节数（不含对象头）。</summary>
+    internal long RetainedBytes { get { lock (_gate) return _retainedBytes; } }
 
     private readonly object _gate = new();
     private readonly Dictionary<string, Entry> _entries = new(StringComparer.OrdinalIgnoreCase);
@@ -73,7 +84,8 @@ internal sealed class SpineResultCache
                 return false;
             }
 
-            Touch(refKey);
+            _order.Remove(entry.Node);
+            _order.AddLast(entry.Node);
             Hits++;
             data = entry.Data;
             error = entry.Error;
@@ -90,9 +102,15 @@ internal sealed class SpineResultCache
         lock (_gate)
         {
             if (_entries.TryGetValue(refKey, out var existing)) Remove(refKey, existing);
-            _entries[refKey] = new Entry(data, error, probePath, ProbeExists(probePath));
-            _order.AddLast(refKey);
-            while (_entries.Count > MaxEntries) EvictOldest();
+            var bytes = data is null ? 0L : data.SkeletonBytes.LongLength + data.AtlasText.Length * 2L
+                + data.PageBytes.Sum(page => page.Value.LongLength);
+            bytes += (refKey.Length + (error?.Length ?? 0) + (probePath?.Length ?? 0)) * 2L;
+            // 超大结果仍交给调用方显示，但不挤掉整个缓存后再长期驻留。
+            if (bytes > _maxBytes) return;
+            var node = _order.AddLast(refKey);
+            _entries[refKey] = new Entry(data, error, probePath, ProbeExists(probePath), bytes, node);
+            _retainedBytes += bytes;
+            while (_entries.Count > MaxEntries || _retainedBytes > _maxBytes) EvictOldest();
         }
     }
 
@@ -110,6 +128,7 @@ internal sealed class SpineResultCache
         {
             _entries.Clear();
             _order.Clear();
+            _retainedBytes = 0;
         }
     }
 
@@ -118,21 +137,15 @@ internal sealed class SpineResultCache
     {
         lock (_gate)
         {
-            return $"缓存 {_entries.Count}/{MaxEntries} 条 · 命中 {Hits} · 未命中 {Misses} · bundle 变化作废 {Invalidated}";
+            return $"缓存 {_entries.Count}/{MaxEntries} 条 · 负载 {_retainedBytes / 1048576.0:0.0}/{_maxBytes / 1048576.0:0.0} MiB · 命中 {Hits} · 未命中 {Misses} · bundle 变化作废 {Invalidated}";
         }
-    }
-
-    private void Touch(string refKey)
-    {
-        _order.Remove(refKey);
-        _order.AddLast(refKey);
     }
 
     private void Remove(string refKey, Entry entry)
     {
         _entries.Remove(refKey);
-        _order.Remove(refKey);
-        _ = entry;
+        _order.Remove(entry.Node);
+        _retainedBytes -= entry.Bytes;
     }
 
     private void EvictOldest()
@@ -140,10 +153,10 @@ internal sealed class SpineResultCache
         var oldest = _order.First;
         if (oldest is null) return;
         var key = oldest.Value;
-        _order.RemoveFirst();
-        _entries.Remove(key);
+        Remove(key, _entries[key]);
         Log.Debug("Spine 结果缓存超上限，淘汰最久未用的一条：{0}", key);
     }
 
-    private sealed record Entry(SpineRawData? Data, string? Error, string? ProbePath, bool ProbeExisted);
+    private sealed record Entry(SpineRawData? Data, string? Error, string? ProbePath, bool ProbeExisted,
+        long Bytes, LinkedListNode<string> Node);
 }

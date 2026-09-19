@@ -8,6 +8,7 @@ using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Application.Build;
 using LimbusModEditor.Application.Caching;
 using LimbusModEditor.Application.Catalog;
+using LimbusModEditor.Application.Common;
 using LimbusModEditor.Application.Debugging;
 using LimbusModEditor.Application.Projects;
 using LimbusModEditor.Application.Relations;
@@ -1074,19 +1075,30 @@ public sealed partial class IpcGateway
 
         // 节流：逐 bundle 的上报能到每秒上万条，按契约 §8-5「中间 ≥200ms」聚合；
         // 首条（开始）与末条（收尾补发）必达。
+        //
+        // 刻意不用 Progress<T>：它会把每条上报 Post 到构造线程（这里是 UI 线程），
+        // 而 StartupScanService 内部又套了一层 —— 同一条进度在 UI 线程上往返两次，
+        // 扫描期的上报量足以把 Dispatcher 队列堆起来（日志里的「界面卡住几秒」）。
+        // 而且投递是异步的，收尾时读到的 lastLabel 可能还是旧的。这里改成
+        // 在**产生线程**上就地节流并直发，末条读的是同一把锁保护的最新值。
         string? lastLabel = null;
         string? lastDetail = null;
         var stopwatch = Stopwatch.StartNew();
         long lastSent = -1;
-        var progress = new Progress<StartupScanProgress>(p =>
+        var progressGate = new object();
+        void ReportProgress(StartupScanProgress p)
         {
-            lastLabel = p.Label;
-            lastDetail = p.Detail;
             var elapsed = stopwatch.ElapsedMilliseconds;
-            if (lastSent >= 0 && elapsed - lastSent < 200) return;
-            lastSent = elapsed;
-            Emit(p.Label, p.Detail);
-        });
+            lock (progressGate)
+            {
+                lastLabel = p.Label;
+                lastDetail = p.Detail;
+                if (lastSent >= 0 && elapsed - lastSent < 200) return;
+                lastSent = elapsed;
+                Emit(p.Label, p.Detail);
+            }
+        }
+        var progress = new DirectProgress<StartupScanProgress>(ReportProgress);
         Emit("扫描", "开始");
 
         try
@@ -1095,7 +1107,13 @@ public sealed partial class IpcGateway
                 ? (await scan.ScanAllAsync(project, progress, cancellationToken).ConfigureAwait(false)).Steps
                 : [await scan.ScanUnityAssetsStepAsync(project, progress, cancellationToken).ConfigureAwait(false)];
 
-            if (lastLabel is not null) Emit(lastLabel, lastDetail ?? string.Empty);
+            string? finalLabel, finalDetail;
+            lock (progressGate)
+            {
+                finalLabel = lastLabel;
+                finalDetail = lastDetail;
+            }
+            if (finalLabel is not null) Emit(finalLabel, finalDetail ?? string.Empty);
 
             var assetStep = steps.FirstOrDefault(s => s.Key == StartupScanService.UnityAssetsStep) ?? steps[0];
             // 跳过/失败对调用方就是「没扫成」：照实给中文原因，不回一个「成功但什么都没变」。

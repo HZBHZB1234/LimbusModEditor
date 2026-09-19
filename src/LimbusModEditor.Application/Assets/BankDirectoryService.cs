@@ -228,6 +228,16 @@ public sealed class BankDirectoryService
         return ProbeBank(stream, collectChunks);
     }
 
+    /// <summary>在同一个已打开文件上验证索引，只读取头部与 SNDH 表。</summary>
+    internal static (uint Offset, uint Size) LocateFsb(Stream stream, int index)
+    {
+        var probe = ProbeBank(stream, collectChunks: false);
+        if (!probe.IsBank) throw new InvalidDataException($"无法解析 Bank 文件：{probe.FailReason}");
+        if ((uint)index >= (uint)probe.FsbEntries.Count)
+            throw new IndexOutOfRangeException($"FSB 索引超出范围: {index}");
+        return probe.FsbEntries[index];
+    }
+
     private static ProbeOutcome ProbeBank(Stream stream, bool collectChunks)
     {
         var outcome = new ProbeOutcome();

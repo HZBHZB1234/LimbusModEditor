@@ -163,7 +163,7 @@ public static class LangAnchorReader
     {
         try
         {
-            return JsonDocument.Parse(File.ReadAllBytes(file));
+            return JsonDocument.Parse(StripUtf8Bom(File.ReadAllBytes(file)));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
@@ -171,4 +171,20 @@ public static class LangAnchorReader
             return null;
         }
     }
+
+    /// <summary>
+    /// 剥掉开头的 UTF-8 BOM（<c>EF BB BF</c>）。
+    ///
+    /// <para>官方 lang 目录里混着带 BOM 的文件 —— 实测 <c>Passives.json</c>、
+    /// <c>Egos.json</c> 与部分 <c>PersonalityVoiceDlg/*.json</c> 都以 BOM 开头。
+    /// <see cref="JsonDocument.Parse(ReadOnlyMemory{byte})"/> 不认 BOM，会直接以
+    /// 「'0xEF' is an invalid start of a value」告败，于是这些文件被判成
+    /// 「读不出锚点」而<b>静默丢掉全部锚点</b>（本次日志里 4 个文件、含整张
+    /// 被动与 E.G.O 锚点表）。与 <c>LangTextWorkbenchService</c> / <c>StaticTableRecords</c>
+    /// 同口径：进解析器之前先把 BOM 去掉。</para>
+    /// </summary>
+    private static ReadOnlyMemory<byte> StripUtf8Bom(byte[] bytes)
+        => bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF
+            ? new ReadOnlyMemory<byte>(bytes, 3, bytes.Length - 3)
+            : new ReadOnlyMemory<byte>(bytes);
 }

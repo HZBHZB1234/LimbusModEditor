@@ -31,7 +31,8 @@ public partial class WebView2MainWindow : Wpf.Ui.Controls.FluentWindow, IDisposa
     private string _wwwrootDir = null!;
     private string _dataDir = null!;
     private CancellationTokenSource? _cts;
-    private bool _disposed;
+    // 跨线程读：事件出口（SendEvent）会被后台工作线程调用，见 PostToPage。
+    private volatile bool _disposed;
 
     public WebView2MainWindow()
     {
@@ -236,7 +237,9 @@ public partial class WebView2MainWindow : Wpf.Ui.Controls.FluentWindow, IDisposa
             if (_gateway is not null)
             {
                 var responseJson = await _gateway.HandleRequestAsync(json);
-                _webView?.CoreWebView2.PostWebMessageAsString(responseJson);
+                // 走 PostToPage 而不是直接碰 CoreWebView2：处理链里只要有一处
+                // ConfigureAwait(false)，这里就不再是 UI 线程，直连会抛跨线程异常。
+                PostToPage(responseJson);
             }
             else
             {
@@ -249,17 +252,45 @@ public partial class WebView2MainWindow : Wpf.Ui.Controls.FluentWindow, IDisposa
         }
     }
 
-    private void SendToPage(IpcResponse response)
-    {
-        if (_webView?.CoreWebView2 is null) return;
-        _webView.CoreWebView2.PostWebMessageAsString(response.ToJson());
-    }
+    private void SendToPage(IpcResponse response) => PostToPage(response.ToJson());
 
-    /// <summary>推一条宿主事件给页面（无 id，可多次；契约 §1/§4）。</summary>
-    private void SendEvent(IpcEvent evt)
+    /// <summary>
+    /// 推一条宿主事件给页面（无 id，可多次；契约 §1/§4）。
+    ///
+    /// <para><b>调用方可能是任意工作线程</b>：扫描 / 音频索引 / 静态表 / 关联分析 / 导出
+    /// 都在后台跑，网关的 <c>EventSink</c> 就从那里回调进来。而 <c>CoreWebView2</c> 是
+    /// WPF 依赖对象、只有 UI 线程能碰 —— 直接访问会抛
+    /// 「调用线程无法访问此对象，因为另一个线程拥有该对象」。
+    /// 日志里 <c>scan.run</c> 扫了 412 秒、六步全部 Scanned，最后仍回失败，就是这条异常
+    /// 从 <c>Emit</c> 冒到 <c>HandleScanRunAsync</c> 的 catch 里造成的假失败。
+    /// 所以统一在这里切回 UI 线程，调用方不必关心自己在哪个线程。</para>
+    ///
+    /// <para>序列化留在调用线程做（后台做更便宜），只有投递切线程。</para>
+    /// </summary>
+    private void SendEvent(IpcEvent evt) => PostToPage(evt.ToJson());
+
+    /// <summary>把一段已序列化的消息投给页面；非 UI 线程调用时切回 UI 线程。</summary>
+    private void PostToPage(string json)
     {
+        if (_disposed) return;
+        if (!Dispatcher.CheckAccess())
+        {
+            // BeginInvoke 同优先级 FIFO ⇒ 事件顺序与产生顺序一致；
+            // 用 Invoke 会让工作线程等 UI 线程，扫描期反而拖慢整体。
+            try
+            {
+                Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Normal,
+                    new Action(() => PostToPage(json)));
+            }
+            catch (Exception ex) when (ex is TaskCanceledException or InvalidOperationException)
+            {
+                // 窗口正在关闭 / Dispatcher 已停：事件丢弃即可，不是错误。
+            }
+            return;
+        }
+
         if (_webView?.CoreWebView2 is null) return;
-        _webView.CoreWebView2.PostWebMessageAsString(evt.ToJson());
+        _webView.CoreWebView2.PostWebMessageAsString(json);
     }
 
     private UnityCacheSqliteIndexStore InitializeIndexStore()

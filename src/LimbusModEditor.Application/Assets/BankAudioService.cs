@@ -14,10 +14,15 @@ public sealed class BankAudioService
             throw new FileNotFoundException("Bank 源文件不存在。", asset.SourcePath);
         var index = ParseIndex(asset.LogicalPath);
         if (index < 0) throw new InvalidDataException("当前资源不是 fsb/<index> Bank 资源。");
-        var data = await File.ReadAllBytesAsync(asset.SourcePath, cancellationToken);
-        var info = BankParser.TryParse(data) ?? throw new InvalidDataException("无法解析 Bank 文件。");
-        if (index >= info.FsbCount) throw new IndexOutOfRangeException($"FSB 索引超出范围: {index}");
-        return data.AsSpan((int)info.FsbOffsets[index], (int)info.FsbSizes[index]).ToArray();
+        cancellationToken.ThrowIfCancellationRequested();
+        await using var stream = new FileStream(asset.SourcePath, FileMode.Open, FileAccess.Read,
+            FileShare.Read, 4096, FileOptions.Asynchronous | FileOptions.RandomAccess);
+        var (offset, size) = BankDirectoryService.LocateFsb(stream, index);
+        if (size > Array.MaxLength) throw new InvalidDataException("FSB 大小超出单次可读范围。");
+        var data = new byte[size];
+        stream.Position = offset;
+        await stream.ReadExactlyAsync(data, cancellationToken);
+        return data;
     }
 
     /// <summary>P2.1: read-only structural view of the selected FSB blob.

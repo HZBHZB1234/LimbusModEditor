@@ -2,6 +2,7 @@ using System.Diagnostics;
 using LimbusModEditor.Application.AppConfig;
 using LimbusModEditor.Application.Assets;
 using LimbusModEditor.Application.Caching;
+using LimbusModEditor.Application.Common;
 using LimbusModEditor.Application.Relations;
 using LimbusModEditor.Application.StaticMods;
 using LimbusModEditor.Application.Texts;
@@ -609,9 +610,12 @@ public sealed class StartupScanService
         var watch = Stopwatch.StartNew();
         try
         {
+            // 直通转发（不用 Progress<T>）：上报发生在扫描工作线程上，
+            // 由调用方的 IProgress 决定要不要切线程。Progress<T> 会在这里
+            // 再投递一次到创建线程（多为 UI 线程），同一条进度跨线程往返两趟。
             var reporter = progress is null
                 ? null
-                : new Progress<UnityCacheScanProgress>(p => progress.Report(
+                : new DirectProgress<UnityCacheScanProgress>(p => progress.Report(
                     new StartupScanProgress("扫描游戏资源", Describe(p))));
             var result = await _cacheScan.ScanIntoProjectAsync(
                 project, cacheDirectory, _env.EffectiveGameDirectory(project), reporter, cancellationToken,
@@ -666,7 +670,7 @@ public sealed class StartupScanService
             var source = BankIndexSource.Describe(bankDirectory);
             var reporter = progress is null
                 ? null
-                : new Progress<BankIndexProgress>(p => progress.Report(new StartupScanProgress("扫描音频索引", p.Describe())));
+                : new DirectProgress<BankIndexProgress>(p => progress.Report(new StartupScanProgress("扫描音频索引", p.Describe())));
             var result = await service.RefreshAsync(source, reporter, cancellationToken).ConfigureAwait(false);
             var status = result.ParseCount == 0 ? StartupScanStepStatus.AlreadyFresh : StartupScanStepStatus.Scanned;
             // 四张表那一行要显示「事实行数」：扫描落定后从库现读（读不到就不显示数字，绝不编）。
@@ -765,7 +769,7 @@ public sealed class StartupScanService
             progress?.Report(new StartupScanProgress("扫描静态数据表", "正在枚举 bundle 内的全部 TextAsset…"));
             var reporter = progress is null
                 ? null
-                : new Progress<StaticIndexProgress>(p => progress.Report(new StartupScanProgress("扫描静态数据表", p.Describe())));
+                : new DirectProgress<StaticIndexProgress>(p => progress.Report(new StartupScanProgress("扫描静态数据表", p.Describe())));
             var result = await service.RebuildAsync(location, source, reporter, cancellationToken).ConfigureAwait(false);
             Log.Info("静态表扫描结束（重建索引）：{0} 张表 · {1:0.0} MB · 用时 {2:0.0} 秒 · bundle={3}",
                 result.TableCount, result.TotalBytes / 1024.0 / 1024.0, result.Elapsed.TotalSeconds, location.BundleName);

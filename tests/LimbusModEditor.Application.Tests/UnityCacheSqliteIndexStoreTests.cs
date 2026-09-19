@@ -304,6 +304,11 @@ public sealed class UnityCacheSqliteIndexStoreTests : IDisposable
     [InlineData("文本 #7")]       // 含空格：trigram 跨空白建词项，见 logs/probe_trigram_space.py
     [InlineData("icon2.png")]    // 含 '.'
     [InlineData("共享容器")]      // 只出现在 lp 里（容器名）—— d1 只索引 dp 时会漏
+    [InlineData("outer/a/共享容器")]
+    [InlineData("a/共享容器/800")]
+    [InlineData("器/800")]
+    [InlineData("a/共")]
+    [InlineData("/800.")]
     [InlineData("i")]            // < 3 字符：trigram 取不到词项 → 退化全表扫描
     [InlineData("n2")]           // 同上
     [InlineData("a")]            // < 3 字符且只命中 src（data_path == bundle 名）→ 全表扫描 + 三字段复核
@@ -320,6 +325,8 @@ public sealed class UnityCacheSqliteIndexStoreTests : IDisposable
         // 判据先 Trim、空/纯空白一律「没有结果」—— 与 SearchRanks 的契约一致。
         // （不能直接拿原始串做 Contains —— `"".Contains` 恒真，会把每一行都算成命中。）
         Assert.Equal(BruteForce(batches, needle), store.SearchRanks(needle).ToArray());
+        var candidates = store.ReadCandidateRanks(new UnityCacheIndexFilter(Text: needle)).ToHashSet();
+        Assert.All(BruteForce(batches, needle), rank => Assert.Contains(rank, candidates));
     }
 
     [Fact]
@@ -375,8 +382,10 @@ public sealed class UnityCacheSqliteIndexStoreTests : IDisposable
         Assert.Single(store.SearchRanks(@"根\a\"));
     }
 
-    [Fact]
-    public void An_old_search_index_shape_is_dropped_and_rebuilt_without_touching_assets()
+    [Theory]
+    [InlineData("dp", "d1")]
+    [InlineData("dp,lp", "d2")]
+    public void An_old_search_index_shape_is_dropped_and_rebuilt_without_touching_assets(string columnsSql, string revision)
     {
         var store = new UnityCacheSqliteIndexStore(Database);
         store.PersistAll([Entry("a")], [(Bundle("a"), new[] { Row(0) })]);
@@ -389,11 +398,12 @@ public sealed class UnityCacheSqliteIndexStoreTests : IDisposable
         {
             connection.Open();
             using var command = connection.CreateCommand();
-            command.CommandText = """
+            command.CommandText = $"""
                 DROP TABLE asset_fts;
-                CREATE VIRTUAL TABLE asset_fts USING fts5(dp, content='', detail=none, columnsize=0, tokenize='trigram');
+                DROP TABLE bundle_fts;
+                CREATE VIRTUAL TABLE asset_fts USING fts5({columnsSql}, content='', detail=none, columnsize=0, tokenize='trigram');
                 DELETE FROM derived_state;
-                INSERT INTO derived_state(k,v) VALUES('revision','d1'),('rows','1');
+                INSERT INTO derived_state(k,v) VALUES('revision','{revision}'),('rows','1');
                 """;
             command.ExecuteNonQuery();
         }
@@ -415,9 +425,26 @@ public sealed class UnityCacheSqliteIndexStoreTests : IDisposable
             var columns = new List<string>();
             using var reader = command.ExecuteReader();
             while (reader.Read()) columns.Add(reader.GetString(0));
-            Assert.Equal(new[] { "dp", "lp" }, columns);
+            Assert.Equal(new[] { "dp", "tail" }, columns);
         }
         Assert.Single(upgraded.SearchRanks("共享容器"));
+    }
+
+    [Fact]
+    public void Wide_queries_verify_shared_prefixes_and_per_row_matches_without_false_positives()
+    {
+        var store = new UnityCacheSqliteIndexStore(Database);
+        var first = Enumerable.Range(0, 5000).Select(i => Row(i) with
+            { Container = "CAB-shared", ContainerEntry = null }).ToArray();
+        var second = Enumerable.Range(0, 5000).Select(i => Row(i) with
+            { Container = "other", ContainerEntry = i == 17 ? "assets/CAB-only.png" : null }).ToArray();
+        store.PersistAll([Entry("a"), Entry("b")], [(Bundle("a"), first), (Bundle("b"), second)]);
+        store.EnsureDerived();
+        var expected = store.ReadPage(0, 10000).Where(x => x.Bundle.DataPath == "a" || x.Row.BundleIndex == 17)
+            .Select(x => x.Rank).ToArray();
+        Assert.Equal(5001, expected.Length);
+        Assert.Equal(expected, store.SearchRanks("CAB-").ToArray());
+        Assert.ThrowsAny<OperationCanceledException>(() => store.SearchRanks("CAB-", new CancellationToken(true)));
     }
 
     [Fact]

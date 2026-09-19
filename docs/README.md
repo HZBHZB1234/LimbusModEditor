@@ -44,3 +44,22 @@
 - **计划不常驻**：新的执行计划写完后按里程碑执行，完成后归档（git），
   只把**仍然有约束力的结论**沉淀进 `STATUS.md` / `CODE-STRUCTURE.md` / `ARCHIVE-DESIGN-NOTES.md`。
 - **中文优先**：文档与提交信息用中文；代码注释保持现有风格（中文说明 + 必要时英文术语）。
+
+## 已移出仓库的资产（2026-09-19）
+
+以下三类内容已从**工作区与全部 git 历史**中整体移除，归档于仓库外
+`E:/desktop/work/_lme-removed-20260919/`（含全量 `git bundle` 镜像 + 三个 zip）：
+
+| 内容 | 原路径 | 移出原因 | 归档位置 |
+|---|---|---|---|
+| Spine C# 运行时源码 | `third_party/spine-csharp/` | **Spine Runtimes License 属非开源许可**，不宜随公开仓库分发 | `tree/spine-csharp/` |
+| 维基参考截图（9 张） | `docs/img/` | 仅为设计参考图，不随仓库分发 | `tree/docs-img/` |
+| 探针脚本与验证工具 | `spikes/` | 阶段性探索产物，非主干代码 | `tree/spikes/` |
+
+**影响**：历史分析 / 计划类文档（`PLAN-RELATIONS-V2.md`、`SPINE-INTEGRATION-ANALYSIS.md`、
+`WEBVIEW-FEASIBILITY.md` 等）仍可能引用上述路径——它们是**当时决策的原始记录**，路径保留以维持记录完整；
+引用到的文件请到归档目录取用。已就地更新的文档：`THIRD-PARTY-NOTICES.md`、`PROJECT-INDEX.md`、
+`ARCH-WEBVIEW2-VUE.md`、`WIKI-PAGE-LAYOUT.md`、`UI-REDESIGN-SPEC.md` §7.1、`HANDOFF-UI-REDESIGN.md`、
+`SPIKE-WEBVIEW2.md`。
+
+**防回归**：三条路径已写入 `.gitignore`，不会再被误提交。

@@ -167,6 +167,9 @@ python logs/lme.py test domain|format   # 不变（dotnet 侧测试）
 
 ### 7.1 删除清单
 
+> **✅ 已于 2026-09-19 执行完毕**。其中 `third_party/spine-csharp/` 因 **Spine Runtimes License 属非开源许可**，
+> 除从工作区删除外，还从**全部 git 历史**中抹除（`git filter-repo --invert-paths`）。下表为执行时的清单。
+
 | 工程 | 文件 | 说明 |
 | --- | --- | --- |
 | `src/LimbusModEditor.SpineRuntime/` | `SpineDocument.cs`、`SpineFrameRenderer.cs`、`ISpineTextureSource.cs`、`SkiaTextureLoader.cs`、`SpineResults.cs`、`LimbusModEditor.SpineRuntime.csproj` | **整工程删除**（vendored spine-csharp + SkiaSharp 离线渲染，随工程移除） |

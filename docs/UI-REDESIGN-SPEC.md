@@ -533,6 +533,9 @@ tokens.css 变量            →  Naive UI 主题字段
 
 ### 7.1 真实维基观测
 
+> ⚠️ **路径变更（2026-09-19）**：本节及本文其他位置引用的 `docs/img/**` 截图、`spikes/harness-tools/**`
+> 工具均已整体移出仓库，归档于仓库外 `_lme-removed-20260919/tree/`。下文保留原始路径以维持记录完整。
+
 - 工具：Playwright（`spikes/harness-tools/node_modules/playwright-core`）+ 本机 Chrome，**不下载 Chromium**。
 - 关键：站点有 Cloudflare 人机校验，默认 headless 会被拦（首测 HTTP 403）。需设置常规 Chrome UA、`locale: zh-CN`、`Accept-Language`，并 `addInitScript` 抹掉 `navigator.webdriver`，加 `--disable-blink-features=AutomationControlled`；随后 HTTP 200。
 - 探测脚本（临时，未入库，可复现）：
@@ -540,7 +543,7 @@ tokens.css 变量            →  Naive UI 主题字段
   - `C:\Users\tester\temp\lme-verify\wiki-probe2.mjs` —— 取背景层、页头高度、卡片、按钮、栅格、TOC、段落行宽、h2 节奏、信息框行高。
 - 运行：
   ```bash
-  NODE_PATH="E:/desktop/work/LimbusModEditor/spikes/harness-tools/node_modules" \
+  NODE_PATH="E:/desktop/work/_lme-removed-20260919/tree/spikes/harness-tools/node_modules" \
     node C:/Users/tester/temp/lme-verify/wiki-probe.mjs "https://limbuscompany.huijiwiki.com/wiki/%E6%B5%AE%E5%A3%AB%E5%BE%B7"
   ```
 - 新增参考截图（本轮产出）：

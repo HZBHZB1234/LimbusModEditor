@@ -72,3 +72,12 @@ third_party/fmod/
 
 # AgentTeams 协作状态（成员 / 任务 / 邮箱，随会话变化）：属于本机开发状态，不入库
 .agent-teams/
+
+# ── 以下三类已整体移出仓库（2026-09-19），历史亦已重写抹除 ──────────────
+# 如需查阅，见仓库外归档：E:/desktop/work/_lme-removed-20260919/
+# 1) Spine 运行时源码：Spine Runtimes License 非开源许可，不入库（同 third_party/fmod/）
+third_party/spine-csharp/
+# 2) 维基参考截图：文档配图改为仓库外归档，不再随仓库分发
+docs/img/
+# 3) 一次性探针脚本与验证工具：属阶段性探索产物，非主干代码
+spikes/

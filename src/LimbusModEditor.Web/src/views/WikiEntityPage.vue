@@ -2,7 +2,7 @@
 /**
  * WikiEntityPage — 通用实体页面（人格 / E.G.O / 饰品 / 敌人 / 异想体 / 播报员）
  *
- * 布局对照 docs/WIKI-PREVIEW-UPGRADE-SPEC.md §4.1 与 docs/img/wiki-personality-page.png：
+ * 布局对照 docs/WIKI-PREVIEW-UPGRADE-SPEC.md §4.1 与 wiki-personality-page.png（截图已移出仓库，归档于 _lme-removed-20260919/tree/docs-img/）：
  *   左栏 WikiToc（编号 + 吸顶 + 当前项高亮） | 主区（引言 → 分节 Tab → 媒体） | 右栏 WikiInfoboxCard
  * 剧情类（category === 'story'）走 WikiStoryView 专用布局（见模板分派处说明）。
  */

@@ -30,7 +30,7 @@ dotnet build LimbusModEditor.slnx --no-restore --nologo
 | `src/LimbusModEditor.App/WebView2SpikeWindow.xaml` | 试验窗口 XAML（独立于 MainWindow） |
 | `src/LimbusModEditor.App/WebView2SpikeWindow.xaml.cs` | 试验窗口代码：WebView2 初始化、虚拟主机、消息桥、运行时检测 |
 | `src/LimbusModEditor.App/WebHostSpike/index.html` | 静态试验页（IME/DPI/对话框/剪贴板/进程/二进制通道六项测试） |
-| `src/LimbusModEditor.App/WebHostSpike/data/spike/test.png` | 测试用真实图片（704 KB，从 docs/img/wiki-front-page.png 复制） |
+| `src/LimbusModEditor.App/WebHostSpike/data/spike/test.png` | 测试用真实图片（704 KB，从 `docs/img/wiki-front-page.png` 复制；源图已随 `docs/img/` 于 2026-09-19 移出仓库） |
 | `src/LimbusModEditor.App/app.manifest` | PerMonitorV2 DPI 感知 + 长路径支持 |
 | `src/LimbusModEditor.App/App.xaml`（改） | StartupUri → Startup 事件（支持 --spike-webview2 走独立窗口） |
 | `src/LimbusModEditor.App/App.xaml.cs`（改） | App_OnStartup：--spike-webview2 路由到 WebView2SpikeWindow |

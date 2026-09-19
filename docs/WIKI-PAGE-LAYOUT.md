@@ -271,13 +271,16 @@
 
 ## 5. 关键截图
 
-| 截图 | 路径 |
+> ⚠️ 本节截图已于 2026-09-19 整体移出仓库（原 `docs/img/`），归档于仓库外
+> `_lme-removed-20260919/tree/docs-img/`。下表保留原文件名以便对照。
+
+| 截图 | 原文件名 |
 |---|---|
-| 首页 | `docs/img/wiki-front-page.png` |
-| 人格页（格里高尔） | `docs/img/wiki-personality-page.png` |
-| E.G.O 列表页 | `docs/img/wiki-ego-page.png` |
-| 分类页 | `docs/img/wiki-category-page.png` |
-| 世界观子页 | `docs/img/wiki-subpage-worldview.png` |
+| 首页 | `wiki-front-page.png` |
+| 人格页（格里高尔） | `wiki-personality-page.png` |
+| E.G.O 列表页 | `wiki-ego-page.png` |
+| 分类页 | `wiki-category-page.png` |
+| 世界观子页 | `wiki-subpage-worldview.png` |
 
 ---
 

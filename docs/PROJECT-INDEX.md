@@ -132,15 +132,15 @@
   `Rg16` 是「两个 8 位通道」。
 - **已知边界**：`ToImage`/`FromPng` 只处理 level 0（mipmap 只支持布局计算与切片）。
 
-### §5.2 `src/LimbusModEditor.SpineRuntime`（Spine 4.0 骨骼动画离线渲染）— **2026-09-15 起计划删除（W2）**
+### §5.2 `src/LimbusModEditor.SpineRuntime`（Spine 4.0 骨骼动画离线渲染）— **已于 2026-09-19 删除（原 W2 计划）**
 
 命名空间：`LimbusModEditor.SpineRuntime`
 
-> **⚠️ 已定案删除**（`docs/ARCH-WEBVIEW2-VUE.md` §7）：Spine 渲染全量前移前端（官方 spine-ts 运行时），
-> 本工程与 `third_party/spine-csharp/`、`tests/LimbusModEditor.SpineRuntime.Tests/` 一并移除。
+> **✅ 删除已执行**（`docs/ARCH-WEBVIEW2-VUE.md` §7）：Spine 渲染全量前移前端（官方 spine-ts 运行时），
+> 本工程与 `tests/LimbusModEditor.SpineRuntime.Tests/` 已移除。其中 `third_party/spine-csharp/`
+> 另因 **Spine Runtimes License 属非开源许可**，已从**全部 git 历史**中抹除（含远端待同步）。
 > 保留能力仅「定位并流式喂原始字节」（留在 `Application/Spine/SpineAnimationSourceService.cs`）
-> 与纯定位逻辑（`SpineSiblingIndex` 迁为独立文件）。删除/保留逐文件清单见 ADR §7；
-> 测试基线 746 → **733**（Domain 672→659）。下方为**删除前**的现状记录。
+> 与纯定位逻辑（`SpineSiblingIndex` 迁为独立文件）。下方为**删除前**的现状记录（仅存档）。
 
 | 文件 | 功能 | 处置（W2） |
 |---|---|---|
@@ -908,7 +908,7 @@
 - `docs/WEBVIEW-FEASIBILITY.md`：§5/§6 结论**被 ADR 取代**（顶部有横幅）；§1–§4 技术账继续有效。
 - `docs/CODE-STRUCTURE.md`：§2/§3/§6/§10 与本文档联动更新（见该文件对应小节）。
 - `docs/STATUS.md`：测试基线 746 → **733**（W2 删除 SpineRuntime.Tests 7 例 + SpineTests 13 例时生效）。
-- `THIRD-PARTY-NOTICES.md`：§1 spine-csharp / §2 SkiaSharp 条目 W2 移除，新增 spine-ts（前端运行时）条目。
+- `THIRD-PARTY-NOTICES.md`：§1 spine-csharp / §2 SkiaSharp 条目 W2 移除，新增 spine-ts（前端运行时）条目。（**2026-09-19 已执行**：两节均已删除，spine-ts 升为 §1。）
 
 ### 同步标记汇总（2026-09-17，交付轮）
 

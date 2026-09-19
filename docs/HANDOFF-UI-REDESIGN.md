@@ -27,7 +27,7 @@
 由此确立：
 - **引入组件库是要求**（不是可选）；**前端的体积/启动速度不再是硬约束**（内存/速度约束只针对后端 C# 侧）。
 - **允许大规模改页面结构**，但**功能一个都不能丢**（见 §4 保真要求）。
-- 可参考维基风格（真实维基截图：`docs/img/wiki-ref/*.png`、`docs/img/wiki-vs-ours-persona.png`）。
+- 可参考维基风格（真实维基截图：`wiki-ref/*.png`、`wiki-vs-ours-persona.png`；截图已于 2026-09-19 移出仓库，归档于 `_lme-removed-20260919/tree/docs-img/`）。
 
 ---
 
@@ -166,7 +166,7 @@ dotnet test  LimbusModEditor.slnx --no-build  --nologo           # 当前基线�
 
 ## 7. 可选的视觉取证（推荐但非必须）
 
-仓库里已有可复用工具：`spikes/harness-tools/wiki-shot.mjs`（起静态服务 + 注入桩桥 + Playwright 截图 + 导出 DOM 计数），用法见 `spikes/harness-tools/README.md`。
+仓库里原有可复用工具 `spikes/harness-tools/wiki-shot.mjs`（起静态服务 + 注入桩桥 + Playwright 截图 + 导出 DOM 计数）——**该工具已于 2026-09-19 随 `spikes/` 整体移出仓库**，归档于 `_lme-removed-20260919/tree/spikes/harness-tools/`，如需复用请从归档目录取用。
 - 静态服务需 **SPA fallback**（深链 `/wiki/page/...` 才不会 404），路由是 **history 模式**。
 - 截图输出到 `artifacts/harness-verify-ui/`，命名建议 `ui-v5-<page>.png`。
 
